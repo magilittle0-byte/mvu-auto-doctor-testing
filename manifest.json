@@ -1,0 +1,12 @@
+{
+  "display_name": "MVU 自动医生（测试通道）",
+  "loading_order": 110,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Codex",
+  "version": "2.0.0-rc.14",
+  "homePage": "https://github.com/magilittle0-byte/mvu-auto-doctor-testing",
+  "auto_update": true
+}
