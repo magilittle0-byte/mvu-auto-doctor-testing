@@ -499,6 +499,28 @@ function stateClockValues(statData) {
     return result;
 }
 
+export function stripLeakedPlanningPrefix(replyText) {
+    const text = asText(replyText);
+    const contentDetection = detectContentTag(text);
+    const contentTag = contentDetection?.tag || '';
+    if (!contentTag || countTag(text, contentTag) !== 1) {
+        return { text, changed: false, reason: '' };
+    }
+    const opening = new RegExp(`<${contentTag}\\b`, 'iu').exec(text);
+    if (!opening || opening.index <= 0) return { text, changed: false, reason: '' };
+    const prefix = text.slice(0, opening.index);
+    const containsPlanningProtocol = (
+        /<\/?konatan_planning~/iu.test(prefix)
+        || /(?:^|\n)\s*(?:【[A-Z]\s*[·・:]|(?:planning|analysis|reasoning|thinking)\s*[:：])/iu.test(prefix)
+    );
+    if (!containsPlanningProtocol) return { text, changed: false, reason: '' };
+    return {
+        text: text.slice(opening.index),
+        changed: true,
+        reason: 'planning_prefix_leak',
+    };
+}
+
 export function auditReplyProtocol(replyText, {
     contractTexts = [],
     previousUserText = '',
@@ -523,6 +545,24 @@ export function auditReplyProtocol(replyText, {
                 message: `<${contentTag}> 必须恰好一组且正确闭合；当前开标签 ${contentOpen} 个、闭标签 ${contentClose} 个、完整区块 ${contentBlocks.length} 个。`,
             });
         }
+    }
+    if (stripLeakedPlanningPrefix(text).changed) {
+        pushUniqueIssue(issues, {
+            code: 'content-prefix-leak',
+            severity: 'error',
+            scope: 'structure',
+            message: '正文标签前出现了用户可见的规划、推理或其他协议外文本。',
+        });
+    }
+    const planningOpen = (text.match(/<konatan_planning~\b[^>]*>/giu) || []).length;
+    const planningClose = (text.match(/<\/konatan_planning~>/giu) || []).length;
+    if (planningOpen !== planningClose) {
+        pushUniqueIssue(issues, {
+            code: 'planning-tag-unbalanced',
+            severity: 'error',
+            scope: 'structure',
+            message: '检测到未配对的规划标签；规划文本不得泄漏到用户可见回复。',
+        });
     }
 
     const contractBudgets = findWordBudgets(contractTexts);

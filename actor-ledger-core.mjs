@@ -941,6 +941,188 @@ export function migrateActorLedgerFromContinuity(value, continuity, {
     });
 }
 
+function taggedTextBlocks(text, tag) {
+    const source = String(text || '');
+    const escaped = String(tag || '').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    if (!escaped) return [];
+    return [...source.matchAll(new RegExp(
+        `<${escaped}\\b[^>]*>([\\s\\S]*?)<\\/${escaped}>`,
+        'giu',
+    ))].map((match) => String(match[1] || ''));
+}
+
+function sceneActorFacts(userText) {
+    const facts = [];
+    let location = '';
+    for (const block of taggedTextBlocks(userText, 'scene')) {
+        const locationMatch = block.match(/(?:地点|位置|location|place)\s*[：:=]\s*([^\n|]+)/iu);
+        if (locationMatch?.[1]) location = cleanText(locationMatch[1], 180);
+        const presentMatch = block.match(/(?:在场|出场|present)\s*[：:=]\s*([^\n|]+)/iu);
+        if (!presentMatch?.[1]) continue;
+        for (const raw of presentMatch[1].split(/[,，、;；]/u)) {
+            const name = cleanText(raw.replace(/\([^)]*\)|（[^）]*）/gu, ''), 160);
+            if (name) facts.push({ name, evidence: `在场：${cleanText(raw, 180)}`, present: true });
+        }
+    }
+    return { facts, location };
+}
+
+function actActorFacts(userText) {
+    const facts = [];
+    for (const block of taggedTextBlocks(userText, 'act')) {
+        const headings = [...block.matchAll(/^\s*#{2,6}\s+([^\n#]+?)\s*$/gmu)];
+        for (let index = 0; index < headings.length; index += 1) {
+            const name = cleanText(headings[index][1], 160);
+            const start = (headings[index].index || 0) + headings[index][0].length;
+            const end = headings[index + 1]?.index ?? block.length;
+            const section = block.slice(start, end);
+            if (
+                /^(?:新人引导者|系统引导者|系统提示)$/u.test(name)
+                && /(?:合成音|转为系统提示|无\s*[（(]?转为系统)/u.test(section)
+            ) continue;
+            facts.push({
+                name,
+                evidence: cleanText(`### ${name} ${section}`, 300),
+                present: true,
+            });
+        }
+    }
+    return facts;
+}
+
+function structuredContentActorFacts(content) {
+    const facts = [];
+    const patterns = [
+        /【(?:敌方|人物|角色|NPC)(?:档案|资料|状态)[·・:：]\s*([^】]+)】/giu,
+        /<(?:actor|npc)\b[^>]*(?:name|id)=["']([^"']+)["'][^>]*>/giu,
+    ];
+    for (const pattern of patterns) {
+        for (const match of String(content || '').matchAll(pattern)) {
+            const name = cleanText(match[1], 160);
+            if (name) facts.push({ name, evidence: cleanText(match[0], 300), present: true });
+        }
+    }
+    return facts;
+}
+
+function canonicalActorName(name, knownNames, actors) {
+    const source = cleanText(name, 160);
+    if (!source) return '';
+    const candidates = [
+        ...(Array.isArray(knownNames) ? knownNames : []),
+        ...(Array.isArray(actors) ? actors.flatMap((actor) => [
+            actor?.name,
+            ...(actor?.identity?.aliases || []),
+        ]) : []),
+    ].map((item) => cleanText(item, 160)).filter(Boolean);
+    const exact = candidates.find((item) => item.toLocaleLowerCase() === source.toLocaleLowerCase());
+    if (exact) return exact;
+    if (source.length >= 3) {
+        const suffixMatches = [...new Set(candidates.filter((item) => (
+            item.length > source.length && item.endsWith(source)
+        )))];
+        if (suffixMatches.length === 1) return suffixMatches[0];
+    }
+    return source;
+}
+
+export function discoverActorsFromTurnSources(value, {
+    userText = '',
+    acceptedContent = '',
+    knownActorNames = [],
+    excludedActorNames = [],
+    sourceRef = null,
+    turn = null,
+} = {}) {
+    const excluded = normalizeExcludedActorNames(excludedActorNames);
+    const ledger = normalizeActorLedger(value, { excludedActorNames });
+    const currentTurn = turn === null || turn === undefined
+        ? ledger.turn
+        : integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
+    const ref = normalizeSourceRef(sourceRef);
+    const scene = sceneActorFacts(userText);
+    const facts = [
+        ...actActorFacts(userText),
+        ...scene.facts,
+        ...structuredContentActorFacts(acceptedContent),
+        ...(Array.isArray(knownActorNames) ? knownActorNames : []).map((name) => ({
+            name,
+            evidence: `MVU人物锚点：${cleanText(name, 160)}`,
+            present: false,
+        })),
+    ];
+    const discovered = [];
+    const touched = [];
+    for (const fact of facts) {
+        const actorName = canonicalActorName(fact.name, knownActorNames, ledger.actors);
+        if (!isActorName(actorName, excluded)) continue;
+        const nameKey = actorName.toLocaleLowerCase();
+        let actor = ledger.actors.find((entry) => (
+            entry.name.toLocaleLowerCase() === nameKey
+            || entry.identity.aliases.some((alias) => alias.toLocaleLowerCase() === nameKey)
+        ));
+        const evidence = cleanList([
+            fact.evidence,
+            ref ? `${ref.messageId}:${ref.swipeId}:${ref.generation}:${ref.hash}` : '',
+        ], 8, 300);
+        if (!actor) {
+            actor = normalizeActor({
+                id: stableActorId(actorName),
+                name: actorName,
+                tier: fact.present ? 'secondary' : 'background',
+                status: 'active',
+                location: {
+                    name: scene.location || 'unknown',
+                    sinceTurn: currentTurn,
+                    evidence,
+                },
+                evidence,
+                nextActionTurn: currentTurn + 1,
+                createdTurn: currentTurn,
+                updatedTurn: currentTurn,
+            }, ledger.actors.length, currentTurn);
+            ledger.actors.push(actor);
+            discovered.push({ actorId: actor.id, name: actor.name });
+        } else {
+            actor.evidence = mergeEvidence(actor.evidence, evidence);
+            if (fact.present && scene.location) {
+                actor.location = {
+                    name: scene.location,
+                    sinceTurn: currentTurn,
+                    evidence: mergeEvidence(actor.location?.evidence, evidence, 12),
+                };
+            }
+            actor.updatedTurn = Math.max(actor.updatedTurn, currentTurn);
+            touched.push({ actorId: actor.id, name: actor.name });
+        }
+    }
+    if (discovered.length) {
+        ledger.observationReceipts.push({
+            receiptId: `actor-discovery:${fingerprint(JSON.stringify([
+                ref?.chatId || ledger.chatId,
+                ref?.messageId || '',
+                ref?.swipeId || 0,
+                ref?.generation || 0,
+                ref?.hash || '',
+                discovered.map((entry) => entry.actorId),
+            ])).slice(0, 18)}`,
+            kind: 'actor-discovery',
+            sourceRef: ref,
+            actorIds: discovered.map((entry) => entry.actorId),
+            settledAt: Date.now(),
+        });
+        ledger.observationReceipts = ledger.observationReceipts.slice(-120);
+    }
+    ledger.turn = Math.max(ledger.turn, currentTurn);
+    ledger.updatedAt = Date.now();
+    return {
+        ledger: normalizeActorLedger(ledger, { excludedActorNames }),
+        discovered,
+        touched,
+        location: scene.location,
+    };
+}
+
 function mergeProfileText(current, proposed, limit = 240) {
     const oldValue = cleanText(current, limit);
     return oldValue || cleanText(proposed, limit);
@@ -997,6 +1179,8 @@ function actorProfileSnapshot(actor) {
     return JSON.stringify({
         identity: actor.identity,
         longTermGoals: actor.longTermGoals,
+        currentGoals: actor.currentGoals,
+        plan: actor.plan,
         capabilities: actor.capabilities,
         hidden: actor.hidden,
     });
@@ -1118,6 +1302,39 @@ export function mergeActorProfilePatches(value, patches, {
             blindSpots: mergeProfileList(actor.identity.blindSpots, stableProfileList(identity.blindSpots, 8, 220), 8, 220),
         };
         actor.longTermGoals = mergeProfileList(actor.longTermGoals, stableProfileList(raw.longTermGoals, 12, 400), 12, 400);
+        actor.currentGoals = mergeProfileList(actor.currentGoals, stableProfileList(raw.currentGoals, 8, 400), 8, 400);
+        const proposedPlan = raw.plan && typeof raw.plan === 'object' && !Array.isArray(raw.plan)
+            ? raw.plan
+            : {};
+        actor.plan = {
+            ...actor.plan,
+            summary: mergeProfileText(actor.plan?.summary, stableProfileText(proposedPlan.summary, 500), 500),
+            steps: mergeProfileList(actor.plan?.steps, stableProfileList(proposedPlan.steps, 12, 300), 12, 300),
+            nextWindow: mergeProfileText(
+                actor.plan?.nextWindow,
+                stableProfileText(proposedPlan.nextWindow, 180),
+                180,
+            ),
+            obstacles: mergeProfileList(
+                actor.plan?.obstacles,
+                stableProfileList(proposedPlan.obstacles, 12, 300),
+                12,
+                300,
+            ),
+            costs: mergeProfileList(actor.plan?.costs, stableProfileList(proposedPlan.costs, 12, 300), 12, 300),
+            alternatives: mergeProfileList(
+                actor.plan?.alternatives,
+                stableProfileList(proposedPlan.alternatives, 12, 300),
+                12,
+                300,
+            ),
+            priority: ['low', 'normal', 'high', 'critical'].includes(proposedPlan.priority)
+                ? proposedPlan.priority
+                : actor.plan?.priority,
+            status: ['active', 'blocked', 'completed', 'abandoned'].includes(proposedPlan.status)
+                ? proposedPlan.status
+                : actor.plan?.status,
+        };
         actor.capabilities = mergeProfileList(actor.capabilities, stableProfileList(raw.capabilities, 24, 160), 24, 160);
         actor.hidden = {
             emotionalInertia: mergeProfileList(

@@ -153,6 +153,22 @@ export function migrateActorLedgerFromContinuity(
     continuity: unknown,
     options?: { excludedActorNames?: string[] },
 ): ActorLedger;
+export function discoverActorsFromTurnSources(
+    value: unknown,
+    options?: {
+        userText?: string;
+        acceptedContent?: string;
+        knownActorNames?: string[];
+        excludedActorNames?: string[];
+        sourceRef?: ActorLedgerSourceRef | null;
+        turn?: number | null;
+    },
+): {
+    ledger: ActorLedger;
+    discovered: Array<{ actorId: string; name: string }>;
+    touched: Array<{ actorId: string; name: string }>;
+    location: string;
+};
 export function mergeActorProfilePatches(
     value: unknown,
     patches: unknown[],

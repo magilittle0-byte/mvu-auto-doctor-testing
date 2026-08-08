@@ -119,6 +119,82 @@ export function observeAcceptedContentPressure(value, {
     return state;
 }
 
+export function classifyWorldPressureCandidate(candidate, {
+    id = '',
+    channel = '',
+    sameScene = null,
+} = {}) {
+    const source = candidate && typeof candidate === 'object' ? candidate : {};
+    const text = [
+        source.candidateAction,
+        source.action,
+        source.summary,
+        source.label,
+        source.dueReason,
+        source.triggerCondition,
+        source.expectedRisk,
+        source.observableConsequence,
+        source.planUpdate,
+        ...(Array.isArray(source.evidenceTerms) ? source.evidenceTerms : []),
+        ...(Array.isArray(source.stateChanges)
+            ? source.stateChanges.map((entry) => entry?.summary)
+            : []),
+    ].filter(Boolean).join(' ');
+    const declaredKind = cleanText(
+        source.pressureType || source.actionKind || source.kind,
+        40,
+    ).toLowerCase();
+    const declaredThreatLevel = cleanText(source.threatLevel, 40).toLowerCase();
+    const bossLanguage = /(?:BOSS|首领|终局|灭绝|天灾级|灾变核心|轨道轰炸|城市毁灭|世界毁灭|apocalypse|extinction)/iu.test(text);
+    const eliteLanguage = /(?:精英|强敌|猎杀|追猎|围剿|屠杀|填线|必死|不计伤亡|全员伤亡|踩过尸体|接管全部资源|夺取全部补给|自杀任务|massacre|suicide\s+mission|all\s+supplies)/iu.test(text);
+    const ordinaryThreatLanguage = /(?:袭击|伏击|围攻|追杀|封锁|致命|敌人|怪物|倒计时|爆炸|崩塌|灾害|瘟疫|危机升级|新增威胁|变异|狂潮|巡逻队|武装冲突|处决|献祭)/iu.test(text);
+    const recoveryLanguage = /(?:恢复|休整|补给|治疗|退路|撤离|安全区|缓冲|互相牵制|错开|停火|解除|冷却)/iu.test(text);
+    const relationshipLanguage = /(?:关系|交涉|谈判|来信|拜访|会面|承诺|误会|和解)/iu.test(text);
+    const threatLevel = ['boss', 'elite', 'ordinary'].includes(declaredThreatLevel)
+        ? declaredThreatLevel
+        : bossLanguage
+            ? 'boss'
+            : eliteLanguage
+                ? 'elite'
+                : 'ordinary';
+    const threat = declaredKind === 'threat'
+        || bossLanguage
+        || eliteLanguage
+        || ordinaryThreatLanguage;
+    const actionKind = declaredKind === 'recovery'
+        || (recoveryLanguage && !threat)
+        ? 'recovery'
+        : declaredKind === 'threat' || threat
+            ? 'threat'
+            : declaredKind === 'relationship' || relationshipLanguage
+                ? 'relationship'
+                : 'information';
+    const inferredChannel = channel
+        || (String(source.threadId || '').startsWith('ACTOR-') || source.actorId
+            ? 'actor'
+            : String(source.threadId || '').startsWith('world:faction:')
+                || source.laneType === 'faction'
+                ? 'faction'
+                : 'environment');
+    return {
+        id: id || source.id || source.threadId || source.sourceId,
+        channel: inferredChannel,
+        actionKind,
+        pressureCost: actionKind === 'threat'
+            ? threatLevel === 'boss' ? 3 : threatLevel === 'elite' ? 2 : 1
+            : 0,
+        threatLevel,
+        sameScene: sameScene === null
+            ? (source.sameScene !== false
+                && (source.impactTargets || []).some((item) => (
+                    String(item).startsWith('location:')
+                    || String(item).startsWith('actor:')
+                )))
+            : sameScene,
+        source,
+    };
+}
+
 function normalizeCandidate(value, index) {
     const source = value && typeof value === 'object' ? value : {};
     const actionKind = ACTION_KINDS.has(source.actionKind)

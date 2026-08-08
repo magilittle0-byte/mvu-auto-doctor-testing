@@ -752,6 +752,14 @@ export function observeSovereigntyTurn(value, {
     }
 
     const staleLogicalIndex = source.logicalIndex;
+    const replacedObservation = runtime.observations
+        .filter((observation) => (
+            observation.sourceRef?.chatId === source.chatId
+            && observation.sourceRef?.logicalIndex === staleLogicalIndex
+            && observation.sourceKey !== sourceKey
+            && observation.superseded !== true
+        ))
+        .sort((left, right) => right.observedAt - left.observedAt)[0] || null;
     for (const observation of runtime.observations) {
         if (
             observation.sourceRef?.chatId === source.chatId
@@ -777,9 +785,12 @@ export function observeSovereigntyTurn(value, {
         }
     }
 
-    const turn = runtime.observations.length
+    // A swipe/regenerate replaces one accepted logical reply. Reusing that
+    // observation turn prevents a reroll from advancing NPC/world time or
+    // inflating lag merely because the content hash changed.
+    const turn = replacedObservation?.turn || (runtime.observations.length
         ? Math.max(...runtime.observations.map((entry) => entry.turn)) + 1
-        : 1;
+        : 1);
     runtime.observations.push({ turn, sourceKey, sourceRef: source, observedAt: now });
     runtime.observations = runtime.observations.slice(-240);
     runtime.observedThrough = { turn, sourceKey, sourceRef: source, at: now };

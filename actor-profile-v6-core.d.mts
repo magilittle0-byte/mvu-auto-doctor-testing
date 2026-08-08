@@ -8,6 +8,9 @@ export function normalizeActorProfileV6(value: unknown, options?: object): objec
 export function prepareActorProfileV6(actor: unknown, options?: object): object;
 export function prepareActorLedgerProfilesV6(value: unknown, options?: object): object;
 export function actorProfileReadyForAction(actor: unknown): boolean;
+export function selectActorProfileCompletionCandidates(value: unknown, options?: object): object[];
+export function buildActorProfileCompletionMessages(candidates: unknown[], options?: object): object[];
+export function parseActorProfileCompletionOutput(output: string, options?: object): object;
 export function setActorProfileV6Lock(value: unknown, options?: object): object;
 export function applyActorProfileV6Override(value: unknown, options?: object): object;
 export function regenerateActorProfileV6Module(value: unknown, actor: unknown, options?: object): object;

@@ -43,6 +43,14 @@ export function observeAcceptedContentPressure(
         knownThreatPressure?: number;
     },
 ): WorldPressureState;
+export function classifyWorldPressureCandidate(
+    candidate: Record<string, unknown>,
+    options?: {
+        id?: string;
+        channel?: DoctorWorldCandidate['channel'] | '';
+        sameScene?: boolean | null;
+    },
+): DoctorWorldCandidate & { source: Record<string, unknown> };
 export function admitDoctorWorldCandidates(
     value: unknown,
     candidates: DoctorWorldCandidate[],

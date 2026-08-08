@@ -36,6 +36,7 @@ export const ACTOR_PROFILE_MODULES = Object.freeze([
 
 const SOURCE_SET = new Set(ACTOR_PROFILE_SOURCES);
 const MODULE_SET = new Set(ACTOR_PROFILE_MODULES);
+const TYPOLOGY_PROFILE_RE = /(?:\b(?:INTJ|INTP|ENTJ|ENTP|INFJ|INFP|ENFJ|ENFP|ISTJ|ISFJ|ESTJ|ESFJ|ISTP|ISFP|ESTP|ESFP)\b|\b[1-9]w[1-9]\b|\btritype\b|MBTI|迈尔斯|九型人格|三型组合|依恋类型|安全型依恋|焦虑型依恋|回避型依恋|恐惧型依恋|病娇|地雷系|白切黑|抖[SM]|S\s*\/\s*M)/iu;
 
 function clone(value) {
     return value === undefined ? undefined : structuredClone(value);
@@ -648,7 +649,9 @@ function assignModule(profile, module, data, {
 function moduleReady(profile, module) {
     const record = profile.modules[module];
     if (record?.status !== 'ready') return false;
-    if (cleanList(record.unknownFields, 64, 160).length) return false;
+    // Locally designed defaults are display scaffolding, not a persisted NPC
+    // dossier. They must never unlock autonomous action.
+    if (record.source === 'designed_seed' || record.source === 'deprecated') return false;
     const data = record.data || {};
     if (module === 'identity') return Boolean(cleanText(data.name) && cleanText(data.role));
     if (module === 'personality') {
@@ -738,27 +741,22 @@ export function prepareActorProfileV6(actor, {
         return profile;
     }
 
-    const full = ['full', 'full_adult'].includes(completionMode);
-    const personalGoalSeed = PERSONAL_GOAL_SEEDS[
-        seedIndex(actor, 'personal-goal', PERSONAL_GOAL_SEEDS.length)
-    ];
     const identity = {
         name: cleanText(actor?.name, 160),
-        role: cleanText(actor?.identity?.role, 180)
-            || (full ? '拥有独立日常、关系边界与现实事务的行动者' : '待确认'),
+        role: cleanText(actor?.identity?.role, 180),
         aliases: cleanList(actor?.identity?.aliases, 8, 120),
         lineage: clone(actor?.lineage || {}),
         species: '',
     };
     assignModule(profile, 'identity', identity, {
-        source: actor?.identity?.role ? 'confirmed' : full ? 'designed_seed' : 'hypothesis',
-        unknownFields: full ? [] : ['role', 'species'],
+        source: actor?.identity?.role ? 'confirmed' : 'hypothesis',
+        unknownFields: actor?.identity?.role ? ['species'] : ['role', 'species'],
         evidence,
         turn,
         now,
         fieldSourceOverrides: {
             name: 'confirmed',
-            role: actor?.identity?.role ? 'confirmed' : full ? 'designed_seed' : 'hypothesis',
+            role: actor?.identity?.role ? 'confirmed' : 'hypothesis',
             aliases: actor?.identity?.aliases?.length ? 'confirmed' : 'hypothesis',
             lineage: actor?.lineage ? 'confirmed' : 'hypothesis',
             species: 'hypothesis',
@@ -784,34 +782,27 @@ export function prepareActorProfileV6(actor, {
         everydayHabits: cleanList(actor?.identity?.everydayHabits, 8, 180),
         blindSpots: cleanList(actor?.identity?.blindSpots, 8, 220),
     };
-    const designedPersonalityFields = [];
-    if (full) {
-        const fill = (key, value) => {
-            if (hasText(personality[key])) return;
-            personality[key] = clone(value);
-            designedPersonalityFields.push(key);
-        };
-        fill('traits', ['能维持普通日常', '会根据关系和处境调整表达']);
-        fill('desires', ['保留可支配时间与现实安全', '让重要关系保持可持续']);
-        fill('boundaries', ['不替他人作不可撤回的决定', '不把一次冲突升级为永久敌意']);
-        fill('socialStyle', SOCIAL_SEEDS[seedIndex(actor, 'social', SOCIAL_SEEDS.length)]);
-        fill('decisionStyle', DECISION_SEEDS[seedIndex(actor, 'decision', DECISION_SEEDS.length)]);
-        fill('speechStyle', SPEECH_SEEDS[seedIndex(actor, 'speech', SPEECH_SEEDS.length)]);
-        fill('copingStyle', '压力上升时先缩小任务范围，再通过可验证的小步骤恢复掌控');
-        fill('pressureResponse', '可能变得简短或谨慎，但不会因此自动残酷、疯癫或绝望');
-        fill('recoveryPath', '通过休息、可信反馈、完成小承诺和恢复日常节奏逐步回稳');
-        fill('everydayHabits', ['保留一项不服务于主线的日常习惯', '定期检查承诺与资源']);
-        fill('blindSpots', ['可能高估自己对熟悉局面的判断']);
-    }
+    const requiredPersonalityFields = [
+        'traits',
+        'desires',
+        'boundaries',
+        'socialStyle',
+        'decisionStyle',
+        'speechStyle',
+        'pressureResponse',
+        'recoveryPath',
+    ];
+    const unknownPersonalityFields = requiredPersonalityFields.filter((key) => !hasText(personality[key]));
     assignModule(profile, 'personality', personality, {
-        source: hasConfirmedPersonality ? 'confirmed' : full ? 'designed_seed' : 'hypothesis',
+        source: hasConfirmedPersonality ? 'confirmed' : 'hypothesis',
+        unknownFields: unknownPersonalityFields,
         evidence,
         turn,
         now,
-        fieldSourceOverrides: Object.fromEntries([
-            ...Object.keys(personality).map((key) => [key, 'confirmed']),
-            ...designedPersonalityFields.map((key) => [key, 'designed_seed']),
-        ]),
+        fieldSourceOverrides: Object.fromEntries(Object.keys(personality).map((key) => [
+            key,
+            hasText(personality[key]) ? 'confirmed' : 'hypothesis',
+        ])),
     });
 
     assignModule(profile, 'relationships', {
@@ -821,75 +812,54 @@ export function prepareActorProfileV6(actor, {
             ? 'confirmed_entries'
             : 'no_confirmed_relationships',
     }, {
-        source: actor?.relationships?.length ? 'confirmed' : full ? 'designed_seed' : 'hypothesis',
-        unknownFields: full || actor?.relationships?.length ? [] : ['relationship_entries'],
+        source: actor?.relationships?.length ? 'confirmed' : 'hypothesis',
+        unknownFields: actor?.relationships?.length ? [] : ['relationship_entries'],
         evidence,
         turn,
         now,
     });
-    const previousGoals = previousProfile.modules.goals;
-    const previousGoalFieldWasSeeded = (path, currentValue, previousValue) => (
-        previousProfile.fieldSources[`modules.goals.data.${path}`] === 'designed_seed'
-        || previousGoals.source === 'designed_seed'
-    ) && JSON.stringify(currentValue ?? null) === JSON.stringify(previousValue ?? null);
     const confirmedLongTerm = cleanList(actor?.longTermGoals, 12, 400);
     const confirmedCurrent = cleanList(actor?.currentGoals, 8, 400);
-    const plan = clone(actor?.plan || {});
+    const actorPlan = actor?.plan && typeof actor.plan === 'object' && !Array.isArray(actor.plan)
+        ? actor.plan
+        : {};
+    const plan = {
+        summary: cleanText(actorPlan.summary, 500),
+        steps: cleanList(actorPlan.steps, 12, 300),
+        status: cleanText(actorPlan.status, 40) || 'active',
+        priority: cleanText(actorPlan.priority, 40),
+    };
     const goalFieldSources = {};
-    const longTerm = confirmedLongTerm.length
-        ? confirmedLongTerm
-        : full ? [personalGoalSeed.longTerm] : [];
-    const current = confirmedCurrent.length
-        ? confirmedCurrent
-        : full ? [personalGoalSeed.current] : [];
-    if (!cleanText(plan.summary) && full) plan.summary = personalGoalSeed.current;
-    if (!cleanList(plan.steps, 12, 300).length && full) plan.steps = clone(personalGoalSeed.steps);
-    if (!cleanText(plan.nextWindow) && full) plan.nextWindow = '下一个不与既有承诺冲突的行动窗口';
-    if (!cleanList(plan.obstacles, 12, 300).length && full) plan.obstacles = [personalGoalSeed.obstacle];
-    if (!cleanList(plan.costs, 12, 300).length && full) plan.costs = [personalGoalSeed.cost];
-    if (!cleanList(plan.alternatives, 12, 300).length && full) plan.alternatives = [personalGoalSeed.alternative];
-    plan.priority = cleanText(plan.priority, 40) || (full ? 'normal' : '');
+    const longTerm = confirmedLongTerm;
+    const current = confirmedCurrent;
     for (const [path, present] of [
-        ['longTerm', confirmedLongTerm.length > 0 && !previousGoalFieldWasSeeded(
-            'longTerm', confirmedLongTerm, previousGoals.data?.longTerm,
-        )],
-        ['current', confirmedCurrent.length > 0 && !previousGoalFieldWasSeeded(
-            'current', confirmedCurrent, previousGoals.data?.current,
-        )],
-        ['plan.summary', cleanText(actor?.plan?.summary) && !previousGoalFieldWasSeeded(
-            'plan.summary', cleanText(actor?.plan?.summary), cleanText(previousGoals.data?.plan?.summary),
-        )],
-        ['plan.steps', cleanList(actor?.plan?.steps, 12, 300).length > 0 && !previousGoalFieldWasSeeded(
-            'plan.steps', cleanList(actor?.plan?.steps, 12, 300), cleanList(previousGoals.data?.plan?.steps, 12, 300),
-        )],
-        ['nextWindow', cleanText(actor?.plan?.nextWindow) && !previousGoalFieldWasSeeded(
-            'nextWindow', cleanText(actor?.plan?.nextWindow), cleanText(previousGoals.data?.nextWindow),
-        )],
-        ['obstacles', cleanList(actor?.plan?.obstacles, 12, 300).length > 0 && !previousGoalFieldWasSeeded(
-            'obstacles', cleanList(actor?.plan?.obstacles, 12, 300), cleanList(previousGoals.data?.obstacles, 12, 300),
-        )],
-        ['costs', cleanList(actor?.plan?.costs, 12, 300).length > 0 && !previousGoalFieldWasSeeded(
-            'costs', cleanList(actor?.plan?.costs, 12, 300), cleanList(previousGoals.data?.costs, 12, 300),
-        )],
-        ['alternatives', cleanList(actor?.plan?.alternatives, 12, 300).length > 0 && !previousGoalFieldWasSeeded(
-            'alternatives', cleanList(actor?.plan?.alternatives, 12, 300), cleanList(previousGoals.data?.alternatives, 12, 300),
-        )],
-    ]) goalFieldSources[path] = present ? 'confirmed' : full ? 'designed_seed' : 'hypothesis';
+        ['longTerm', confirmedLongTerm.length > 0],
+        ['current', confirmedCurrent.length > 0],
+        ['plan.summary', Boolean(cleanText(actor?.plan?.summary))],
+        ['plan.steps', cleanList(actor?.plan?.steps, 12, 300).length > 0],
+        ['nextWindow', Boolean(cleanText(actorPlan.nextWindow))],
+        ['obstacles', cleanList(actorPlan.obstacles, 12, 300).length > 0],
+        ['costs', cleanList(actorPlan.costs, 12, 300).length > 0],
+        ['alternatives', cleanList(actorPlan.alternatives, 12, 300).length > 0],
+    ]) goalFieldSources[path] = present ? 'confirmed' : 'hypothesis';
     const hasConfirmedGoal = Object.values(goalFieldSources).some((source) => source === 'confirmed');
+    const unknownGoalFields = Object.entries(goalFieldSources)
+        .filter(([, source]) => source !== 'confirmed')
+        .map(([path]) => path);
     assignModule(profile, 'goals', {
         longTerm,
         current,
         priority: plan.priority,
         plan,
-        nextWindow: cleanText(plan.nextWindow, 180),
+        nextWindow: cleanText(actorPlan.nextWindow, 180),
         deadlineTurn: integer(actor?.deadlineTurn),
         commitments: clone(actor?.commitments || []),
-        obstacles: cleanList(plan.obstacles, 12, 300),
-        costs: cleanList(plan.costs, 12, 300),
-        alternatives: cleanList(plan.alternatives, 12, 300),
+        obstacles: cleanList(actorPlan.obstacles, 12, 300),
+        costs: cleanList(actorPlan.costs, 12, 300),
+        alternatives: cleanList(actorPlan.alternatives, 12, 300),
     }, {
-        source: hasConfirmedGoal ? 'confirmed' : full ? 'designed_seed' : 'hypothesis',
-        unknownFields: full ? [] : ['personal_goal_details'],
+        source: hasConfirmedGoal ? 'confirmed' : 'hypothesis',
+        unknownFields: unknownGoalFields,
         evidence,
         turn,
         now,
@@ -911,7 +881,7 @@ export function prepareActorProfileV6(actor, {
             : 'no_confirmed_resources_or_capabilities',
     }, {
         source: 'confirmed',
-        unknownFields: full || actor?.resources?.length || actor?.capabilities?.length
+        unknownFields: actor?.resources?.length || actor?.capabilities?.length
             ? []
             : ['resources', 'capabilities'],
         evidence,
@@ -977,6 +947,48 @@ export function prepareActorProfileV6(actor, {
     return profile;
 }
 
+function removeProjectedDesignedSeeds(actor) {
+    const next = clone(actor);
+    const profile = normalizeActorProfileV6(next?.profileV6, {
+        actorId: next?.id,
+        name: next?.name,
+    });
+    const goals = profile.modules.goals;
+    const projected = goals?.data || {};
+    const designed = (path) => (
+        goals?.source === 'designed_seed'
+        || profile.fieldSources[`modules.goals.data.${path}`] === 'designed_seed'
+    );
+    if (
+        designed('longTerm')
+        && JSON.stringify(next.longTermGoals || []) === JSON.stringify(projected.longTerm || [])
+    ) next.longTermGoals = [];
+    if (
+        designed('current')
+        && JSON.stringify(next.currentGoals || []) === JSON.stringify(projected.current || [])
+    ) next.currentGoals = [];
+    next.plan = next.plan && typeof next.plan === 'object' ? next.plan : {};
+    for (const [actorKey, profilePath] of [
+        ['summary', 'plan.summary'],
+        ['steps', 'plan.steps'],
+        ['nextWindow', 'nextWindow'],
+        ['obstacles', 'obstacles'],
+        ['costs', 'costs'],
+        ['alternatives', 'alternatives'],
+        ['priority', 'priority'],
+    ]) {
+        if (!designed(profilePath)) continue;
+        const projectedValue = profilePath.startsWith('plan.')
+            ? projected.plan?.[profilePath.slice(5)]
+            : projected[profilePath];
+        if (JSON.stringify(next.plan[actorKey] ?? null) !== JSON.stringify(projectedValue ?? null)) {
+            continue;
+        }
+        next.plan[actorKey] = Array.isArray(next.plan[actorKey]) ? [] : '';
+    }
+    return next;
+}
+
 export function prepareActorLedgerProfilesV6(value, {
     mode = 'full',
     turn = null,
@@ -989,7 +1001,7 @@ export function prepareActorLedgerProfilesV6(value, {
     const prepared = [];
     const deferred = [];
     ledger.actors = (Array.isArray(ledger.actors) ? ledger.actors : []).map((actor) => {
-        const next = clone(actor);
+        const next = removeProjectedDesignedSeeds(actor);
         next.profileV6 = prepareActorProfileV6(next, { mode, turn: currentTurn, now });
         const goalData = next.profileV6.modules.goals.data || {};
         if (!cleanList(next.longTermGoals, 12, 400).length) {
@@ -1034,6 +1046,178 @@ export function actorProfileReadyForAction(actor) {
     });
     const coverage = calculateCoverage(profile);
     return profile.preparedForAction === true && coverage === 100;
+}
+
+export function selectActorProfileCompletionCandidates(value, { maxActors = 8 } = {}) {
+    const actors = Array.isArray(value?.actors) ? value.actors : [];
+    return actors
+        .filter((actor) => !actorProfileReadyForAction(actor))
+        .slice(0, integer(maxActors, 1, 24, 8))
+        .map((actor) => ({
+            actorId: cleanText(actor?.id, 120),
+            name: cleanText(actor?.name, 160),
+            identity: clone(actor?.identity || {}),
+            longTermGoals: cleanList(actor?.longTermGoals, 12, 400),
+            currentGoals: cleanList(actor?.currentGoals, 8, 400),
+            plan: clone(actor?.plan || {}),
+            capabilities: cleanList(actor?.capabilities, 24, 160),
+            relationships: clone(actor?.relationships || []),
+            knowledge: clone(actor?.knowledge || []),
+            location: clone(actor?.location || {}),
+            stateFacts: clone(actor?.stateFacts || []),
+            evidence: cleanList(actor?.evidence, 16, 300),
+        }))
+        .filter((actor) => actor.actorId && actor.name);
+}
+
+function actorProfileOutputShape(candidate) {
+    return {
+        actorId: candidate.actorId,
+        name: candidate.name,
+        evidence: ['逐字摘录本轮用户act/scene、已发生正文、角色卡、世界书或MVU锚点中的短句'],
+        identity: {
+            role: '',
+            traits: [],
+            desires: [],
+            boundaries: [],
+            socialStyle: '',
+            decisionStyle: '',
+            speechStyle: '',
+            copingStyle: '',
+            informationStyle: '',
+            typicalMisread: '',
+            relationshipDistancePattern: '',
+            selfImageGap: '',
+            learnedCounterDisposition: '',
+            pressureResponse: '',
+            recoveryPath: '',
+            everydayHabits: [],
+            blindSpots: [],
+        },
+        longTermGoals: [],
+        currentGoals: [],
+        plan: {
+            summary: '',
+            steps: [],
+            status: 'active',
+            priority: 'normal',
+            nextWindow: '',
+            obstacles: [],
+            costs: [],
+            alternatives: [],
+        },
+        capabilities: [],
+        hidden: {
+            emotionalInertia: [],
+            innerConflicts: [],
+            privateIntentions: [],
+        },
+    };
+}
+
+export function buildActorProfileCompletionMessages(candidates, {
+    evidenceText = '',
+    customPrompt = '',
+} = {}) {
+    const selected = Array.isArray(candidates) ? candidates : [];
+    const system = [
+        '你是NPC人物档案生成器。只生成持久人物档案，不续写剧情，不裁决行动，不修改MVU、数据库或聊天正文。',
+        '每个输入人物必须逐字返回相同actorId与name。只依据提供的证据正文；evidence中的每一项必须是证据正文中可逐字找到的短句。',
+        '档案描述条件化、可观察的社交方式、决策方法、说话节奏、现实欲望、边界、压力反应、恢复路径和当前行动计划。一次恐惧、愤怒、服从或战斗不能被固化成永久人格。',
+        '不得用职业、阵营或一次情绪代替人格，不得默认冷酷、暴躁、疯癫、绝望、怯懦或狂热。不得用MBTI、九型、Tritype、依恋型、病娇等类型标签。',
+        '证据不足的可选维度保持空值；不得发明隐藏创伤、秘密关系、资源、能力或长期经历。当前目标和计划只能描述角色自己能尝试的事，不得替玩家决定、同意、付费、移动或产生感受。',
+        'role、traits、desires、boundaries、socialStyle、decisionStyle、speechStyle、pressureResponse、recoveryPath、currentGoals与plan必须尽量由证据完成；确实不足时留空，由本地保持档案未就绪，禁止用通用模板填充。',
+        customPrompt,
+        '只输出一个合法JSON对象，根对象只能包含actorProfiles数组，不要代码围栏、标签或解释。',
+    ].filter(Boolean).join('\n\n');
+    const user = [
+        '=== 待补全人物（现状只读） ===',
+        JSON.stringify(selected),
+        '=== 可引用证据正文 ===',
+        cleanText(evidenceText, 48000),
+        '=== 严格输出形状 ===',
+        JSON.stringify({ actorProfiles: selected.map(actorProfileOutputShape) }),
+    ].join('\n');
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+}
+
+function firstJsonObject(text) {
+    const source = String(text || '').trim();
+    let start = -1;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === '"') quoted = false;
+            continue;
+        }
+        if (char === '"') {
+            quoted = true;
+            continue;
+        }
+        if (char === '{') {
+            if (start < 0) start = index;
+            depth += 1;
+        } else if (char === '}' && start >= 0) {
+            depth -= 1;
+            if (depth === 0) {
+                try {
+                    return JSON.parse(source.slice(start, index + 1));
+                } catch {
+                    return null;
+                }
+            }
+        }
+    }
+    return null;
+}
+
+export function parseActorProfileCompletionOutput(output, {
+    candidates = [],
+    evidenceText = '',
+} = {}) {
+    const parsed = firstJsonObject(output);
+    if (!parsed || !Array.isArray(parsed.actorProfiles)) {
+        return { profiles: null, error: 'actor_profile.json_invalid' };
+    }
+    const candidateById = new Map((Array.isArray(candidates) ? candidates : []).map((actor) => (
+        [cleanText(actor.actorId, 120), actor]
+    )));
+    const evidenceHaystack = cleanText(evidenceText, 240000)
+        .toLocaleLowerCase('zh-CN')
+        .replace(/[\s\p{P}\p{S}]+/gu, '');
+    const profiles = [];
+    const seen = new Set();
+    for (const raw of parsed.actorProfiles) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            return { profiles: null, error: 'actor_profile.shape_invalid' };
+        }
+        const actorId = cleanText(raw.actorId, 120);
+        const candidate = candidateById.get(actorId);
+        if (!candidate || seen.has(actorId) || cleanText(raw.name, 160) !== candidate.name) {
+            return { profiles: null, error: 'actor_profile.actor_identity_invalid' };
+        }
+        const evidence = cleanList(raw.evidence, 8, 300);
+        if (!evidence.length || !evidence.every((item) => {
+            const needle = item.toLocaleLowerCase('zh-CN').replace(/[\s\p{P}\p{S}]+/gu, '');
+            return needle.length >= 4 && evidenceHaystack.includes(needle);
+        })) {
+            return { profiles: null, error: 'actor_profile.evidence_invalid' };
+        }
+        if (TYPOLOGY_PROFILE_RE.test(JSON.stringify(raw))) {
+            return { profiles: null, error: 'actor_profile.typology_forbidden' };
+        }
+        seen.add(actorId);
+        profiles.push(raw);
+    }
+    if (profiles.length !== candidateById.size) {
+        return { profiles: null, error: 'actor_profile.actor_missing' };
+    }
+    return { profiles, error: '' };
 }
 
 function pathParts(path) {

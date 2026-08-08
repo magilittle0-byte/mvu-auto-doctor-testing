@@ -74,6 +74,7 @@ import {
     actorActionCandidatesFromShard,
     actorLedgerView,
     applyAcceptedContentObservations,
+    discoverActorsFromTurnSources,
     emptyActorLedger,
     inferObserverActorIds,
     mergeActorProfilePatches,
@@ -90,6 +91,7 @@ import {
 } from './actor-ledger-core.mjs';
 import {
     admitDoctorWorldCandidates,
+    classifyWorldPressureCandidate,
     emptyWorldPressureState,
     normalizeWorldPressureState,
     observeAcceptedContentPressure,
@@ -119,8 +121,11 @@ import {
     actorProfileReadyForAction,
     actorProfileV6View,
     applyActorProfileV6Override,
+    buildActorProfileCompletionMessages,
+    parseActorProfileCompletionOutput,
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
+    selectActorProfileCompletionCandidates,
     setActorProfileV6Lock,
 } from './actor-profile-v6-core.mjs';
 import {
@@ -155,6 +160,7 @@ import {
 } from './sovereignty-orchestrator-core.mjs';
 import {
     auditHardContracts,
+    stripLeakedPlanningPrefix,
 } from './protocol-core.mjs';
 import {
     buildSocialNarrativeContract,
@@ -4676,6 +4682,14 @@ function acceptedContentFingerprint(text) {
     return fingerprint(acceptedContentText(text));
 }
 
+function sovereigntyNarrativeEligible(text) {
+    const narrative = acceptedContentText(text)
+        .replace(/<[^>]+>/gu, ' ')
+        .replace(/\s+/gu, ' ')
+        .trim();
+    return narrative.length >= 2 && /[\p{L}\p{N}]/u.test(narrative);
+}
+
 function recentTranscript(context, targetIndex, limit) {
     const chat = context?.chat || [];
     return chat
@@ -4960,12 +4974,50 @@ function continuityAnchorState(mvuData) {
             .filter(([pathValue]) => (
                 /时间|日期|天数|时刻|地点|位置|区域|场景|世界|位面|角色|人物|同伴|队伍|势力|组织|阵营|任务|目标|资源|物品|装备|货币|库存|time|date|day|location|place|scene|world|actor|character|npc|party|faction|organization|quest|task|resource|item|equipment|inventory/iu
                     .test(pathValue)
+                || /契约者|敌人|敌方|在场|成员|名册|名单|contractor|enemy|present|member/iu.test(pathValue)
             ))
             .slice(0, 140),
     );
     return Object.keys(anchors).length
         ? safeJson(anchors)
         : '当前 MVU 没有可通用识别的时间、地点、人物、势力、任务或资源锚点；以最近正文为准，不得猜造交集。';
+}
+
+function actorNamesFromMvuData(mvuData) {
+    const stat = statDataOf(mvuData);
+    if (!stat || typeof stat !== 'object') return [];
+    const names = new Set();
+    const containerPattern = /(?:当前敌人|当前人物|在场人物|其他契约者名单|契约者名单|队伍成员|小队成员|同伴|NPC|npc|actors?|characters?|contractors?|enemies?)/iu;
+    const excludedContainer = /(?:固定角色|模板|schema|配置|历史|图鉴)/iu;
+    const fieldName = /^(?:名称|姓名|名字|状态|等级|称号|阵营|职业|描述|数量|成员|列表|name|status|level|title|faction|role|description|count)$/iu;
+    const add = (value) => {
+        const name = String(value || '').replace(/\s+/gu, ' ').trim();
+        if (!name || name.length < 2 || name.length > 80 || fieldName.test(name)) return;
+        names.add(name);
+    };
+    const walk = (value, depth = 0) => {
+        if (!value || typeof value !== 'object' || depth > 10) return;
+        for (const [key, child] of Object.entries(value)) {
+            if (containerPattern.test(key) && !excludedContainer.test(key)) {
+                if (Array.isArray(child)) {
+                    for (const item of child) {
+                        if (typeof item === 'string') add(item);
+                        else if (item && typeof item === 'object') add(item.name || item.姓名 || item.名称);
+                    }
+                } else if (child && typeof child === 'object') {
+                    for (const [candidateKey, candidateValue] of Object.entries(child)) {
+                        if (!fieldName.test(candidateKey)) add(candidateKey);
+                        if (candidateValue && typeof candidateValue === 'object') {
+                            add(candidateValue.name || candidateValue.姓名 || candidateValue.名称);
+                        }
+                    }
+                }
+            }
+            walk(child, depth + 1);
+        }
+    };
+    walk(stat);
+    return [...names].slice(0, 96);
 }
 
 function stateForPrompt(stat) {
@@ -6539,6 +6591,31 @@ function buildSocialAuditMessages({
     ];
 }
 
+function buildSocialAuditRepairMessages(output, changes) {
+    const paths = (changes || []).map((change) => change.path);
+    return [
+        {
+            role: 'system',
+            content: [
+                '你只修复人物关系二审输出的JSON结构，不重新创作剧情，也不改写审核结论。',
+                '只输出一个合法JSON对象；不得输出代码围栏、解释或额外文本。',
+                'verdict只能是pass、warning或violation。decisions中的path只能逐字使用给定路径，action只能是allow或revert。',
+                '输出结构：{"verdict":"pass|warning|violation","summary":"短结论","findings":[],"decisions":[{"path":"给定路径","action":"allow|revert","reason":"原因","evidence":"短证据"}]}',
+            ].join('\n'),
+        },
+        {
+            role: 'user',
+            content: [
+                '=== 必须覆盖的关系路径 ===',
+                JSON.stringify(paths),
+                '=== 上一次无效输出 ===',
+                cropText(output, 8000, '无效二审输出'),
+                '只修复为合法JSON。',
+            ].join('\n'),
+        },
+    ];
+}
+
 async function runSocialAuditTarget(captured, { manual = false } = {}) {
     const settings = getSettings();
     if (settings.socialAuditMode === 'off') {
@@ -6627,6 +6704,68 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
                 outputChars: output.length,
                 ...structuredOutputShape(output),
             });
+            structureRepairAttempted = true;
+            let repairUsage = null;
+            try {
+                const repairedOutput = await callModel(
+                    buildSocialAuditRepairMessages(output, relationship.changes),
+                    {
+                        maxTokens: Math.max(1400, settings.socialAuditMaxTokens),
+                        task: '人物关系二审 JSON 修复',
+                        channel: 'fast',
+                        targetIndex: target.index,
+                        jsonMode: true,
+                        attempt: 2,
+                        failover: false,
+                        maxFailovers: 0,
+                        validateOutput: (candidateOutput) => {
+                            const candidate = parseSocialAuditOutput(
+                                candidateOutput,
+                                relationship.changes,
+                            );
+                            return candidate.error
+                                ? { valid: false, reason: candidate.error }
+                                : true;
+                        },
+                        onUsage: (value) => {
+                            repairUsage = value;
+                        },
+                    },
+                );
+                modelAttempts += 1;
+                usageAttempts.push(normalizedProviderUsage(repairUsage));
+                const repaired = parseSocialAuditOutput(
+                    repairedOutput,
+                    relationship.changes,
+                );
+                localStructureRepairAttempted ||= repaired.localRepairAttempted === true;
+                if (!repaired.error) {
+                    output = repairedOutput;
+                    parsed = repaired;
+                    failureReason = '';
+                    failureCode = '';
+                    recordModelDiagnostic({
+                        phase: 'validation',
+                        task: '人物关系二审 JSON 修复',
+                        channel: 'fast',
+                        status: 'recovered',
+                        attempt: 2,
+                        targetIndex: target.index,
+                        failureKind: 'social-structure-repaired-by-model',
+                        outputChars: repairedOutput.length,
+                        ...structuredOutputShape(repairedOutput),
+                        recovered: true,
+                        recoveryReason: 'valid-json-repair',
+                    });
+                }
+            } catch (repairError) {
+                failureReason = String(
+                    repairError?.validationReason
+                    || repairError?.message
+                    || repairError,
+                );
+                failureCode = 'social.invalid_structure';
+            }
         } else if (parsed.repaired) {
             recordModelDiagnostic({
                 phase: 'validation',
@@ -7083,6 +7222,35 @@ function applyBlockToCurrentSwipe(message, block, includeBlock, removeBlock = ''
         delete message.extra.display_text;
     }
     return message.mes !== before;
+}
+
+async function sanitizePlanningLeakOnReceivedMessage(context, index) {
+    const message = context?.chat?.[index];
+    if (!message || typeof message.mes !== 'string') return false;
+    const repaired = stripLeakedPlanningPrefix(message.mes);
+    if (!repaired.changed) return false;
+    message.mes = repaired.text;
+    if (
+        Array.isArray(message.swipes)
+        && typeof message.swipes[message.swipe_id] === 'string'
+    ) message.swipes[message.swipe_id] = repaired.text;
+    if (message.extra && typeof message.extra === 'object') delete message.extra.display_text;
+    try {
+        await context.saveChat?.();
+    } catch (error) {
+        console.warn('[MVU Auto Doctor] 保存规划泄漏清理结果失败：', error);
+    }
+    try {
+        context.updateMessageBlock?.(index, message);
+    } catch (error) {
+        console.warn('[MVU Auto Doctor] 重绘规划泄漏清理结果失败：', error);
+    }
+    recordOperation(
+        '回复协议',
+        '已从当前回复正文标签之前移除泄漏的模型规划文本；正文、选项和变量块保持原样',
+        'warning',
+    );
+    return true;
 }
 
 async function refreshMessage(
@@ -9132,7 +9300,7 @@ function worldPressurePhase(state, pressureState) {
     return Number(state?.turn || 0) <= 3 ? 'opening' : 'exploration';
 }
 
-function classifyDoctorPressureCandidate(candidate, {
+function legacyClassifyDoctorPressureCandidate(candidate, {
     id = '',
     channel = '',
     sameScene = null,
@@ -9189,6 +9357,10 @@ function classifyDoctorPressureCandidate(candidate, {
             : sameScene,
         source: candidate,
     };
+}
+
+function classifyDoctorPressureCandidate(candidate, options = {}) {
+    return classifyWorldPressureCandidate(candidate, options);
 }
 
 function prepareContinuityInjectionBatch(namespace, state, {
@@ -10180,6 +10352,98 @@ async function collectActorShardProposals(captured, {
     };
 }
 
+async function completeActorProfilesForTurn(captured, {
+    actorLedger,
+    userText = '',
+    acceptedNarrative = '',
+    worldContext = '',
+    stateAnchors = '',
+    turn = 0,
+    token = null,
+} = {}) {
+    const settings = getSettings();
+    const candidates = selectActorProfileCompletionCandidates(actorLedger, {
+        maxActors: Math.min(12, settings.actorLedgerMaxActorsPerTurn + 6),
+    });
+    if (!candidates.length || settings.actorProfileCompletionMode === 'off') {
+        return { ledger: actorLedger, candidates, accepted: [], rejected: [], failures: [] };
+    }
+    const evidenceText = [
+        userText,
+        acceptedNarrative,
+        worldContext,
+        stateAnchors,
+    ].filter(Boolean).join('\n\n');
+    const settled = await Promise.all(candidates.map(async (candidate) => {
+        const messages = buildActorProfileCompletionMessages([candidate], {
+            evidenceText: cropText(evidenceText, 42000, '人物档案证据'),
+        });
+        try {
+            const output = await callModel(messages, {
+                maxTokens: Math.max(2400, Math.min(6000, settings.actorShardMaxTokens)),
+                timeoutMs: settings.sovereigntyHardTimeoutMs,
+                task: '人物档案生成',
+                channel: 'fast',
+                instructionModule: 'profile',
+                targetIndex: captured.index,
+                jsonMode: true,
+                parallelLane: `profile:${candidate.actorId}`,
+                failover: true,
+                maxFailovers: 1,
+                validateOutput: (candidateOutput) => {
+                    const parsed = parseActorProfileCompletionOutput(candidateOutput, {
+                        candidates: [candidate],
+                        evidenceText,
+                    });
+                    return parsed.profiles
+                        ? true
+                        : { valid: false, reason: parsed.error || 'actor_profile.output_invalid' };
+                },
+                runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
+            });
+            if (token && !continuityTargetIsCurrent(captured, token).ok) {
+                return { candidate, failure: 'target_stale' };
+            }
+            const parsed = parseActorProfileCompletionOutput(output, {
+                candidates: [candidate],
+                evidenceText,
+            });
+            return parsed.profiles
+                ? { candidate, profiles: parsed.profiles }
+                : { candidate, failure: parsed.error || 'actor_profile.output_invalid' };
+        } catch (error) {
+            return {
+                candidate,
+                failure: String(error?.validationReason || error?.message || error),
+            };
+        }
+    }));
+    let ledger = actorLedger;
+    const accepted = [];
+    const rejected = [];
+    const failures = [];
+    for (const result of settled) {
+        if (result.failure) {
+            failures.push({
+                actorId: result.candidate.actorId,
+                name: result.candidate.name,
+                reason: result.failure,
+            });
+            continue;
+        }
+        const merged = mergeActorProfilePatches(ledger, result.profiles, {
+            turn,
+            sourceRef: sourceRefOf(captured),
+            maxPatches: 1,
+            evidenceCorpus: evidenceText,
+        });
+        ledger = merged.ledger;
+        accepted.push(...merged.accepted);
+        rejected.push(...merged.rejected);
+    }
+    return { ledger, candidates, accepted, rejected, failures };
+}
+
 async function runContinuityTarget(captured, { force = false } = {}) {
     const token = operationToken(captured);
     let guard = continuityTargetIsCurrent(captured, token);
@@ -10259,10 +10523,11 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         return { status: 'stale', reason: guard.reason };
     }
     let stateAnchors = '未读取到当前 MVU 锚点。';
+    let currentMvuData = null;
     try {
         const Mvu = await getMvu();
-        const currentData = Mvu ? await mvuDataAt(Mvu, captured.index) : null;
-        stateAnchors = continuityAnchorState(currentData);
+        currentMvuData = Mvu ? await mvuDataAt(Mvu, captured.index) : null;
+        stateAnchors = continuityAnchorState(currentMvuData);
     } catch (error) {
         console.warn('[MVU Auto Doctor] 读取活世界时间/地点锚点失败：', error);
     }
@@ -10279,6 +10544,18 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         return { status: 'disabled' };
     }
     const director = detectContinuityDirector(context, messageText, markers);
+    const cycleStateBaseline = Object.fromEntries([
+        'continuity',
+        'continuityCheckpoint',
+        'actorLedger',
+        'actorLedgerCheckpoint',
+        'actorLedgerCheckpointBlobs',
+        'worldPressure',
+        'continuityWorldLaneReceipts',
+        'continuityDirector',
+        'continuityDetected',
+        'continuitySourceReceipts',
+    ].map((field) => [field, deepClone(namespace[field])]));
     setContinuityStatus('世界连续性：正在整理因果…', 'busy');
     const sourcePlan = continuityTickPlan(context, base, captured, namespace);
     const ticksDue = sourcePlan.ticksDue;
@@ -10373,6 +10650,15 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         { excludedActorNames },
     );
     actorLedger.turn = tickTurn;
+    const actorDiscovery = discoverActorsFromTurnSources(actorLedger, {
+        userText: previousUserMessageText(context, captured.index),
+        acceptedContent: acceptedNarrative,
+        knownActorNames: actorNamesFromMvuData(currentMvuData),
+        excludedActorNames,
+        sourceRef: sourceRefOf(captured),
+        turn: tickTurn,
+    });
+    actorLedger = actorDiscovery.ledger;
     actorLedger = reconcileActorIdentityRevealsFromAcceptedContent(actorLedger, {
         content: acceptedNarrative,
         sourceRef: sourceRefOf(captured),
@@ -10391,11 +10677,29 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         sourceRef: sourceRefOf(captured),
         observerActorIds,
     });
-    const profilePreparation = prepareActorLedgerProfilesV6(actorLedger, {
+    let profilePreparation = prepareActorLedgerProfilesV6(actorLedger, {
         mode: settings.actorProfileCompletionMode,
         turn: tickTurn,
     });
     actorLedger = profilePreparation.ledger;
+    const profileCompletion = await completeActorProfilesForTurn(captured, {
+        actorLedger,
+        userText: previousUserMessageText(context, captured.index),
+        acceptedNarrative,
+        worldContext,
+        stateAnchors,
+        turn: tickTurn,
+        token,
+    });
+    actorLedger = profileCompletion.ledger;
+    profilePreparation = prepareActorLedgerProfilesV6(actorLedger, {
+        mode: settings.actorProfileCompletionMode,
+        turn: tickTurn,
+    });
+    actorLedger = profilePreparation.ledger;
+    const persistedProfileNames = new Set(
+        profileCompletion.accepted.map((entry) => entry.name),
+    );
     let actorSchedule = scheduleActorTurns(actorLedger, {
         turn: tickTurn,
         maxActors: settings.actorLedgerMaxActorsPerTurn,
@@ -10476,7 +10780,11 @@ async function runContinuityTarget(captured, { force = false } = {}) {
             {
                 agentType: 'profile',
                 agentId: `profile-${tickTurn}`,
-                input: { coverage: profilePreparation.coverage },
+                input: {
+                    coverage: profilePreparation.coverage,
+                    generated: profileCompletion.accepted.length,
+                    failed: profileCompletion.failures.length,
+                },
             },
             {
                 agentType: 'actor',
@@ -10495,6 +10803,8 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                     coverage: profilePreparation.coverage,
                     prepared: profilePreparation.prepared.length,
                     deferred: profilePreparation.deferred.length,
+                    generated: profileCompletion.accepted.length,
+                    failed: profileCompletion.failures.length,
                 };
             }
             if (job.agentType === 'actor') {
@@ -10997,11 +11307,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                 );
                 if (profileMerge.accepted.length) {
                     actorLedger = profileMerge.ledger;
-                    recordOperation(
-                        '人物档案',
-                        `补全 ${profileMerge.accepted.map((item) => item.name).join('、')} 的人物DNA；拒绝 ${profileMerge.rejected.length} 项无效候选`,
-                        'ok',
-                    );
+                    for (const item of profileMerge.accepted) persistedProfileNames.add(item.name);
                 }
                 const rawTick = parsed.raw?.lastTick;
                 const heldThread = scheduledBase.threads.find(
@@ -11281,6 +11587,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
             [encodedActorCheckpoint.ref]: encodedActorCheckpoint.blob,
         };
     }
+    const runtimeBeforeCompletion = deepClone(sovereigntyRuntime);
     sovereigntyRuntime = await completeSovereigntyCycle({
         runtime: sovereigntyRuntime,
         tasks: sovereigntyTasks,
@@ -11318,10 +11625,35 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         durable: true,
         force: true,
     });
+    if (stateCommitted) {
+        if (actorDiscovery.discovered.length) {
+            recordOperation(
+                '人物档案',
+                `已登记 ${actorDiscovery.discovered.map((item) => item.name).join('、')}；等待证据化档案后才允许自主行动`,
+                'ok',
+            );
+        }
+        if (persistedProfileNames.size) {
+            recordOperation(
+                '人物档案',
+                `已持久化 ${[...persistedProfileNames].join('、')} 的证据化人物档案`,
+                'ok',
+            );
+        }
+        if (profilePreparation.deferred.length) {
+            recordOperation(
+                '人物档案',
+                `${profilePreparation.deferred.length} 名人物档案仍未就绪；已禁止其自主行动并保留重试`,
+                'error',
+            );
+        }
+    }
     if (!stateCommitted) {
-        const currentAfterFailure = sovereigntyRuntimeFromNamespace(readChatNamespace());
+        for (const [field, value] of Object.entries(cycleStateBaseline)) {
+            namespace[field] = deepClone(value);
+        }
         sovereigntyRuntime = await completeSovereigntyCycle({
-            runtime: currentAfterFailure,
+            runtime: runtimeBeforeCompletion,
             tasks: sovereigntyTasks,
             captured,
             turn: tickTurn,
@@ -16095,15 +16427,27 @@ function bindEvents() {
         types.MESSAGE_RECEIVED || 'message_received',
         async (value) => {
             const index = resolveMessageId(value);
-            const current = getContext();
+            let current = getContext();
             const latest = latestAiMessage(current);
             const resolved = index < 0 ? latest.index : index;
+            await sanitizePlanningLeakOnReceivedMessage(current, resolved);
+            current = getContext();
             const captured = captureTarget(current, resolved);
             if (!captured) return;
             // Observation is local and durable. It deliberately runs before any
             // model, MVU, relation, or world wait so a total API outage cannot
             // make an accepted reply disappear from the doctor's backlog.
-            const sovereigntyObservation = await observeSovereigntyTarget(captured);
+            const narrativeEligible = sovereigntyNarrativeEligible(
+                current.chat?.[resolved]?.mes || '',
+            );
+            const sovereigntyObservation = narrativeEligible
+                ? await observeSovereigntyTarget(captured)
+                : {
+                    persisted: true,
+                    observed: false,
+                    skipped: true,
+                    reason: 'narrative_empty',
+                };
             if (!sovereigntyObservation.persisted) {
                 recordOperation(
                     '人物主权',
@@ -16203,7 +16547,7 @@ function bindEvents() {
             attachTargetSettlement(barrierRecord, finalReplySettlement);
             // World settlement consumes the accepted <content> independently.
             // It does not wait for MVU, social, or read-only contract reports.
-            const continuity = sovereigntyObservation.persisted
+            const continuity = narrativeEligible && sovereigntyObservation.persisted
                 ? stateCommitting.then((result) => (
                     result.status === 'settled'
                         ? enqueueContinuity(resolved, {
