@@ -3082,9 +3082,11 @@ async function performChatNamespaceWrite(next, expectedChatId, {
                 // refresh recovery idempotent instead of claiming success.
             }
         }
-        fail(error?.code === 'host_save_readback_mismatch'
-            ? 'host_save_readback_mismatch'
-            : 'host_save_rejected');
+        if (error?.code === 'host_save_readback_mismatch') {
+            fail('host_save_readback_mismatch');
+        } else {
+            fail('host_save_rejected');
+        }
         console.warn(
             '[MVU Auto Doctor] 保存聊天内记录失败：',
             safeDiagnosticReason(error?.message || error),
