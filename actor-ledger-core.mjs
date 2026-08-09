@@ -191,6 +191,28 @@ function normalizeActor(value, index, turn) {
             : '',
         identity: {
             role: cleanText(identity.role, 180),
+            species: cleanText(identity.species, 160),
+            profileSummary: cleanText(identity.profileSummary, 700),
+            gender: cleanText(identity.gender, 80),
+            age: cleanText(identity.age, 80),
+            briefIntro: cleanText(identity.briefIntro, 240),
+            appearance: cleanText(identity.appearance, 1200),
+            identityText: cleanText(identity.identityText, 500),
+            relationState: cleanText(identity.relationState, 1200),
+            attitudeToProtagonist: cleanText(identity.attitudeToProtagonist, 600),
+            pastExperience: cleanText(identity.pastExperience, 2400),
+            biography: cleanText(identity.biography, 2400),
+            primaryColor: cleanText(identity.primaryColor, 200),
+            primaryDerivatives: cleanList(identity.primaryDerivatives, 3, 700),
+            primarySentence: cleanText(identity.primarySentence, 700),
+            baseColor: cleanText(identity.baseColor, 200),
+            baseDerivatives: cleanList(identity.baseDerivatives, 3, 700),
+            baseSentence: cleanText(identity.baseSentence, 700),
+            accentColor: cleanText(identity.accentColor, 200),
+            accentDerivatives: cleanList(identity.accentDerivatives, 3, 700),
+            accentSentence: cleanText(identity.accentSentence, 700),
+            othersVoices: cleanList(identity.othersVoices, 7, 700),
+            authorVoice: cleanText(identity.authorVoice, 1400),
             aliases: cleanList(identity.aliases, 8, 120),
             traits: cleanList(identity.traits, 12, 180),
             desires: cleanList(identity.desires, 12, 240),
@@ -1191,6 +1213,7 @@ export function mergeActorProfilePatches(value, patches, {
     sourceRef = null,
     maxPatches = 8,
     evidenceCorpus = '',
+    mergeMode = 'append',
 } = {}) {
     const ledger = normalizeActorLedger(value);
     const currentTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
@@ -1202,6 +1225,28 @@ export function mergeActorProfilePatches(value, patches, {
         0,
         integer(maxPatches, 0, 24, 8),
     );
+    const consolidate = mergeMode === 'consolidate';
+    const mergeStableText = (current, proposed, limit = 240) => {
+        const next = consolidate
+            ? cleanText(proposed, limit)
+            : stableProfileText(proposed, limit);
+        if (consolidate && next) return next;
+        return mergeProfileText(current, next, limit);
+    };
+    const mergeStablePattern = (current, proposed, limit = 240) => {
+        const next = consolidate
+            ? cleanText(proposed, limit)
+            : stableProfileText(proposed, limit);
+        if (consolidate && next) return next;
+        return mergeProfilePattern(current, next, limit);
+    };
+    const mergeStableList = (current, proposed, limit = 12, itemLimit = 240) => {
+        const next = consolidate
+            ? cleanList(proposed, limit, itemLimit)
+            : stableProfileList(proposed, limit, itemLimit);
+        if (consolidate && next.length) return next;
+        return mergeProfileList(current, next, limit, itemLimit);
+    };
     for (const raw of candidates) {
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
             rejected.push({ actorId: '', reason: 'profile-not-object' });
@@ -1257,74 +1302,144 @@ export function mergeActorProfilePatches(value, patches, {
             : {};
         actor.identity = {
             ...actor.identity,
-            role: mergeProfileText(actor.identity.role, identity.role, 180),
-            traits: mergeProfileList(actor.identity.traits, stableProfileList(identity.traits, 12, 180), 12, 180),
-            desires: mergeProfileList(actor.identity.desires, stableProfileList(identity.desires, 12, 240), 12, 240),
-            boundaries: mergeProfileList(actor.identity.boundaries, stableProfileList(identity.boundaries, 12, 240), 12, 240),
-            socialStyle: mergeProfilePattern(actor.identity.socialStyle, stableProfileText(identity.socialStyle)),
-            decisionStyle: mergeProfilePattern(actor.identity.decisionStyle, stableProfileText(identity.decisionStyle)),
-            speechStyle: mergeProfilePattern(actor.identity.speechStyle, stableProfileText(identity.speechStyle)),
-            copingStyle: mergeProfilePattern(actor.identity.copingStyle, stableProfileText(identity.copingStyle)),
-            informationStyle: mergeProfilePattern(
+            role: mergeStableText(actor.identity.role, identity.role, 180),
+            species: mergeStableText(actor.identity.species, identity.species, 160),
+            profileSummary: mergeStableText(
+                actor.identity.profileSummary,
+                identity.profileSummary || identity.summary,
+                700,
+            ),
+            gender: mergeStableText(actor.identity.gender, identity.gender, 80),
+            age: mergeStableText(actor.identity.age, identity.age, 80),
+            briefIntro: mergeStableText(actor.identity.briefIntro, identity.briefIntro, 240),
+            appearance: mergeStableText(actor.identity.appearance, identity.appearance, 1200),
+            identityText: mergeStableText(actor.identity.identityText, identity.identityText, 500),
+            relationState: mergeStableText(actor.identity.relationState, identity.relationState, 1200),
+            attitudeToProtagonist: mergeStableText(
+                actor.identity.attitudeToProtagonist,
+                identity.attitudeToProtagonist,
+                600,
+            ),
+            pastExperience: mergeStableText(
+                actor.identity.pastExperience,
+                identity.pastExperience,
+                2400,
+            ),
+            biography: mergeStableText(actor.identity.biography, identity.biography, 2400),
+            primaryColor: mergeStableText(
+                actor.identity.primaryColor,
+                identity.primaryColor,
+                200,
+            ),
+            primaryDerivatives: mergeStableList(
+                actor.identity.primaryDerivatives,
+                identity.primaryDerivatives,
+                3,
+                700,
+            ),
+            primarySentence: mergeStableText(
+                actor.identity.primarySentence,
+                identity.primarySentence,
+                700,
+            ),
+            baseColor: mergeStableText(actor.identity.baseColor, identity.baseColor, 200),
+            baseDerivatives: mergeStableList(
+                actor.identity.baseDerivatives,
+                identity.baseDerivatives,
+                3,
+                700,
+            ),
+            baseSentence: mergeStableText(
+                actor.identity.baseSentence,
+                identity.baseSentence,
+                700,
+            ),
+            accentColor: mergeStableText(actor.identity.accentColor, identity.accentColor, 200),
+            accentDerivatives: mergeStableList(
+                actor.identity.accentDerivatives,
+                identity.accentDerivatives,
+                3,
+                700,
+            ),
+            accentSentence: mergeStableText(
+                actor.identity.accentSentence,
+                identity.accentSentence,
+                700,
+            ),
+            othersVoices: mergeStableList(
+                actor.identity.othersVoices,
+                identity.othersVoices,
+                7,
+                700,
+            ),
+            authorVoice: mergeStableText(actor.identity.authorVoice, identity.authorVoice, 1400),
+            traits: mergeStableList(actor.identity.traits, identity.traits, 12, 180),
+            desires: mergeStableList(actor.identity.desires, identity.desires, 12, 240),
+            boundaries: mergeStableList(actor.identity.boundaries, identity.boundaries, 12, 240),
+            socialStyle: mergeStablePattern(actor.identity.socialStyle, identity.socialStyle),
+            decisionStyle: mergeStablePattern(actor.identity.decisionStyle, identity.decisionStyle),
+            speechStyle: mergeStablePattern(actor.identity.speechStyle, identity.speechStyle),
+            copingStyle: mergeStablePattern(actor.identity.copingStyle, identity.copingStyle),
+            informationStyle: mergeStablePattern(
                 actor.identity.informationStyle,
-                stableProfileText(identity.informationStyle),
+                identity.informationStyle,
             ),
-            typicalMisread: mergeProfilePattern(
+            typicalMisread: mergeStablePattern(
                 actor.identity.typicalMisread,
-                stableProfileText(identity.typicalMisread),
+                identity.typicalMisread,
             ),
-            relationshipDistancePattern: mergeProfilePattern(
+            relationshipDistancePattern: mergeStablePattern(
                 actor.identity.relationshipDistancePattern,
-                stableProfileText(identity.relationshipDistancePattern),
+                identity.relationshipDistancePattern,
             ),
-            selfImageGap: mergeProfilePattern(
+            selfImageGap: mergeStablePattern(
                 actor.identity.selfImageGap,
-                stableProfileText(identity.selfImageGap),
+                identity.selfImageGap,
             ),
-            learnedCounterDisposition: mergeProfilePattern(
+            learnedCounterDisposition: mergeStablePattern(
                 actor.identity.learnedCounterDisposition,
-                stableProfileText(identity.learnedCounterDisposition),
+                identity.learnedCounterDisposition,
             ),
-            pressureResponse: mergeProfilePattern(
+            pressureResponse: mergeStablePattern(
                 actor.identity.pressureResponse,
-                stableProfileText(identity.pressureResponse),
+                identity.pressureResponse,
             ),
-            recoveryPath: mergeProfilePattern(
+            recoveryPath: mergeStablePattern(
                 actor.identity.recoveryPath,
-                stableProfileText(identity.recoveryPath),
+                identity.recoveryPath,
             ),
-            everydayHabits: mergeProfileList(
+            everydayHabits: mergeStableList(
                 actor.identity.everydayHabits,
-                stableProfileList(identity.everydayHabits, 8, 180),
+                identity.everydayHabits,
                 8,
                 180,
             ),
-            blindSpots: mergeProfileList(actor.identity.blindSpots, stableProfileList(identity.blindSpots, 8, 220), 8, 220),
+            blindSpots: mergeStableList(actor.identity.blindSpots, identity.blindSpots, 8, 220),
         };
-        actor.longTermGoals = mergeProfileList(actor.longTermGoals, stableProfileList(raw.longTermGoals, 12, 400), 12, 400);
-        actor.currentGoals = mergeProfileList(actor.currentGoals, stableProfileList(raw.currentGoals, 8, 400), 8, 400);
+        actor.longTermGoals = mergeStableList(actor.longTermGoals, raw.longTermGoals, 12, 400);
+        actor.currentGoals = mergeStableList(actor.currentGoals, raw.currentGoals, 8, 400);
         const proposedPlan = raw.plan && typeof raw.plan === 'object' && !Array.isArray(raw.plan)
             ? raw.plan
             : {};
         actor.plan = {
             ...actor.plan,
-            summary: mergeProfileText(actor.plan?.summary, stableProfileText(proposedPlan.summary, 500), 500),
-            steps: mergeProfileList(actor.plan?.steps, stableProfileList(proposedPlan.steps, 12, 300), 12, 300),
-            nextWindow: mergeProfileText(
+            summary: mergeStableText(actor.plan?.summary, proposedPlan.summary, 500),
+            steps: mergeStableList(actor.plan?.steps, proposedPlan.steps, 12, 300),
+            nextWindow: mergeStableText(
                 actor.plan?.nextWindow,
-                stableProfileText(proposedPlan.nextWindow, 180),
+                proposedPlan.nextWindow,
                 180,
             ),
-            obstacles: mergeProfileList(
+            obstacles: mergeStableList(
                 actor.plan?.obstacles,
-                stableProfileList(proposedPlan.obstacles, 12, 300),
+                proposedPlan.obstacles,
                 12,
                 300,
             ),
-            costs: mergeProfileList(actor.plan?.costs, stableProfileList(proposedPlan.costs, 12, 300), 12, 300),
-            alternatives: mergeProfileList(
+            costs: mergeStableList(actor.plan?.costs, proposedPlan.costs, 12, 300),
+            alternatives: mergeStableList(
                 actor.plan?.alternatives,
-                stableProfileList(proposedPlan.alternatives, 12, 300),
+                proposedPlan.alternatives,
                 12,
                 300,
             ),
@@ -1335,23 +1450,23 @@ export function mergeActorProfilePatches(value, patches, {
                 ? proposedPlan.status
                 : actor.plan?.status,
         };
-        actor.capabilities = mergeProfileList(actor.capabilities, stableProfileList(raw.capabilities, 24, 160), 24, 160);
+        actor.capabilities = mergeStableList(actor.capabilities, raw.capabilities, 24, 160);
         actor.hidden = {
-            emotionalInertia: mergeProfileList(
+            emotionalInertia: mergeStableList(
                 actor.hidden.emotionalInertia,
-                stableProfileList(hidden.emotionalInertia, 12, 240),
+                hidden.emotionalInertia,
                 12,
                 240,
             ),
-            innerConflicts: mergeProfileList(
+            innerConflicts: mergeStableList(
                 actor.hidden.innerConflicts,
-                stableProfileList(hidden.innerConflicts, 12, 300),
+                hidden.innerConflicts,
                 12,
                 300,
             ),
-            privateIntentions: mergeProfileList(
+            privateIntentions: mergeStableList(
                 actor.hidden.privateIntentions,
-                stableProfileList(hidden.privateIntentions, 12, 300),
+                hidden.privateIntentions,
                 12,
                 300,
             ),

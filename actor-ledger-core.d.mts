@@ -177,6 +177,7 @@ export function mergeActorProfilePatches(
         sourceRef?: ActorLedgerSourceRef | null;
         maxPatches?: number;
         evidenceCorpus?: string;
+        mergeMode?: 'append' | 'consolidate';
     },
 ): {
     ledger: ActorLedger;

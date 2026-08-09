@@ -120,8 +120,10 @@ import {
 import {
     actorProfileReadyForAction,
     actorProfileV6View,
+    applyActorProfileCompletionToV6,
     applyActorProfileV6Override,
     buildActorProfileCompletionMessages,
+    buildActorProfileRepairMessages,
     parseActorProfileCompletionOutput,
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
@@ -4711,6 +4713,13 @@ function previousUserMessageText(context, targetIndex) {
         }
     }
     return '';
+}
+
+function playerAuthoredTextFromCompiledMessage(value) {
+    const source = String(value || '').trim();
+    if (!source) return '';
+    const compiledMarker = source.search(/\n+以上是用户的本轮输入[，,：:]?/u);
+    return (compiledMarker >= 0 ? source.slice(0, compiledMarker) : source).trim();
 }
 
 function renderHardContractAudit() {
@@ -10363,7 +10372,8 @@ async function completeActorProfilesForTurn(captured, {
 } = {}) {
     const settings = getSettings();
     const candidates = selectActorProfileCompletionCandidates(actorLedger, {
-        maxActors: Math.min(12, settings.actorLedgerMaxActorsPerTurn + 6),
+        maxActors: Math.min(2, settings.actorLedgerMaxActorsPerTurn),
+        turn,
     });
     if (!candidates.length || settings.actorProfileCompletionMode === 'off') {
         return { ledger: actorLedger, candidates, accepted: [], rejected: [], failures: [] };
@@ -10375,41 +10385,84 @@ async function completeActorProfilesForTurn(captured, {
         stateAnchors,
     ].filter(Boolean).join('\n\n');
     const settled = await Promise.all(candidates.map(async (candidate) => {
+        const candidateEvidenceText = [
+            ...(Array.isArray(candidate.evidence) ? candidate.evidence : [])
+                .map((item) => String(item || '').trim().slice(0, 300))
+                .filter(Boolean)
+                .slice(0, 16),
+            evidenceText,
+        ].filter(Boolean).join('\n\n');
         const messages = buildActorProfileCompletionMessages([candidate], {
-            evidenceText: cropText(evidenceText, 42000, '人物档案证据'),
+            evidenceText: cropText(candidateEvidenceText, 42000, '人物档案材料'),
         });
         try {
-            const output = await callModel(messages, {
+            let output = await callModel(messages, {
                 maxTokens: Math.max(2400, Math.min(6000, settings.actorShardMaxTokens)),
                 timeoutMs: settings.sovereigntyHardTimeoutMs,
                 task: '人物档案生成',
                 channel: 'fast',
                 instructionModule: 'profile',
                 targetIndex: captured.index,
-                jsonMode: true,
+                jsonMode: false,
                 parallelLane: `profile:${candidate.actorId}`,
                 failover: true,
                 maxFailovers: 1,
-                validateOutput: (candidateOutput) => {
-                    const parsed = parseActorProfileCompletionOutput(candidateOutput, {
-                        candidates: [candidate],
-                        evidenceText,
-                    });
-                    return parsed.profiles
-                        ? true
-                        : { valid: false, reason: parsed.error || 'actor_profile.output_invalid' };
-                },
                 runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
             });
             if (token && !continuityTargetIsCurrent(captured, token).ok) {
                 return { candidate, failure: 'target_stale' };
             }
-            const parsed = parseActorProfileCompletionOutput(output, {
+            let parsed = parseActorProfileCompletionOutput(output, {
                 candidates: [candidate],
-                evidenceText,
+                evidenceText: candidateEvidenceText,
             });
+            if (!parsed.profiles) {
+                const originalOutput = output;
+                output = await callModel(
+                    buildActorProfileRepairMessages(originalOutput, candidate),
+                    {
+                        maxTokens: Math.max(2400, Math.min(6000, settings.actorShardMaxTokens)),
+                        timeoutMs: settings.sovereigntyHardTimeoutMs,
+                        task: '人物档案 JSON 修复',
+                        channel: 'fast',
+                        instructionModule: 'profile',
+                        targetIndex: captured.index,
+                        jsonMode: true,
+                        parallelLane: `profile:${candidate.actorId}:repair`,
+                        failover: false,
+                        maxFailovers: 0,
+                        validateOutput: (repairedOutput) => {
+                            const repaired = parseActorProfileCompletionOutput(repairedOutput, {
+                                candidates: [candidate],
+                                evidenceText: candidateEvidenceText,
+                            });
+                            return repaired.profiles
+                                ? true
+                                : { valid: false, reason: repaired.error };
+                        },
+                        runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
+                    },
+                );
+                parsed = parseActorProfileCompletionOutput(output, {
+                    candidates: [candidate],
+                    evidenceText: candidateEvidenceText,
+                });
+                if (parsed.profiles) {
+                    recordModelDiagnostic({
+                        phase: 'validation',
+                        task: '人物档案 JSON 修复',
+                        channel: 'fast',
+                        status: 'recovered',
+                        targetIndex: captured.index,
+                        failureKind: 'profile-structure-repaired',
+                        outputChars: output.length,
+                        recovered: true,
+                        recoveryReason: 'valid-json-repair',
+                    });
+                }
+            }
             return parsed.profiles
-                ? { candidate, profiles: parsed.profiles }
+                ? { candidate, profiles: parsed.profiles, evidenceText: candidateEvidenceText }
                 : { candidate, failure: parsed.error || 'actor_profile.output_invalid' };
         } catch (error) {
             return {
@@ -10435,11 +10488,35 @@ async function completeActorProfilesForTurn(captured, {
             turn,
             sourceRef: sourceRefOf(captured),
             maxPatches: 1,
-            evidenceCorpus: evidenceText,
+            evidenceCorpus: result.evidenceText || evidenceText,
+            mergeMode: 'consolidate',
         });
         ledger = merged.ledger;
-        accepted.push(...merged.accepted);
-        rejected.push(...merged.rejected);
+        const profilePatch = result.profiles[0];
+        const actorIndex = ledger.actors.findIndex((actor) => actor.id === profilePatch.actorId);
+        let physiologyApplied = false;
+        if (actorIndex >= 0) {
+            const before = JSON.stringify(ledger.actors[actorIndex].profileV6?.modules?.physiology || null);
+            ledger.actors[actorIndex].profileV6 = applyActorProfileCompletionToV6(
+                ledger.actors[actorIndex].profileV6,
+                profilePatch,
+                { turn },
+            );
+            physiologyApplied = before !== JSON.stringify(
+                ledger.actors[actorIndex].profileV6?.modules?.physiology || null,
+            );
+        }
+        if (merged.accepted.length) accepted.push(...merged.accepted);
+        else if (physiologyApplied) {
+            accepted.push({
+                actorId: profilePatch.actorId,
+                name: profilePatch.name,
+                evidence: profilePatch.evidence,
+            });
+        }
+        rejected.push(...merged.rejected.filter((entry) => (
+            !physiologyApplied || entry.reason !== 'no-new-profile-facts'
+        )));
     }
     return { ledger, candidates, accepted, rejected, failures };
 }
@@ -10684,7 +10761,9 @@ async function runContinuityTarget(captured, { force = false } = {}) {
     actorLedger = profilePreparation.ledger;
     const profileCompletion = await completeActorProfilesForTurn(captured, {
         actorLedger,
-        userText: previousUserMessageText(context, captured.index),
+        userText: playerAuthoredTextFromCompiledMessage(
+            previousUserMessageText(context, captured.index),
+        ),
         acceptedNarrative,
         worldContext,
         stateAnchors,
@@ -10711,7 +10790,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
     if (retryActorIds.length) {
         const retrySet = new Set(retryActorIds);
         const durableRetries = actorLedger.actors
-            .filter((actor) => retrySet.has(actor.id))
+            .filter((actor) => retrySet.has(actor.id) && actorProfileReadyForAction(actor))
             .map((actor) => ({
                 actorId: actor.id,
                 actorName: actor.name,
@@ -12979,6 +13058,26 @@ const ACTOR_PROFILE_FIELD_LABELS = Object.freeze({
     aliases: '别名',
     lineage: '谱系',
     species: '物种',
+    profileSummary: '人物概述',
+    gender: '性别',
+    age: '年龄',
+    briefIntro: '一句话介绍',
+    identityText: '身份',
+    relationState: '人际关系',
+    attitudeToProtagonist: '对主角态度',
+    pastExperience: '过往经历',
+    biography: '履历',
+    primaryColor: '性格主色调',
+    primaryDerivatives: '主色调衍生',
+    primarySentence: '主色调语句',
+    baseColor: '性格底色',
+    baseDerivatives: '底色衍生',
+    baseSentence: '底色语句',
+    accentColor: '性格点缀',
+    accentDerivatives: '点缀衍生',
+    accentSentence: '点缀语句',
+    othersVoices: '他者声部',
+    authorVoice: '作者声部',
     traits: '稳定特征',
     desires: '现实欲望',
     boundaries: '个人边界',
@@ -12986,6 +13085,11 @@ const ACTOR_PROFILE_FIELD_LABELS = Object.freeze({
     decisionStyle: '决策方式',
     speechStyle: '说话方式',
     copingStyle: '应对方式',
+    informationStyle: '获取信息的习惯',
+    typicalMisread: '容易误判的地方',
+    relationshipDistancePattern: '关系距离',
+    selfImageGap: '自我认识与实际差异',
+    learnedCounterDisposition: '会如何调整旧习惯',
     pressureResponse: '受压反应',
     recoveryPath: '恢复路径',
     everydayHabits: '日常习惯',
@@ -13018,25 +13122,27 @@ const ACTOR_PROFILE_FIELD_LABELS = Object.freeze({
     enabled: '启用生理模块',
     adultEnabled: '启用成人生理',
     source: '来源',
-    appearance: '外观',
-    visibleFeatures: '可见特征',
-    proportions: '形态比例',
-    measurements: '尺寸',
-    reproductiveAnatomy: '生殖构造',
-    external: '外部构造',
-    internal: '内部构造',
-    morphology: '形态',
-    form: '当前形态',
-    dimorphism: '形态差异',
-    sensitivity: '敏感度',
-    physiologicalResponses: '生理反应',
-    secretionCycle: '分泌周期',
-    fertility: '生育能力',
-    specialSpecies: '特殊物种特征',
-    forms: '多形态',
-    currentBodyState: '当前身体状态',
-    freeform: '自由描述',
-    personalityInferenceAllowed: '允许反推人格',
+    facialAppearance: '相貌',
+    oralCavity: '口腔',
+    hairstyle: '常用发型',
+    neckShoulderArmpit: '肩颈腋窝',
+    heightWeight: '身高/体重',
+    bodyMeasurements: '三围/罩杯',
+    bodySpecial: '身材/特异性征',
+    skinTexture: '肌肤触感',
+    bodyScent: '身体气味',
+    breastAppearance: '胸部外观',
+    waistAbdomen: '腰腹外观',
+    vulvaAppearance: '外阴外观',
+    vaginalProfile: '阴道剖面',
+    anusAppearance: '菊穴',
+    buttockAppearance: '臀部外观',
+    legAppearance: '腿部外观',
+    footSize: '足码/脚型',
+    footAppearance: '足部外观',
+    lactationBodyFluid: '泌乳与特殊体液',
+    sensitiveParts: '敏感部位',
+    note: '说明',
     actorId: '人物 ID',
     evidence: '证据',
     attempt: '行动尝试',
@@ -13067,7 +13173,7 @@ function actorProfileValueText(value) {
     if (value === null || value === undefined || value === '') return '未登记';
     if (Array.isArray(value)) {
         if (!value.length) return '未登记';
-        return value.map((entry) => actorProfileValueText(entry)).join('；');
+        return value.map((entry) => actorProfileValueText(entry)).join('、');
     }
     if (typeof value === 'object') {
         if (!Object.keys(value).length) return '未登记';
@@ -13077,6 +13183,16 @@ function actorProfileValueText(value) {
     }
     return String(value);
 }
+
+const ACTOR_PROFILE_HIDDEN_TECHNICAL_FIELDS = new Set([
+    'enabled',
+    'adultEnabled',
+    'source',
+    'coverageState',
+    'unknownRemainsUnknown',
+    'noUnconfirmedAbilityGranted',
+    'historicalActionsInvented',
+]);
 
 function actorProfileLeafEntries(value, parts = []) {
     if (Array.isArray(value)) {
@@ -13088,7 +13204,9 @@ function actorProfileLeafEntries(value, parts = []) {
         return value.flatMap((entry, index) => actorProfileLeafEntries(entry, [...parts, String(index)]));
     }
     if (value && typeof value === 'object') {
-        const entries = Object.entries(value);
+        const entries = Object.entries(value).filter(([key]) => (
+            !ACTOR_PROFILE_HIDDEN_TECHNICAL_FIELDS.has(key)
+        ));
         if (!entries.length) return [{ parts, value }];
         return entries.flatMap(([key, entry]) => actorProfileLeafEntries(entry, [...parts, key]));
     }
@@ -13262,8 +13380,11 @@ function buildActorProfileModule(actor, profile, moduleKey, module, { open = fal
     const moduleIsLocked = profile.locks.actor === true
         || profile.locks[moduleKey] === true
         || profile.locks[`modules.${moduleKey}`] === true;
+    const waitingForGeneratedDossier = module.source === 'designed_seed';
     meta.textContent = [
-        ACTOR_PROFILE_STATUS_LABELS[module.status] || module.status,
+        waitingForGeneratedDossier
+            ? '等待模型生成'
+            : (ACTOR_PROFILE_STATUS_LABELS[module.status] || module.status),
         ACTOR_PROFILE_SOURCE_LABELS[module.source] || module.source,
         `v${module.version}`,
         moduleIsLocked ? '已锁定' : '',
@@ -13282,16 +13403,25 @@ function buildActorProfileModule(actor, profile, moduleKey, module, { open = fal
     const regenerate = document.createElement('button');
     regenerate.type = 'button';
     regenerate.className = 'menu_button mvuad-profile-module-regenerate';
-    regenerate.textContent = '重生成本模块';
+    regenerate.textContent = '按当前证据重建';
     regenerate.disabled = moduleIsLocked;
     toolbar.append(lock, regenerate);
     body.appendChild(toolbar);
 
     const fields = document.createElement('div');
     fields.className = 'mvuad-profile-fields';
-    const leaves = actorProfileLeafEntries(module.data);
-    for (const leaf of leaves) {
-        fields.appendChild(buildActorProfileField(actor, profile, moduleKey, module, leaf));
+    if (waitingForGeneratedDossier) {
+        const pending = document.createElement('p');
+        pending.className = 'mvuad-profile-pending-copy';
+        pending.textContent = moduleKey === 'physiology'
+            ? '生理档案尚未生成成功。医生会继续按人物证据补全；这里不再用程序占位词冒充成品。'
+            : '这一部分尚未生成成功；医生不会把程序占位内容当成人物档案。';
+        fields.appendChild(pending);
+    } else {
+        const leaves = actorProfileLeafEntries(module.data);
+        for (const leaf of leaves) {
+            fields.appendChild(buildActorProfileField(actor, profile, moduleKey, module, leaf));
+        }
     }
     body.appendChild(fields);
 
