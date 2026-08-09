@@ -163,6 +163,49 @@ export function classifySocialAuditNeed({
     return { needed: reasons.length > 0, reasons: [...new Set(reasons)] };
 }
 
+const LOCAL_SOCIAL_WARNING_FLOORS = Object.freeze({
+    'player-motive-attribution': '旁白出现了本地可识别的玩家隐藏动机归因',
+    'ordinary-care-extreme-interpretation': '普通照顾被升级为极端关系或支配解释',
+    'identity-totalization': '正文用单一状态或总判词覆盖完整人格',
+    'stereotype-label-pileup': '正文堆叠多项通用极端人格标签',
+    'typology-shortcut': '正文使用心理类型标签代替具体人物塑造',
+    'group-reaction-homogenization': '同场人物被写成整齐一致的模板反应',
+});
+
+export function enforceLocalSocialAuditFloor(parsed, reasons = []) {
+    if (!parsed || parsed.error) return parsed;
+    const localReasons = [...new Set(reasons)]
+        .filter((reason) => LOCAL_SOCIAL_WARNING_FLOORS[reason]);
+    if (!localReasons.length) return parsed;
+    const next = clone(parsed);
+    next.localVerdictFloor = {
+        verdict: 'warning',
+        reasons: localReasons,
+    };
+    if (next.verdict === 'pass') next.verdict = 'warning';
+    const existing = new Set((next.findings || []).map((item) => item.type));
+    for (const reason of localReasons) {
+        const type = `local_${reason.replace(/-/gu, '_')}`;
+        if (existing.has(type)) continue;
+        next.findings.push({
+            type,
+            severity: 'warning',
+            reason: LOCAL_SOCIAL_WARNING_FLOORS[reason],
+            evidence: '',
+        });
+    }
+    next.findings = next.findings.slice(0, 12);
+    if (parsed.verdict === 'pass') {
+        const notice = localReasons.map((reason) => LOCAL_SOCIAL_WARNING_FLOORS[reason]).join('；');
+        next.summary = `${cleanAuditText(next.summary, 520) || '模型二审给出通过'}；本地结构信号仍需注意：${notice}`.slice(0, 800);
+    }
+    return next;
+}
+
+function cleanAuditText(value, limit = 800) {
+    return String(value || '').replace(/\s+/gu, ' ').trim().slice(0, limit);
+}
+
 function parseErrorPosition(error) {
     const match = String(error?.message || error).match(/position\s+(\d+)/iu);
     return match ? Number(match[1]) : -1;

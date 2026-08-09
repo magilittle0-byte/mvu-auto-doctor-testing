@@ -210,6 +210,7 @@ export function emptyActorProfileV6(actorId = '', name = '', { mode = 'full' } =
             normalizeModule(null, module === 'physiology' ? emptyPhysiology() : {}),
         ])),
         fieldSources: {},
+        designRolls: null,
         locks: {},
         manualOverrides: {},
         moduleVersions: Object.fromEntries(ACTOR_PROFILE_MODULES.map((module) => [module, 0])),
@@ -244,8 +245,9 @@ export function normalizeActorProfileV6(value, {
     output.fieldSources = Object.fromEntries(
         Object.entries(source.fieldSources || {})
             .map(([path, fieldSource]) => [cleanText(path, 240), sourceOf(fieldSource)])
-            .filter(([path]) => path),
+        .filter(([path]) => path),
     );
+    output.designRolls = normalizeActorProfileDesignRolls(source.designRolls);
     output.locks = Object.fromEntries(
         Object.entries(source.locks || {})
             .map(([path, locked]) => [cleanText(path, 240), locked === true])
@@ -305,6 +307,138 @@ const SPEECH_SEEDS = [
     '愿意承认不知道，并把需要核实的部分说清楚',
     '礼貌不等于顺从，拒绝时会尽量给出替代办法',
     '重视对方是否真正理解，复杂事情会换一种说法确认',
+];
+const VALUE_SEEDS = [
+    '更看重兑现承诺，宁愿少答应也不轻易失约',
+    '更看重个人选择权，反感别人替自己决定',
+    '更看重具体公平，愿意为程序和申诉入口多花时间',
+    '更看重熟人情分，规则允许时会先照顾自己人',
+    '更看重手艺与完成度，不喜欢只靠身份压人',
+    '更看重现实回报，帮助别人也会先问清成本与对价',
+    '更看重安稳日常，不愿让所有事情都升级成宏大使命',
+    '更看重公开声誉，希望自己的贡献能被准确看见',
+    '更看重知识与解释，面对结论会追问它怎样被证实',
+    '更看重弱者免受无谓损失，但不会把帮助等同于替人做主',
+    '更看重群体秩序，愿意承担维持协作的麻烦工作',
+    '更看重自由探索，允许无功利的好奇和临时改道',
+    '更看重家人与故土留下的生活方式，不轻易把旧习惯当落后',
+    '更看重效率，能接受不完美但可运行的方案',
+    '更看重体面与分寸，即使敌对也不喜欢失控撒泼',
+    '更看重诚实交换，不要求全盘坦白但厌恶故意误导',
+];
+const TEMPERAMENT_SEEDS = [
+    '平时松弛健谈，真正要紧时反而会突然安静',
+    '慢热寡言，但熟悉后会主动分享琐碎见闻',
+    '精力旺盛、容易先动手试一小步，不等于鲁莽',
+    '耐心有限，遇到反复解释会明显烦躁但仍能把事做完',
+    '情绪来得快去得也快，很少把一场争执记成永久立场',
+    '表面随和，涉及自己的时间和物品时边界很硬',
+    '对陌生事物兴奋，对熟悉责任却容易拖延',
+    '习惯先照顾场面，独处后才承认自己其实介意',
+    '不喜欢热闹中心，但会留意谁被人群落下',
+    '爱竞争也输得起，失败后更想复盘而不是报复',
+    '容易为小事担心，却能在真正危机里按步骤行动',
+    '外表严肃，实际很容易被具体而笨拙的善意打动',
+    '好奇心强，常因多问一句得到线索，也可能惹人厌烦',
+    '对多数事情淡然，唯独少数个人原则会让其突然强硬',
+    '重视速度和节奏，等待时容易用别的小事填满空档',
+    '观察期很长，一旦作出判断就不喜欢频繁摇摆',
+];
+const HUMOR_SEEDS = [
+    '用轻微自嘲缓冲尴尬，不拿别人的伤处取乐',
+    '喜欢一本正经地讲荒唐比喻，等别人自己反应过来',
+    '会吐槽制度、天气和手边物件，很少直接挖苦人',
+    '几乎不主动讲笑话，但会精准接住熟人的梗',
+    '笑点低，紧张时偶尔因不合时宜的小事憋笑',
+    '喜欢夸张模仿熟悉的口头禅，遇到陌生人则收敛',
+    '把竞争说成小游戏，借玩笑掩饰自己其实很在意输赢',
+    '习惯冷不丁指出字面歧义，笑意很淡',
+    '幽默感笨拙，常常解释完笑话反而更好笑',
+    '不爱玩笑，偶尔的直白评价会意外形成喜感',
+    '会用给物件起外号的方式减轻漫长工作的无聊',
+    '喜欢善意抬杠，用反例逗人但允许对方不接招',
+    '在熟人面前嘴贫，对公开场合的取笑非常谨慎',
+    '喜欢讲生活里真实发生的小倒霉，不编夸张传奇',
+    '笑时不遮掩，生气时反而不会使用讽刺',
+    '对黑色幽默接受度高，但知道什么时候必须停下',
+];
+const FRICTION_SEEDS = [
+    '容易高估自己独自解决问题的能力，开口求助偏晚',
+    '对含糊承诺缺乏耐心，可能把仍在思考的人误判成敷衍',
+    '太在意不浪费资源，有时显得小气或错过时机',
+    '习惯替团队收尾，久而久之会暗自计较别人是否偷懒',
+    '看重体面，犯错后的第一反应常是解释而不是道歉',
+    '好奇心压过分寸时会多问一句不该问的事',
+    '对熟人过度宽容，对陌生人则要求证据过严',
+    '喜欢尽快做决定，有时没给慢热的人足够表达时间',
+    '过于相信亲手做过的经验，容易低估新方法',
+    '害怕承诺后做不到，因此可能错过本可承担的关系',
+    '爱比较效率，偶尔忽略别人需要先确认感受和边界',
+    '不愿欠人情，可能拒绝一项其实合理的帮助',
+    '对规则漏洞很敏感，也可能因此把简单事情弄得太复杂',
+    '容易被清楚自信的说法说服，之后才想起核对来源',
+    '把疲惫当成意志问题，往往到明显失误后才肯休息',
+    '遇到不公平会持续追究，有时不肯接受成本更低的折中',
+];
+const AUTHORITY_SEEDS = [
+    '尊重明确职责，但会要求权威说明权限和后果',
+    '对头衔不敏感，更服从现场最懂行的人',
+    '习惯先按程序做，发现程序伤人时才转向变通',
+    '对熟悉的上级直言不讳，对陌生权力保持表面礼貌',
+    '不喜欢命令人，也不愿被模糊命令支配，偏好谈清分工',
+    '能在纪律体系里工作，同时私下保留自己的评价',
+    '对权威有天然戒心，但不会为了反抗而反抗事实',
+    '愿意暂时服从紧急指挥，事后一定要求复盘责任',
+    '容易把照顾型权威当作可靠来源，需提醒自己继续核实',
+    '看重资历与传承，却允许新人用结果推翻旧做法',
+    '更相信共同制定的规则，对单方面例外非常敏感',
+    '对权力关系务实，知道何时让步，也记得自己让出了什么',
+];
+const RELATIONSHIP_SEEDS = [
+    '先通过共同做一件小事判断可靠度，再决定是否谈私事',
+    '容易主动熟络，但真正的承诺会拖到观察很久以后',
+    '很少主动靠近，却会稳定记住别人随口提过的需要',
+    '用互相帮忙维持关系，不擅长长篇表达感情',
+    '亲近时仍保留独处和各自做决定的空间',
+    '对冲突对象也能合作，但会把合作范围说得很窄',
+    '信任被打破后先拉开距离，不急着报复或彻底断绝',
+    '面对比自己弱势的人容易照顾过头，需要提醒自己先询问',
+    '喜欢定期联系而非高强度黏在一起，久别不自动等于疏远',
+    '会用调侃试探亲近程度，发现对方不舒服就立即换方式',
+    '对朋友偏袒但不替朋友否认事实，忠诚与判断可以并存',
+    '把共享秘密看得很重，却不要求对方交代全部生活',
+];
+const PRESSURE_RECOVERY_SEEDS = [
+    ['压力上升时先缩短说话、检查出口和可控步骤', '确认退路与同伴状态后，通过整理手边物品恢复节奏'],
+    ['压力上升时话会变多，试图用提问掌握局面', '得到一条可靠答案后安静下来，重新区分轻重缓急'],
+    ['压力上升时先讨价还价，努力减少必须承担的范围', '边界得到承认后会恢复合作，并补做自己承诺的部分'],
+    ['压力上升时容易僵住几秒，但仍能执行熟练流程', '完成第一个熟悉步骤后逐渐找回判断，不需要被羞辱刺激'],
+    ['压力上升时会加快行动并忽略疲劳', '危险过去后需要吃饭、睡眠或独处，才不会持续过载'],
+    ['压力上升时先找最可信的人确认分工', '责任明确后恢复独立行动，不会永久依附对方'],
+    ['压力上升时变得挑剔，反复检查别人做过的部分', '看到可核验回执后愿意放手，并承认自己过度控制'],
+    ['压力上升时用玩笑淡化严重性', '允许严肃谈一次后会停止插科打诨，转而处理后果'],
+    ['压力上升时先撤离争执现场，避免当场说重话', '在时间约定明确时会回来继续谈，不把回避变成失踪'],
+    ['压力上升时更依赖规则和旧经验', '获得新证据后通过复盘修正规则，而不是维护面子'],
+    ['压力上升时会优先保护某个具体人或物，视野因此变窄', '确认保护对象安全后才重新看见全局和他人的代价'],
+    ['压力上升时情绪外露、动作直接，但不会自动失去能力', '通过运动、劳动或完成一件短任务消化情绪后恢复交流'],
+];
+const EVERYDAY_SEEDS = [
+    '会给常用工具固定位置，别人放错时忍不住重新归位',
+    '总想尝试路边新食物，踩雷后还会认真记录哪一点难吃',
+    '出门前反复确认门窗，却经常忘记带不重要的小东西',
+    '喜欢修补还能用的旧物，对纯装饰消费有自己的偏见',
+    '忙时会把饮品忘到凉透，空闲时又很讲究冲泡步骤',
+    '习惯记账，但会给少数毫无用处的爱好留固定预算',
+    '对植物或小动物很有耐心，对复杂机器反而容易烦躁',
+    '每到陌生地方先记厕所、出口和便宜饭馆的位置',
+    '会收集票根、标签或小纸条，却不愿承认这是纪念',
+    '睡前喜欢听固定节目，错过后第二天会有一点不自在',
+    '工作台看似凌乱，实际上能立刻指出每件东西在哪里',
+    '习惯早到一会儿观察环境，也因此常替迟到的人找借口',
+    '不擅长做饭但很会处理剩菜，讨厌把能吃的东西浪费掉',
+    '喜欢在走路时默背要做的事，到地方后可能漏掉最后一项',
+    '会记住熟人的忌口和常用物，却经常想不起纪念日',
+    '遇到长队会观察队伍怎么移动，并暗中猜哪个窗口更快',
 ];
 const PERSONAL_GOAL_SEEDS = [
     {
@@ -518,19 +652,77 @@ const PERSONAL_GOAL_SEEDS = [
 ];
 
 function seedIndex(actor, salt, length) {
-    const identity = `${actor?.id || ''}|${actor?.name || 'actor'}`;
-    const numericSuffix = String(actor?.id || '').match(/(\d+)$/u);
-    const identityOffset = numericSuffix
-        ? Math.max(0, Number(numericSuffix[1]) - 1)
-        : [...identity].reduce(
-            (sum, character, index) => sum + character.codePointAt(0) * (index + 1),
-            0,
-        );
-    const saltOffset = [...String(salt || '')].reduce(
-        (sum, character, index) => sum + character.codePointAt(0) * (index + 3),
-        0,
-    );
-    return (identityOffset + saltOffset) % length;
+    if (!length) return 0;
+    const identity = `${actor?.id || actor?.actorId || ''}|${actor?.name || 'actor'}`;
+    const hex = fingerprint(`${identity}|${String(salt || '')}`).split(':').at(-1) || '0';
+    return Number.parseInt(hex.slice(-8), 16) % length;
+}
+
+function diceEntry(actor, salt, values) {
+    const index = seedIndex(actor, salt, values.length);
+    return {
+        die: `d${values.length}`,
+        roll: index + 1,
+        result: clone(values[index]),
+    };
+}
+
+export function rollActorProfileDiversity(actor, { entropy = '' } = {}) {
+    const roller = {
+        id: cleanText(actor?.id || actor?.actorId, 120),
+        name: cleanText(actor?.name, 160),
+    };
+    const salted = (axis) => `actor-profile-v1|${cleanText(entropy, 240)}|${axis}`;
+    const axes = {
+        valuePriority: diceEntry(roller, salted('value'), VALUE_SEEDS),
+        temperament: diceEntry(roller, salted('temperament'), TEMPERAMENT_SEEDS),
+        socialMethod: diceEntry(roller, salted('social'), SOCIAL_SEEDS),
+        decisionMethod: diceEntry(roller, salted('decision'), DECISION_SEEDS),
+        speechRhythm: diceEntry(roller, salted('speech'), SPEECH_SEEDS),
+        humorMethod: diceEntry(roller, salted('humor'), HUMOR_SEEDS),
+        authorityAttitude: diceEntry(roller, salted('authority'), AUTHORITY_SEEDS),
+        relationshipDistance: diceEntry(roller, salted('relationship'), RELATIONSHIP_SEEDS),
+        ordinaryFriction: diceEntry(roller, salted('friction'), FRICTION_SEEDS),
+        pressureAndRecovery: diceEntry(
+            roller,
+            salted('pressure-recovery'),
+            PRESSURE_RECOVERY_SEEDS,
+        ),
+        everydayTexture: diceEntry(roller, salted('everyday'), EVERYDAY_SEEDS),
+        independentLifeFocus: diceEntry(
+            roller,
+            salted('life-focus'),
+            PERSONAL_GOAL_SEEDS.map((item) => item.longTerm),
+        ),
+    };
+    const seed = fingerprint(`${roller.id}|${roller.name}|${cleanText(entropy, 240)}`);
+    return {
+        version: 1,
+        seed,
+        ticketId: `NPC-DICE-${fingerprint(`${seed}|${JSON.stringify(axes)}`).split(':').at(-1)}`,
+        axes,
+    };
+}
+
+function normalizeActorProfileDesignRolls(value) {
+    const source = value && typeof value === 'object' && !Array.isArray(value)
+        ? value
+        : null;
+    if (!source || integer(source.version) !== 1 || !source.axes) return null;
+    const axes = Object.fromEntries(Object.entries(source.axes)
+        .map(([axis, entry]) => [cleanText(axis, 80), {
+            die: cleanText(entry?.die, 20),
+            roll: integer(entry?.roll, 1, 999, 1),
+            result: clone(entry?.result),
+        }])
+        .filter(([axis, entry]) => axis && entry.die && hasText(entry.result)));
+    if (Object.keys(axes).length < 8) return null;
+    return {
+        version: 1,
+        seed: cleanText(source.seed, 120),
+        ticketId: cleanText(source.ticketId, 120),
+        axes,
+    };
 }
 
 function evidenceForActor(actor) {
@@ -736,6 +928,17 @@ function calculateOptionalCoverage(profile) {
     return moduleReady(profile, 'physiology') ? 100 : 0;
 }
 
+function projectedFieldSource(previousProfile, module, relativePath, value, fallback) {
+    const path = `modules.${module}.data.${relativePath}`;
+    const previousValue = getPath(previousProfile, pathParts(path));
+    const previousSource = sourceOf(previousProfile?.fieldSources?.[path], '');
+    if (
+        previousSource
+        && JSON.stringify(previousValue) === JSON.stringify(value)
+    ) return previousSource;
+    return sourceOf(fallback, 'hypothesis');
+}
+
 export function prepareActorProfileV6(actor, {
     mode = 'full',
     turn = 0,
@@ -748,6 +951,11 @@ export function prepareActorProfileV6(actor, {
         mode: completionMode,
     });
     const previousProfile = clone(profile);
+    if (!profile.designRolls) {
+        profile.designRolls = rollActorProfileDiversity(actor, {
+            entropy: `${integer(turn)}|${integer(now)}`,
+        });
+    }
     profile.completionMode = completionMode;
     const evidence = evidenceForActor(actor);
     if (completionMode === 'off') {
@@ -773,8 +981,20 @@ export function prepareActorProfileV6(actor, {
         attitudeToProtagonist: cleanText(actor?.identity?.attitudeToProtagonist, 600),
         pastExperience: cleanText(actor?.identity?.pastExperience, 2400),
     };
+    const identityFieldSources = Object.fromEntries(Object.keys(identity).map((key) => [
+        key,
+        projectedFieldSource(
+            previousProfile,
+            'identity',
+            key,
+            identity[key],
+            key === 'name' || hasText(identity[key]) ? 'confirmed' : 'hypothesis',
+        ),
+    ]));
     assignModule(profile, 'identity', identity, {
-        source: hasText(actor?.identity?.role) ? 'confirmed' : 'hypothesis',
+        source: Object.values(identityFieldSources).some((source) => source === 'confirmed')
+            ? 'confirmed'
+            : 'hypothesis',
         unknownFields: [
             ...(hasText(actor?.identity?.role) ? [] : ['role']),
             ...(hasText(actor?.identity?.species) ? [] : ['species']),
@@ -790,32 +1010,9 @@ export function prepareActorProfileV6(actor, {
         evidence,
         turn,
         now,
-        fieldSourceOverrides: {
-            name: 'confirmed',
-            role: hasText(actor?.identity?.role) ? 'confirmed' : 'hypothesis',
-            aliases: actor?.identity?.aliases?.length ? 'confirmed' : 'hypothesis',
-            lineage: actor?.lineage ? 'confirmed' : 'hypothesis',
-            species: hasText(actor?.identity?.species) ? 'confirmed' : 'hypothesis',
-            gender: hasText(actor?.identity?.gender) ? 'confirmed' : 'hypothesis',
-            age: hasText(actor?.identity?.age) ? 'confirmed' : 'hypothesis',
-            briefIntro: hasText(actor?.identity?.briefIntro) ? 'confirmed' : 'hypothesis',
-            appearance: hasText(actor?.identity?.appearance) ? 'confirmed' : 'hypothesis',
-            identityText: hasText(actor?.identity?.identityText) ? 'confirmed' : 'hypothesis',
-            relationState: hasText(actor?.identity?.relationState) ? 'confirmed' : 'hypothesis',
-            attitudeToProtagonist: hasText(actor?.identity?.attitudeToProtagonist)
-                ? 'confirmed'
-                : 'hypothesis',
-            pastExperience: hasText(actor?.identity?.pastExperience) ? 'confirmed' : 'hypothesis',
-        },
+        fieldSourceOverrides: identityFieldSources,
     });
 
-    const hasConfirmedPersonality = [
-        ...(actor?.identity?.traits || []),
-        actor?.identity?.primaryColor,
-        actor?.identity?.socialStyle,
-        actor?.identity?.decisionStyle,
-        actor?.identity?.speechStyle,
-    ].some(hasText);
     const personality = {
         summary: cleanText(actor?.identity?.profileSummary, 700),
         biography: cleanText(actor?.identity?.biography, 2400),
@@ -862,16 +1059,25 @@ export function prepareActorProfileV6(actor, {
         'authorVoice',
     ];
     const unknownPersonalityFields = requiredPersonalityFields.filter((key) => !hasText(personality[key]));
+    const personalityFieldSources = Object.fromEntries(Object.keys(personality).map((key) => [
+        key,
+        projectedFieldSource(
+            previousProfile,
+            'personality',
+            key,
+            personality[key],
+            hasText(personality[key]) ? 'confirmed' : 'hypothesis',
+        ),
+    ]));
+    const hasConfirmedPersonality = Object.values(personalityFieldSources)
+        .some((source) => source === 'confirmed');
     assignModule(profile, 'personality', personality, {
         source: hasConfirmedPersonality ? 'confirmed' : 'hypothesis',
         unknownFields: unknownPersonalityFields,
         evidence,
         turn,
         now,
-        fieldSourceOverrides: Object.fromEntries(Object.keys(personality).map((key) => [
-            key,
-            hasText(personality[key]) ? 'confirmed' : 'hypothesis',
-        ])),
+        fieldSourceOverrides: personalityFieldSources,
     });
 
     assignModule(profile, 'relationships', {
@@ -901,12 +1107,20 @@ export function prepareActorProfileV6(actor, {
     const goalFieldSources = {};
     const longTerm = confirmedLongTerm;
     const current = confirmedCurrent;
-    for (const [path, present] of [
-        ['longTerm', confirmedLongTerm.length > 0],
-        ['current', confirmedCurrent.length > 0],
-        ['plan.summary', Boolean(cleanText(actor?.plan?.summary))],
-        ['plan.steps', cleanList(actor?.plan?.steps, 12, 300).length > 0],
-    ]) goalFieldSources[path] = present ? 'confirmed' : 'hypothesis';
+    for (const [path, present, value] of [
+        ['longTerm', confirmedLongTerm.length > 0, confirmedLongTerm],
+        ['current', confirmedCurrent.length > 0, confirmedCurrent],
+        ['plan.summary', Boolean(cleanText(actor?.plan?.summary)), plan.summary],
+        ['plan.steps', cleanList(actor?.plan?.steps, 12, 300).length > 0, plan.steps],
+    ]) {
+        goalFieldSources[path] = projectedFieldSource(
+            previousProfile,
+            'goals',
+            path,
+            value,
+            present ? 'confirmed' : 'hypothesis',
+        );
+    }
     const hasConfirmedGoal = Object.values(goalFieldSources).some((source) => source === 'confirmed');
     const unknownGoalFields = Object.entries(goalFieldSources)
         .filter(([, source]) => source !== 'confirmed')
@@ -1021,6 +1235,19 @@ export function prepareActorProfileV6(actor, {
         ? previousProfile.updatedTurn
         : integer(turn);
     return profile;
+}
+
+export function bindActorProfileDesignRolls(actor, designRolls) {
+    const normalizedRolls = normalizeActorProfileDesignRolls(designRolls);
+    if (!normalizedRolls || !actor || typeof actor !== 'object') return clone(actor);
+    const next = clone(actor);
+    const profile = normalizeActorProfileV6(next.profileV6, {
+        actorId: next.id,
+        name: next.name,
+    });
+    profile.designRolls = normalizedRolls;
+    next.profileV6 = profile;
+    return next;
 }
 
 function removeProjectedDesignedSeeds(actor) {
@@ -1177,31 +1404,68 @@ export function selectActorProfileCompletionCandidates(value, {
             stateFacts: clone(actor?.stateFacts || []),
             evidence: cleanList(actor?.evidence, 16, 300),
             physiology: clone(actor?.profileV6?.modules?.physiology?.data || {}),
+            fieldSources: clone(actor?.profileV6?.fieldSources || {}),
+            designRolls: clone(actor?.profileV6?.designRolls || null),
         }))
         .filter((actor) => actor.actorId && actor.name);
 }
 
 function actorProfilePromptContext(candidate) {
-    const pick = (source, fields) => Object.fromEntries(fields
+    const sourceFor = (module, field) => sourceOf(
+        candidate?.fieldSources?.[`modules.${module}.data.${field}`],
+        'hypothesis',
+    );
+    const pick = (source, fields, module, selectedSource, relativePrefix = '') => Object.fromEntries(fields
         .map((field) => [field, clone(source?.[field])])
-        .filter(([, value]) => hasText(value)));
+        .filter(([field, value]) => (
+            hasText(value)
+            && sourceFor(
+                module,
+                relativePrefix && field !== 'nextWindow'
+                    ? `${relativePrefix}.${field}`
+                    : field,
+            )
+                === selectedSource
+        )));
+    const identityFields = [
+        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
+        'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
+    ];
+    const personalityFields = [
+        'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
+        'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
+        'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
+    ];
+    const goalsFor = (selectedSource) => ({
+        longTerm: sourceFor('goals', 'longTerm') === selectedSource
+            ? cleanList(candidate.longTermGoals, 12, 400)
+            : [],
+        current: sourceFor('goals', 'current') === selectedSource
+            ? cleanList(candidate.currentGoals, 8, 400)
+            : [],
+        plan: pick(
+            candidate.plan,
+            ['summary', 'steps', 'nextWindow'],
+            'goals',
+            selectedSource,
+            'plan',
+        ),
+    });
     return {
         actorId: candidate.actorId,
         name: candidate.name,
-        identity: pick(candidate.identity, [
-            'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
-            'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
-        ]),
-        personality: pick(candidate.identity, [
-            'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
-            'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
-            'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
-        ]),
-        goals: {
-            longTerm: cleanList(candidate.longTermGoals, 12, 400),
-            current: cleanList(candidate.currentGoals, 8, 400),
-            plan: pick(candidate.plan, ['summary', 'steps', 'nextWindow']),
+        confirmedAnchors: {
+            identity: pick(candidate.identity, identityFields, 'identity', 'confirmed'),
+            personality: pick(candidate.identity, personalityFields, 'personality', 'confirmed'),
+            goals: goalsFor('confirmed'),
         },
+        editableDraft: {
+            identity: pick(candidate.identity, identityFields, 'identity', 'hypothesis'),
+            personality: pick(candidate.identity, personalityFields, 'personality', 'hypothesis'),
+            goals: goalsFor('hypothesis'),
+        },
+        designRolls: normalizeActorProfileDesignRolls(candidate.designRolls)
+            || rollActorProfileDiversity(candidate, { entropy: 'legacy-profile' }),
     };
 }
 
@@ -1226,12 +1490,15 @@ export function buildActorProfileCompletionMessages(candidates, {
         modeOf(candidate?.completionMode) === 'full_adult'
     ));
     const system = [
-        '你是数据库填表器。根据材料把同一个角色的碎片整理成自然、连贯、可直接阅读的人物档案。只填表，不续写剧情。',
-        '数据库、角色卡和参考材料里已经明确的事实是硬锚点：逐项保留，不改写成冲突版本。材料没有设定的字段不是“待确认”，而是你的创作空间；请结合角色在世界中的位置、职业、关系和当前处境合理补全，直接形成可长期使用的人物设定。',
-        '【追踪角色表】填写性别、年龄、外貌、身份、简介、关系、对主角态度和过去经历。外貌只写长期物理特征，不把服装、姿势、伤势或本轮情绪当成固有外貌。',
-        '【追踪人设基线】沿用数据库的性格调色盘：主色是材料中已经显露、日常最常驱动行为的1-3个词；底色是原文有限场景看不出的稳定质地；点缀是只在特定人或压力下激活的反差层。底色和点缀可以向原文留白处自由创作，甚至与主色碰撞，但不能与已写明的事实矛盾。每一种颜色都要写成有对象、情境、边界、消退条件的具体行为，不能停在标签；三组衍生每条30-100字。',
-        '履历用角色第一人称写其遇到主角之前也成立的完整人生，把身份、外貌、重要经历和人际关系组织成自然自述，减少与主角互动，不写上帝视角总结。他者声部写4-7句有视角差、落到具体轶事的旁人议论，允许互相矛盾和看不懂。作者声部用第一人称写“越写越不确定”的困惑，不替角色下最终结论，控制在200字以内。不要把临时恐惧、受伤、衣着或一次动作写成人格。',
-        '【行动方向】用普通话整理长期目标、当前目标和下一步计划；写具体要做什么，不写程序状态词。',
+        '你是数据库式NPC人物档案生成器，也是一名只负责填表的表格填写器。根据材料把同一个角色的碎片整理成自然、连贯、可直接阅读的人物档案；只填表，不续写剧情。',
+        '人物数据分为 confirmedAnchors 与 editableDraft：数据库、角色卡或正文明确事实属于确认硬锚点，必须逐项保留；草稿只是以前的创作补全，可以重写，不能反过来冒充正文事实。材料没有设定的字段不是“待确认”，而是创作空间，直接补成可长期使用的设定。',
+        '输入优先级固定为：数据库/角色卡/原著硬设定 > 已接受正文事实 > 缝合怪已经明确给出的该人物设定 > 已保存档案 > designRolls人物骰票。低层不得改写高层；某个骰轴冲突时只丢弃该轴，不折中出第三种设定。缝合怪的剧情建议若尚未成为正文，只能约束创作方向，不能伪装成角色已经做过的事。',
+        '【追踪角色表】填写性别、年龄、外貌、身份、简介、关系、对主角态度和过去经历。外貌只写长期物理特征；本轮衣着、姿势、伤势、恐惧和高压反应只属于当前状态，不能写成一生不变的人格与身体特征。',
+        '【追踪人设基线】按数据库调色盘填写：主色优先从原文中提取，原文没有时使用本地已掷出的designRolls；底色和点缀用其余不冲突骰轴组合。骰子由脚本选择，你只负责融合成一个自洽的人，不能自行换成更熟悉的冷酷、怯懦、绝望、完美面具模板。每种颜色都写清对什么对象生效、何时活跃、何时消退的具体行为，不能只堆标签；每组衍生写2-3条，每条30-100字。',
+        'designRolls是创作底稿而非正文证据。将价值取向、现实欲望、社交办法、权威态度、决策习惯、说话节奏、幽默、缺点、关系距离、日常纹理与压力—恢复路径交叉组合；不要逐项照抄成属性表，也不要让职业决定全部轴。',
+        '履历用角色第一人称写遇到主角之前也成立的普通完整人生，把身份、外貌、经历和人际关系写成人话。不要自动发明秘密组织、系统底层身份、漫长受难、隐藏虐杀癖、人格崩坏或与主角的命定关系；只有确认锚点明确提供时才沿用。',
+        '他者声部写4-7句有视角差、落到具体轶事的旁人议论，允许互相矛盾和看不懂。作者声部用第一人称陈列“越写越不确定”的困惑，不替角色下最终结论，控制在200字以内。',
+        '【行动方向】长期目标属于角色自己的人生，当前目标和下一步计划只使用已经成立的地点、任务、知识与资源；不凭空发明角色已经监控、犯罪、施术、持有装备或知道秘密。',
         ...(includesPhysiology ? [
             '【追踪身体基线】按相貌、口腔、发型、肩颈腋窝、身高体重、身材与特异性征、肌肤、气味、三围、胸部、腰腹、外阴、阴道、菊穴、臀部、腿部、足码脚型、足部、泌乳与特殊体液、敏感部位填写长期稳定的客观身体特征。只写物理白描，不写性格、态度、衣物、性经历或本轮临时状态；材料未写的项目自行创作补全，但不能与已有数据库事实冲突。',
         ] : []),
@@ -1242,7 +1509,7 @@ export function buildActorProfileCompletionMessages(candidates, {
         '按上述字段名直接填写。可以用JSON、键值表或清晰的小标题；内容完整、自然、可读比格式整齐更重要。',
     ].filter(Boolean).join('\n\n');
     const user = selected.map((candidate) => [
-        `人物：${JSON.stringify(actorProfilePromptContext(candidate))}`,
+        `人物与数据库锚点：${JSON.stringify(actorProfilePromptContext(candidate))}`,
         `参考材料：\n${[
             ...cleanList(candidate.evidence, 16, 300),
             cleanText(evidenceText, 42000),
@@ -1264,6 +1531,7 @@ export function buildActorProfileRepairMessages(output, candidate, {
             missing.length
                 ? '下面列出的缺失字段必须结合现有角色事实合理补齐；正文没有设定的地方直接创作，但不得与数据库、角色卡或原输出冲突。不得填写“未知”“未设定”“未登记”“待确认”“暂无”或空值。'
                 : '只修复字段名和结构，不改变内容含义。',
+            '输入优先级是数据库/角色卡/原著 > 已接受正文 > 缝合怪明确人物设定 > 已保存档案 > designRolls。骰票只补空白，冲突轴直接忽略；不得用骰票覆盖已存在事实。',
             '返回一个完整JSON对象，使用 identity、personality、goals、physiology 分区；不要解释。',
         ].join('\n'),
     }, {
@@ -1739,29 +2007,116 @@ export function applyActorProfileCompletionToV6(value, patch, {
         actorId: patch?.actorId,
         name: patch?.name,
     });
-    if (
-        profile.completionMode !== 'full_adult'
-        || !patch?.physiology
-        || typeof patch.physiology !== 'object'
-        || Array.isArray(patch.physiology)
-        || moduleLocked(profile, 'physiology')
-    ) {
-        return profile;
+    const evidence = cleanList(patch?.evidence, 16, 300);
+    const patchIdentity = patch?.identity && typeof patch.identity === 'object'
+        && !Array.isArray(patch.identity)
+        ? patch.identity
+        : {};
+    const identityFields = [
+        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
+        'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
+    ];
+    const personalityFields = [
+        'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
+        'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
+        'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
+    ];
+    const completionSourceOverrides = (module, fields) => Object.fromEntries(fields.map((field) => [
+        field,
+        profile.fieldSources[`modules.${module}.data.${field}`] === 'confirmed'
+            ? 'confirmed'
+            : 'hypothesis',
+    ]));
+    if (!moduleLocked(profile, 'identity')) {
+        const identity = clone(profile.modules.identity.data || {});
+        for (const field of identityFields) {
+            if (hasText(patchIdentity[field])) identity[field] = clone(patchIdentity[field]);
+        }
+        assignModule(profile, 'identity', identity, {
+            source: profile.modules.identity.source === 'confirmed' ? 'confirmed' : 'hypothesis',
+            unknownFields: [],
+            evidence,
+            turn,
+            now,
+            action: 'model_completion',
+            fieldSourceOverrides: completionSourceOverrides('identity', identityFields),
+        });
     }
-    const source = patch?.sources?.physiology === 'confirmed' ? 'confirmed' : 'hypothesis';
-    const data = normalizePhysiology({
-        ...clone(patch.physiology),
-        enabled: true,
-        adultEnabled: true,
-    });
-    assignModule(profile, 'physiology', data, {
-        source,
-        unknownFields: [],
-        evidence: cleanList(patch.evidence, 16, 300),
-        turn,
-        now,
-        action: 'model_completion',
-    });
+    if (!moduleLocked(profile, 'personality')) {
+        const personality = clone(profile.modules.personality.data || {});
+        for (const field of personalityFields) {
+            if (hasText(patchIdentity[field])) personality[field] = clone(patchIdentity[field]);
+        }
+        assignModule(profile, 'personality', personality, {
+            source: Object.values(completionSourceOverrides('personality', personalityFields))
+                .some((source) => source === 'confirmed')
+                ? 'confirmed'
+                : 'hypothesis',
+            unknownFields: [],
+            evidence,
+            turn,
+            now,
+            action: 'model_completion',
+            fieldSourceOverrides: completionSourceOverrides('personality', personalityFields),
+        });
+    }
+    if (!moduleLocked(profile, 'goals')) {
+        const goals = clone(profile.modules.goals.data || {});
+        if (meaningfulProfileList(patch?.longTermGoals, 12, 400).length) {
+            goals.longTerm = cleanList(patch.longTermGoals, 12, 400);
+        }
+        if (meaningfulProfileList(patch?.currentGoals, 8, 400).length) {
+            goals.current = cleanList(patch.currentGoals, 8, 400);
+        }
+        const proposedPlan = patch?.plan && typeof patch.plan === 'object'
+            && !Array.isArray(patch.plan)
+            ? patch.plan
+            : {};
+        goals.plan = { ...(goals.plan || {}) };
+        if (meaningfulProfileText(proposedPlan.summary, 500)) {
+            goals.plan.summary = cleanText(proposedPlan.summary, 500);
+        }
+        if (meaningfulProfileList(proposedPlan.steps, 12, 300).length) {
+            goals.plan.steps = cleanList(proposedPlan.steps, 12, 300);
+        }
+        if (meaningfulProfileText(proposedPlan.nextWindow, 180)) {
+            goals.nextWindow = cleanText(proposedPlan.nextWindow, 180);
+        }
+        const goalFields = ['longTerm', 'current', 'plan.summary', 'plan.steps', 'nextWindow'];
+        assignModule(profile, 'goals', goals, {
+            source: goalFields.some((field) => (
+                profile.fieldSources[`modules.goals.data.${field}`] === 'confirmed'
+            )) ? 'confirmed' : 'hypothesis',
+            unknownFields: [],
+            evidence,
+            turn,
+            now,
+            action: 'model_completion',
+            fieldSourceOverrides: completionSourceOverrides('goals', goalFields),
+        });
+    }
+    if (
+        profile.completionMode === 'full_adult'
+        && patch?.physiology
+        && typeof patch.physiology === 'object'
+        && !Array.isArray(patch.physiology)
+        && !moduleLocked(profile, 'physiology')
+    ) {
+        const source = patch?.sources?.physiology === 'confirmed' ? 'confirmed' : 'hypothesis';
+        const data = normalizePhysiology({
+            ...clone(patch.physiology),
+            enabled: true,
+            adultEnabled: true,
+        });
+        assignModule(profile, 'physiology', data, {
+            source,
+            unknownFields: [],
+            evidence,
+            turn,
+            now,
+            action: 'model_completion',
+        });
+    }
     profile.coverage = calculateCoverage(profile);
     profile.preparedForAction = profile.coverage === 100;
     profile.backgroundPending = !profile.preparedForAction
@@ -1909,6 +2264,12 @@ export function actorProfileV6View(actor) {
         ])),
         historyCount: profile.history.length,
         fieldSourceCount: Object.keys(profile.fieldSources).length,
+        designRolls: profile.designRolls
+            ? {
+                ticketId: profile.designRolls.ticketId,
+                axisCount: Object.keys(profile.designRolls.axes || {}).length,
+            }
+            : null,
         hasActionPlan: moduleReady(profile, 'goals'),
         physiologyEnabled: profile.modules.physiology.data.enabled === true,
         adultPhysiologyEnabled: profile.modules.physiology.data.adultEnabled === true,

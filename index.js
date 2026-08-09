@@ -123,12 +123,14 @@ import {
     actorProfileCompletionMissingFields,
     applyActorProfileCompletionToV6,
     applyActorProfileV6Override,
+    bindActorProfileDesignRolls,
     buildActorProfileCompletionMessages,
     buildActorProfileRepairMessages,
     mergeActorProfileCompletionPatches,
     parseActorProfileCompletionOutput,
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
+    rollActorProfileDiversity,
     selectActorProfileCompletionCandidates,
     setActorProfileV6Lock,
 } from './actor-profile-v6-core.mjs';
@@ -171,6 +173,7 @@ import {
     buildSocialRollbackOps,
     classifySocialAuditNeed,
     collectRelationshipChanges,
+    enforceLocalSocialAuditFloor,
     parseSocialAuditOutput,
     renderSocialPatchBlock,
     sanitizeClosedProposalMessages,
@@ -589,6 +592,7 @@ let lastRegisteredSocialContent = '';
 let lastRegisteredSerendipityContent = '';
 let pendingSerendipityDraft = null;
 let pendingSerendipityBaseline = null;
+let pendingNpcDesignTicketBatch = null;
 const pendingSerendipityOpportunities = new Map();
 let lastSocialPromptSanitization = {
     checkedAt: 0,
@@ -6937,6 +6941,7 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
                 evidence: '',
             });
         }
+        parsed = enforceLocalSocialAuditFloor(parsed, routed.reasons);
     }
     const zeroUsage = {
         inputTokens: 0,
@@ -6971,6 +6976,7 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
         relationshipChangeCount: relationship.changes.length,
         omittedRelationshipChanges: relationship.omitted,
         promptProposalSanitization: deepClone(lastSocialPromptSanitization),
+        localVerdictFloor: deepClone(parsed.localVerdictFloor || null),
     };
     const rollbackOps = reviewUnavailable
         ? []
@@ -7039,7 +7045,9 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
     } else {
         setSocialStatus(
             `人物关系：${parsed.verdict === 'pass' ? '审核通过' : '已记录提醒'}`,
-            parsed.verdict === 'violation' ? 'error' : 'ok',
+            parsed.verdict === 'violation'
+                ? 'error'
+                : parsed.verdict === 'warning' ? 'warn' : 'ok',
         );
     }
     return {
@@ -8897,13 +8905,111 @@ function registerSocialInjection(content) {
     return false;
 }
 
+function prepareNpcDesignTicketBatch() {
+    const context = getContext();
+    const namespace = readChatNamespace(context);
+    const ledger = normalizeActorLedger(namespace.actorLedger, {
+        chatId: context?.chatId || '',
+    });
+    const tickets = Array.from({ length: 3 }, (_, index) => (
+        rollActorProfileDiversity({
+            id: `${lastGeneration.id}|ticket:${index + 1}`,
+            name: `原创人物骰票${index + 1}`,
+        }, {
+            entropy: `${context?.chatId || ''}|${lastGeneration.id}|${index + 1}`,
+        })
+    ));
+    pendingNpcDesignTicketBatch = {
+        generationId: lastGeneration.id,
+        generationSerial,
+        chatId: context?.chatId || '',
+        baselineActorIds: ledger.actors.map((actor) => actor.id),
+        tickets,
+    };
+    return pendingNpcDesignTicketBatch;
+}
+
+function npcDesignTicketPrompt(batch) {
+    if (!batch?.tickets?.length) return '';
+    const labels = {
+        valuePriority: '价值',
+        temperament: '气质',
+        socialMethod: '社交',
+        decisionMethod: '决策',
+        speechRhythm: '说话',
+        humorMethod: '幽默',
+        authorityAttitude: '权威态度',
+        relationshipDistance: '关系距离',
+        ordinaryFriction: '缺点摩擦',
+        pressureAndRecovery: '压力与恢复',
+        everydayTexture: '日常纹理',
+        independentLifeFocus: '个人生活目标',
+    };
+    const rows = batch.tickets.map((ticket, index) => {
+        const axes = Object.entries(ticket.axes || {}).map(([axis, entry]) => {
+            const result = Array.isArray(entry.result)
+                ? `${entry.result[0]}；${entry.result[1]}`
+                : entry.result;
+            return `${labels[axis] || axis}(${entry.die}=${entry.roll})=${result}`;
+        });
+        return `骰票${index + 1}[${ticket.ticketId}]：${axes.join('｜')}`;
+    });
+    return [
+        '<Original_NPC_Dice_Tickets>',
+        '这些骰票由医生脚本在正文生成前实际掷出，不是让模型自行挑选。只有本回复自然需要创建“没有数据库、角色卡、原著或既有正文人格设定”的原创NPC时才使用；没有新人物就全部忽略，禁止为了消费骰票强行加人。',
+        '按原创NPC首次出现顺序依次使用骰票。数据库/角色卡/原著硬设定 > 已接受正文 > 缝合怪明确给出的该人物设定 > 已保存档案 > 骰票；某轴冲突就丢弃该轴，不折中改写上层设定。缝合怪只给剧情职能、没有给人格事实时，才用骰票补空白。',
+        '骰票决定内在组合，预设负责在首次出场前完成塑形；正文首次最多自然显露三项，不输出骰票、属性表、类型名或设计过程。不同人物不得互换骰票，也不得把职业、种族或一次情绪覆盖全部骰轴。',
+        ...rows,
+        '</Original_NPC_Dice_Tickets>',
+    ].join('\n');
+}
+
+async function settleNpcDesignTicketBatch(captured) {
+    const batch = pendingNpcDesignTicketBatch;
+    if (
+        !batch
+        || batch.generationId !== captured?.generationId
+        || batch.chatId !== captured?.chatId
+    ) return { bound: 0 };
+    pendingNpcDesignTicketBatch = null;
+    const context = getContext();
+    const namespace = readChatNamespace(context);
+    const ledger = normalizeActorLedger(namespace.actorLedger, {
+        chatId: captured.chatId,
+    });
+    const baseline = new Set(batch.baselineActorIds || []);
+    const newActors = ledger.actors.filter((actor) => !baseline.has(actor.id));
+    if (!newActors.length) return { bound: 0 };
+    const assignments = new Map(
+        newActors.slice(0, batch.tickets.length).map((actor, index) => (
+            [actor.id, batch.tickets[index]]
+        )),
+    );
+    ledger.actors = ledger.actors.map((actor) => (
+        assignments.has(actor.id)
+            ? bindActorProfileDesignRolls(actor, assignments.get(actor.id))
+            : actor
+    ));
+    namespace.actorLedger = ledger;
+    const saved = await writeChatNamespace(namespace, captured.chatId, {
+        fields: ['actorLedger'],
+    });
+    if (saved) {
+        recordOperation(
+            '原创人物骰票',
+            `已将 ${assignments.size} 组生成前骰票绑定到本轮新人物档案`,
+            'ok',
+        );
+    }
+    return { bound: saved ? assignments.size : 0 };
+}
+
 function applySocialInjection() {
     const settings = getSettings();
-    return registerSocialInjection(
-        settings.socialNarrativeGuardEnabled
-            ? buildSocialNarrativeContract()
-            : '',
-    );
+    return registerSocialInjection([
+        settings.socialNarrativeGuardEnabled ? buildSocialNarrativeContract() : '',
+        npcDesignTicketPrompt(pendingNpcDesignTicketBatch),
+    ].filter(Boolean).join('\n\n'));
 }
 
 function registerSerendipityInjection(content) {
@@ -9469,6 +9575,35 @@ function classifyDoctorPressureCandidate(candidate, options = {}) {
     return classifyWorldPressureCandidate(candidate, options);
 }
 
+function currentCompiledTurnAnchor(context = getContext()) {
+    const raw = previousUserMessageText(context, context?.chat?.length || 0);
+    const blocks = (tag) => [...String(raw || '').matchAll(new RegExp(
+        `<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,
+        'giu',
+    ))].map((match) => String(match[1] || '').trim()).filter(Boolean);
+    const scenes = blocks('scene');
+    const acts = blocks('act');
+    const location = scenes.map((scene) => (
+        scene.match(/(?:地点|位置|location|place)\s*[：:=]\s*([^\n|]+)/iu)?.[1] || ''
+    )).map((value) => String(value).trim()).find(Boolean) || '';
+    return {
+        location,
+        content: [
+            ...scenes.slice(-1).map((scene) => `<scene>${scene}</scene>`),
+            ...acts.slice(-1).map((act) => `<act>${act}</act>`),
+        ].join('\n'),
+    };
+}
+
+function locationsCompatible(left, right) {
+    const normalize = (value) => String(value || '')
+        .toLocaleLowerCase('zh-CN')
+        .replace(/[\s\p{P}\p{S}]+/gu, '');
+    const a = normalize(left);
+    const b = normalize(right);
+    return !a || !b || a.includes(b) || b.includes(a);
+}
+
 function prepareContinuityInjectionBatch(namespace, state, {
     maxVisible = 2,
     budgetChars = 6000,
@@ -9502,11 +9637,20 @@ function prepareContinuityInjectionBatch(namespace, state, {
     }
     const limit = Math.min(4, Math.max(0, Number(maxVisible) || 0));
     const pressureBase = normalizeWorldPressureState(namespace.worldPressure);
+    const turnAnchor = currentCompiledTurnAnchor();
     const eligibleCandidates = selectContinuityInjectionCandidates(
         continuityInjectionCandidates(state),
         queue,
         { targetTurn },
-    );
+    ).filter((candidate) => {
+        if (!turnAnchor.location) return true;
+        const candidateLocations = (candidate.impactTargets || [])
+            .filter((item) => String(item).startsWith('location:'))
+            .map((item) => String(item).slice('location:'.length));
+        return !candidateLocations.length || candidateLocations.some((location) => (
+            locationsCompatible(location, turnAnchor.location)
+        ));
+    });
     const pressureDecision = admitDoctorWorldCandidates(
         pressureBase,
         eligibleCandidates.map((candidate) => (
@@ -9775,6 +9919,7 @@ function applyContinuityInjection({ isReroll = false } = {}) {
             Number(settings.continuityMaxVisible) || 0,
             batch.receipts.length,
         ),
+        selectedThreadIds: batch.receipts.map((receipt) => receipt.threadId),
     });
     if (
         !content
@@ -9800,6 +9945,16 @@ function applyContinuityInjection({ isReroll = false } = {}) {
             '<Parallel_Continuity_Bridge>',
             `<Parallel_Continuity_Bridge>\n${trace}`,
         );
+    }
+    const turnAnchor = currentCompiledTurnAnchor();
+    if (turnAnchor.content) {
+        const anchor = [
+            '<Current_Turn_Anchor>',
+            '这是最新用户消息内的数据库场景与NPC行动方向，比旧世界账本更新。正文必须从该场景继续，不得倒退到旧地点、旧时间或重演已经写入的新状态；act不能替玩家追加未选择的行动。',
+            cropText(turnAnchor.content, 2400, '当前回合锚点'),
+            '</Current_Turn_Anchor>',
+        ].join('\n');
+        content = content ? `${anchor}\n${content}` : anchor;
     }
     content = capContinuityInjectionContent(
         content,
@@ -10062,6 +10217,7 @@ function buildContinuityMessages({
         '- ambient：社会、组织、生态、日常或局势的世界脉动，可短期发展后自行结束。',
         '【主线关系 relation】linked / latent / independent / converging。origin记录最初来源，不因后续汇流而改写。',
         '- 可按世界设定创建尚未登场的普通NPC、小组织、地方事务和日常关系；不得无依据发明核心宇宙法则、改写重要角色过去或凭空制造只为震惊玩家的幕后黑手。',
+        '- 当前人物档案中的status是硬状态：deceased人物不得继续行动、逃生或新建存活支线，departed/resolved人物不得在原场景无因回归。只有正文明确成立的复活、回归或身份误判证据才能改变终态。',
         `【自主度】${autonomyRule}`,
         `【本轮自主事件槽】${autonomousSlotDirective}`,
         bridgeOnly
@@ -10161,6 +10317,8 @@ function buildContinuityMessages({
         .map((actor) => ({
             actorId: actor.id,
             name: actor.name,
+            status: actor.status,
+            inactiveReason: actor.inactiveReason || '',
             role: actor.identity?.role || '',
             identity: actor.identity || {},
             longTermGoals: actor.longTermGoals || [],
@@ -16672,6 +16830,7 @@ function bindEvents() {
                 invalidateOperations(`开始新的${lastGeneration.type}生成`);
             }
             await restoreBranchCheckpointsForSwipe(undefined);
+            prepareNpcDesignTicketBatch();
             applySocialInjection();
             prepareSerendipityGeneration(generationType);
             applyContinuityInjection({
@@ -16710,6 +16869,9 @@ function bindEvents() {
                     `本地观察写前日志未能持久化（${sovereigntyObservation.failureCode}）；本轮人物/世界后台结算已隔离，正文与变量医生继续运行`,
                     'error',
                 );
+            }
+            if (sovereigntyObservation.persisted) {
+                await settleNpcDesignTicketBatch(captured);
             }
             await settleContinuityInjectionReceipts(captured);
             await settleActorLedgerInjectionReceipts(captured);
@@ -16871,6 +17033,7 @@ function bindEvents() {
             targetSettlementRecords.clear();
             pendingSerendipityDraft = null;
             pendingSerendipityBaseline = null;
+            pendingNpcDesignTicketBatch = null;
             pendingSerendipityOpportunities.clear();
             downstreamBarrierProtocol = null;
             downstreamBarrierProtocolChatId = '';

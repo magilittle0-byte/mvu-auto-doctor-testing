@@ -27,7 +27,7 @@ const PRIVATE_NARRATION = /(?:心想|暗想|暗自|内心|心底|心理|秘密�
 const PLAYER_SOVEREIGNTY = /(?:让|迫使|命令|说服|要求)(?:了)?玩家(?:接受|同意|服从|支付|交出|前往|离开|攻击|回答|承诺|决定)|玩家(?:接受了|同意了|服从了|支付了|交出了|前往了|离开了|攻击了|回答了|承诺了|决定了)/u;
 const GENERIC_WAIT = /^(?:等待|继续等待|暂时不动|按兵不动|保持现状|没有变化|暂无变化|无事发生|条件未成熟)[。.!！]?$/u;
 const GROUP_NAME = /(?:队|小队|团队|军|军团|旅团|兵团|团|协会|组织|公司|集团|家族|势力|帮派|教会|政府|部门|机构|委员会|居民|商户|人群|群众|议会|公会|商会)$/u;
-const NON_ACTOR_NAME = /^(?:玩家|player|user|系统|system|环境|environment|世界|world|旁白|narrator|主持人|gm|game master)$/iu;
+const NON_ACTOR_NAME = /^(?:玩家|player|user|系统(?:播报|提示|公告|通知)?|system(?:\s+(?:broadcast|message|notice|announcement))?|环境|environment|世界|world|旁白|narrator|场景|scene|规则播报|任务提示|游戏提示|主持人|gm|game master)$/iu;
 const PLAYER_DEPENDENT_GOAL = /(?:等待|等候|直到|由|让|需要|必须等)(?:玩家|主角|主人|user|player)|(?:玩家|主角|主人|user|player).{0,24}(?:决定|联系|召唤|下令|命令|批准|同意|前往|到来|选择|处置)/iu;
 const DIRECT_OBSERVATION = /(?:看见|看到|目睹|注意到|发现|听见|听到|闻到|察觉|收到|读到|被告知|获悉|亲历|遭遇|触碰|检查到|观察到)/u;
 const OBSERVATION_NEGATION = /(?:没看见|没有看见|未看见|没听见|没有听见|未听见|一无所知|并不知道|不知情|尚未知晓)/u;
@@ -664,6 +664,9 @@ function mergePollutedActorState(canonical, duplicate) {
         ...(duplicateProfile.manualOverrides || {}),
         ...(canonicalProfile.manualOverrides || {}),
     };
+    if (!canonicalProfile.designRolls && duplicateProfile.designRolls) {
+        canonicalProfile.designRolls = clone(duplicateProfile.designRolls);
+    }
     canonicalProfile.history = mergeObjectList(
         canonicalProfile.history,
         duplicateProfile.history,
@@ -1219,6 +1222,40 @@ function actorProfileSnapshot(actor) {
     });
 }
 
+function removeProjectedProfileHypotheses(actor) {
+    const next = clone(actor);
+    const profile = normalizeActorProfileV6(next?.profileV6, {
+        actorId: next?.id,
+        name: next?.name,
+    });
+    const clearProjected = (container, key, module, relativePath = key) => {
+        const path = `modules.${module}.data.${relativePath}`;
+        if (profile.fieldSources[path] !== 'hypothesis') return;
+        const projected = relativePath.split('.').reduce(
+            (value, part) => value && typeof value === 'object' ? value[part] : undefined,
+            profile.modules[module]?.data,
+        );
+        if (JSON.stringify(container?.[key]) !== JSON.stringify(projected)) return;
+        container[key] = Array.isArray(container[key]) ? [] : '';
+    };
+    for (const key of [
+        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
+        'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
+    ]) clearProjected(next.identity, key, 'identity');
+    for (const key of [
+        'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
+        'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
+        'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
+    ]) clearProjected(next.identity, key, 'personality');
+    clearProjected(next, 'longTermGoals', 'goals', 'longTerm');
+    clearProjected(next, 'currentGoals', 'goals', 'current');
+    next.plan = next.plan && typeof next.plan === 'object' ? next.plan : {};
+    clearProjected(next.plan, 'summary', 'goals', 'plan.summary');
+    clearProjected(next.plan, 'steps', 'goals', 'plan.steps');
+    clearProjected(next.plan, 'nextWindow', 'goals', 'nextWindow');
+    return next;
+}
+
 export function mergeActorProfilePatches(value, patches, {
     turn = null,
     sourceRef = null,
@@ -1310,7 +1347,9 @@ export function mergeActorProfilePatches(value, patches, {
             });
             continue;
         }
-        const actor = clone(ledger.actors[actorIndex]);
+        const actor = consolidate
+            ? removeProjectedProfileHypotheses(ledger.actors[actorIndex])
+            : clone(ledger.actors[actorIndex]);
         const before = actorProfileSnapshot(actor);
         const identity = raw.identity && typeof raw.identity === 'object'
             && !Array.isArray(raw.identity)
@@ -1826,7 +1865,25 @@ export function reconcileActorLifecycleFromAcceptedContent(value, {
         ));
         if (!relevant.length) return actor;
         let nextStatus = actor.status;
-        if (relevant.some((statement) => /(?:已经|确认|当场|彻底)?(?:死亡|身亡|毙命|被杀死|咽气|尸体)/u.test(statement))) {
+        const mentionWindows = actorNames(actor).flatMap((name) => {
+            const windows = [];
+            let from = 0;
+            while (from < String(content || '').length) {
+                const index = String(content || '').indexOf(name, from);
+                if (index < 0) break;
+                windows.push(String(content || '').slice(index, index + 900));
+                from = index + Math.max(1, name.length);
+            }
+            return windows;
+        });
+        const explicitDeath = relevant.some((statement) => (
+            /(?:已经|确认|当场|彻底)?(?:死亡|身亡|毙命|被杀死|咽气|尸体)/u.test(statement)
+        ));
+        const observedDeathSequence = mentionWindows.some((window) => (
+            /(?:惨叫|呼吸|心跳|脉搏|声音).{0,160}(?:越来越微弱|停止|消失|中断).{0,80}(?:彻底)?(?:归于死寂|没有回应|停止)/su.test(window)
+            || /(?:断裂的?(?:手指|肢体)|致命伤|大量失血).{0,220}(?:一条人命|死亡|身亡|毙命|归于死寂)/su.test(window)
+        ));
+        if (explicitDeath || observedDeathSequence) {
             nextStatus = 'deceased';
         } else if (
             actor.status !== 'deceased'

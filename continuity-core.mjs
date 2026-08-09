@@ -2343,21 +2343,28 @@ export function mergeMarkerRecords(state, records, {
 export function buildContinuityInjection(state, {
     director = 'standalone',
     maxVisible = 2,
+    selectedThreadIds = null,
 } = {}) {
     const normalized = normalizeContinuityState(state, { maxThreads: 12 });
+    const selectedThreads = Array.isArray(selectedThreadIds)
+        ? new Set(selectedThreadIds.map((id) => cleanText(id)).filter(Boolean))
+        : null;
     const canReachMain = (thread) => !!thread
         && (
             thread.origin === 'main_derivative'
             || ['linked', 'converging'].includes(thread.relation)
         );
     const active = normalized.threads.filter((thread) => (
-        thread.stage !== 'resolved' && canReachMain(thread)
+        thread.stage !== 'resolved'
+        && canReachMain(thread)
+        && (!selectedThreads || selectedThreads.has(thread.id))
     ));
     const aftermath = normalized.threads.filter((thread) => (
         thread.stage === 'resolved'
         && normalized.turn - thread.resolvedTurn <= 6
         && (thread.effects.length || thread.rumors.length)
         && canReachMain(thread)
+        && (!selectedThreads || selectedThreads.has(thread.id))
     ));
     const scenario = normalized.scenarioPlan;
     const hasScenarioPlan = scenario.status !== 'inactive' && !!scenario.instanceId;
