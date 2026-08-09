@@ -79,9 +79,12 @@ function incompleteSovereigntyTask(task) {
 function routeChannelPresentation(entries, now) {
     const slots = (Array.isArray(entries) ? entries : []).map((entry, slotIndex) => {
         const failureKind = cleanRuntimeCode(entry?.lastFailureKind);
-        const consecutiveFailures = nonNegativeInteger(entry?.consecutiveFailures);
-        const openedUntil = nonNegativeInteger(entry?.openedUntil);
-        const semanticPoison = ['parse-error', 'validation-error'].includes(failureKind);
+        const validationOnly = failureKind === 'validation-error';
+        const consecutiveFailures = validationOnly
+            ? 0
+            : nonNegativeInteger(entry?.consecutiveFailures);
+        const openedUntil = validationOnly ? 0 : nonNegativeInteger(entry?.openedUntil);
+        const semanticPoison = failureKind === 'parse-error';
         const status = openedUntil > now
             ? semanticPoison ? 'poisoned' : 'isolated'
             : consecutiveFailures > 0
@@ -151,6 +154,16 @@ export function createDoctorRuntimePresentation({
     const profilesOptionalPending = nonNegativeInteger(
         profileReadiness?.optionalPending ?? sovereignty?.profilesOptionalPending,
     );
+    const failingModules = [...new Set(
+        (Array.isArray(sovereignty?.failingModules) ? sovereignty.failingModules : [])
+            .map((module) => cleanRuntimeCode(module))
+            .filter(Boolean),
+    )].slice(0, 8);
+    const lastFailureCodes = [...new Set(
+        (Array.isArray(sovereignty?.lastFailureCodes) ? sovereignty.lastFailureCodes : [])
+            .map((code) => cleanRuntimeCode(code))
+            .filter(Boolean),
+    )].slice(0, 8);
 
     const runtimeTasks = (Array.isArray(runtime?.backlog) ? runtime.backlog : [])
         .filter(incompleteSovereigntyTask);
@@ -225,6 +238,7 @@ export function createDoctorRuntimePresentation({
     const routeDegraded = routeChannels.strict.degraded + routeChannels.fast.degraded;
     const surfaceKinds = Object.values(statusKinds || {}).map((value) => String(value || ''));
     const surfaceErrorCount = surfaceKinds.filter((kind) => kind === 'error').length;
+    const surfaceWarningCount = surfaceKinds.filter((kind) => kind === 'warn').length;
     const surfaceBusyCount = surfaceKinds.filter((kind) => kind === 'busy').length;
 
     const alerts = [];
@@ -238,6 +252,7 @@ export function createDoctorRuntimePresentation({
         sovereignty?.color === 'red' ? 1 : 0
     ));
     addAlert('surface.status_error', 'red', surfaceErrorCount);
+    addAlert('surface.status_warning', 'yellow', surfaceWarningCount);
     addAlert('sovereignty.retryable_failed', 'orange', retryableFailed);
     addAlert('sovereignty.deferred', 'orange', deferred);
     addAlert('continuity.stalled', 'orange', stalledReceipts.length);
@@ -298,6 +313,8 @@ export function createDoctorRuntimePresentation({
             cancelledIncomplete,
             dueTaskCount: nonNegativeInteger(dueTaskCount),
             backgroundActive: backgroundActive === true || surfaceBusyCount > 0,
+            failingModules,
+            lastFailureCodes,
         },
         identity: {
             pollution: identityPollution,

@@ -542,6 +542,26 @@ function hasPendingSovereigntyRetryForChat(context = getContext()) {
 }
 const modelRouteSlotCursors = { strict: 0, fast: 0 };
 const modelRouteHealth = { strict: new Map(), fast: new Map() };
+
+function resetChatScopedRuntimeDiagnostics() {
+    modelRouteHealth.strict.clear();
+    modelRouteHealth.fast.clear();
+    modelRouteSlotCursors.strict = 0;
+    modelRouteSlotCursors.fast = 0;
+    latestActorShardDiagnostics = {
+        status: 'disabled',
+        selected: 0,
+        completed: 0,
+        succeeded: 0,
+        failed: 0,
+    };
+    latestWorldLaneDiagnostics = {
+        turn: 0,
+        maxLanes: 0,
+        selected: [],
+    };
+    lastPromptSnapshot = null;
+}
 let activeTaskProgress = null;
 let taskProgressSerial = 0;
 let lastPromptSnapshot = null;
@@ -1345,12 +1365,9 @@ function renderModelCallStats() {
 }
 
 function doctorSemanticHealthView(namespaceValue = null, runtimeValue = null) {
-    const storedNamespace = getContext()?.chatMetadata?.[PLUGIN_ID];
     const namespace = namespaceValue && typeof namespaceValue === 'object'
         ? namespaceValue
-        : storedNamespace && typeof storedNamespace === 'object'
-            ? storedNamespace
-            : readChatNamespace();
+        : readChatNamespace();
     const ledger = normalizeActorLedger(namespace.actorLedger, {
         chatId: getContext()?.chatId || '',
     });
@@ -1415,12 +1432,9 @@ function modelRouteHealthPresentation(now = Date.now()) {
 function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = null, {
     scheduler = null,
 } = {}) {
-    const storedNamespace = getContext()?.chatMetadata?.[PLUGIN_ID];
     const namespace = namespaceValue && typeof namespaceValue === 'object'
         ? namespaceValue
-        : storedNamespace && typeof storedNamespace === 'object'
-            ? storedNamespace
-            : readChatNamespace();
+        : readChatNamespace();
     const runtime = normalizeSovereigntyRuntime(
         runtimeValue ?? namespace.sovereigntyRuntime,
         { chatId: getContext()?.chatId || '' },
@@ -1483,12 +1497,13 @@ function doctorRuntimePresentation(namespaceValue = null, runtimeValue = null, o
 const RUNTIME_ALERT_LABELS = Object.freeze({
     'identity.pollution': '发现身份污染',
     'sovereignty.failed_before_success': '存在从未成功的模块',
-    'surface.status_error': '前台检查存在错误',
+    'surface.status_error': '正文或变量检查报错',
+    'surface.status_warning': '非阻塞检查未完成',
     'sovereignty.retryable_failed': '技术任务失败，可重试',
     'sovereignty.deferred': '技术任务已延后',
     'continuity.stalled': '正文回执已停滞',
-    'actor_shards.failed': '人物行动槽失败',
-    'routes.poisoned': '模型槽解析或校验失败，已隔离',
+    'actor_shards.failed': '人物行动分析输出失败',
+    'routes.poisoned': '模型接口响应无法解析，已隔离',
     'pressure.over_cap': '外部叙事压力超过上限',
     'identity.quarantine': '人物身份待人工确认',
     'profiles.incomplete': '人物档案未达到行动就绪',
@@ -1515,16 +1530,44 @@ function appendRuntimeHealthMetric(host, label, value, kind = '') {
     host.appendChild(item);
 }
 
+const RUNTIME_MODULE_LABELS = Object.freeze({
+    profile: '人物档案',
+    physiology: '生理档案',
+    actor: '人物行动',
+    world: '世界整理',
+});
+
+const RUNTIME_FAILURE_LABELS = Object.freeze({
+    'profile.preparation_incomplete': '人物档案仍待补全',
+    'profile.persistence_failed': '人物档案保存失败',
+    'physiology.persistence_failed': '生理档案保存失败',
+    'actor.output_missing': '人物行动没有可用输出',
+    'actor.technical_failure': '人物行动处理失败',
+    'actor.world_adjudication_invalid': '人物行动等待有效世界裁决',
+    'actor_shard.transport_failed': '人物行动模型调用失败',
+    'world.output_not_committed': '世界整理输出未能落库',
+    'world.transport_failed': '世界整理模型调用失败',
+    'world.persistence_failed': '世界状态保存失败',
+});
+
+function runtimeFailureSummary(presentation) {
+    const modules = (presentation?.work?.failingModules || [])
+        .map((module) => RUNTIME_MODULE_LABELS[module] || module);
+    const failures = (presentation?.work?.lastFailureCodes || [])
+        .map((code) => `${RUNTIME_FAILURE_LABELS[code] || code}（${code}）`);
+    return [
+        modules.length ? `模块：${modules.join('、')}` : '',
+        failures.length ? `原因：${failures.join('；')}` : '',
+    ].filter(Boolean).join(' · ');
+}
+
 function renderSovereigntyHealth(value = readChatNamespace()?.sovereigntyRuntime) {
-    const storedNamespace = getContext()?.chatMetadata?.[PLUGIN_ID];
-    const namespace = storedNamespace && typeof storedNamespace === 'object'
-        ? storedNamespace
-        : readChatNamespace();
+    const namespace = readChatNamespace();
     const health = doctorSemanticHealthView(namespace, value);
     const presentation = doctorRuntimePresentation(namespace, value);
     const routeSummary = (label, channel) => [
         `${label} ${channel.healthy}/${channel.total} 健康`,
-        channel.poisoned ? `校验隔离 ${channel.poisoned}` : '',
+        channel.poisoned ? `响应解析隔离 ${channel.poisoned}` : '',
         channel.isolated ? `传输隔离 ${channel.isolated}` : '',
         channel.degraded ? `待确认 ${channel.degraded}` : '',
     ].filter(Boolean).join('，');
@@ -1563,6 +1606,10 @@ function renderSovereigntyHealth(value = readChatNamespace()?.sovereigntyRuntime
             '任务状态',
             `待执行 ${presentation.work.pending} · 运行 ${presentation.work.running} · 可重试 ${presentation.work.retryableFailed} · 延后 ${presentation.work.deferred} · 取消未完成 ${presentation.work.cancelledIncomplete}`,
         );
+        const failureSummary = runtimeFailureSummary(presentation);
+        if (failureSummary) {
+            appendRuntimeHealthMetric(metrics, '当前失败原因', failureSummary, 'error');
+        }
         appendRuntimeHealthMetric(
             metrics,
             '身份与档案',
@@ -2874,12 +2921,19 @@ function ensureRuntimeTargetIdentity(context, message, index, messageId) {
 
 function readChatNamespace(context = getContext()) {
     const value = context?.chatMetadata?.[PLUGIN_ID];
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    const currentChatId = String(context?.chatId || '');
+    const storedChatId = String(value?.chatId || '');
+    if (
+        !value
+        || typeof value !== 'object'
+        || Array.isArray(value)
+        || (currentChatId && storedChatId && storedChatId !== currentChatId)
+    ) {
         return {
             version: CHAT_NAMESPACE_VERSION,
             rev: 0,
             fieldRevisions: {},
-            chatId: context?.chatId || '',
+            chatId: currentChatId,
             repairJournal: [],
             operationLog: [],
             modelCallStats: normalizedModelCallStats(null),
@@ -2909,7 +2963,14 @@ function readChatNamespace(context = getContext()) {
             },
         };
     }
-    return typeof structuredClone === 'function' ? structuredClone(value) : deepClone(value);
+    const cloned = typeof structuredClone === 'function'
+        ? structuredClone(value)
+        : deepClone(value);
+    // A chat namespace may be copied by the host while opening a new chat.
+    // Legacy namespaces without an id are claimed by their current owner, but
+    // a namespace bearing another chat's id must never leak into this one.
+    if (!storedChatId && currentChatId) cloned.chatId = currentChatId;
+    return cloned;
 }
 
 function openingSyncState(namespace = readChatNamespace()) {
@@ -2940,7 +3001,10 @@ async function performChatNamespaceWrite(next, expectedChatId, {
         return fail('chat_context_changed');
     }
     const stored = context?.chatMetadata?.[PLUGIN_ID];
-    const current = stored && typeof stored === 'object' && !Array.isArray(stored)
+    const current = stored
+        && typeof stored === 'object'
+        && !Array.isArray(stored)
+        && (!stored.chatId || String(stored.chatId) === String(expectedChatId))
         ? stored
         : readChatNamespace(context);
     const selectedFields = Array.isArray(fields)
@@ -4539,17 +4603,19 @@ async function completeSovereigntyCycle({
     const profileReady = getSettings().actorProfileCompletionMode === 'off'
         || (profilePreparation?.deferred?.length || 0) === 0;
     next = settleSovereigntyModule(next, tasks.profile, {
-        success: profileReady && persistenceSuccess,
+        // An incomplete dossier is a persisted incremental table state, not a
+        // technical module failure. The actor remains action-blocked and the
+        // next observed turn selects the same incomplete row again.
+        success: persistenceSuccess,
         payload: {
             coverage: profilePreparation?.coverage ?? 100,
             prepared: profilePreparation?.prepared?.length || 0,
             deferred: profilePreparation?.deferred?.length || 0,
+            complete: profileReady,
             actorLedger,
         },
         commitRef: `PROFILE-${turn}`,
-        failureCode: persistenceSuccess
-            ? 'profile.preparation_incomplete'
-            : 'profile.persistence_failed',
+        failureCode: 'profile.persistence_failed',
         currentTurn: recoveryTurn,
         retryOnCurrentTurn,
     });
@@ -6085,8 +6151,11 @@ function assertUsableModelOutput(output, options = {}) {
     if (!text) reason = 'model_output_empty';
     if (!reason && options.jsonMode === true) {
         const extracted = extractFirstBalancedJsonObject(text);
-        if (!extracted.value) reason = extracted.error || 'model_output_json_invalid';
-        else parsedJson = extracted.value;
+        // jsonMode is a provider request hint, not a universal output gate.
+        // Every module owns its parser and bounded repair path; returning the
+        // raw non-empty answer lets those local repairers preserve usable
+        // fields instead of turning harmless formatting drift into a failure.
+        parsedJson = extracted.value || null;
     }
     if (!reason && typeof options.validateOutput === 'function') {
         const validation = options.validateOutput(text, parsedJson);
@@ -6238,8 +6307,11 @@ async function callModel(messages, options = {}) {
             const callStartedAt = Date.now();
             recordModelCall(task, 'started', null, callGenerationSerial);
             const succeed = (output) => {
-                const validatedOutput = assertUsableModelOutput(output, options);
+                // A response proves the route is reachable. Module-level
+                // structure/content validation is handled by that task's
+                // parser/repairer and must not poison the shared model slot.
                 markModelRouteHealth(channel, slotIndex, profile, true);
+                const validatedOutput = assertUsableModelOutput(output, options);
                 recordModelCall(task, 'succeeded', null, callGenerationSerial);
                 recordModelDiagnostic({
                     phase: 'transport',
@@ -6347,7 +6419,9 @@ async function callModel(messages, options = {}) {
             } catch (error) {
                 const failureKind = error?.failureKind
                     || (isRateLimitError(error) ? 'rate-limit' : 'transport-error');
-                markModelRouteHealth(channel, slotIndex, profile, false, { failureKind });
+                if (failureKind !== 'validation-error') {
+                    markModelRouteHealth(channel, slotIndex, profile, false, { failureKind });
+                }
                 recordModelCall(task, 'failed', error, callGenerationSerial);
                 recordModelDiagnostic({
                     phase: error?.diagnosticPhase || 'transport',
@@ -6404,7 +6478,8 @@ async function callModel(messages, options = {}) {
                     : []),
                 modelConnectionKey(profile),
             ];
-            const nextRoute = options.failover === true
+            const nextRoute = error?.failureKind !== 'validation-error'
+                && options.failover === true
                 && !externalSignal?.aborted
                 && attemptedRouteSlots.length <= maxFailovers
                 && (!deadlineAt || deadlineAt - Date.now() > 250)
@@ -6437,6 +6512,11 @@ async function callModel(messages, options = {}) {
         externalSignal?.removeEventListener?.('abort', abortFromExternal);
         activeModelControllers.delete(controller);
         syncTaskCancelButtons();
+        // The last in-flight controller can finish after the durable module
+        // state was rendered. Refresh once more so the panel and orb do not
+        // keep a stale busy/yellow snapshot after the work is actually green.
+        renderSovereigntyHealth();
+        updateFloatingOrb();
     }
 }
 
@@ -6932,7 +7012,7 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
             modelCallCompleted
                 ? `人物关系：二审结果无效${safetyOutcome}；本次仅记录上游实际返回的 token 用量`
                 : `人物关系：二审调用失败${safetyOutcome}；未写入关系修正`,
-            'error',
+            'warn',
         );
     } else if (correction.status === 'applied') {
         setSocialStatus(
@@ -11723,7 +11803,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
             recordOperation(
                 '人物档案',
                 `${profilePreparation.deferred.length} 名人物档案仍未就绪；已禁止其自主行动并保留重试`,
-                'error',
+                'warn',
             );
         }
     }
@@ -14592,8 +14672,7 @@ function updateFloatingOrb(view = null) {
     }
     const count = Number(ledgerView?.activeCount) || 0;
     if (ui.floatingCount) ui.floatingCount.textContent = String(count);
-    const storedNamespace = getContext()?.chatMetadata?.[PLUGIN_ID];
-    const presentation = doctorRuntimePresentation(storedNamespace);
+    const presentation = doctorRuntimePresentation(readChatNamespace());
     orb.dataset.kind = presentation.kind;
     orb.dataset.healthColor = presentation.color;
     orb.title = [
@@ -15793,7 +15872,7 @@ function buildSettingsPanel() {
                                 不改写、截断或重生成主模型已经完成的正文，也不修改角色卡、数据库或缝合怪。
                             </div>
                             <details class="mvuad-settings-fold mvuad-continuity-prompt-settings">
-                                <summary>用户自定义叙事提示词插槽</summary>
+                                <summary>高级：分别定制世界与人物行动（通常不用填）</summary>
                                 <div class="mvuad-settings-fold-body">
                                     <div class="mvuad-description">
                                         内容不做题材或 NSFW 语义过滤，也不内置破限文本；它只作为清楚标识的用户自定义模型指令，
@@ -15801,14 +15880,14 @@ function buildSettingsPanel() {
                                         脱敏诊断只导出是否启用、长度和哈希，不导出全文。每个插槽最多 6000 字符。
                                     </div>
                                     <label class="mvuad-prompt-addon-label" for="mvuad-continuity-prompt-addon">
-                                        世界连续性自定义提示词
+                                        只影响后台世界发展的提示词
                                     </label>
                                     <textarea id="mvuad-continuity-prompt-addon"
                                         class="text_pole mvuad-continuity-prompt-addon"
                                         rows="5" maxlength="6000"
                                         placeholder="留空使用内置连续性规则。"></textarea>
                                     <label class="mvuad-prompt-addon-label" for="mvuad-actor-shard-prompt-addon">
-                                        人物行动分析自定义提示词
+                                        只影响 NPC 幕后行动的提示词
                                     </label>
                                     <textarea id="mvuad-actor-shard-prompt-addon"
                                         class="text_pole mvuad-actor-shard-prompt-addon"
@@ -15822,18 +15901,21 @@ function buildSettingsPanel() {
                                 </div>
                             </details>
                             <details class="mvuad-settings-fold mvuad-global-instruction-settings">
-                                <summary>全局模型补充指令与作用域</summary>
+                                <summary>统一模型适配/破限提示词（通常填这里）</summary>
                                 <div class="mvuad-settings-fold-body">
+                                    <div class="mvuad-description">
+                                        一般只填写这一处。勾选“档案”会注入人物档案填表，勾选“生理”会注入生理档案，其他勾选项只影响各自模块；不会写入角色档案内容或诊断报告原文。
+                                    </div>
                                     <div class="mvuad-description">
                                         医生按原文注入所选模块，不审核或改写内容；服务商自身限制仍由所选接口决定。
                                         诊断只保留启用、范围、长度、哈希和是否注入，不保存原文。
                                     </div>
                                     <label class="mvuad-check">
                                         <input class="mvuad-global-instruction-enabled" type="checkbox">
-                                        <span>启用全局模型补充指令</span>
+                                        <span>启用统一模型适配/破限提示词</span>
                                     </label>
                                     <textarea class="text_pole mvuad-global-instruction" rows="7" maxlength="12000"
-                                        placeholder="仅写你希望原样传给所选模型模块的补充指令。"></textarea>
+                                        placeholder="通常只需填这里，再勾选档案、生理、人物行动、世界或变量等作用范围。"></textarea>
                                     <div class="mvuad-global-instruction-scopes"></div>
                                     <div class="mvuad-global-instruction-save-hint" aria-live="polite"></div>
                                     <div class="mvuad-actions">
@@ -16729,6 +16811,7 @@ function bindEvents() {
             pendingChatSaveTimer = null;
             clearTimeout(pendingOperationLogSaveTimer);
             pendingOperationLogSaveTimer = null;
+            resetChatScopedRuntimeDiagnostics();
             invalidateOperations('聊天已经切换');
             continuationIdentityHint = null;
             automaticPendingKeys.clear();

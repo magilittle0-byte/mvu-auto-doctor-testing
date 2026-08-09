@@ -37,8 +37,16 @@ export function nextModelRouteHealth(currentValue, {
         };
     }
     const normalizedFailureKind = String(failureKind || 'transport-error');
-    const semanticPoison = ['parse-error', 'validation-error']
-        .includes(normalizedFailureKind);
+    // The connection successfully returned a model answer when a module-level
+    // validator rejected its shape or content. That is a repairable task
+    // problem, not evidence that the API/model slot is unhealthy.
+    if (normalizedFailureKind === 'validation-error') {
+        return {
+            ...current,
+            lastValidationAt: Number(now) || 0,
+        };
+    }
+    const semanticPoison = normalizedFailureKind === 'parse-error';
     const consecutiveFailures = currentFailures + 1;
     return {
         ...current,

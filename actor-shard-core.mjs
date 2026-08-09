@@ -225,6 +225,9 @@ export function selectActorShardCandidates({
     excludedActorNames = [],
 } = {}) {
     const limit = boundedWorkers(maxWorkers);
+    const scheduleProvided = schedule !== null
+        && schedule !== undefined
+        && typeof schedule === 'object';
     const excludedNames = new Set(
         cleanList(excludedActorNames, 24, 160).map((item) => normalizedKey(item)),
     );
@@ -233,6 +236,11 @@ export function selectActorShardCandidates({
         (Array.isArray(schedule?.selected) ? schedule.selected : [])
             .map((item) => cleanText(item?.actorId, 180)),
     );
+    // A supplied schedule is an allow-list. In particular, an empty schedule
+    // means that no actor is ready this turn; treating it as "no restriction"
+    // bypasses profile readiness and starts an actor shard for an incomplete
+    // dossier.
+    if (scheduleProvided && scheduledIds.size === 0) return [];
     const scheduleById = new Map(
         (Array.isArray(schedule?.selected) ? schedule.selected : [])
             .map((item) => [cleanText(item?.actorId, 180), item]),
@@ -245,7 +253,7 @@ export function selectActorShardCandidates({
             || !name
             || excludedNames.has(normalizedKey(name))
             || GROUP_NAME.test(name)
-            || (scheduledIds.size && !scheduledIds.has(id))
+            || (scheduleProvided && !scheduledIds.has(id))
             || !['active', 'dormant'].includes(actor?.status)
             || (actor?.status === 'dormant' && actor?.inactiveReason === 'sleep')
         ) continue;

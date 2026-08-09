@@ -1216,14 +1216,18 @@ export function buildActorProfileCompletionMessages(candidates, {
     ));
     const system = [
         '你是数据库填表器。根据材料把同一个角色的碎片整理成自然、连贯、可直接阅读的人物档案。只填表，不续写剧情。',
-        '【追踪角色表】填写性别、年龄、外貌、身份、简介、关系、对主角态度和过去经历。外貌只写长期物理特征，不把服装、姿势、伤势或本轮情绪当成固有外貌。原文已有事实不改，留白处可以合理补足。',
-        '【追踪人设基线】用性格调色盘写主色、底色、点缀及其具体行为。主色1-3个词，底色和点缀各1-2个词；三组衍生每条30-100字。他者声部写4-7句有视角差的具体议论。履历用角色第一人称自然自述，作者声部只写仍无法下结论的疑问。不要把临时恐惧、受伤、衣着或一次动作写成人格。',
+        '数据库、角色卡和参考材料里已经明确的事实是硬锚点：逐项保留，不改写成冲突版本。材料没有设定的字段不是“待确认”，而是你的创作空间；请结合角色在世界中的位置、职业、关系和当前处境合理补全，直接形成可长期使用的人物设定。',
+        '【追踪角色表】填写性别、年龄、外貌、身份、简介、关系、对主角态度和过去经历。外貌只写长期物理特征，不把服装、姿势、伤势或本轮情绪当成固有外貌。',
+        '【追踪人设基线】沿用数据库的性格调色盘：主色是材料中已经显露、日常最常驱动行为的1-3个词；底色是原文有限场景看不出的稳定质地；点缀是只在特定人或压力下激活的反差层。底色和点缀可以向原文留白处自由创作，甚至与主色碰撞，但不能与已写明的事实矛盾。每一种颜色都要写成有对象、情境、边界、消退条件的具体行为，不能停在标签；三组衍生每条30-100字。',
+        '履历用角色第一人称写其遇到主角之前也成立的完整人生，把身份、外貌、重要经历和人际关系组织成自然自述，减少与主角互动，不写上帝视角总结。他者声部写4-7句有视角差、落到具体轶事的旁人议论，允许互相矛盾和看不懂。作者声部用第一人称写“越写越不确定”的困惑，不替角色下最终结论，控制在200字以内。不要把临时恐惧、受伤、衣着或一次动作写成人格。',
         '【行动方向】用普通话整理长期目标、当前目标和下一步计划；写具体要做什么，不写程序状态词。',
         ...(includesPhysiology ? [
-            '【追踪身体基线】按相貌、口腔、发型、肩颈腋窝、身高体重、身材与特异性征、肌肤、气味、三围、胸部、腰腹、外阴、阴道、菊穴、臀部、腿部、足码脚型、足部、泌乳与特殊体液、敏感部位填写长期稳定的客观身体特征。只写物理白描，不写性格、态度、衣物、性经历或本轮临时状态；留白处可以补足，但不能与已有事实冲突。',
+            '【追踪身体基线】按相貌、口腔、发型、肩颈腋窝、身高体重、身材与特异性征、肌肤、气味、三围、胸部、腰腹、外阴、阴道、菊穴、臀部、腿部、足码脚型、足部、泌乳与特殊体液、敏感部位填写长期稳定的客观身体特征。只写物理白描，不写性格、态度、衣物、性经历或本轮临时状态；材料未写的项目自行创作补全，但不能与已有数据库事实冲突。',
         ] : []),
-        '尽量填全；某个字段一时写不出可以省略，不要输出空字符串或程序占位词。',
-        customPrompt,
+        '把下方列出的字段一次填全。不要输出“未知”“待确认”“暂无”“不详”、空字符串或程序占位词；确无原设定时就合理创作。创作补全是档案设定，不要伪称它来自正文证据。',
+        customPrompt
+            ? `【用户自定义人物档案/破限提示】\n${customPrompt}\n【用户自定义提示结束】`
+            : '',
         '按上述字段名直接填写。可以用JSON、键值表或清晰的小标题；内容完整、自然、可读比格式整齐更重要。',
     ].filter(Boolean).join('\n\n');
     const user = selected.map((candidate) => [
@@ -1296,6 +1300,199 @@ function firstJsonObject(text) {
         }
     }
     return null;
+}
+
+const LOOSE_PROFILE_SECTIONS = Object.freeze({
+    identity: ['identity', '身份', '角色表', '追踪角色表', '人物档案', '角色档案'],
+    personality: ['personality', 'persona', '性格', '人设', '人设基线', '追踪人设基线'],
+    goals: ['goals', '目标', '行动方向', '计划'],
+    physiology: ['physiology', 'bodybaseline', '身体', '身体基线', '生理档案', '追踪身体基线'],
+});
+
+const LOOSE_PROFILE_FIELDS = Object.freeze({
+    identity: {
+        role: ['role', '角色', '角色定位', '定位'],
+        species: ['species', '物种', '种族'],
+        gender: ['gender', '性别'],
+        age: ['age', '年龄'],
+        briefIntro: ['briefintro', '简介', '一句话介绍', '简短介绍'],
+        appearance: ['appearance', '外貌', '外观'],
+        identityText: ['identitytext', '身份', '身份说明'],
+        relationState: ['relationstate', '人际关系', '关系状态'],
+        attitudeToProtagonist: ['attitudetoprotagonist', '对主角态度', '对玩家态度'],
+        pastExperience: ['pastexperience', '过往经历', '过去经历'],
+    },
+    personality: {
+        biography: ['biography', '履历', '自述'],
+        primaryColor: ['primarycolor', '主色调', '性格主色调'],
+        primaryDerivatives: ['primaryderivatives', '主色调衍生', '主色衍生'],
+        primarySentence: ['primarysentence', '主色调语句', '主色语句'],
+        baseColor: ['basecolor', '底色', '性格底色'],
+        baseDerivatives: ['basederivatives', '底色衍生'],
+        baseSentence: ['basesentence', '底色语句'],
+        accentColor: ['accentcolor', '点缀', '性格点缀'],
+        accentDerivatives: ['accentderivatives', '点缀衍生'],
+        accentSentence: ['accentsentence', '点缀语句'],
+        othersVoices: ['othersvoices', '他者声部', '他人评价'],
+        authorVoice: ['authorvoice', '作者声部', '作者疑问'],
+    },
+    goals: {
+        longTerm: ['longterm', 'longtermgoals', '长期目标'],
+        current: ['current', 'currentgoals', '当前目标'],
+        summary: ['summary', '计划摘要', '下一步计划'],
+        steps: ['steps', '步骤', '计划步骤'],
+        nextWindow: ['nextwindow', '下一行动窗口', '行动窗口'],
+    },
+    physiology: {
+        facialAppearance: ['facialappearance', '相貌', '面部外观'],
+        oralCavity: ['oralcavity', '口腔'],
+        hairstyle: ['hairstyle', '常用发型', '发型'],
+        neckShoulderArmpit: ['neckshoulderarmpit', '肩颈腋窝', '颈肩腋窝'],
+        heightWeight: ['heightweight', '身高体重', '身高/体重'],
+        bodySpecial: ['bodyspecial', '身材特异性征', '身材/特异性征'],
+        skinTexture: ['skintexture', '肌肤触感', '皮肤触感'],
+        bodyScent: ['bodyscent', '身体气味', '体味'],
+        bodyMeasurements: ['bodymeasurements', '三围罩杯', '三围/罩杯', '三围'],
+        breastAppearance: ['breastappearance', '胸部外观'],
+        waistAbdomen: ['waistabdomen', '腰腹外观', '腰腹'],
+        vulvaAppearance: ['vulvaappearance', '外阴外观'],
+        vaginalProfile: ['vaginalprofile', '阴道剖面'],
+        anusAppearance: ['anusappearance', '菊穴', '肛门外观'],
+        buttockAppearance: ['buttockappearance', '臀部外观'],
+        legAppearance: ['legappearance', '腿部外观'],
+        footSize: ['footsize', '足码脚型', '足码/脚型'],
+        footAppearance: ['footappearance', '足部外观'],
+        lactationBodyFluid: ['lactationbodyfluid', '泌乳与特殊体液'],
+        sensitiveParts: ['sensitiveparts', '敏感部位'],
+    },
+});
+
+const LOOSE_PROFILE_LIST_FIELDS = new Set([
+    'primaryDerivatives',
+    'baseDerivatives',
+    'accentDerivatives',
+    'othersVoices',
+    'longTerm',
+    'current',
+    'steps',
+]);
+
+function looseProfileKey(value) {
+    return String(value || '')
+        .toLocaleLowerCase('zh-CN')
+        .replace(/[\s_`*#【】\[\]（）()/.·:：-]+/gu, '');
+}
+
+function looseProfileSection(value) {
+    const key = looseProfileKey(value);
+    return Object.entries(LOOSE_PROFILE_SECTIONS).find(([, aliases]) => (
+        aliases.some((alias) => looseProfileKey(alias) === key)
+    ))?.[0] || '';
+}
+
+function looseProfileField(section, value) {
+    const key = looseProfileKey(value);
+    const sections = section ? [section] : Object.keys(LOOSE_PROFILE_FIELDS);
+    for (const candidateSection of sections) {
+        const match = Object.entries(LOOSE_PROFILE_FIELDS[candidateSection] || {})
+            .find(([field, aliases]) => (
+                looseProfileKey(field) === key
+                || aliases.some((alias) => looseProfileKey(alias) === key)
+            ));
+        if (match) return { section: candidateSection, field: match[0] };
+    }
+    return null;
+}
+
+function looseProfileList(value) {
+    return cleanList(String(value || '')
+        .replace(/^[-*•]\s*/u, '')
+        .split(/\s*(?:[；;|]|(?=\d+[.、）)]\s*))\s*/gu)
+        .map((item) => item.replace(/^\d+[.、）)]\s*/u, ''))
+        .filter(Boolean), 12, 700);
+}
+
+function parseLooseProfileTable(text) {
+    const result = {
+        identity: {},
+        personality: {},
+        goals: { plan: {} },
+        physiology: {},
+    };
+    let section = '';
+    let current = null;
+    const write = (target, rawValue, { append = false } = {}) => {
+        if (!target) return;
+        const { section: targetSection, field } = target;
+        const container = targetSection === 'goals' && ['summary', 'steps', 'nextWindow'].includes(field)
+            ? result.goals.plan
+            : result[targetSection];
+        const outputField = targetSection === 'goals' && field === 'summary' ? 'summary'
+            : targetSection === 'goals' && field === 'nextWindow' ? 'nextWindow'
+                : field;
+        if (LOOSE_PROFILE_LIST_FIELDS.has(field)) {
+            const items = looseProfileList(rawValue);
+            container[outputField] = cleanList([
+                ...(append && Array.isArray(container[outputField]) ? container[outputField] : []),
+                ...items,
+            ], field === 'othersVoices' ? 7 : 12, 700);
+        } else {
+            const value = cleanText(rawValue, 4000);
+            if (!value) return;
+            container[outputField] = append && container[outputField]
+                ? cleanText(`${container[outputField]} ${value}`, 4000)
+                : value;
+        }
+        current = target;
+    };
+    for (const rawLine of String(text || '').split(/\r?\n/gu)) {
+        const line = rawLine.trim();
+        if (!line || /^```/u.test(line) || /^\|?\s*:?-{2,}/u.test(line)) continue;
+        const heading = line
+            .replace(/^#{1,6}\s*/u, '')
+            .replace(/^[【\[]|[】\]]$/gu, '')
+            .replace(/[：:]$/u, '')
+            .trim();
+        const headingSection = looseProfileSection(heading);
+        if (headingSection) {
+            section = headingSection;
+            current = null;
+            continue;
+        }
+        let key = '';
+        let value = '';
+        if (line.startsWith('|') && line.endsWith('|')) {
+            const cells = line.slice(1, -1).split('|').map((cell) => cell.trim()).filter(Boolean);
+            if (cells.length >= 3 && looseProfileSection(cells[0])) {
+                section = looseProfileSection(cells[0]);
+                [key, value] = [cells[1], cells.slice(2).join('；')];
+            } else if (cells.length >= 2) {
+                [key, value] = [cells[0], cells.slice(1).join('；')];
+            }
+        } else {
+            const match = line.match(/^(?:[-*•]\s*)?([^：:]{1,48})[：:]\s*(.*)$/u);
+            if (match) [, key, value] = match;
+        }
+        const target = key && !/^(?:字段|field|内容|value)$/iu.test(key)
+            ? looseProfileField(section, key)
+            : null;
+        if (target) {
+            section = target.section;
+            write(target, value);
+            continue;
+        }
+        if (current && /^[-*•]|^\d+[.、）)]/u.test(line)) {
+            write(current, line, { append: true });
+        } else if (current) {
+            write(current, line, { append: true });
+        }
+    }
+    const hasContent = Object.values(result).some((value) => (
+        value && typeof value === 'object' && Object.keys(value).some((key) => (
+            key !== 'plan' || Object.keys(value.plan || {}).length
+        ))
+    ));
+    return hasContent ? result : null;
 }
 
 function profileObjectsFromParsed(value) {
@@ -1385,7 +1582,7 @@ export function parseActorProfileCompletionOutput(output, {
     candidates = [],
     evidenceText = '',
 } = {}) {
-    const parsed = firstJsonObject(output);
+    const parsed = firstJsonObject(output) || parseLooseProfileTable(output);
     if (!parsed) {
         return { profiles: null, error: 'actor_profile.json_invalid' };
     }

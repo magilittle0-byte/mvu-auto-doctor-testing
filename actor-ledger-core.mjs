@@ -1227,16 +1227,20 @@ export function mergeActorProfilePatches(value, patches, {
     );
     const consolidate = mergeMode === 'consolidate';
     const mergeStableText = (current, proposed, limit = 240) => {
+        const existing = cleanText(current, limit);
         const next = consolidate
             ? cleanText(proposed, limit)
             : stableProfileText(proposed, limit);
+        if (consolidate && existing) return existing;
         if (consolidate && next) return next;
         return mergeProfileText(current, next, limit);
     };
     const mergeStablePattern = (current, proposed, limit = 240) => {
+        const existing = cleanText(current, limit);
         const next = consolidate
             ? cleanText(proposed, limit)
             : stableProfileText(proposed, limit);
+        if (consolidate && existing) return existing;
         if (consolidate && next) return next;
         return mergeProfilePattern(current, next, limit);
     };
@@ -1244,7 +1248,7 @@ export function mergeActorProfilePatches(value, patches, {
         const next = consolidate
             ? cleanList(proposed, limit, itemLimit)
             : stableProfileList(proposed, limit, itemLimit);
-        if (consolidate && next.length) return next;
+        if (consolidate) return mergeProfileList(current, next, limit, itemLimit);
         return mergeProfileList(current, next, limit, itemLimit);
     };
     for (const raw of candidates) {
