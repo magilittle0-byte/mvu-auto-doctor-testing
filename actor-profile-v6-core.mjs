@@ -67,6 +67,17 @@ function cleanText(value, limit = 500) {
     return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, limit);
 }
 
+const PROFILE_PLACEHOLDER_RE = /^(?:未设定|未登记|未填写|未生成|未知|待确认|暂无(?:资料|信息|设定)?|不详|无资料|无信息|unknown|unset|unregistered|pending|n\/?a|null|none|[-—]+)[。.!！]?$/iu;
+
+function meaningfulProfileText(value, limit = 500) {
+    const text = cleanText(value, limit);
+    return text && !PROFILE_PLACEHOLDER_RE.test(text) ? text : '';
+}
+
+function meaningfulProfileList(value, limit = 16, itemLimit = 300) {
+    return cleanList(value, limit, itemLimit).filter((item) => meaningfulProfileText(item, itemLimit));
+}
+
 function cleanList(value, limit = 16, itemLimit = 300) {
     if (!Array.isArray(value)) return [];
     const output = [];
@@ -531,8 +542,8 @@ function evidenceForActor(actor) {
 }
 
 function hasText(value) {
-    if (typeof value === 'string') return Boolean(cleanText(value));
-    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'string') return Boolean(meaningfulProfileText(value));
+    if (Array.isArray(value)) return meaningfulProfileList(value).length > 0;
     if (value && typeof value === 'object') return Object.keys(value).length > 0;
     return value !== null && value !== undefined;
 }
@@ -655,21 +666,21 @@ function moduleReady(profile, module) {
         data.briefIntro,
         data.appearance,
         data.identityText,
-    ].every((value) => Boolean(cleanText(value, 2400)));
+    ].every((value) => Boolean(meaningfulProfileText(value, 2400)));
     if (module === 'personality') {
         return Boolean(
-            cleanText(data.biography)
-            && cleanText(data.primaryColor)
-            && cleanList(data.primaryDerivatives).length >= 2
-            && cleanText(data.primarySentence)
-            && cleanText(data.baseColor)
-            && cleanList(data.baseDerivatives).length >= 2
-            && cleanText(data.baseSentence)
-            && cleanText(data.accentColor)
-            && cleanList(data.accentDerivatives).length >= 2
-            && cleanText(data.accentSentence)
-            && cleanList(data.othersVoices).length >= 4
-            && cleanText(data.authorVoice)
+            meaningfulProfileText(data.biography)
+            && meaningfulProfileText(data.primaryColor)
+            && meaningfulProfileList(data.primaryDerivatives).length >= 2
+            && meaningfulProfileText(data.primarySentence)
+            && meaningfulProfileText(data.baseColor)
+            && meaningfulProfileList(data.baseDerivatives).length >= 2
+            && meaningfulProfileText(data.baseSentence)
+            && meaningfulProfileText(data.accentColor)
+            && meaningfulProfileList(data.accentDerivatives).length >= 2
+            && meaningfulProfileText(data.accentSentence)
+            && meaningfulProfileList(data.othersVoices).length >= 4
+            && meaningfulProfileText(data.authorVoice)
         );
     }
     if (module === 'relationships') return Array.isArray(data.entries)
@@ -679,10 +690,10 @@ function moduleReady(profile, module) {
         );
     if (module === 'goals') {
         return Boolean(
-            cleanList(data.longTerm).length
-            && cleanList(data.current).length
-            && cleanText(data.plan?.summary)
-            && cleanList(data.plan?.steps).length
+            meaningfulProfileList(data.longTerm).length
+            && meaningfulProfileList(data.current).length
+            && meaningfulProfileText(data.plan?.summary)
+            && meaningfulProfileList(data.plan?.steps).length
         );
     }
     if (module === 'knowledge') return Array.isArray(data.entries)
@@ -705,7 +716,7 @@ function moduleReady(profile, module) {
     if (module === 'physiology') {
         if (data.enabled !== true) return true;
         return PHYSIOLOGY_CONTENT_FIELDS.every((field) => (
-            Boolean(cleanText(data[field], 4000))
+            Boolean(meaningfulProfileText(data[field], 4000))
         ));
     }
     return false;
@@ -763,38 +774,38 @@ export function prepareActorProfileV6(actor, {
         pastExperience: cleanText(actor?.identity?.pastExperience, 2400),
     };
     assignModule(profile, 'identity', identity, {
-        source: actor?.identity?.role ? 'confirmed' : 'hypothesis',
+        source: hasText(actor?.identity?.role) ? 'confirmed' : 'hypothesis',
         unknownFields: [
-            ...(actor?.identity?.role ? [] : ['role']),
-            ...(actor?.identity?.species ? [] : ['species']),
-            ...(actor?.identity?.gender ? [] : ['gender']),
-            ...(actor?.identity?.age ? [] : ['age']),
-            ...(actor?.identity?.briefIntro ? [] : ['briefIntro']),
-            ...(actor?.identity?.appearance ? [] : ['appearance']),
-            ...(actor?.identity?.identityText ? [] : ['identityText']),
-            ...(actor?.identity?.relationState ? [] : ['relationState']),
-            ...(actor?.identity?.attitudeToProtagonist ? [] : ['attitudeToProtagonist']),
-            ...(actor?.identity?.pastExperience ? [] : ['pastExperience']),
+            ...(hasText(actor?.identity?.role) ? [] : ['role']),
+            ...(hasText(actor?.identity?.species) ? [] : ['species']),
+            ...(hasText(actor?.identity?.gender) ? [] : ['gender']),
+            ...(hasText(actor?.identity?.age) ? [] : ['age']),
+            ...(hasText(actor?.identity?.briefIntro) ? [] : ['briefIntro']),
+            ...(hasText(actor?.identity?.appearance) ? [] : ['appearance']),
+            ...(hasText(actor?.identity?.identityText) ? [] : ['identityText']),
+            ...(hasText(actor?.identity?.relationState) ? [] : ['relationState']),
+            ...(hasText(actor?.identity?.attitudeToProtagonist) ? [] : ['attitudeToProtagonist']),
+            ...(hasText(actor?.identity?.pastExperience) ? [] : ['pastExperience']),
         ],
         evidence,
         turn,
         now,
         fieldSourceOverrides: {
             name: 'confirmed',
-            role: actor?.identity?.role ? 'confirmed' : 'hypothesis',
+            role: hasText(actor?.identity?.role) ? 'confirmed' : 'hypothesis',
             aliases: actor?.identity?.aliases?.length ? 'confirmed' : 'hypothesis',
             lineage: actor?.lineage ? 'confirmed' : 'hypothesis',
-            species: actor?.identity?.species ? 'confirmed' : 'hypothesis',
-            gender: actor?.identity?.gender ? 'confirmed' : 'hypothesis',
-            age: actor?.identity?.age ? 'confirmed' : 'hypothesis',
-            briefIntro: actor?.identity?.briefIntro ? 'confirmed' : 'hypothesis',
-            appearance: actor?.identity?.appearance ? 'confirmed' : 'hypothesis',
-            identityText: actor?.identity?.identityText ? 'confirmed' : 'hypothesis',
-            relationState: actor?.identity?.relationState ? 'confirmed' : 'hypothesis',
-            attitudeToProtagonist: actor?.identity?.attitudeToProtagonist
+            species: hasText(actor?.identity?.species) ? 'confirmed' : 'hypothesis',
+            gender: hasText(actor?.identity?.gender) ? 'confirmed' : 'hypothesis',
+            age: hasText(actor?.identity?.age) ? 'confirmed' : 'hypothesis',
+            briefIntro: hasText(actor?.identity?.briefIntro) ? 'confirmed' : 'hypothesis',
+            appearance: hasText(actor?.identity?.appearance) ? 'confirmed' : 'hypothesis',
+            identityText: hasText(actor?.identity?.identityText) ? 'confirmed' : 'hypothesis',
+            relationState: hasText(actor?.identity?.relationState) ? 'confirmed' : 'hypothesis',
+            attitudeToProtagonist: hasText(actor?.identity?.attitudeToProtagonist)
                 ? 'confirmed'
                 : 'hypothesis',
-            pastExperience: actor?.identity?.pastExperience ? 'confirmed' : 'hypothesis',
+            pastExperience: hasText(actor?.identity?.pastExperience) ? 'confirmed' : 'hypothesis',
         },
     });
 
@@ -1241,17 +1252,29 @@ export function buildActorProfileCompletionMessages(candidates, {
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
-export function buildActorProfileRepairMessages(output, candidate) {
+export function buildActorProfileRepairMessages(output, candidate, {
+    missingFields = [],
+    evidenceText = '',
+} = {}) {
+    const missing = cleanList(missingFields, 64, 160);
     return [{
         role: 'system',
-        content: '你只修复人物档案的JSON格式，不重写、不扩写、不审核人物内容。保留原输出中能辨认的所有字段和值，整理为一个合法JSON对象；允许 identity、personality、goals、physiology 四个分区。不要解释。',
+        content: [
+            '你负责数据库人物档案在提交前的结构修复与缺列补全。保留原输出中所有有效字段和值，不审核、不删减、不改写已明确事实。',
+            missing.length
+                ? '下面列出的缺失字段必须结合现有角色事实合理补齐；正文没有设定的地方直接创作，但不得与数据库、角色卡或原输出冲突。不得填写“未知”“未设定”“未登记”“待确认”“暂无”或空值。'
+                : '只修复字段名和结构，不改变内容含义。',
+            '返回一个完整JSON对象，使用 identity、personality、goals、physiology 分区；不要解释。',
+        ].join('\n'),
     }, {
         role: 'user',
         content: [
-            `当前人物：${JSON.stringify({ actorId: candidate?.actorId, name: candidate?.name })}`,
+            `当前人物与数据库锚点：${JSON.stringify(actorProfilePromptContext(candidate))}`,
             `可用字段：\n${actorProfileFieldGuide(candidate)}`,
+            missing.length ? `必须补齐的缺列：${missing.join(', ')}` : '',
+            evidenceText ? `参考材料：\n${cleanText(evidenceText, 42000)}` : '',
             `待修复原输出：\n${String(output || '')}`,
-        ].join('\n\n'),
+        ].filter(Boolean).join('\n\n'),
     }];
 }
 
@@ -1311,28 +1334,28 @@ const LOOSE_PROFILE_SECTIONS = Object.freeze({
 
 const LOOSE_PROFILE_FIELDS = Object.freeze({
     identity: {
-        role: ['role', '角色', '角色定位', '定位'],
+        role: ['role', '角色', '角色定位', '定位', '职业', '头衔'],
         species: ['species', '物种', '种族'],
         gender: ['gender', '性别'],
         age: ['age', '年龄'],
-        briefIntro: ['briefintro', '简介', '一句话介绍', '简短介绍'],
-        appearance: ['appearance', '外貌', '外观'],
+        briefIntro: ['briefintro', '简介', '人物简介', '角色简介', '一句话介绍', '简短介绍'],
+        appearance: ['appearance', '外貌', '外观', '外貌特征'],
         identityText: ['identitytext', '身份', '身份说明'],
-        relationState: ['relationstate', '人际关系', '关系状态'],
+        relationState: ['relationstate', '人际关系', '关系状态', '关系'],
         attitudeToProtagonist: ['attitudetoprotagonist', '对主角态度', '对玩家态度'],
-        pastExperience: ['pastexperience', '过往经历', '过去经历'],
+        pastExperience: ['pastexperience', '过往经历', '过去经历', '重要经历'],
     },
     personality: {
         biography: ['biography', '履历', '自述'],
         primaryColor: ['primarycolor', '主色调', '性格主色调'],
-        primaryDerivatives: ['primaryderivatives', '主色调衍生', '主色衍生'],
+        primaryDerivatives: ['primaryderivatives', '主色调衍生', '主色衍生', '主色调衍生一', '主色调衍生二', '主色调衍生三'],
         primarySentence: ['primarysentence', '主色调语句', '主色语句'],
         baseColor: ['basecolor', '底色', '性格底色'],
-        baseDerivatives: ['basederivatives', '底色衍生'],
-        baseSentence: ['basesentence', '底色语句'],
+        baseDerivatives: ['basederivatives', '底色衍生', '底色衍生一', '底色衍生二', '底色衍生三'],
+        baseSentence: ['basesentence', '底色语句', '底色用语把捉'],
         accentColor: ['accentcolor', '点缀', '性格点缀'],
-        accentDerivatives: ['accentderivatives', '点缀衍生'],
-        accentSentence: ['accentsentence', '点缀语句'],
+        accentDerivatives: ['accentderivatives', '点缀衍生', '点缀衍生一', '点缀衍生二', '点缀衍生三'],
+        accentSentence: ['accentsentence', '点缀语句', '点缀用语把捉'],
         othersVoices: ['othersvoices', '他者声部', '他人评价'],
         authorVoice: ['authorvoice', '作者声部', '作者疑问'],
     },
@@ -1433,7 +1456,7 @@ function parseLooseProfileTable(text) {
         if (LOOSE_PROFILE_LIST_FIELDS.has(field)) {
             const items = looseProfileList(rawValue);
             container[outputField] = cleanList([
-                ...(append && Array.isArray(container[outputField]) ? container[outputField] : []),
+                ...(Array.isArray(container[outputField]) ? container[outputField] : []),
                 ...items,
             ], field === 'othersVoices' ? 7 : 12, 700);
         } else {
@@ -1495,6 +1518,56 @@ function parseLooseProfileTable(text) {
     return hasContent ? result : null;
 }
 
+function normalizeLooseProfileSection(raw, section) {
+    const result = section === 'goals' ? { plan: {} } : {};
+    const sources = [];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        sources.push(raw);
+        for (const [key, value] of Object.entries(raw)) {
+            if (
+                looseProfileSection(key) === section
+                && value && typeof value === 'object' && !Array.isArray(value)
+            ) sources.push(value);
+        }
+    }
+    const assign = (field, value) => {
+        const goalPlanField = section === 'goals' && ['summary', 'steps', 'nextWindow'].includes(field);
+        const target = goalPlanField ? result.plan : result;
+        if (LOOSE_PROFILE_LIST_FIELDS.has(field)) {
+            const rawItems = Array.isArray(value) ? value
+                : value && typeof value === 'object' ? Object.values(value)
+                    : looseProfileList(value);
+            target[field] = cleanList([
+                ...(Array.isArray(target[field]) ? target[field] : []),
+                ...rawItems,
+            ], field === 'othersVoices' ? 7 : 12, 700);
+            return;
+        }
+        if (value && typeof value === 'object') return;
+        const text = cleanText(value, 4000);
+        if (text) target[field] = text;
+    };
+    for (const source of sources) {
+        for (const [key, value] of Object.entries(source)) {
+            if (
+                section === 'goals'
+                && ['plan', '计划'].includes(looseProfileKey(key))
+                && value && typeof value === 'object' && !Array.isArray(value)
+            ) {
+                for (const [planKey, planValue] of Object.entries(value)) {
+                    const planField = looseProfileField('goals', planKey);
+                    if (planField?.section === 'goals') assign(planField.field, planValue);
+                }
+                continue;
+            }
+            const target = looseProfileField(section, key);
+            if (target?.section === section) assign(target.field, value);
+        }
+    }
+    if (section === 'goals' && !Object.keys(result.plan).length) delete result.plan;
+    return result;
+}
+
 function profileObjectsFromParsed(value) {
     if (Array.isArray(value)) return value;
     if (!value || typeof value !== 'object') return [];
@@ -1526,32 +1599,14 @@ function candidateForProfile(raw, candidates, index) {
 
 function normalizedProfilePatch(raw, candidate, evidenceText) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !candidate) return null;
-    const identity = raw.identity && typeof raw.identity === 'object'
-        ? raw.identity
-        : raw.身份 && typeof raw.身份 === 'object'
-            ? raw.身份
-            : {};
-    const personality = raw.personality && typeof raw.personality === 'object'
-        ? raw.personality
-        : raw.persona && typeof raw.persona === 'object'
-            ? raw.persona
-            : raw.人设基线 && typeof raw.人设基线 === 'object'
-                ? raw.人设基线
-                : raw.性格 && typeof raw.性格 === 'object'
-                    ? raw.性格
-                    : {};
-    const goals = raw.goals && typeof raw.goals === 'object'
-        ? raw.goals
-        : raw.行动方向 && typeof raw.行动方向 === 'object'
-            ? raw.行动方向
-            : {};
-    const physiology = raw.physiology && typeof raw.physiology === 'object'
-        ? raw.physiology
-        : raw.bodyBaseline && typeof raw.bodyBaseline === 'object'
-            ? raw.bodyBaseline
-            : raw.身体基线 && typeof raw.身体基线 === 'object'
-                ? raw.身体基线
-                : null;
+    const identity = normalizeLooseProfileSection(raw, 'identity');
+    const personality = {
+        ...normalizeLooseProfileSection(raw, 'personality'),
+        ...normalizeLooseProfileSection(raw.identity, 'personality'),
+    };
+    const goals = normalizeLooseProfileSection(raw, 'goals');
+    const normalizedPhysiology = normalizeLooseProfileSection(raw, 'physiology');
+    const physiology = Object.keys(normalizedPhysiology).length ? normalizedPhysiology : null;
     const evidence = cleanList(candidate.evidence, 8, 300);
     if (!evidence.length) {
         evidence.push(...buildActorProfileEvidenceBank(evidenceText, {
@@ -1564,9 +1619,9 @@ function normalizedProfilePatch(raw, candidate, evidenceText) {
         actorId: candidate.actorId,
         name: candidate.name,
         identity: { ...identity, ...personality },
-        longTermGoals: raw.longTermGoals ?? goals.longTermGoals ?? goals.longTerm ?? [],
-        currentGoals: raw.currentGoals ?? goals.currentGoals ?? goals.current ?? [],
-        plan: raw.plan ?? goals.plan ?? {},
+        longTermGoals: goals.longTerm ?? [],
+        currentGoals: goals.current ?? [],
+        plan: goals.plan ?? {},
         physiology,
         evidence,
     };
@@ -1576,6 +1631,79 @@ function normalizedProfilePatch(raw, candidate, evidenceText) {
         || Object.keys(patch.plan || {}).length
         || (patch.physiology && Object.keys(patch.physiology).length);
     return hasContent ? patch : null;
+}
+
+export function actorProfileCompletionMissingFields(patch, candidate = {}) {
+    const identity = { ...(candidate?.identity || {}), ...(patch?.identity || {}) };
+    const plan = { ...(candidate?.plan || {}), ...(patch?.plan || {}) };
+    const longTerm = [
+        ...(candidate?.longTermGoals || []),
+        ...(patch?.longTermGoals || []),
+    ];
+    const current = [
+        ...(candidate?.currentGoals || []),
+        ...(patch?.currentGoals || []),
+    ];
+    const missing = [];
+    for (const field of [
+        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance', 'identityText',
+        'relationState', 'attitudeToProtagonist', 'pastExperience',
+    ]) {
+        if (!meaningfulProfileText(identity[field], 4000)) missing.push(`identity.${field}`);
+    }
+    for (const field of [
+        'biography', 'primaryColor', 'primarySentence', 'baseColor', 'baseSentence',
+        'accentColor', 'accentSentence', 'authorVoice',
+    ]) {
+        if (!meaningfulProfileText(identity[field], 4000)) missing.push(`personality.${field}`);
+    }
+    for (const [field, minimum] of [
+        ['primaryDerivatives', 2],
+        ['baseDerivatives', 2],
+        ['accentDerivatives', 2],
+        ['othersVoices', 4],
+    ]) {
+        if (meaningfulProfileList(identity[field], 12, 700).length < minimum) {
+            missing.push(`personality.${field}`);
+        }
+    }
+    if (!meaningfulProfileList(longTerm, 12, 400).length) missing.push('goals.longTerm');
+    if (!meaningfulProfileList(current, 8, 400).length) missing.push('goals.current');
+    if (!meaningfulProfileText(plan.summary, 500)) missing.push('goals.plan.summary');
+    if (!meaningfulProfileList(plan.steps, 12, 300).length) missing.push('goals.plan.steps');
+    if (!meaningfulProfileText(plan.nextWindow, 180)) missing.push('goals.plan.nextWindow');
+    if (modeOf(candidate?.completionMode) === 'full_adult') {
+        const physiology = { ...(candidate?.physiology || {}), ...(patch?.physiology || {}) };
+        for (const field of PHYSIOLOGY_CONTENT_FIELDS) {
+            if (!meaningfulProfileText(physiology[field], 4000)) {
+                missing.push(`physiology.${field}`);
+            }
+        }
+    }
+    return missing;
+}
+
+export function mergeActorProfileCompletionPatches(base, addition) {
+    if (!base) return clone(addition);
+    if (!addition) return clone(base);
+    return {
+        ...clone(base),
+        ...clone(addition),
+        actorId: addition.actorId || base.actorId,
+        name: addition.name || base.name,
+        identity: { ...(clone(base.identity) || {}), ...(clone(addition.identity) || {}) },
+        longTermGoals: meaningfulProfileList(addition.longTermGoals, 12, 400).length
+            ? clone(addition.longTermGoals)
+            : clone(base.longTermGoals || []),
+        currentGoals: meaningfulProfileList(addition.currentGoals, 8, 400).length
+            ? clone(addition.currentGoals)
+            : clone(base.currentGoals || []),
+        plan: { ...(clone(base.plan) || {}), ...(clone(addition.plan) || {}) },
+        physiology: base.physiology || addition.physiology
+            ? { ...(clone(base.physiology) || {}), ...(clone(addition.physiology) || {}) }
+            : null,
+        evidence: cleanList([...(base.evidence || []), ...(addition.evidence || [])], 16, 300),
+    };
 }
 
 export function parseActorProfileCompletionOutput(output, {

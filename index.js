@@ -120,10 +120,12 @@ import {
 import {
     actorProfileReadyForAction,
     actorProfileV6View,
+    actorProfileCompletionMissingFields,
     applyActorProfileCompletionToV6,
     applyActorProfileV6Override,
     buildActorProfileCompletionMessages,
     buildActorProfileRepairMessages,
+    mergeActorProfileCompletionPatches,
     parseActorProfileCompletionOutput,
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
@@ -560,6 +562,8 @@ function resetChatScopedRuntimeDiagnostics() {
         maxLanes: 0,
         selected: [],
     };
+    modelDiagnostics.splice(0);
+    customInstructionInjectionRecords.splice(0);
     lastPromptSnapshot = null;
 }
 let activeTaskProgress = null;
@@ -1293,6 +1297,15 @@ function normalizedModelDiagnostics(value) {
         .slice(0, 80);
 }
 
+function modelDiagnosticsForChat(value, context = getContext()) {
+    const lastMessageIndex = Array.isArray(context?.chat) ? context.chat.length - 1 : -1;
+    return normalizedModelDiagnostics(value).filter((entry) => (
+        entry.targetIndex < 0
+        || lastMessageIndex < 0
+        || entry.targetIndex <= lastMessageIndex
+    ));
+}
+
 function structuredOutputShape(output) {
     const source = String(output || '');
     const lower = source.toLowerCase();
@@ -1422,7 +1435,7 @@ function modelRouteHealthPresentation(now = Date.now()) {
     return {
         strict: channelEntries('strict'),
         fast: channelEntries('fast'),
-        switchCount: normalizedModelDiagnostics(modelDiagnostics).filter((entry) => (
+        switchCount: modelDiagnosticsForChat(modelDiagnostics).filter((entry) => (
             entry.status === 'succeeded' && entry.failover === true
         )).length,
         now,
@@ -1539,7 +1552,9 @@ const RUNTIME_MODULE_LABELS = Object.freeze({
 
 const RUNTIME_FAILURE_LABELS = Object.freeze({
     'profile.preparation_incomplete': '人物档案仍待补全',
+    'profile.content_incomplete': '人物档案缺列，未作为成功档案提交',
     'profile.persistence_failed': '人物档案保存失败',
+    'physiology.content_incomplete': '生理档案缺列，未作为成功档案提交',
     'physiology.persistence_failed': '生理档案保存失败',
     'actor.output_missing': '人物行动没有可用输出',
     'actor.technical_failure': '人物行动处理失败',
@@ -1815,7 +1830,7 @@ function loadOperationLogFromChat(context = getContext()) {
     modelDiagnostics.splice(
         0,
         modelDiagnostics.length,
-        ...normalizedModelDiagnostics(namespace.modelDiagnostics),
+        ...modelDiagnosticsForChat(namespace.modelDiagnostics, context),
     );
     customInstructionInjectionRecords.splice(
         0,
@@ -1851,7 +1866,7 @@ function scheduleOperationLogSave() {
         const namespace = readChatNamespace();
         namespace.operationLog = deepClone(operationLog.slice(0, 30));
         namespace.modelCallStats = normalizedModelCallStats(modelCallStats);
-        namespace.modelDiagnostics = normalizedModelDiagnostics(modelDiagnostics);
+        namespace.modelDiagnostics = modelDiagnosticsForChat(modelDiagnostics, getContext());
         namespace.customInstructionInjections = deepClone(
             customInstructionInjectionRecords.slice(-80),
         );
@@ -2557,7 +2572,7 @@ async function inspectEnvironment({ waitForMvu = false, mvuOverride = null } = {
     }
 
     const runtimeActors = actorLedgerView(readChatNamespace(context).actorLedger);
-    const recentWorldCalls = normalizedModelDiagnostics(modelDiagnostics)
+    const recentWorldCalls = modelDiagnosticsForChat(modelDiagnostics)
         .filter((entry) => /世界|连续|NPC 分片|人物行动分析/u.test(entry.task))
         .slice(0, 24);
     const recentWorldFailures = recentWorldCalls.filter(
@@ -2748,7 +2763,7 @@ function diagnosticPayload() {
             hardContract: latestHardContractAudit,
             socialAudit: latestSocialAudit,
             prompt: lastPromptSnapshot,
-            modelDiagnostics: normalizedModelDiagnostics(modelDiagnostics),
+            modelDiagnostics: modelDiagnosticsForChat(modelDiagnostics, getContext()),
         }),
     };
 }
@@ -4603,10 +4618,10 @@ async function completeSovereigntyCycle({
     const profileReady = getSettings().actorProfileCompletionMode === 'off'
         || (profilePreparation?.deferred?.length || 0) === 0;
     next = settleSovereigntyModule(next, tasks.profile, {
-        // An incomplete dossier is a persisted incremental table state, not a
-        // technical module failure. The actor remains action-blocked and the
-        // next observed turn selects the same incomplete row again.
-        success: persistenceSuccess,
+        // Match database INSERT semantics: a profile task commits only when
+        // every required column survives normalization and the prepared view
+        // reaches readiness. Partial rows remain retryable, never "successful".
+        success: persistenceSuccess && profileReady,
         payload: {
             coverage: profilePreparation?.coverage ?? 100,
             prepared: profilePreparation?.prepared?.length || 0,
@@ -4615,27 +4630,29 @@ async function completeSovereigntyCycle({
             actorLedger,
         },
         commitRef: `PROFILE-${turn}`,
-        failureCode: 'profile.persistence_failed',
+        failureCode: persistenceSuccess
+            ? 'profile.content_incomplete'
+            : 'profile.persistence_failed',
         currentTurn: recoveryTurn,
         retryOnCurrentTurn,
     });
+    const optionalPhysiologyPending = (actorLedger?.actors || []).filter((actor) => (
+        actor?.profileV6?.modules?.physiology?.data?.enabled === true
+        && (actor?.profileV6?.modules?.physiology?.unknownFields || []).length > 0
+    )).length;
+    const physiologyReady = getSettings().actorProfileCompletionMode !== 'full_adult'
+        || optionalPhysiologyPending === 0;
     next = settleSovereigntyModule(next, tasks.physiology, {
-        // The physiology task durably initializes the optional schema and its
-        // provenance. Unknown optional detail remains visible on the profile,
-        // but cannot block core profile readiness or trigger a retry hot loop.
-        success: persistenceSuccess,
+        success: persistenceSuccess && physiologyReady,
         payload: {
             enabled: getSettings().actorProfileCompletionMode === 'full_adult',
             prepared: profilePreparation?.prepared?.length || 0,
-            optionalPending: (actorLedger?.actors || []).filter((actor) => (
-                actor?.profileV6?.modules?.physiology?.data?.enabled === true
-                && (actor?.profileV6?.modules?.physiology?.unknownFields || []).length > 0
-            )).length,
+            optionalPending: optionalPhysiologyPending,
             actorLedger,
         },
         commitRef: `PHYSIOLOGY-${turn}`,
         failureCode: persistenceSuccess
-            ? 'physiology.preparation_incomplete'
+            ? 'physiology.content_incomplete'
             : 'physiology.persistence_failed',
         currentTurn: recoveryTurn,
         retryOnCurrentTurn,
@@ -10496,10 +10513,15 @@ async function completeActorProfilesForTurn(captured, {
                 candidates: [candidate],
                 evidenceText: candidateEvidenceText,
             });
-            if (!parsed.profiles) {
+            let profilePatch = parsed.profiles?.[0] || null;
+            let missingFields = actorProfileCompletionMissingFields(profilePatch, candidate);
+            if (!profilePatch || missingFields.length) {
                 const originalOutput = output;
                 output = await callModel(
-                    buildActorProfileRepairMessages(originalOutput, candidate),
+                    buildActorProfileRepairMessages(originalOutput, candidate, {
+                        missingFields,
+                        evidenceText: candidateEvidenceText,
+                    }),
                     {
                         maxTokens: Math.max(2400, Math.min(6000, settings.actorShardMaxTokens)),
                         timeoutMs: settings.sovereigntyHardTimeoutMs,
@@ -10511,39 +10533,41 @@ async function completeActorProfilesForTurn(captured, {
                         parallelLane: `profile:${candidate.actorId}:repair`,
                         failover: false,
                         maxFailovers: 0,
-                        validateOutput: (repairedOutput) => {
-                            const repaired = parseActorProfileCompletionOutput(repairedOutput, {
-                                candidates: [candidate],
-                                evidenceText: candidateEvidenceText,
-                            });
-                            return repaired.profiles
-                                ? true
-                                : { valid: false, reason: repaired.error };
-                        },
                         runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
                     },
                 );
-                parsed = parseActorProfileCompletionOutput(output, {
+                const repaired = parseActorProfileCompletionOutput(output, {
                     candidates: [candidate],
                     evidenceText: candidateEvidenceText,
                 });
-                if (parsed.profiles) {
+                profilePatch = mergeActorProfileCompletionPatches(
+                    profilePatch,
+                    repaired.profiles?.[0] || null,
+                );
+                missingFields = actorProfileCompletionMissingFields(profilePatch, candidate);
+                parsed = profilePatch ? { profiles: [profilePatch], error: '' } : repaired;
+                if (profilePatch && !missingFields.length) {
                     recordModelDiagnostic({
                         phase: 'validation',
-                        task: '人物档案 JSON 修复',
+                        task: '人物档案结构与缺列修复',
                         channel: 'fast',
                         status: 'recovered',
                         targetIndex: captured.index,
                         failureKind: 'profile-structure-repaired',
                         outputChars: output.length,
                         recovered: true,
-                        recoveryReason: 'valid-json-repair',
+                        recoveryReason: 'complete-profile-repair',
                     });
                 }
             }
-            return parsed.profiles
+            return parsed.profiles && !missingFields.length
                 ? { candidate, profiles: parsed.profiles, evidenceText: candidateEvidenceText }
-                : { candidate, failure: parsed.error || 'actor_profile.output_invalid' };
+                : {
+                    candidate,
+                    failure: missingFields.length
+                        ? `actor_profile.content_incomplete:${missingFields.join(',')}`
+                        : parsed.error || 'actor_profile.output_invalid',
+                };
         } catch (error) {
             return {
                 candidate,
@@ -13247,17 +13271,29 @@ function actorProfileFieldLabel(parts) {
     return ACTOR_PROFILE_FIELD_LABELS[key] || key;
 }
 
+const ACTOR_PROFILE_EMPTY_DISPLAY_RE = /^(?:未设定|未登记|未填写|未生成|未知|待确认|暂无(?:资料|信息|设定)?|不详|无资料|无信息|unknown|unset|unregistered|pending|n\/?a|null|none|[-—]+)[。.!！]?$/iu;
+
+function actorProfileValuePresent(value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') {
+        const text = value.trim();
+        return Boolean(text) && !ACTOR_PROFILE_EMPTY_DISPLAY_RE.test(text);
+    }
+    if (Array.isArray(value)) return value.some(actorProfileValuePresent);
+    if (typeof value === 'object') return Object.values(value).some(actorProfileValuePresent);
+    return true;
+}
+
 function actorProfileValueText(value) {
     if (value === true) return '是';
     if (value === false) return '否';
-    if (value === null || value === undefined || value === '') return '未登记';
+    if (!actorProfileValuePresent(value)) return '';
     if (Array.isArray(value)) {
-        if (!value.length) return '未登记';
-        return value.map((entry) => actorProfileValueText(entry)).join('、');
+        return value.filter(actorProfileValuePresent).map((entry) => actorProfileValueText(entry)).join('、');
     }
     if (typeof value === 'object') {
-        if (!Object.keys(value).length) return '未登记';
         return Object.entries(value)
+            .filter(([, entry]) => actorProfileValuePresent(entry))
             .map(([key, entry]) => `${ACTOR_PROFILE_FIELD_LABELS[key] || key}：${actorProfileValueText(entry)}`)
             .join('；');
     }
@@ -13461,6 +13497,7 @@ function buildActorProfileModule(actor, profile, moduleKey, module, { open = fal
         || profile.locks[moduleKey] === true
         || profile.locks[`modules.${moduleKey}`] === true;
     const waitingForGeneratedDossier = module.source === 'designed_seed';
+    const moduleHasMissingColumns = (module.unknownFields?.length || 0) > 0;
     meta.textContent = [
         waitingForGeneratedDossier
             ? '等待模型生成'
@@ -13498,7 +13535,14 @@ function buildActorProfileModule(actor, profile, moduleKey, module, { open = fal
             : '这一部分尚未生成成功；医生不会把程序占位内容当成人物档案。';
         fields.appendChild(pending);
     } else {
-        const leaves = actorProfileLeafEntries(module.data);
+        if (moduleHasMissingColumns) {
+            const pending = document.createElement('p');
+            pending.className = 'mvuad-profile-pending-copy';
+            pending.textContent = '本模块仍有缺列，尚未作为完整档案提交；下方只显示已经获得的有效内容。';
+            fields.appendChild(pending);
+        }
+        const leaves = actorProfileLeafEntries(module.data)
+            .filter((leaf) => actorProfileValuePresent(leaf.value));
         for (const leaf of leaves) {
             fields.appendChild(buildActorProfileField(actor, profile, moduleKey, module, leaf));
         }
@@ -13509,10 +13553,10 @@ function buildActorProfileModule(actor, profile, moduleKey, module, { open = fal
         const provenance = document.createElement('details');
         provenance.className = 'mvuad-profile-provenance';
         const provenanceSummary = document.createElement('summary');
-        provenanceSummary.textContent = '未知字段与证据';
+        provenanceSummary.textContent = '缺列与依据';
         const provenanceBody = document.createElement('div');
         provenanceBody.className = 'mvuad-profile-provenance-body';
-        appendLedgerField(provenanceBody, '仍未知', module.unknownFields?.join('、'));
+        appendLedgerField(provenanceBody, '待补列', module.unknownFields?.join('、'));
         appendLedgerField(provenanceBody, '依据', module.evidence?.join('；'));
         provenance.append(provenanceSummary, provenanceBody);
         body.appendChild(provenance);
@@ -17195,7 +17239,7 @@ function initialize() {
         getEnvironmentReport: () => deepClone(lastEnvironmentReport),
         getInjectionInspection: () => deepClone(lastInjectionInspection),
         getModelCallStats: () => deepClone(normalizedModelCallStats(modelCallStats)),
-        getModelDiagnostics: () => deepClone(normalizedModelDiagnostics(modelDiagnostics)),
+        getModelDiagnostics: () => deepClone(modelDiagnosticsForChat(modelDiagnostics)),
         probeModelChannelConnections,
         getDiagnosticProjection: () => deepClone(diagnosticPayload()),
         getLastPromptInfo: () => lastPromptSnapshot

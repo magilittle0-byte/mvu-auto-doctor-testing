@@ -40,6 +40,17 @@ function cleanText(value, limit = 500) {
     return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, limit);
 }
 
+const PROFILE_PLACEHOLDER_RE = /^(?:未设定|未登记|未填写|未生成|未知|待确认|暂无(?:资料|信息|设定)?|不详|无资料|无信息|unknown|unset|unregistered|pending|n\/?a|null|none|[-—]+)[。.!！]?$/iu;
+
+function profileValueText(value, limit = 500) {
+    const text = cleanText(value, limit);
+    return text && !PROFILE_PLACEHOLDER_RE.test(text) ? text : '';
+}
+
+function profileValueList(value, limit = 12, itemLimit = 300) {
+    return cleanList(value, limit, itemLimit).filter((item) => profileValueText(item, itemLimit));
+}
+
 function cleanList(value, limit = 12, itemLimit = 300) {
     if (!Array.isArray(value)) return [];
     const result = [];
@@ -1227,18 +1238,18 @@ export function mergeActorProfilePatches(value, patches, {
     );
     const consolidate = mergeMode === 'consolidate';
     const mergeStableText = (current, proposed, limit = 240) => {
-        const existing = cleanText(current, limit);
+        const existing = consolidate ? profileValueText(current, limit) : cleanText(current, limit);
         const next = consolidate
-            ? cleanText(proposed, limit)
+            ? profileValueText(proposed, limit)
             : stableProfileText(proposed, limit);
         if (consolidate && existing) return existing;
         if (consolidate && next) return next;
         return mergeProfileText(current, next, limit);
     };
     const mergeStablePattern = (current, proposed, limit = 240) => {
-        const existing = cleanText(current, limit);
+        const existing = consolidate ? profileValueText(current, limit) : cleanText(current, limit);
         const next = consolidate
-            ? cleanText(proposed, limit)
+            ? profileValueText(proposed, limit)
             : stableProfileText(proposed, limit);
         if (consolidate && existing) return existing;
         if (consolidate && next) return next;
@@ -1246,9 +1257,14 @@ export function mergeActorProfilePatches(value, patches, {
     };
     const mergeStableList = (current, proposed, limit = 12, itemLimit = 240) => {
         const next = consolidate
-            ? cleanList(proposed, limit, itemLimit)
+            ? profileValueList(proposed, limit, itemLimit)
             : stableProfileList(proposed, limit, itemLimit);
-        if (consolidate) return mergeProfileList(current, next, limit, itemLimit);
+        if (consolidate) return mergeProfileList(
+            profileValueList(current, limit, itemLimit),
+            next,
+            limit,
+            itemLimit,
+        );
         return mergeProfileList(current, next, limit, itemLimit);
     };
     for (const raw of candidates) {
