@@ -18,6 +18,47 @@ export interface ActorKnowledge {
     propagation: string[];
 }
 
+export interface ActorCandidate {
+    kind: 'actor_candidate';
+    state: 'discovered';
+    candidateId: string;
+    chatId: string;
+    name: string;
+    explicitActorId: string;
+    identityDisambiguated: boolean;
+    identityKey: string;
+    sourceKind: 'accepted_narrative' | 'authority_input' | 'mvu_anchor';
+    sourceRef: ActorLedgerSourceRef | null;
+    evidence: string[];
+    present: boolean;
+    location: string;
+    discoveredTurn: number;
+}
+
+export interface ActorRegistryEntry {
+    actorRef: {
+        kind: 'actor_ref';
+        actorId: string;
+        displayName: string;
+        aliases: string[];
+    };
+    state: 'registered' | 'retired';
+    origin: string;
+    identityKeys: string[];
+    lifecycle: { status: string; inactiveReason: string };
+    lineage: Record<string, unknown>;
+    sourceRefs: ActorLedgerSourceRef[];
+    registeredTurn: number;
+    updatedTurn: number;
+}
+
+export interface ActorRegistry {
+    version: number;
+    chatId: string;
+    entries: ActorRegistryEntry[];
+    updatedAt: number;
+}
+
 export interface ActorLedgerActor {
     id: string;
     name: string;
@@ -124,7 +165,20 @@ export interface ActorLedger {
     chatId: string;
     turn: number;
     actors: ActorLedgerActor[];
+    actorRegistry: ActorRegistry;
     identityQuarantine: Array<Record<string, unknown>>;
+    actionAttempts: Array<Record<string, unknown>>;
+    actionAttemptBacklog: {
+        status: 'ok' | 'pending_over_capacity';
+        pendingCount: number;
+        capacity: number;
+        terminalRetained: number;
+        terminalDropped: number;
+        pendingDropped: 0;
+        receiptProtectedCount: number;
+        receiptTerminalDropped: number;
+        receiptOverCapacity: boolean;
+    };
     actionReceipts: Array<Record<string, unknown>>;
     observationReceipts: Array<Record<string, unknown>>;
     migrations: {
@@ -134,16 +188,32 @@ export interface ActorLedger {
         actorLedgerV4: boolean;
         actorLedgerV5: boolean;
         actorLedgerV6: boolean;
+        actorLedgerV7: boolean;
+        actorLedgerV8: boolean;
         actorProfileV6: boolean;
+        actorRefV1: boolean;
+        actorRegistryV1: boolean;
     };
     updatedAt: number;
 }
 
 export const ACTOR_LEDGER_VERSION: number;
+export const ACTOR_REGISTRY_VERSION: number;
 export const ACTOR_LEDGER_MAX_ACTORS: number;
 export const ACTOR_LEDGER_MAX_RECEIPTS: number;
+export const ACTOR_LEDGER_MAX_ACTION_ATTEMPTS: number;
 
 export function emptyActorLedger(chatId?: string): ActorLedger;
+export function emptyActorRegistry(chatId?: string): ActorRegistry;
+export function normalizeActorRegistry(
+    value: unknown,
+    options?: { chatId?: string; actors?: unknown[]; migrateLegacy?: boolean },
+): ActorRegistry;
+export function actorRegistryDigest(value: unknown): string;
+export function actorRegistryMatchesLedger(
+    value: unknown,
+    expected?: { chatId?: string; digest?: string; actorIds?: string[] },
+): { ok: boolean; mismatches: string[] };
 export function normalizeActorLedger(
     value: unknown,
     options?: { chatId?: string; maxActors?: number; excludedActorNames?: string[] },
@@ -151,8 +221,24 @@ export function normalizeActorLedger(
 export function migrateActorLedgerFromContinuity(
     value: unknown,
     continuity: unknown,
-    options?: { excludedActorNames?: string[] },
+    options?: { excludedActorNames?: string[]; allowLegacyRegistration?: boolean },
 ): ActorLedger;
+export function replaceActorProfileBaselineInLedger(
+    value: unknown,
+    actorRef: { actorId: string; name?: string } | string,
+    baseline: unknown,
+    commitMeta: object,
+): {
+    ledger: ActorLedger;
+    committed: boolean;
+    reason?: string;
+    actorId?: string;
+    commit?: Record<string, unknown>;
+};
+export function actorProfileCommitMatchesLedger(
+    value: unknown,
+    expected: object,
+): { ok: boolean; mismatches: string[] };
 export function discoverActorsFromTurnSources(
     value: unknown,
     options?: {
@@ -165,9 +251,22 @@ export function discoverActorsFromTurnSources(
     },
 ): {
     ledger: ActorLedger;
+    candidates: ActorCandidate[];
     discovered: Array<{ actorId: string; name: string }>;
     touched: Array<{ actorId: string; name: string }>;
     location: string;
+};
+export function promoteActorCandidatesToRegistry(
+    value: unknown,
+    candidates: ActorCandidate[],
+    options?: { chatId?: string; turn?: number | null; excludedActorNames?: string[] },
+): {
+    ledger: ActorLedger;
+    promoted: Array<Record<string, unknown>>;
+    discovered: Array<{ actorId: string; name: string }>;
+    touched: Array<{ actorId: string; name: string }>;
+    quarantined: Array<{ candidateId: string; name: string; reason: string }>;
+    changed: boolean;
 };
 export function mergeActorProfilePatches(
     value: unknown,
@@ -246,12 +345,67 @@ export function prepareActorActionAttempts(
     options?: {
         turn?: number | null;
         playerNames?: string[];
+        sourceRef?: ActorLedgerSourceRef | null;
+        target?: Record<string, unknown> | null;
     },
 ): {
     ledger: ActorLedger;
     admittedCandidates: unknown[];
     attempts: unknown[];
     rejected: Array<{ actorId: string; reasons: string[] }>;
+};
+export function actorActionEligibility(value: unknown, actorId: string): {
+    ready: boolean;
+    reason: string;
+    actor: ActorLedgerActor | null;
+    actorRef: Record<string, unknown> | null;
+    migrationRequired?: boolean;
+    profileAuthority?: Record<string, unknown>;
+};
+export function recordActorActionAttempts(
+    value: unknown,
+    attempts: unknown[],
+    options?: { target?: Record<string, unknown> | null },
+): {
+    ledger: ActorLedger;
+    recorded: unknown[];
+    rejected: Array<{ actorId: string; attemptId: string; reason: string }>;
+};
+export function actorActionAttemptsMatchLedger(
+    value: unknown,
+    expected?: {
+        chatId?: string;
+        target?: Record<string, unknown> | null;
+        attempts?: unknown[];
+    },
+): { ok: boolean; mismatches: string[] };
+export function actorActionSettlementsMatchLedger(
+    value: unknown,
+    expected?: {
+        chatId?: string;
+        target?: Record<string, unknown> | null;
+        results?: unknown[];
+    },
+): { ok: boolean; mismatches: string[] };
+export function pendingActorActionAttempts(
+    value: unknown,
+    options?: { target?: Record<string, unknown> | null },
+): { ledger: ActorLedger; attempts: unknown[]; candidates: unknown[] };
+export function planActorAttemptRecovery(
+    value: unknown,
+    options?: {
+        target?: Record<string, unknown> | null;
+        scheduledActorIds?: string[];
+    },
+): {
+    ledger: ActorLedger;
+    attempts: unknown[];
+    candidates: unknown[];
+    mode: 'resume' | 'generate';
+    actorIds: string[];
+    recoveredActorIds: string[];
+    scheduledActorIds: string[];
+    shouldRunActorWorker: boolean;
 };
 export function settleActorActionCandidates(
     value: unknown,
@@ -260,6 +414,8 @@ export function settleActorActionCandidates(
         turn?: number | null;
         attemptedActorIds?: string[];
         playerNames?: string[];
+        attempts?: unknown[];
+        target?: Record<string, unknown> | null;
         worldAdjudications?: unknown[];
     },
 ): {
@@ -285,6 +441,8 @@ export function actorLedgerView(value: unknown): {
     version: number;
     turn: number;
     actorCount: number;
+    registryVersion: number;
+    registeredActorCount: number;
     activeCount: number;
     dormantCount: number;
     semanticProgressCount: number;
@@ -292,6 +450,7 @@ export function actorLedgerView(value: unknown): {
     stalledDueCount: number;
     consecutiveFailureCount: number;
     actors: Array<Omit<ActorLedgerActor, 'hidden'>>;
+    attempts: unknown[];
     receipts: unknown[];
     observationReceipts: unknown[];
     privateThoughtsExposed: false;

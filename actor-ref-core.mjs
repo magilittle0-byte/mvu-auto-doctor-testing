@@ -34,7 +34,26 @@ export function actorIdFromName(value) {
     return `NPC-${fingerprint(name.toLocaleLowerCase()).slice(0, 16)}`;
 }
 
-export function actorRefFrom(value, { actors = [] } = {}) {
+export function actorIdFromScopedIdentity(value, {
+    chatId = '',
+    identityKey = '',
+} = {}) {
+    const name = cleanText(value, 160);
+    if (!name) return '';
+    if (isActorId(name)) return name;
+    const scope = cleanText(chatId, 180);
+    const key = cleanText(identityKey, 300)
+        || `name:${name.toLocaleLowerCase('zh-CN')}`;
+    if (!scope) return actorIdFromName(name);
+    return `NPC-${fingerprint(`${scope}\u001f${key}`).slice(0, 16)}`;
+}
+
+export function actorRefFrom(value, {
+    actors = [],
+    chatId = '',
+    identityKey = '',
+    allowCreate = true,
+} = {}) {
     const byId = new Map();
     const byName = new Map();
     for (const actor of Array.isArray(actors) ? actors : []) {
@@ -47,7 +66,10 @@ export function actorRefFrom(value, { actors = [] } = {}) {
         }
         for (const candidate of [name, ...(actor?.identity?.aliases || [])]) {
             const key = cleanText(candidate, 160).toLocaleLowerCase();
-            if (key && !byName.has(key)) byName.set(key, actor);
+            if (!key) continue;
+            const matches = byName.get(key) || [];
+            if (!matches.some((entry) => entry === actor)) matches.push(actor);
+            byName.set(key, matches);
         }
     }
 
@@ -71,15 +93,19 @@ export function actorRefFrom(value, { actors = [] } = {}) {
         return null;
     }
 
-    const matched = actorId
-        ? byId.get(actorId.toLocaleLowerCase())
-        : byName.get(displayName.toLocaleLowerCase());
+    const nameMatches = displayName
+        ? byName.get(displayName.toLocaleLowerCase()) || []
+        : [];
+    const matchedById = actorId ? byId.get(actorId.toLocaleLowerCase()) : null;
+    const matched = matchedById
+        || (displayName && nameMatches.length === 1 ? nameMatches[0] : null);
+    if (!actorId && displayName && nameMatches.length > 1) return null;
     if (matched) {
         actorId = cleanText(matched.id);
         displayName = cleanText(matched.name, 160);
         aliases = cleanList([...aliases, ...(matched.identity?.aliases || [])]);
-    } else if (!actorId && displayName) {
-        actorId = actorIdFromName(displayName);
+    } else if (!actorId && displayName && allowCreate) {
+        actorId = actorIdFromScopedIdentity(displayName, { chatId, identityKey });
     }
     if (!actorId) return null;
     return {

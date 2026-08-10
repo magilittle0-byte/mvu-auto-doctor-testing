@@ -1,6 +1,12 @@
 export interface ActorShardCandidate {
     id: string;
     name: string;
+    actorRef: {
+        kind: 'actor_ref';
+        actorId: string;
+        displayName: string;
+        aliases: string[];
+    };
     score: number;
     locations: string[];
     knowledgeBasis: string[];

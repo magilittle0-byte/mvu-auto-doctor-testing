@@ -8,6 +8,19 @@ export type SovereigntyTaskStatus =
 
 export type SovereigntyHealthColor = 'green' | 'yellow' | 'orange' | 'red' | 'blue';
 
+export interface SovereigntySourceRef {
+    chatId: string;
+    logicalIndex: number;
+    messageId: string;
+    swipeId: number;
+    generation: number;
+    generationId: string;
+    generationType: string;
+    branchId: string;
+    contentHash: string;
+    scopeDigest: string;
+}
+
 export const SOVEREIGNTY_RUNTIME_VERSION: number;
 export const SOVEREIGNTY_CHECKPOINT_VERSION: number;
 export const SOVEREIGNTY_CHECKPOINT_BYTE_BUDGET: number;
@@ -16,9 +29,12 @@ export const SOVEREIGNTY_TASK_STATUSES: readonly SovereigntyTaskStatus[];
 export const SOVEREIGNTY_MODULES: readonly string[];
 export function emptySovereigntyRuntime(chatId?: string, options?: object): object;
 export function normalizeSovereigntyRuntime(value: unknown, options?: object): object;
-export function normalizeSovereigntySourceRef(value: unknown): object | null;
+export function normalizeSovereigntySourceRef(value: unknown): SovereigntySourceRef | null;
 export function sovereigntySourceKey(value: unknown): string;
+export function sovereigntySourceRefsMatch(left: unknown, right: unknown): boolean;
 export function observeSovereigntyTurn(value: unknown, options?: object): object;
+export function completeSovereigntyObservationGaps(value: unknown, options?: object): object;
+export function supersedeSovereigntyObservationSources(value: unknown, options?: object): object;
 export function recoverOrphanedSovereigntyTasks(value: unknown, options?: object): object;
 export function claimNextSovereigntyTask(value: unknown, options?: object): object;
 export function claimDueSovereigntyActorTasks(value: unknown, options?: object): object;

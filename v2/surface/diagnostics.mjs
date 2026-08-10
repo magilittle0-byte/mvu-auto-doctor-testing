@@ -186,6 +186,10 @@ export function createDoctorRuntimePresentation({
         .filter(Boolean));
     const pendingWorldActionCount = [...attemptedActionIds]
         .filter((actionId) => !worldSettledActionIds.has(actionId)).length;
+    const actionJournalOverCapacity = actorLedger?.actionAttemptBacklog?.status
+        === 'pending_over_capacity'
+        ? nonNegativeInteger(actorLedger?.actionAttemptBacklog?.pendingCount)
+        : 0;
 
     const receiptQueue = Array.isArray(continuity?.queue) ? continuity.queue : [];
     const receiptBatches = Array.isArray(continuity?.batches) ? continuity.batches : [];
@@ -253,18 +257,19 @@ export function createDoctorRuntimePresentation({
     ));
     addAlert('surface.status_error', 'red', surfaceErrorCount);
     addAlert('surface.status_warning', 'yellow', surfaceWarningCount);
-    addAlert('sovereignty.retryable_failed', 'orange', retryableFailed);
+    addAlert('sovereignty.retryable_failed', 'red', retryableFailed);
     addAlert('sovereignty.deferred', 'orange', deferred);
     addAlert('continuity.stalled', 'orange', stalledReceipts.length);
     addAlert('actor_shards.failed', 'orange', actorShards?.failed);
     addAlert('routes.poisoned', 'orange', routePoisoned);
     addAlert('pressure.over_cap', 'orange', worldPressure?.external?.overCap === true ? 1 : 0);
-    addAlert('identity.quarantine', 'yellow', identityQuarantine);
+    addAlert('identity.quarantine', 'red', identityQuarantine);
     addAlert('profiles.incomplete', 'yellow', profilesIncomplete);
     addAlert('profiles.optional_pending', 'yellow', profilesOptionalPending);
-    addAlert('sovereignty.cancelled_incomplete', 'yellow', cancelledIncomplete);
+    addAlert('sovereignty.cancelled_incomplete', 'red', cancelledIncomplete);
     addAlert('sovereignty.backlog', 'yellow', backlog);
     addAlert('actor_tasks.pending_world_adjudication', 'yellow', pendingWorldActionCount);
+    addAlert('actor_tasks.journal_over_capacity', 'red', actionJournalOverCapacity);
     addAlert('continuity.waiting_ack', 'yellow', waitingReceipts.length);
     addAlert('continuity.duplicate_waiting', 'yellow', duplicateWaitingReceipts);
     addAlert('routes.isolated', 'yellow', routeIsolated);

@@ -1,4 +1,5 @@
 import { normalizeActorRefs } from './actor-ref-core.mjs';
+import { normalizeActorActionTarget } from './actor-authority-core.mjs';
 
 const STAGES = new Set([
     'seeded',
@@ -715,12 +716,14 @@ export function normalizeSourceRef(value) {
     const messageId = cleanText(value.messageId, 180);
     const hash = cleanText(value.hash, 80);
     if (!chatId || !messageId || !hash) return null;
+    const target = normalizeActorActionTarget(value.target);
     return {
         chatId,
         messageId,
         index: boundedInteger(value.index, 0, Number.MAX_SAFE_INTEGER, 0),
         swipeId: boundedInteger(value.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
         hash,
+        ...(target ? { target } : {}),
     };
 }
 
@@ -944,26 +947,40 @@ function advanceThreadClock(thread, random) {
 function decayWorldClocks(world, turn, random) {
     const next = clone(world);
     const decay = {
-        notice: { base: 10, grace: 4, linear: 3, quadratic: 1 },
-        report: { base: 20, grace: 2, linear: 4, quadratic: 2 },
-        rumor: { base: 25, grace: 1, linear: 5, quadratic: 3 },
-        sentiment: { base: 8, grace: 5, linear: 2, quadratic: 1 },
+        notice: {
+            shelterTurns: 3, strengthBuffer: 3, cadence: 4,
+            openingRisk: 12, bandRisk: 14, withinBandRisk: 2,
+        },
+        report: {
+            shelterTurns: 1, strengthBuffer: 4, cadence: 5,
+            openingRisk: 15, bandRisk: 12, withinBandRisk: 2,
+        },
+        rumor: {
+            shelterTurns: 0, strengthBuffer: 5, cadence: 3,
+            openingRisk: 18, bandRisk: 13, withinBandRisk: 3,
+        },
+        sentiment: {
+            shelterTurns: 5, strengthBuffer: 2, cadence: 6,
+            openingRisk: 9, bandRisk: 10, withinBandRisk: 1,
+        },
     };
     next.winds = next.winds.filter((wind) => {
         const params = decay[wind.type] || decay.rumor;
         wind.quietTurns = Math.max(0, Number(wind.quietTurns) || 0) + 1;
-        if (wind.quietTurns <= params.grace) return true;
-        const n = wind.quietTurns - params.grace - 1;
-        const chance = Math.min(
-            95,
-            Math.max(
-                5,
-                params.base
-                    + params.linear * n
-                    + params.quadratic * n * n
-                    - (wind.strength - 1) * 10,
-            ),
-        );
+        const strength = Math.max(1, Math.min(5, Number(wind.strength) || 1));
+        const exposedTurns = wind.quietTurns
+            - params.shelterTurns
+            - (strength - 1) * params.strengthBuffer;
+        if (exposedTurns <= 0) return true;
+        const elapsed = exposedTurns - 1;
+        const band = Math.floor(elapsed / params.cadence);
+        const withinBand = elapsed % params.cadence;
+        const chance = Math.min(92, Math.max(
+            4,
+            params.openingRisk
+                + band * params.bandRisk
+                + withinBand * params.withinBandRisk,
+        ));
         return Math.floor(Math.max(0, Math.min(0.999999, random())) * 100) + 1
             > chance;
     });
@@ -2055,9 +2072,12 @@ export function attachChangedSourceRefs(previous, next, sourceRef) {
         const refs = Array.isArray(old?.sourceRefs) ? clone(old.sourceRefs) : [];
         const changed = !old || stableThreadContent(old) !== stableThreadContent(thread);
         if (changed && ref) {
-            const key = `${ref.chatId}:${ref.messageId}:${ref.swipeId}:${ref.hash}`;
+            const sourceKey = (item) => item.target
+                ? JSON.stringify(item.target)
+                : `${item.chatId}:${item.messageId}:${item.swipeId}:${item.hash}`;
+            const key = sourceKey(ref);
             const deduped = refs.filter((item) => (
-                `${item.chatId}:${item.messageId}:${item.swipeId}:${item.hash}` !== key
+                sourceKey(item) !== key
             ));
             deduped.push(ref);
             thread.sourceRefs = deduped.slice(-8);
@@ -2109,8 +2129,13 @@ export function buildContinuityRepairMessages(output, error, {
         .map((entry) => ({
             attemptId: String(entry.id || '').slice(0, 160),
             actorId: String(entry.actorId || '').slice(0, 120),
+            actorRef: clone(entry.actorRef || null),
+            target: clone(entry.target || null),
             route: String(entry.route || '').slice(0, 40),
             action: String(entry.action || '').slice(0, 700),
+            goal: String(entry.goal || '').slice(0, 500),
+            timeProposal: clone(entry.timeProposal || null),
+            location: clone(entry.location || null),
             playerTargeted: entry.playerTargeted === true,
             proposedStateChanges: (Array.isArray(entry.proposedStateChanges)
                 ? entry.proposedStateChanges
@@ -2118,6 +2143,24 @@ export function buildContinuityRepairMessages(output, error, {
             resourceCosts: (Array.isArray(entry.resourceCosts)
                 ? entry.resourceCosts
                 : []).slice(0, 12),
+            resourceBasis: (Array.isArray(entry.resourceBasis)
+                ? entry.resourceBasis
+                : []).slice(0, 12),
+            knowledgeRefs: (Array.isArray(entry.knowledgeRefs)
+                ? entry.knowledgeRefs
+                : []).slice(0, 24),
+            knownFacts: (Array.isArray(entry.knownFacts)
+                ? entry.knownFacts
+                : []).slice(0, 24),
+            knowledgeBasis: (Array.isArray(entry.knowledgeBasis)
+                ? entry.knowledgeBasis
+                : []).slice(0, 12),
+            expectedCost: String(entry.expectedCost || '').slice(0, 300),
+            expectedDuration: String(entry.expectedDuration || '').slice(0, 180),
+            expectedRisk: String(entry.expectedRisk || '').slice(0, 300),
+            expectedObservableConsequence: String(
+                entry.expectedObservableConsequence || '',
+            ).slice(0, 500),
             capabilityUsed: String(entry.capabilityUsed || '').slice(0, 160),
             evidence: (Array.isArray(entry.evidence) ? entry.evidence : []).slice(0, 16),
         }));
@@ -2127,12 +2170,12 @@ export function buildContinuityRepairMessages(output, error, {
             content: [
                 '你只负责把上一条活世界候选修成一个完整、可解析的增量 JSON 对象。',
                 '保留原候选中有依据的内容，不新增事实、不补造人物行动、不替玩家决定。',
-                `根对象只允许 turn、lastTick、actorProfiles、${attempts.length ? 'actionAdjudications、' : ''}threads、scenarioPlan、world。`,
+                `根对象只允许 turn、lastTick、${attempts.length ? 'actionAdjudications、' : ''}threads、scenarioPlan、world。`,
                 `turn与lastTick.turn都必须严格等于目标回合 ${targetTurn}。`,
                 'lastTick 必须包含 turn、action、threadId、reason；threadId 只能使用给定已有稳定ID或 WORLD，held 理由不少于8字。',
-                'actorProfiles、threads必须是数组；scenarioPlan、world必须是对象。缺少变化时使用空数组或空对象。',
+                'threads必须是数组；scenarioPlan、world必须是对象。缺少变化时使用空数组或空对象。',
                 attempts.length
-                    ? 'actionAdjudications 必须逐条覆盖给定 attemptId。人物只提出尝试；世界决定实际成本、耗时、风险和结果。settled/partial 只能写 knowledge、location、plan、resource、relationship、risk、condition、commitment、environment 状态，不得替玩家同意、行动、付费、移动或产生感受；后台结果必须给出以后可验证的 revealPath。'
+                    ? 'actionAdjudications 必须逐条覆盖给定 attemptId，并逐字段原样回传actorRef与target。人物只提出尝试；世界决定实际成本、耗时、风险和结果。actualResourceCosts只能取尝试已有resourceCosts且不得超量；visibility必须是public/private/observer_limited。settled/partial 只能写 knowledge、location、plan、resource、relationship、risk、condition、commitment、environment 状态，不得替玩家同意、行动、付费、移动或产生感受，也不得结算玩家关系；后台结果必须给出以后可验证的 revealPath。'
                     : '',
                 '只输出 JSON 对象，不要围栏、解释或前后文字。',
             ].join('\n'),
@@ -2152,14 +2195,20 @@ export function buildContinuityRepairMessages(output, error, {
                         threadId: allowedThreadIds[0] || 'WORLD',
                         reason: '不少于8字的具体依据',
                     },
-                    actorProfiles: [],
                     ...(attempts.length ? {
                         actionAdjudications: attempts.map((entry) => ({
                             attemptId: entry.attemptId,
-                            status: 'settled|partial|rejected|held',
+                            actorRef: entry.actorRef,
+                            target: entry.target,
+                            status: 'success|partial|failure|delayed|blocked',
                             risk: '具体风险',
                             costs: ['具体代价'],
+                            actualResourceCosts: [],
                             durationTurns: 1,
+                            visibility: 'private',
+                            observerActorIds: [],
+                            publicSummary: '',
+                            privateSummary: '私密结果可填',
                             resultSummary: '世界实际裁决结果',
                             observableConsequence: '可观察后果',
                             revealPath: '隐藏结果以后如何被发现',
@@ -2205,6 +2254,9 @@ export function parseContinuityOutput(output, options = {}) {
     }
     try {
         const parsed = JSON.parse(body.slice(start, end + 1));
+        if (Object.hasOwn(parsed, 'actorProfiles')) {
+            return { error: 'ContinuityState 包含已停用的人物档案写字段' };
+        }
         return {
             state: normalizeContinuityState(parsed, options),
             raw: clone(parsed),

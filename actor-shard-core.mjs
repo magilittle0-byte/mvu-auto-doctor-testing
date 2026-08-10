@@ -4,7 +4,11 @@ import {
     isActorId,
     normalizeActorRefs,
 } from './actor-ref-core.mjs';
-import { ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT } from './actor-profile-v6-core.mjs';
+import {
+    ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT,
+    actorProfileActionReadiness,
+} from './actor-profile-v6-core.mjs';
+import { actorRefsMatch } from './actor-authority-core.mjs';
 import { extractFirstBalancedJsonObject } from './sovereignty-runtime-core.mjs';
 
 export const ACTOR_SHARD_MAX_WORKERS = 5;
@@ -231,6 +235,23 @@ export function selectActorShardCandidates({
     const excludedNames = new Set(
         cleanList(excludedActorNames, 24, 160).map((item) => normalizedKey(item)),
     );
+    const registryRequired = Number(actorLedger?.actorRegistry?.version) >= 1;
+    if (!registryRequired) return [];
+    const registryEntries = Array.isArray(actorLedger?.actorRegistry?.entries)
+        ? actorLedger.actorRegistry.entries
+        : [];
+    const quarantineIds = new Set(
+        (Array.isArray(actorLedger?.identityQuarantine)
+            ? actorLedger.identityQuarantine
+            : [])
+            .flatMap((entry) => [entry?.id, entry?.actor?.id])
+            .map((entry) => cleanText(entry, 180))
+            .filter(Boolean),
+    );
+    const registeredActorIds = new Set(registryEntries
+        .filter((entry) => entry?.state === 'registered')
+        .map((entry) => cleanText(entry?.actorRef?.actorId, 180))
+        .filter(Boolean));
     const byActor = new Map();
     const scheduledIds = new Set(
         (Array.isArray(schedule?.selected) ? schedule.selected : [])
@@ -248,9 +269,24 @@ export function selectActorShardCandidates({
     for (const actor of Array.isArray(actorLedger?.actors) ? actorLedger.actors : []) {
         const id = cleanText(actor?.id, 180);
         const name = cleanText(actor?.name, 120);
+        const registryEntry = registryEntries.find((entry) => (
+            entry?.state === 'registered'
+            && cleanText(entry?.actorRef?.actorId, 180) === id
+        ));
+        const actorRef = {
+            kind: 'actor_ref',
+            actorId: id,
+            displayName: name,
+            aliases: cleanList(actor?.identity?.aliases, 12, 160),
+        };
         if (
             !id
             || !name
+            || !registeredActorIds.has(id)
+            || !registryEntry
+            || !actorRefsMatch(registryEntry.actorRef, actorRef)
+            || quarantineIds.has(id)
+            || !actorProfileActionReadiness(actor).ready
             || excludedNames.has(normalizedKey(name))
             || GROUP_NAME.test(name)
             || (scheduleProvided && !scheduledIds.has(id))
@@ -287,6 +323,7 @@ export function selectActorShardCandidates({
         byActor.set(id, {
             id,
             name,
+            actorRef: clone(registryEntry.actorRef),
             score: Number(scheduling?.score) || 0,
             slot: cleanText(scheduling?.slot, 40) || 'priority',
             scheduleReasons: cleanList(scheduling?.reasons, 8, 120),
@@ -344,10 +381,24 @@ export function selectActorShardCandidates({
             Array.isArray(thread.actorRefs) && thread.actorRefs.length
                 ? thread.actorRefs
                 : thread.actors,
-            { actors: actorLedger?.actors || [] },
+            {
+                actors: actorLedger?.actors || [],
+                chatId: actorLedger?.chatId || continuity?.chatId,
+                allowCreate: false,
+            },
         );
         for (const ref of actorRefs) {
-            const ledgerActor = (actorLedger?.actors || []).find((actor) => actor?.id === ref.actorId);
+            const ledgerActor = (actorLedger?.actors || []).find((actor) => (
+                actor?.id === ref.actorId
+                && registeredActorIds.has(actor.id)
+            ));
+            if (
+                !ledgerActor
+                || !byActor.has(ref.actorId)
+                ||
+                scheduleProvided
+                && (!ledgerActor || !scheduledIds.has(ledgerActor.id))
+            ) continue;
             const name = cleanText(ledgerActor?.name || ref.displayName || ref.aliases[0], 120);
             if (
                 !name
@@ -357,18 +408,8 @@ export function selectActorShardCandidates({
             ) continue;
             const id = ref.actorId || stableActorId(name);
             if (isActorId(name) && !ledgerActor) continue;
-            const current = byActor.get(id) || {
-                id,
-                name,
-                score: 0,
-                locations: [],
-                knowledgeBasis: [],
-                goals: [],
-                stimuli: [],
-                sourceThreads: [],
-                evidence: [],
-                causalChain: [],
-            };
+            const current = byActor.get(id);
+            if (!current) continue;
             current.score += score;
             current.locations.push(...cleanList(thread.locations, 4, 120));
             current.knowledgeBasis.push(...cleanList([

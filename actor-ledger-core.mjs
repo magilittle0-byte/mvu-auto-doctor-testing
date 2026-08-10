@@ -1,28 +1,44 @@
 import { fingerprint } from './core.mjs';
 import {
     actorIdFromName,
+    actorIdFromScopedIdentity,
     isActorId,
     normalizeActorRefs,
 } from './actor-ref-core.mjs';
 import {
+    ACTOR_PROFILE_V6_VERSION,
+    actorProfileActionReadiness,
+    actorProfileBaselineDigest,
     actorProfileReadyForAction,
     normalizeActorProfileV6,
 } from './actor-profile-v6-core.mjs';
 import {
+    actorActionTargetMatches,
     actorActionNarrativeInjection,
+    actorRefsMatch,
     adjudicateActorActionAttempt,
     createActorActionAttempt,
+    normalizeActorActionTarget,
+    validateActorActionAttempt,
+    validateWorldAdjudicationBatch,
     worldEventFromSettledActionReceipt,
 } from './actor-authority-core.mjs';
 
-export const ACTOR_LEDGER_VERSION = 6;
+export const ACTOR_LEDGER_VERSION = 8;
+export const ACTOR_REGISTRY_VERSION = 1;
 export const ACTOR_LEDGER_MAX_ACTORS = 96;
 export const ACTOR_LEDGER_MAX_RECEIPTS = 240;
+export const ACTOR_LEDGER_MAX_ACTION_ATTEMPTS = 120;
 
 const TIERS = new Set(['key', 'secondary', 'background']);
 const STATUSES = new Set(['active', 'dormant', 'departed', 'deceased', 'resolved']);
 const KNOWLEDGE_KINDS = new Set(['observed', 'reported', 'inferred']);
 const INTENTS = new Set(['execute', 'replan', 'wait']);
+const ACTOR_CANDIDATE_SOURCES = new Set([
+    'accepted_narrative',
+    'authority_input',
+    'mvu_anchor',
+]);
 const PRIVATE_NARRATION = /(?:心想|暗想|暗自|内心|心底|心理|秘密想|私下决定|未说出口|回忆起|玩家的秘密|玩家私密)/u;
 const PLAYER_SOVEREIGNTY = /(?:让|迫使|命令|说服|要求)(?:了)?玩家(?:接受|同意|服从|支付|交出|前往|离开|攻击|回答|承诺|决定)|玩家(?:接受了|同意了|服从了|支付了|交出了|前往了|离开了|攻击了|回答了|承诺了|决定了)/u;
 const GENERIC_WAIT = /^(?:等待|继续等待|暂时不动|按兵不动|保持现状|没有变化|暂无变化|无事发生|条件未成熟)[。.!！]?$/u;
@@ -120,6 +136,201 @@ function normalizeSourceRef(value) {
         branchId: cleanText(value.branchId, 180),
         hash,
     };
+}
+
+export function emptyActorRegistry(chatId = '') {
+    return {
+        version: ACTOR_REGISTRY_VERSION,
+        chatId: cleanText(chatId, 180),
+        entries: [],
+        updatedAt: 0,
+    };
+}
+
+function registrySourceRefs(value, chatId) {
+    const refs = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(value) ? value : []) {
+        const ref = normalizeSourceRef(raw);
+        if (!ref || (chatId && ref.chatId !== chatId)) continue;
+        const key = [
+            ref.chatId,
+            ref.messageId,
+            ref.swipeId,
+            ref.generation,
+            ref.branchId,
+            ref.hash,
+        ].join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        refs.push(ref);
+    }
+    return refs.slice(-24);
+}
+
+function registryEntryFromActor(actor, chatId, {
+    origin = 'legacy_persisted',
+    sourceRefs = [],
+    identityKeys = [],
+    registeredTurn = null,
+} = {}) {
+    const actorId = cleanText(actor?.id, 120);
+    const displayName = cleanText(actor?.name, 160);
+    if (!actorId || !displayName) return null;
+    const aliases = cleanList(actor?.identity?.aliases, 12, 160)
+        .filter((item) => item !== displayName && !isActorId(item));
+    return {
+        actorRef: {
+            kind: 'actor_ref',
+            actorId,
+            displayName,
+            aliases,
+        },
+        state: 'registered',
+        origin: cleanText(origin, 80) || 'legacy_persisted',
+        identityKeys: cleanList([
+            ...identityKeys,
+            `actor-id:${actorId.toLocaleLowerCase()}`,
+        ], 24, 300),
+        lifecycle: {
+            status: STATUSES.has(actor?.status) ? actor.status : 'active',
+            inactiveReason: ['sleep', 'absence', 'quiet'].includes(actor?.inactiveReason)
+                ? actor.inactiveReason
+                : '',
+        },
+        lineage: {
+            rootActorId: cleanText(actor?.lineage?.rootActorId, 120) || actorId,
+            currentForm: cleanText(actor?.lineage?.currentForm, 160) || displayName,
+            mergedActorIds: cleanList(actor?.lineage?.mergedActorIds, 24, 120),
+            forms: (Array.isArray(actor?.lineage?.forms) ? actor.lineage.forms : [])
+                .filter((item) => item && typeof item === 'object')
+                .map((item) => ({
+                    name: cleanText(item.name, 160),
+                    turn: integer(item.turn, 0, Number.MAX_SAFE_INTEGER, 0),
+                    evidence: cleanList(item.evidence, 8, 240),
+                }))
+                .filter((item) => item.name)
+                .slice(-12),
+        },
+        sourceRefs: registrySourceRefs(sourceRefs, chatId),
+        registeredTurn: integer(
+            registeredTurn,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            actor?.createdTurn || 0,
+        ),
+        updatedTurn: integer(
+            actor?.updatedTurn,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            actor?.createdTurn || 0,
+        ),
+    };
+}
+
+function normalizeRegistryEntry(value, chatId) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const rawRef = value.actorRef && typeof value.actorRef === 'object'
+        ? value.actorRef
+        : value;
+    const actorId = cleanText(rawRef.actorId || value.actorId, 120);
+    const displayName = cleanText(
+        rawRef.displayName || rawRef.name || value.displayName || value.name,
+        160,
+    );
+    if (!actorId || !displayName) return null;
+    const actor = {
+        id: actorId,
+        name: displayName,
+        identity: { aliases: rawRef.aliases || value.aliases },
+        status: value.lifecycle?.status || value.status,
+        inactiveReason: value.lifecycle?.inactiveReason || value.inactiveReason,
+        lineage: value.lineage,
+        createdTurn: value.registeredTurn,
+        updatedTurn: value.updatedTurn,
+    };
+    const entry = registryEntryFromActor(actor, chatId, {
+        origin: value.origin,
+        sourceRefs: value.sourceRefs,
+        identityKeys: value.identityKeys,
+        registeredTurn: value.registeredTurn,
+    });
+    if (!entry) return null;
+    entry.state = value.state === 'retired' ? 'retired' : 'registered';
+    return entry;
+}
+
+export function normalizeActorRegistry(value, {
+    chatId = '',
+    actors = [],
+    migrateLegacy = false,
+} = {}) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const expectedChatId = cleanText(chatId || source.chatId, 180);
+    const sourceChatId = cleanText(source.chatId, 180);
+    if (chatId && sourceChatId && cleanText(chatId, 180) !== sourceChatId) {
+        return emptyActorRegistry(chatId);
+    }
+    const entries = [];
+    const used = new Set();
+    for (const raw of Array.isArray(source.entries) ? source.entries : []) {
+        const entry = normalizeRegistryEntry(raw, expectedChatId);
+        if (!entry || used.has(entry.actorRef.actorId)) continue;
+        used.add(entry.actorRef.actorId);
+        entries.push(entry);
+    }
+    if (migrateLegacy && !entries.length) {
+        for (const actor of Array.isArray(actors) ? actors : []) {
+            const entry = registryEntryFromActor(actor, expectedChatId);
+            if (!entry || used.has(entry.actorRef.actorId)) continue;
+            used.add(entry.actorRef.actorId);
+            entries.push(entry);
+        }
+    }
+    return {
+        version: ACTOR_REGISTRY_VERSION,
+        chatId: expectedChatId,
+        entries: entries.slice(0, ACTOR_LEDGER_MAX_ACTORS),
+        updatedAt: integer(source.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+    };
+}
+
+export function actorRegistryDigest(value) {
+    const registry = normalizeActorRegistry(value, { chatId: value?.chatId });
+    const payload = {
+        version: registry.version,
+        chatId: registry.chatId,
+        entries: [...registry.entries]
+            .sort((left, right) => left.actorRef.actorId.localeCompare(right.actorRef.actorId))
+            .map((entry) => ({
+                actorRef: entry.actorRef,
+                state: entry.state,
+                origin: entry.origin,
+                identityKeys: [...entry.identityKeys].sort(),
+                lifecycle: entry.lifecycle,
+                lineage: entry.lineage,
+                sourceRefs: entry.sourceRefs,
+                registeredTurn: entry.registeredTurn,
+                updatedTurn: entry.updatedTurn,
+            })),
+    };
+    return `actor-registry-v1:${fingerprint(JSON.stringify(payload))}`;
+}
+
+export function actorRegistryMatchesLedger(value, expected = {}) {
+    const ledger = normalizeActorLedger(value, { chatId: expected.chatId || value?.chatId });
+    const mismatches = [];
+    if (expected.chatId && ledger.chatId !== expected.chatId) mismatches.push('chatId');
+    if (expected.digest && actorRegistryDigest(ledger.actorRegistry) !== expected.digest) {
+        mismatches.push('digest');
+    }
+    const registered = new Set(ledger.actorRegistry.entries
+        .filter((entry) => entry.state === 'registered')
+        .map((entry) => entry.actorRef.actorId));
+    for (const actorId of cleanList(expected.actorIds, ACTOR_LEDGER_MAX_ACTORS, 120)) {
+        if (!registered.has(actorId)) mismatches.push(`actorRef:${actorId}`);
+    }
+    return { ok: mismatches.length === 0, mismatches };
 }
 
 function normalizeKnowledge(value, index, turn) {
@@ -354,6 +565,10 @@ function normalizeActor(value, index, turn) {
                     ? item.route
                     : 'background_private',
                 attempt: cleanText(item.attempt, 700),
+                actorRef: item.actorRef && typeof item.actorRef === 'object'
+                    ? clone(item.actorRef)
+                    : null,
+                target: normalizeActorActionTarget(item.target),
                 resultStatus: cleanText(item.resultStatus, 80),
                 resultId: cleanText(item.resultId, 160),
                 visibility: cleanText(item.visibility, 80),
@@ -407,11 +622,20 @@ function normalizeReceipt(value) {
     if (!value || typeof value !== 'object') return null;
     const receiptId = cleanText(value.receiptId, 180);
     if (!receiptId) return null;
-    return {
+    const normalized = {
         ...clone(value),
         receiptId,
         actionId: cleanText(value.actionId, 160),
+        attemptId: cleanText(value.attemptId || value.actionId, 160),
         actorId: cleanText(value.actorId, 120),
+        actorRef: value.actorRef && typeof value.actorRef === 'object'
+            ? {
+                kind: 'actor_ref',
+                actorId: cleanText(value.actorRef.actorId || value.actorId, 120),
+                displayName: cleanText(value.actorRef.displayName, 160),
+                aliases: cleanList(value.actorRef.aliases, 12, 160),
+            }
+            : null,
         stage: ['planned', 'attempted', 'executed', 'world_settled', 'injected', 'response_settled']
             .includes(value.stage)
             ? value.stage
@@ -431,12 +655,136 @@ function normalizeReceipt(value) {
             ? {
                 chatId: cleanText(value.target.chatId, 180),
                 messageId: cleanText(value.target.messageId, 180),
+                logicalIndex: integer(
+                    value.target.logicalIndex ?? value.target.index,
+                    0,
+                    Number.MAX_SAFE_INTEGER,
+                    0,
+                ),
+                index: integer(
+                    value.target.logicalIndex ?? value.target.index,
+                    0,
+                    Number.MAX_SAFE_INTEGER,
+                    0,
+                ),
                 swipeId: integer(value.target.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
                 generation: integer(value.target.generation, 0, Number.MAX_SAFE_INTEGER, 0),
+                generationId: cleanText(value.target.generationId, 180),
+                generationType: cleanText(value.target.generationType, 80),
                 branchId: cleanText(value.target.branchId, 180),
-                hash: cleanText(value.target.hash, 100),
+                contentHash: cleanText(value.target.contentHash || value.target.hash, 120),
+                hash: cleanText(value.target.contentHash || value.target.hash, 120),
             }
             : null,
+    };
+    delete normalized.actionAttempt;
+    return normalized;
+}
+
+function actionAttemptPayload(value) {
+    const attempt = clone(value || {});
+    delete attempt.settlementEligible;
+    delete attempt.compatibilityOnly;
+    delete attempt.compatibilityReason;
+    delete attempt.migratedFromLegacyReceipt;
+    return attempt;
+}
+
+function actionAttemptFingerprint(value) {
+    return fingerprint(JSON.stringify(actionAttemptPayload(value)));
+}
+
+function normalizeActionAttempt(value, { migratedFromLegacyReceipt = false } = {}) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const attempt = actionAttemptPayload(value);
+    const id = cleanText(attempt.id, 160);
+    if (!id) return null;
+    const validation = validateActorActionAttempt(attempt);
+    const status = cleanText(attempt.status, 80) || 'attempted';
+    const terminal = !['attempted', 'pending_world'].includes(status);
+    const compatibilityOnly = migratedFromLegacyReceipt || !validation.valid;
+    return {
+        ...attempt,
+        id,
+        status,
+        settlementEligible: validation.valid && !terminal && !migratedFromLegacyReceipt,
+        compatibilityOnly,
+        compatibilityReason: migratedFromLegacyReceipt
+            ? 'action_attempt.legacy_embedded_receipt'
+            : validation.valid ? '' : validation.reason,
+        migratedFromLegacyReceipt,
+    };
+}
+
+function compactActionAttempts(values) {
+    const deduped = (Array.isArray(values) ? values : [])
+        .filter(Boolean)
+        .filter((entry, index, list) => (
+            list.findLastIndex((candidate) => candidate.id === entry.id) === index
+        ));
+    const pending = deduped.filter((entry) => (
+        ['attempted', 'pending_world', 'pending_player'].includes(entry.status)
+        && entry.compatibilityOnly !== true
+    ));
+    const terminal = deduped.filter((entry) => !pending.includes(entry));
+    // Pending recovery state is outside the terminal-history budget. Keeping
+    // a separate terminal window also guarantees a just-settled result remains
+    // available for durable readback even while pending work is over capacity.
+    const terminalOrder = new Map(
+        terminal.map((entry, index) => [entry.id, index]),
+    );
+    const retainedTerminal = [...terminal]
+        .sort((left, right) => (
+            Number(left.adjudicatedAt || left.worldAdjudicationResult?.settledAt || 0)
+            - Number(right.adjudicatedAt || right.worldAdjudicationResult?.settledAt || 0)
+            || (terminalOrder.get(left.id) ?? 0) - (terminalOrder.get(right.id) ?? 0)
+        ))
+        .slice(-ACTOR_LEDGER_MAX_ACTION_ATTEMPTS);
+    const retainedIds = new Set([
+        ...pending.map((entry) => entry.id),
+        ...retainedTerminal.map((entry) => entry.id),
+    ]);
+    return {
+        attempts: deduped.filter((entry) => retainedIds.has(entry.id)),
+        backlog: {
+            status: pending.length > ACTOR_LEDGER_MAX_ACTION_ATTEMPTS
+                ? 'pending_over_capacity'
+                : 'ok',
+            pendingCount: pending.length,
+            capacity: ACTOR_LEDGER_MAX_ACTION_ATTEMPTS,
+            terminalRetained: retainedTerminal.length,
+            terminalDropped: Math.max(0, terminal.length - retainedTerminal.length),
+            pendingDropped: 0,
+        },
+    };
+}
+
+function compactActionReceipts(values, attempts) {
+    const receipts = (Array.isArray(values) ? values : []).filter(Boolean);
+    const protectedAttemptIds = new Set((Array.isArray(attempts) ? attempts : [])
+        .filter((entry) => (
+            ['attempted', 'pending_world', 'pending_player'].includes(entry.status)
+            && entry.compatibilityOnly !== true
+        ))
+        .map((entry) => entry.id));
+    const isProtected = (receipt) => (
+        protectedAttemptIds.has(cleanText(receipt?.attemptId || receipt?.actionId, 160))
+        || receipt?.status === 'pending'
+        || receipt?.status === 'pending_world'
+        || receipt?.status === 'pending_player'
+    );
+    const protectedReceipts = receipts.filter(isProtected);
+    const terminalReceipts = receipts.filter((receipt) => !isProtected(receipt));
+    const retainedTerminal = terminalReceipts.slice(-ACTOR_LEDGER_MAX_RECEIPTS);
+    const retained = new Set([...protectedReceipts, ...retainedTerminal]);
+    return {
+        receipts: receipts.filter((entry) => retained.has(entry)),
+        protectedCount: protectedReceipts.length,
+        terminalDropped: Math.max(
+            0,
+            receipts.length - protectedReceipts.length - retainedTerminal.length,
+        ),
+        overCapacity: protectedReceipts.length > ACTOR_LEDGER_MAX_RECEIPTS,
     };
 }
 
@@ -446,7 +794,20 @@ export function emptyActorLedger(chatId = '') {
         chatId: cleanText(chatId, 180),
         turn: 0,
         actors: [],
+        actorRegistry: emptyActorRegistry(chatId),
         identityQuarantine: [],
+        actionAttempts: [],
+        actionAttemptBacklog: {
+            status: 'ok',
+            pendingCount: 0,
+            capacity: ACTOR_LEDGER_MAX_ACTION_ATTEMPTS,
+            terminalRetained: 0,
+            terminalDropped: 0,
+            pendingDropped: 0,
+            receiptProtectedCount: 0,
+            receiptTerminalDropped: 0,
+            receiptOverCapacity: false,
+        },
         actionReceipts: [],
         observationReceipts: [],
         migrations: {
@@ -456,7 +817,10 @@ export function emptyActorLedger(chatId = '') {
             actorLedgerV4: true,
             actorLedgerV5: true,
             actorLedgerV6: true,
+            actorLedgerV7: true,
+            actorLedgerV8: true,
             actorProfileV6: true,
+            actorRegistryV1: false,
         },
         updatedAt: 0,
     };
@@ -468,6 +832,11 @@ export function normalizeActorLedger(value, {
     excludedActorNames = [],
 } = {}) {
     const source = value && typeof value === 'object' ? value : {};
+    const expectedChatId = cleanText(chatId || source.chatId, 180);
+    const sourceChatId = cleanText(source.chatId, 180);
+    if (chatId && sourceChatId && cleanText(chatId, 180) !== sourceChatId) {
+        return emptyActorLedger(chatId);
+    }
     const turn = integer(source.turn, 0, Number.MAX_SAFE_INTEGER, 0);
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const actors = [];
@@ -481,6 +850,35 @@ export function normalizeActorLedger(value, {
             break;
         }
     }
+    const hasPersistedRegistry = source.migrations?.actorRegistryV1 === true
+        && source.actorRegistry
+        && typeof source.actorRegistry === 'object'
+        && !Array.isArray(source.actorRegistry)
+        && Number(source.actorRegistry.version) >= 1;
+    const actorRegistry = normalizeActorRegistry(source.actorRegistry, {
+        chatId: expectedChatId,
+        actors,
+        migrateLegacy: !hasPersistedRegistry,
+    });
+    const registeredIds = new Set(actorRegistry.entries
+        .filter((entry) => entry.state === 'registered')
+        .map((entry) => entry.actorRef.actorId));
+    const registeredActors = actors.filter((actor) => registeredIds.has(actor.id));
+    const actorById = new Map(registeredActors.map((actor) => [actor.id, actor]));
+    actorRegistry.entries = actorRegistry.entries
+        .filter((entry) => entry.state === 'retired' || actorById.has(entry.actorRef.actorId))
+        .map((entry) => {
+            const actor = actorById.get(entry.actorRef.actorId);
+            if (!actor) return entry;
+            const synced = registryEntryFromActor(actor, expectedChatId, {
+                origin: entry.origin,
+                sourceRefs: entry.sourceRefs,
+                identityKeys: entry.identityKeys,
+                registeredTurn: entry.registeredTurn,
+            });
+            synced.state = entry.state;
+            return synced;
+        });
     const identityQuarantine = (Array.isArray(source.identityQuarantine)
         ? source.identityQuarantine
         : [])
@@ -500,16 +898,50 @@ export function normalizeActorLedger(value, {
             list.findIndex((candidate) => candidate.id === entry.id) === index
         ))
         .slice(-64);
+    const rawReceipts = Array.isArray(source.actionReceipts) ? source.actionReceipts : [];
+    const normalizedAttemptById = new Map();
+    for (const rawAttempt of Array.isArray(source.actionAttempts) ? source.actionAttempts : []) {
+        const attempt = normalizeActionAttempt(rawAttempt);
+        if (attempt) normalizedAttemptById.set(attempt.id, attempt);
+    }
+    // v7 and early v8 receipts embedded the whole attempt. Lift those records
+    // into the single journal for history only, then discard the duplicate
+    // receipt payload. They can be displayed or migrated, but cannot settle.
+    for (const rawReceipt of rawReceipts) {
+        const embedded = rawReceipt?.actionAttempt;
+        const embeddedId = cleanText(embedded?.id || rawReceipt?.attemptId, 160);
+        if (!embeddedId || normalizedAttemptById.has(embeddedId)) continue;
+        const migrated = normalizeActionAttempt({
+            ...clone(embedded),
+            id: embeddedId,
+            status: rawReceipt?.status === 'pending_world'
+                ? 'legacy_pending'
+                : cleanText(rawReceipt?.status, 80) || cleanText(embedded?.status, 80),
+            outcome: cleanText(rawReceipt?.resultId, 160) || embedded?.outcome || null,
+        }, { migratedFromLegacyReceipt: true });
+        if (migrated) normalizedAttemptById.set(migrated.id, migrated);
+    }
+    const compactedAttempts = compactActionAttempts([...normalizedAttemptById.values()]);
+    const normalizedReceipts = rawReceipts.map(normalizeReceipt).filter(Boolean);
+    const compactedReceipts = compactActionReceipts(
+        normalizedReceipts,
+        compactedAttempts.attempts,
+    );
     return {
         version: ACTOR_LEDGER_VERSION,
-        chatId: cleanText(chatId || source.chatId, 180),
+        chatId: expectedChatId,
         turn,
-        actors,
+        actors: registeredActors,
+        actorRegistry,
         identityQuarantine,
-        actionReceipts: (Array.isArray(source.actionReceipts) ? source.actionReceipts : [])
-            .map(normalizeReceipt)
-            .filter(Boolean)
-            .slice(-ACTOR_LEDGER_MAX_RECEIPTS),
+        actionAttempts: compactedAttempts.attempts,
+        actionAttemptBacklog: {
+            ...compactedAttempts.backlog,
+            receiptProtectedCount: compactedReceipts.protectedCount,
+            receiptTerminalDropped: compactedReceipts.terminalDropped,
+            receiptOverCapacity: compactedReceipts.overCapacity,
+        },
+        actionReceipts: compactedReceipts.receipts,
         observationReceipts: (Array.isArray(source.observationReceipts)
             ? clone(source.observationReceipts)
             : []).slice(-120),
@@ -520,11 +952,142 @@ export function normalizeActorLedger(value, {
             actorLedgerV4: true,
             actorLedgerV5: true,
             actorLedgerV6: true,
+            actorLedgerV7: true,
+            actorLedgerV8: true,
             actorProfileV6: source.migrations?.actorProfileV6 === true,
             actorRefV1: source.migrations?.actorRefV1 === true,
+            actorRegistryV1: true,
         },
         updatedAt: integer(source.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
     };
+}
+
+export function replaceActorProfileBaselineInLedger(value, actorRef, baseline, commitMeta = {}) {
+    const ledger = normalizeActorLedger(value);
+    const originalLedger = clone(ledger);
+    const actorId = cleanText(actorRef?.actorId || actorRef, 120);
+    const actorName = cleanText(actorRef?.name, 160);
+    const actorIndex = ledger.actors.findIndex((actor) => actor.id === actorId);
+    if (actorIndex < 0) {
+        return { ledger, committed: false, reason: 'actor_profile.actor_ref_mismatch' };
+    }
+    const actor = clone(ledger.actors[actorIndex]);
+    if (
+        actorName
+        && actor.name !== actorName
+        && !actor.identity.aliases.includes(actorName)
+    ) {
+        return { ledger, committed: false, reason: 'actor_profile.actor_ref_mismatch' };
+    }
+    const profile = normalizeActorProfileV6(baseline, {
+        actorId: actor.id,
+        name: actor.name,
+        mode: baseline?.completionMode,
+    });
+    if (
+        profile.actorId !== actor.id
+        || profile.version !== ACTOR_PROFILE_V6_VERSION
+        || Number(commitMeta.schemaVersion || profile.version) !== profile.version
+        || (commitMeta.actorRef?.actorId && commitMeta.actorRef.actorId !== actor.id)
+        || (
+            commitMeta.actorRef?.name
+            && commitMeta.actorRef.name !== actor.name
+            && !actor.identity.aliases.includes(commitMeta.actorRef.name)
+        )
+        || !cleanText(commitMeta.commitId, 180)
+    ) {
+        return { ledger, committed: false, reason: 'actor_profile.commit_rejected' };
+    }
+    const digest = actorProfileBaselineDigest(profile);
+    if (commitMeta.digest && cleanText(commitMeta.digest, 120) !== digest) {
+        return { ledger, committed: false, reason: 'actor_profile.commit_rejected' };
+    }
+    profile.baselineCommit = {
+        schemaVersion: profile.version,
+        commitId: cleanText(commitMeta.commitId, 180),
+        actorRef: { actorId: actor.id, name: actor.name },
+        digest,
+        sourceRef: commitMeta.sourceRef && typeof commitMeta.sourceRef === 'object'
+            ? clone(commitMeta.sourceRef)
+            : null,
+        committedTurn: integer(
+            commitMeta.committedTurn,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            ledger.turn,
+        ),
+        readbackVerified: commitMeta.readbackVerified === true,
+        status: commitMeta.readbackVerified === true ? 'committed' : 'pending_readback',
+    };
+    profile.preparedForAction = commitMeta.readbackVerified === true;
+    profile.backgroundPending = !profile.preparedForAction;
+    actor.profileV6 = profile;
+
+    // Keep the established actor-ledger compatibility projection readable,
+    // but never write current goals, current plans, location, emotion or
+    // action history from the immutable baseline candidate.
+    const identity = profile.modules.identity.data || {};
+    const personality = profile.modules.personality.data || {};
+    actor.identity = {
+        ...actor.identity,
+        ...Object.fromEntries([
+            'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
+            'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
+        ].map((field) => [field, clone(identity[field])])),
+        ...Object.fromEntries([
+            'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
+            'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
+            'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
+        ].map((field) => [field, clone(personality[field])])),
+    };
+    actor.longTermGoals = clone(profile.modules.goals.data?.longTerm || []);
+    actor.relationships = clone(profile.modules.relationships.data?.entries || []);
+    actor.knowledge = clone(profile.modules.knowledge.data?.entries || []);
+    actor.resources = clone(profile.modules.resourcesCapabilities.data?.resources || []);
+    actor.capabilities = clone(profile.modules.resourcesCapabilities.data?.capabilities || []);
+    actor.updatedTurn = Math.max(actor.updatedTurn, profile.baselineCommit.committedTurn);
+    actor.version += 1;
+    ledger.actors[actorIndex] = actor;
+    const normalized = normalizeActorLedger(ledger, { chatId: ledger.chatId });
+    const committedActor = normalized.actors.find((entry) => entry.id === actor.id);
+    if (!actorProfileReadyForAction(committedActor)) {
+        return { ledger: originalLedger, committed: false, reason: 'actor_profile.commit_rejected' };
+    }
+    return {
+        ledger: normalized,
+        committed: true,
+        actorId: actor.id,
+        commit: clone(committedActor.profileV6.baselineCommit),
+    };
+}
+
+export function actorProfileCommitMatchesLedger(value, expected = {}) {
+    const ledger = normalizeActorLedger(value);
+    const actorId = cleanText(expected.actorRef?.actorId || expected.actorId, 120);
+    const actorName = cleanText(expected.actorRef?.name || expected.name, 160);
+    const actor = ledger.actors.find((entry) => entry.id === actorId);
+    if (!actor) return { ok: false, mismatches: ['actorRef'] };
+    const profile = normalizeActorProfileV6(actor.profileV6, {
+        actorId: actor.id,
+        name: actor.name,
+    });
+    const commit = profile.baselineCommit;
+    const mismatches = [];
+    if (commit?.actorRef?.actorId !== actorId) mismatches.push('actorRef');
+    if (
+        actorName
+        && (actor.name !== actorName || commit?.actorRef?.name !== actorName)
+    ) mismatches.push('actorRef.name');
+    if (profile.version !== Number(expected.schemaVersion)) mismatches.push('schemaVersion');
+    if (commit?.schemaVersion !== Number(expected.schemaVersion)) mismatches.push('commitSchemaVersion');
+    if (commit?.commitId !== cleanText(expected.commitId, 180)) mismatches.push('commitId');
+    const digest = actorProfileBaselineDigest(profile);
+    if (digest !== cleanText(expected.digest, 120)) mismatches.push('digest');
+    if (commit?.digest !== digest) mismatches.push('commitDigest');
+    if (commit?.readbackVerified !== true || commit?.status !== 'committed') {
+        mismatches.push('readbackVerified');
+    }
+    return { ok: mismatches.length === 0, mismatches };
 }
 
 function mergeEvidence(current, additions, limit = 24) {
@@ -842,6 +1405,7 @@ function mergeActorStimuli(current, additions, limit = 48) {
 
 export function migrateActorLedgerFromContinuity(value, continuity, {
     excludedActorNames = [],
+    allowLegacyRegistration = false,
 } = {}) {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = repairPollutedActorIdentities(normalizeActorLedger(value, {
@@ -852,9 +1416,10 @@ export function migrateActorLedgerFromContinuity(value, continuity, {
     const byName = new Map();
     for (const actor of ledger.actors) {
         const nameKey = actor.name.toLocaleLowerCase();
-        if (byName.has(nameKey)) continue;
         byId.set(actor.id, actor);
-        byName.set(nameKey, actor);
+        const matches = byName.get(nameKey) || [];
+        matches.push(actor);
+        byName.set(nameKey, matches);
     }
     for (const actor of byId.values()) {
         const migratedConstraints = actor.currentGoals.filter(
@@ -875,10 +1440,19 @@ export function migrateActorLedgerFromContinuity(value, continuity, {
             Array.isArray(thread?.actorRefs) && thread.actorRefs.length
                 ? thread.actorRefs
                 : thread?.actors,
-            { actors: [...byId.values()] },
+            {
+                actors: [...byId.values()],
+                chatId: ledger.chatId || continuity?.chatId,
+                allowCreate: allowLegacyRegistration === true,
+            },
         );
         for (const ref of actorRefs) {
             const existingById = byId.get(ref.actorId);
+            // Continuity is a world/event projection, not an ActorRegistry
+            // writer. Only the explicit legacy adapter may reconstruct actors
+            // from pre-Registry persisted continuity. Normal runtime can enrich
+            // an already registered ActorRef but cannot create one here.
+            if (!existingById && allowLegacyRegistration !== true) continue;
             const actorName = cleanText(
                 existingById?.name || ref.displayName || ref.aliases[0],
                 160,
@@ -904,7 +1478,9 @@ export function migrateActorLedgerFromContinuity(value, continuity, {
                     ...(thread?.sourceRefs || []).map((ref) => ref?.hash),
                 ], 8, 240),
             }));
-            const current = byId.get(id) || byName.get(nameKey) || normalizeActor({
+            const nameMatches = byName.get(nameKey) || [];
+            if (!byId.has(id) && nameMatches.length > 1) continue;
+            const current = byId.get(id) || nameMatches[0] || normalizeActor({
                 id,
                 name: actorName,
                 tier: 'background',
@@ -956,19 +1532,38 @@ export function migrateActorLedgerFromContinuity(value, continuity, {
                 }
             }
             byId.set(current.id, current);
-            byName.set(nameKey, current);
+            const updatedNameMatches = byName.get(nameKey) || [];
+            if (!updatedNameMatches.some((actor) => actor.id === current.id)) {
+                updatedNameMatches.push(current);
+                byName.set(nameKey, updatedNameMatches);
+            }
         }
     }
+    const migratedActors = [...byId.values()];
+    const actorRegistry = clone(ledger.actorRegistry);
+    for (const actor of migratedActors) {
+        if (actorRegistry.entries.some((entry) => entry.actorRef.actorId === actor.id)) continue;
+        const entry = registryEntryFromActor(actor, ledger.chatId || continuity?.chatId, {
+            origin: 'legacy_continuity_migration',
+            identityKeys: [`continuity:${actor.id.toLocaleLowerCase()}`],
+            registeredTurn: turn,
+        });
+        if (entry) actorRegistry.entries.push(entry);
+    }
+    actorRegistry.updatedAt = Date.now();
     return normalizeActorLedger({
         ...ledger,
         turn: Math.max(ledger.turn, turn),
-        actors: [...byId.values()],
+        actors: migratedActors,
+        actorRegistry,
         migrations: {
             ...ledger.migrations,
             continuityV5: true,
             actorLedgerV5: true,
             actorLedgerV6: true,
+            actorLedgerV7: true,
             actorRefV1: true,
+            actorRegistryV1: true,
         },
         updatedAt: Date.now(),
     }, {
@@ -997,7 +1592,13 @@ function sceneActorFacts(userText) {
         if (!presentMatch?.[1]) continue;
         for (const raw of presentMatch[1].split(/[,，、;；]/u)) {
             const name = cleanText(raw.replace(/\([^)]*\)|（[^）]*）/gu, ''), 160);
-            if (name) facts.push({ name, evidence: `在场：${cleanText(raw, 180)}`, present: true });
+            if (name) facts.push({
+                name,
+                evidence: `在场：${cleanText(raw, 180)}`,
+                present: true,
+                sourceKind: 'authority_input',
+                identityKey: `scene:${name.toLocaleLowerCase('zh-CN')}`,
+            });
         }
     }
     return { facts, location };
@@ -1020,6 +1621,8 @@ function actActorFacts(userText) {
                 name,
                 evidence: cleanText(`### ${name} ${section}`, 300),
                 present: true,
+                sourceKind: 'authority_input',
+                identityKey: `act:${name.toLocaleLowerCase('zh-CN')}`,
             });
         }
     }
@@ -1028,15 +1631,36 @@ function actActorFacts(userText) {
 
 function structuredContentActorFacts(content) {
     const facts = [];
-    const patterns = [
+    for (const match of String(content || '').matchAll(
         /【(?:敌方|人物|角色|NPC)(?:档案|资料|状态)[·・:：]\s*([^】]+)】/giu,
-        /<(?:actor|npc)\b[^>]*(?:name|id)=["']([^"']+)["'][^>]*>/giu,
-    ];
-    for (const pattern of patterns) {
-        for (const match of String(content || '').matchAll(pattern)) {
-            const name = cleanText(match[1], 160);
-            if (name) facts.push({ name, evidence: cleanText(match[0], 300), present: true });
-        }
+    )) {
+        const name = cleanText(match[1], 160);
+        if (name) facts.push({
+            name,
+            evidence: cleanText(match[0], 300),
+            present: true,
+            sourceKind: 'accepted_narrative',
+            identityKey: `narrative-name:${name.toLocaleLowerCase('zh-CN')}`,
+        });
+    }
+    for (const match of String(content || '').matchAll(/<(?:actor|npc)\b([^>]*)>/giu)) {
+        const attributes = Object.fromEntries([...String(match[1] || '').matchAll(
+            /([\w-]+)\s*=\s*["']([^"']+)["']/gu,
+        )].map((attribute) => [attribute[1].toLocaleLowerCase(), cleanText(attribute[2], 180)]));
+        const rawId = cleanText(attributes.id || attributes['actor-id'], 120);
+        const name = cleanText(attributes.name || attributes['display-name'] || rawId, 160);
+        if (!name) continue;
+        facts.push({
+            name,
+            explicitActorId: isActorId(rawId) ? rawId : '',
+            identityDisambiguated: Boolean(rawId),
+            evidence: cleanText(match[0], 300),
+            present: true,
+            sourceKind: 'accepted_narrative',
+            identityKey: rawId
+                ? `narrative-id:${rawId.toLocaleLowerCase()}`
+                : `narrative-name:${name.toLocaleLowerCase('zh-CN')}`,
+        });
     }
     return facts;
 }
@@ -1085,65 +1709,285 @@ export function discoverActorsFromTurnSources(value, {
             name,
             evidence: `MVU人物锚点：${cleanText(name, 160)}`,
             present: false,
+            sourceKind: 'mvu_anchor',
+            identityKey: `mvu:${cleanText(name, 160).toLocaleLowerCase('zh-CN')}`,
         })),
     ];
-    const discovered = [];
-    const touched = [];
-    for (const fact of facts) {
+    const candidates = [];
+    const byKey = new Map();
+    for (const [factIndex, fact] of facts.entries()) {
         const actorName = canonicalActorName(fact.name, knownActorNames, ledger.actors);
         if (!isActorName(actorName, excluded)) continue;
-        const nameKey = actorName.toLocaleLowerCase();
-        let actor = ledger.actors.find((entry) => (
-            entry.name.toLocaleLowerCase() === nameKey
-            || entry.identity.aliases.some((alias) => alias.toLocaleLowerCase() === nameKey)
-        ));
+        const sourceKind = ACTOR_CANDIDATE_SOURCES.has(fact.sourceKind)
+            ? fact.sourceKind
+            : 'accepted_narrative';
+        const identityKey = cleanText(fact.identityKey, 300)
+            || `${sourceKind}:${actorName.toLocaleLowerCase('zh-CN')}`;
         const evidence = cleanList([
             fact.evidence,
             ref ? `${ref.messageId}:${ref.swipeId}:${ref.generation}:${ref.hash}` : '',
         ], 8, 300);
-        if (!actor) {
-            actor = normalizeActor({
-                id: stableActorId(actorName),
-                name: actorName,
-                tier: fact.present ? 'secondary' : 'background',
-                status: 'active',
-                location: {
-                    name: scene.location || 'unknown',
-                    sinceTurn: currentTurn,
-                    evidence,
-                },
-                evidence,
-                nextActionTurn: currentTurn + 1,
-                createdTurn: currentTurn,
-                updatedTurn: currentTurn,
-            }, ledger.actors.length, currentTurn);
-            ledger.actors.push(actor);
-            discovered.push({ actorId: actor.id, name: actor.name });
-        } else {
-            actor.evidence = mergeEvidence(actor.evidence, evidence);
-            if (fact.present && scene.location) {
-                actor.location = {
-                    name: scene.location,
-                    sinceTurn: currentTurn,
-                    evidence: mergeEvidence(actor.location?.evidence, evidence, 12),
-                };
-            }
-            actor.updatedTurn = Math.max(actor.updatedTurn, currentTurn);
-            touched.push({ actorId: actor.id, name: actor.name });
+        const candidateKey = `${cleanText(fact.explicitActorId, 120)}|${identityKey}`;
+        const current = byKey.get(candidateKey);
+        if (current) {
+            current.evidence = mergeEvidence(current.evidence, evidence, 12);
+            current.present ||= fact.present === true;
+            if (!current.location && fact.present) current.location = scene.location;
+            continue;
         }
-    }
-    if (discovered.length) {
-        ledger.observationReceipts.push({
-            receiptId: `actor-discovery:${fingerprint(JSON.stringify([
-                ref?.chatId || ledger.chatId,
+        const candidate = {
+            kind: 'actor_candidate',
+            state: 'discovered',
+            candidateId: `AC-${fingerprint(JSON.stringify([
+                ledger.chatId,
                 ref?.messageId || '',
                 ref?.swipeId || 0,
                 ref?.generation || 0,
                 ref?.hash || '',
+                identityKey,
+                factIndex,
+            ])).slice(0, 18)}`,
+            chatId: ref?.chatId || ledger.chatId,
+            name: actorName,
+            explicitActorId: cleanText(fact.explicitActorId, 120),
+            identityDisambiguated: fact.identityDisambiguated === true,
+            identityKey,
+            sourceKind,
+            sourceRef: ref,
+            evidence,
+            present: fact.present === true,
+            location: fact.present ? scene.location : '',
+            discoveredTurn: currentTurn,
+        };
+        byKey.set(candidateKey, candidate);
+        candidates.push(candidate);
+    }
+    return {
+        ledger,
+        candidates,
+        discovered: [],
+        touched: [],
+        location: scene.location,
+    };
+}
+
+function registryEntriesForName(registry, name) {
+    const key = cleanText(name, 160).toLocaleLowerCase('zh-CN');
+    if (!key) return [];
+    return registry.entries.filter((entry) => (
+        entry.state === 'registered'
+        && [entry.actorRef.displayName, ...entry.actorRef.aliases]
+            .some((candidate) => cleanText(candidate, 160).toLocaleLowerCase('zh-CN') === key)
+    ));
+}
+
+function registryEntriesForIdentityKey(registry, identityKey) {
+    const key = cleanText(identityKey, 300).toLocaleLowerCase('zh-CN');
+    if (!key) return [];
+    return registry.entries.filter((entry) => entry.state === 'registered'
+        && entry.identityKeys.some((candidate) => (
+            cleanText(candidate, 300).toLocaleLowerCase('zh-CN') === key
+        )));
+}
+
+export function promoteActorCandidatesToRegistry(value, candidates, {
+    chatId = '',
+    turn = null,
+    excludedActorNames = [],
+} = {}) {
+    const sourceChatId = cleanText(value?.chatId, 180);
+    const expectedChatId = cleanText(chatId || sourceChatId, 180);
+    if (sourceChatId && expectedChatId && sourceChatId !== expectedChatId) {
+        return {
+            ledger: normalizeActorLedger(value),
+            promoted: [],
+            discovered: [],
+            touched: [],
+            quarantined: (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
+                candidateId: cleanText(candidate?.candidateId, 120),
+                name: cleanText(candidate?.name, 160),
+                reason: 'actor_candidate.chat_mismatch',
+            })),
+            changed: false,
+        };
+    }
+    const excluded = normalizeExcludedActorNames(excludedActorNames);
+    const ledger = normalizeActorLedger(value, {
+        chatId: expectedChatId,
+        excludedActorNames,
+    });
+    const currentTurn = turn === null || turn === undefined
+        ? ledger.turn
+        : integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
+    const registry = clone(ledger.actorRegistry);
+    const promoted = [];
+    const discovered = [];
+    const touched = [];
+    const quarantined = [];
+    const candidateList = Array.isArray(candidates) ? candidates : [];
+    const beforeDigest = actorRegistryDigest(registry);
+    for (const raw of candidateList) {
+        const candidateId = cleanText(raw?.candidateId, 120);
+        const name = cleanText(raw?.name, 160);
+        const candidateChatId = cleanText(raw?.chatId, 180);
+        const identityKey = cleanText(raw?.identityKey, 300);
+        const sourceKind = cleanText(raw?.sourceKind, 80);
+        const sourceRef = normalizeSourceRef(raw?.sourceRef);
+        const explicitActorId = cleanText(raw?.explicitActorId, 120);
+        const reject = (reason) => quarantined.push({ candidateId, name, reason });
+        if (raw?.kind !== 'actor_candidate' || raw?.state !== 'discovered') {
+            reject('actor_candidate.invalid_state');
+            continue;
+        }
+        if (
+            !expectedChatId
+            || candidateChatId !== expectedChatId
+            || !sourceRef
+            || sourceRef.chatId !== expectedChatId
+        ) {
+            reject('actor_candidate.chat_mismatch');
+            continue;
+        }
+        if (!ACTOR_CANDIDATE_SOURCES.has(sourceKind) || !identityKey) {
+            reject('actor_candidate.source_invalid');
+            continue;
+        }
+        if (!isActorName(name, excluded) || isActorId(name)) {
+            reject('actor_candidate.identity_quarantined');
+            continue;
+        }
+        if (explicitActorId && !isActorId(explicitActorId)) {
+            reject('actor_candidate.actor_ref_invalid');
+            continue;
+        }
+        let entry = explicitActorId
+            ? registry.entries.find((item) => item.actorRef.actorId === explicitActorId)
+            : null;
+        let boundBy = entry ? 'actor_ref' : '';
+        if (!entry && !explicitActorId && raw?.identityDisambiguated !== true) {
+            const identityMatches = registryEntriesForIdentityKey(registry, identityKey);
+            if (identityMatches.length > 1) {
+                reject('actor_candidate.identity_ambiguous');
+                continue;
+            }
+            if (identityMatches.length === 1) {
+                [entry] = identityMatches;
+                boundBy = 'identity_key';
+            }
+        }
+        if (!entry && !explicitActorId) {
+            const nameMatches = registryEntriesForName(registry, name);
+            if (nameMatches.length > 1) {
+                reject('actor_candidate.name_ambiguous');
+                continue;
+            }
+            if (nameMatches.length === 1) {
+                [entry] = nameMatches;
+                boundBy = 'unique_name';
+            }
+        }
+        let actor = null;
+        let created = false;
+        if (!entry) {
+            const actorId = explicitActorId || actorIdFromScopedIdentity(name, {
+                chatId: expectedChatId,
+                identityKey,
+            });
+            if (!actorId || registry.entries.some((item) => item.actorRef.actorId === actorId)) {
+                reject('actor_candidate.actor_ref_collision');
+                continue;
+            }
+            actor = normalizeActor({
+                id: actorId,
+                name,
+                tier: raw.present === true ? 'secondary' : 'background',
+                status: 'active',
+                location: {
+                    name: cleanText(raw.location, 180) || 'unknown',
+                    sinceTurn: currentTurn,
+                    evidence: cleanList(raw.evidence, 12, 300),
+                },
+                evidence: cleanList(raw.evidence, 12, 300),
+                nextActionTurn: currentTurn + 1,
+                createdTurn: currentTurn,
+                updatedTurn: currentTurn,
+            }, ledger.actors.length, currentTurn);
+            entry = registryEntryFromActor(actor, expectedChatId, {
+                origin: sourceKind,
+                sourceRefs: [sourceRef],
+                identityKeys: [identityKey],
+                registeredTurn: currentTurn,
+            });
+            registry.entries.push(entry);
+            ledger.actors.push(actor);
+            created = true;
+            boundBy = explicitActorId ? 'actor_ref_created' : 'scoped_identity_created';
+        } else {
+            actor = ledger.actors.find((item) => item.id === entry.actorRef.actorId);
+            if (!actor) {
+                reject('actor_candidate.registry_actor_missing');
+                continue;
+            }
+            entry.identityKeys = cleanList([
+                ...entry.identityKeys,
+                identityKey,
+            ], 24, 300);
+            entry.sourceRefs = registrySourceRefs([
+                ...entry.sourceRefs,
+                sourceRef,
+            ], expectedChatId);
+            if (
+                name !== entry.actorRef.displayName
+                && !entry.actorRef.aliases.includes(name)
+            ) {
+                entry.actorRef.aliases = cleanList([
+                    ...entry.actorRef.aliases,
+                    name,
+                ], 12, 160);
+                actor.identity.aliases = cleanList([
+                    ...actor.identity.aliases,
+                    name,
+                ], 12, 160);
+            }
+            actor.evidence = mergeEvidence(actor.evidence, raw.evidence, 24);
+            if (raw.present === true && raw.location) {
+                actor.location = {
+                    name: cleanText(raw.location, 180),
+                    sinceTurn: currentTurn,
+                    evidence: mergeEvidence(actor.location?.evidence, raw.evidence, 12),
+                };
+            }
+            actor.updatedTurn = Math.max(actor.updatedTurn, currentTurn);
+        }
+        const actorRef = clone(entry.actorRef);
+        promoted.push({
+            candidateId,
+            actorRef,
+            state: 'registered',
+            created,
+            boundBy,
+        });
+        (created ? discovered : touched).push({
+            actorId: actorRef.actorId,
+            name: actorRef.displayName,
+        });
+    }
+    registry.updatedAt = Date.now();
+    ledger.actorRegistry = registry;
+    if (discovered.length) {
+        const sourceRefs = promoted
+            .map((item) => candidateList
+                .find((candidate) => candidate.candidateId === item.candidateId)?.sourceRef)
+            .map(normalizeSourceRef)
+            .filter(Boolean);
+        ledger.observationReceipts.push({
+            receiptId: `actor-registration:${fingerprint(JSON.stringify([
+                expectedChatId,
+                currentTurn,
                 discovered.map((entry) => entry.actorId),
             ])).slice(0, 18)}`,
-            kind: 'actor-discovery',
-            sourceRef: ref,
+            kind: 'actor-registration',
+            sourceRef: sourceRefs.at(-1) || null,
             actorIds: discovered.map((entry) => entry.actorId),
             settledAt: Date.now(),
         });
@@ -1151,11 +1995,18 @@ export function discoverActorsFromTurnSources(value, {
     }
     ledger.turn = Math.max(ledger.turn, currentTurn);
     ledger.updatedAt = Date.now();
+    ledger.migrations.actorRegistryV1 = true;
+    const normalized = normalizeActorLedger(ledger, {
+        chatId: expectedChatId,
+        excludedActorNames,
+    });
     return {
-        ledger: normalizeActorLedger(ledger, { excludedActorNames }),
+        ledger: normalized,
+        promoted,
         discovered,
         touched,
-        location: scene.location,
+        quarantined,
+        changed: beforeDigest !== actorRegistryDigest(normalized.actorRegistry),
     };
 }
 
@@ -1617,8 +2468,17 @@ export function mergeActorIdentityReveal(value, {
     actor.updatedTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
     actor.version += 1;
     ledger.actors[index] = actor;
+    if (!ledger.actorRegistry.entries.some((entry) => entry.actorRef.actorId === actor.id)) {
+        const entry = registryEntryFromActor(actor, ledger.chatId, {
+            origin: 'identity_reveal_restore',
+            identityKeys: [`actor-id:${actor.id.toLocaleLowerCase()}`],
+            registeredTurn: actor.createdTurn,
+        });
+        if (entry) ledger.actorRegistry.entries.push(entry);
+    }
+    ledger.actorRegistry.updatedAt = Date.now();
     ledger.updatedAt = Date.now();
-    return ledger;
+    return normalizeActorLedger(ledger, { chatId: ledger.chatId });
 }
 
 function observableStatements(content) {
@@ -1663,10 +2523,34 @@ export function reconcileActorIdentityRevealsFromAcceptedContent(value, {
     const body = String(content ?? '')
         .replace(/^[\s\S]*?<content\b[^>]*>/iu, '')
         .replace(/<\/content>[\s\S]*$/iu, '');
+    for (const match of body.matchAll(/<(?:actor|npc)\b([^>]*)>/giu)) {
+        const attributes = Object.fromEntries([...String(match[1] || '').matchAll(
+            /([\w-]+)\s*=\s*["']([^"']+)["']/gu,
+        )].map((attribute) => [attribute[1].toLocaleLowerCase(), cleanText(attribute[2], 180)]));
+        const actorId = cleanText(attributes.id || attributes['actor-id'], 120);
+        const revealedName = cleanText(attributes.name || attributes['display-name'], 160);
+        if (!isActorId(actorId) || !isActorName(revealedName)) continue;
+        ledger = mergeActorIdentityReveal(ledger, {
+            actorId,
+            revealedName,
+            evidence: [`${ref.messageId}:${ref.swipeId}:${ref.generation}:${ref.hash}`],
+            turn: ledger.turn,
+        });
+    }
+    const nameOwners = new Map();
+    for (const actor of ledger.actors) {
+        for (const name of actorNames(actor)) {
+            const key = name.toLocaleLowerCase('zh-CN');
+            const owners = nameOwners.get(key) || new Set();
+            owners.add(actor.id);
+            nameOwners.set(key, owners);
+        }
+    }
     for (const current of [...ledger.actors]) {
         const names = actorNames(current);
         let revealedName = '';
         for (const alias of names) {
+            if ((nameOwners.get(alias.toLocaleLowerCase('zh-CN'))?.size || 0) !== 1) continue;
             const pattern = new RegExp(
                 `${escapePattern(alias)}[^。！？.!?]{0,48}`
                 + '(?:真实身份(?:是|为)|原来(?:就是|是)|自称(?:为)?)'
@@ -1728,9 +2612,19 @@ export function reconcileActorMutationLineageFromAcceptedContent(value, {
     const body = String(content ?? '')
         .replace(/^[\s\S]*?<content\b[^>]*>/iu, '')
         .replace(/<\/content>[\s\S]*$/iu, '');
+    const nameOwners = new Map();
+    for (const actor of ledger.actors) {
+        for (const name of actorNames(actor)) {
+            const key = name.toLocaleLowerCase('zh-CN');
+            const owners = nameOwners.get(key) || new Set();
+            owners.add(actor.id);
+            nameOwners.set(key, owners);
+        }
+    }
     for (const actor of [...ledger.actors]) {
         let form = '';
         for (const name of actorNames(actor)) {
+            if ((nameOwners.get(name.toLocaleLowerCase('zh-CN'))?.size || 0) !== 1) continue;
             const pattern = new RegExp(
                 `${escapePattern(name)}[^。！？.!?]{0,36}`
                 + '(?:异变为|变异成|转化为|进化为|蜕变为)'
@@ -1990,12 +2884,79 @@ function schedulingScore(actor, turn) {
     return { score, reasons, semanticAge, starved };
 }
 
+function actorActionEligibilityInLedger(ledger, actorId) {
+    const id = cleanText(actorId, 120);
+    const actor = ledger.actors.find((entry) => entry.id === id);
+    if (!actor || !isActorId(id)) {
+        return { ready: false, reason: 'actor_action.actor_missing', actor: null, actorRef: null };
+    }
+    const registryEntry = (ledger.actorRegistry?.entries || []).find((entry) => (
+        entry?.state === 'registered'
+        && entry?.actorRef?.actorId === id
+    ));
+    if (!registryEntry) {
+        return { ready: false, reason: 'actor_action.not_registered', actor, actorRef: null };
+    }
+    const actorRef = {
+        kind: 'actor_ref',
+        actorId: actor.id,
+        displayName: actor.name,
+        aliases: cleanList(actor.identity?.aliases, 12, 160),
+    };
+    if (!actorRefsMatch(registryEntry.actorRef, actorRef)) {
+        return {
+            ready: false,
+            reason: 'actor_action.registry_ref_mismatch',
+            actor,
+            actorRef: clone(registryEntry.actorRef),
+        };
+    }
+    const quarantined = (ledger.identityQuarantine || []).some((entry) => (
+        cleanText(entry?.id, 120) === id
+        || cleanText(entry?.actor?.id, 120) === id
+    ));
+    if (quarantined) {
+        return {
+            ready: false,
+            reason: 'actor_action.identity_quarantined',
+            actor,
+            actorRef: clone(registryEntry.actorRef),
+        };
+    }
+    const profileReadiness = actorProfileActionReadiness(actor);
+    if (!profileReadiness.ready) {
+        return {
+            ready: false,
+            reason: profileReadiness.reason,
+            actor,
+            actorRef: clone(registryEntry.actorRef),
+            migrationRequired: profileReadiness.migrationRequired === true,
+        };
+    }
+    return {
+        ready: true,
+        reason: '',
+        actor,
+        actorRef: clone(registryEntry.actorRef),
+        profileAuthority: {
+            schemaVersion: actor.profileV6.baselineCommit.schemaVersion,
+            commitId: actor.profileV6.baselineCommit.commitId,
+            digest: actor.profileV6.baselineCommit.digest,
+            readbackVerified: true,
+        },
+    };
+}
+
+export function actorActionEligibility(value, actorId) {
+    return actorActionEligibilityInLedger(normalizeActorLedger(value), actorId);
+}
+
 export function scheduleActorTurns(value, {
     turn = null,
     maxActors = 2,
     explorationSlots = 1,
     excludedActorNames = [],
-    requireProfileReady = false,
+    requireProfileReady: _requireProfileReady = true,
 } = {}) {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = normalizeActorLedger(value, { excludedActorNames });
@@ -2008,7 +2969,7 @@ export function scheduleActorTurns(value, {
     const scored = ledger.actors
         .filter((actor) => (
             isActorName(actor.name, excluded)
-            && (!requireProfileReady || actorProfileReadyForAction(actor))
+            && actorActionEligibilityInLedger(ledger, actor.id).ready
         ))
         .map((actor) => ({ actor, ...schedulingScore(actor, currentTurn) }))
         .filter((item) => Number.isFinite(item.score))
@@ -2069,6 +3030,16 @@ export function actorActionCandidatesFromShard(value, proposals, {
     return (Array.isArray(proposals) ? proposals : []).map((proposal) => {
         const actor = byId.get(cleanText(proposal?.actorId, 120));
         if (!actor) return clone(proposal);
+        const eligibility = actorActionEligibilityInLedger(ledger, actor.id);
+        if (!eligibility.ready) {
+            return {
+                ...clone(proposal),
+                actorId: actor.id,
+                actorName: actor.name,
+                actorRef: clone(eligibility.actorRef),
+                actionGateFailure: eligibility.reason,
+            };
+        }
         const action = cleanText(proposal?.candidateAction, 700);
         const declaredIntent = cleanText(proposal?.intent, 40);
         const wait = declaredIntent === 'wait';
@@ -2092,6 +3063,8 @@ export function actorActionCandidatesFromShard(value, proposals, {
         return {
             actorId: actor.id,
             actorName: actor.name,
+            actorRef: clone(eligibility.actorRef),
+            profileAuthority: clone(eligibility.profileAuthority),
             intent: wait ? 'wait' : replan ? 'replan' : 'execute',
             time: { turn: currentTurn, window: cleanText(proposal?.time, 160) || 'now' },
             location: {
@@ -2113,6 +3086,7 @@ export function actorActionCandidatesFromShard(value, proposals, {
                 summary: cleanText(item?.summary, 500),
             })).filter((item) => item.kind && item.summary),
             knowledgeRefs,
+            knowledgeBasis: cleanList(proposal?.knowledgeBasis, 12, 500),
             resourceCosts: (Array.isArray(proposal?.resourceCosts)
                 ? proposal.resourceCosts
                 : []).map((item) => ({
@@ -2131,10 +3105,13 @@ export function actorActionCandidatesFromShard(value, proposals, {
                 }
                 : null,
             planUpdate: cleanText(proposal?.currentGoal, 500),
+            currentGoal: cleanText(proposal?.currentGoal, 500),
             waitCondition: wait
                 ? cleanText(proposal?.waitCondition, 500) || action
                 : '',
             evidence: evidence.length ? evidence : actor.evidence.slice(0, 1),
+            sourceThreads: cleanList(proposal?.sourceThreads, 12, 120),
+            causalChain: cleanList(proposal?.causalChain, 16, 160),
         };
     });
 }
@@ -2199,11 +3176,25 @@ export function mergeActorWorldEventsIntoContinuity(continuity, worldEvents) {
     return state;
 }
 
-function validateCandidate(actor, candidate, turn) {
+function registeredActorRef(ledger, actor) {
+    const actorId = cleanText(actor?.id, 120);
+    const entry = ledger?.actorRegistry?.entries?.find((candidate) => (
+        candidate?.state === 'registered'
+        && cleanText(candidate?.actorRef?.actorId, 120) === actorId
+    ));
+    if (!entry || cleanText(entry.actorRef?.displayName, 160) !== cleanText(actor?.name, 160)) {
+        return null;
+    }
+    return clone(entry.actorRef);
+}
+
+function validateCandidate(ledger, actor, candidate, turn) {
     const reasons = [];
     if (!actor || cleanText(candidate?.actorId, 120) !== actor.id) {
         return ['actor-identity-mismatch'];
     }
+    if (!registeredActorRef(ledger, actor)) reasons.push('actor-ref-not-registered');
+    if (!actorProfileReadyForAction(actor)) reasons.push('actor-profile-not-ready');
     if (
         !['active', 'dormant'].includes(actor.status)
         || (actor.status === 'dormant' && actor.inactiveReason === 'sleep')
@@ -2326,36 +3317,313 @@ function updateTier(actor) {
 export function prepareActorActionAttempts(value, candidates, {
     turn = null,
     playerNames = [],
+    sourceRef = null,
+    target = null,
 } = {}) {
     const ledger = normalizeActorLedger(value);
     const currentTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
     const byId = new Map(ledger.actors.map((item) => [item.id, item]));
+    const strictTarget = normalizeActorActionTarget(target || sourceRef);
     const attempts = [];
     const admittedCandidates = [];
     const rejected = [];
     for (const raw of Array.isArray(candidates) ? candidates : []) {
         const candidate = clone(raw);
         const actor = byId.get(cleanText(candidate?.actorId, 120));
-        const reasons = validateCandidate(actor, candidate, currentTurn);
+        const eligibility = actorActionEligibilityInLedger(
+            ledger,
+            cleanText(candidate?.actorId, 120),
+        );
+        const reasons = [
+            ...validateCandidate(ledger, actor, candidate, currentTurn),
+            ...(eligibility.ready ? [] : [eligibility.reason]),
+            ...(candidate?.actionGateFailure ? [cleanText(candidate.actionGateFailure, 160)] : []),
+            ...(!strictTarget ? ['actor_attempt.target_missing'] : []),
+        ].filter(Boolean);
         if (reasons.length) {
-            rejected.push({ actorId: cleanText(candidate?.actorId, 120), reasons });
+            rejected.push({
+                actorId: cleanText(candidate?.actorId, 120),
+                phase: 'admission',
+                worldAdjudicated: false,
+                reasons: [...new Set(reasons)],
+            });
             continue;
         }
+        candidate.actorRef = clone(eligibility.actorRef);
+        candidate.profileAuthority = clone(eligibility.profileAuthority);
         const attempt = createActorActionAttempt(candidate, {
             actor,
             turn: currentTurn,
+            actorRef: eligibility.actorRef,
+            sourceRef: strictTarget,
+            target: strictTarget,
             playerNames,
         });
+        attempt.candidateSnapshot = clone(candidate);
+        const attemptValidation = validateActorActionAttempt(attempt);
+        if (!attemptValidation.valid) {
+            rejected.push({
+                actorId: actor.id,
+                phase: 'admission',
+                worldAdjudicated: false,
+                reasons: [attemptValidation.reason],
+            });
+            continue;
+        }
         attempts.push(attempt);
         admittedCandidates.push({ ...candidate, attemptId: attempt.id });
     }
     return { ledger, attempts, admittedCandidates, rejected };
 }
 
+export function recordActorActionAttempts(value, attempts, {
+    target = null,
+} = {}) {
+    const ledger = normalizeActorLedger(value);
+    const expectedTarget = normalizeActorActionTarget(target);
+    const recorded = [];
+    const rejected = [];
+    const existingByAttempt = new Map(ledger.actionAttempts
+        .map((attempt) => [attempt.id, attempt]));
+    for (const raw of Array.isArray(attempts) ? attempts : []) {
+        const attempt = clone(raw);
+        const actor = ledger.actors.find((entry) => entry.id === cleanText(attempt?.actorId, 120));
+        const actorRef = registeredActorRef(ledger, actor);
+        const attemptTarget = normalizeActorActionTarget(attempt?.target || attempt?.sourceRef);
+        const fail = (reason) => rejected.push({
+            actorId: cleanText(attempt?.actorId, 120),
+            attemptId: cleanText(attempt?.id, 160),
+            reason,
+        });
+        const validation = validateActorActionAttempt(attempt);
+        const eligibility = actorActionEligibilityInLedger(ledger, attempt?.actorId);
+        if (
+            !validation.valid
+            || !attempt?.id
+            || !actor
+            || !actorRef
+            || !eligibility.ready
+            || !actorRefsMatch(actorRef, attempt?.actorRef)
+        ) {
+            fail(validation.valid
+                ? eligibility.reason || 'action_attempt.actor_ref_mismatch'
+                : validation.reason);
+            continue;
+        }
+        if (
+            !attemptTarget
+            || (expectedTarget && !actorActionTargetMatches(attemptTarget, expectedTarget))
+            || attemptTarget.chatId !== ledger.chatId
+        ) {
+            fail('action_attempt.target_mismatch');
+            continue;
+        }
+        const existing = existingByAttempt.get(attempt.id);
+        if (existing) {
+            if (
+                existing.actorId !== actor.id
+                || !actorRefsMatch(existing.actorRef, actorRef)
+                || !actorActionTargetMatches(existing.target, attemptTarget)
+                || actionAttemptFingerprint(existing) !== actionAttemptFingerprint(attempt)
+            ) {
+                fail('action_attempt.persisted_collision');
+                continue;
+            }
+            const existingReceipt = ledger.actionReceipts.find((receipt) => (
+                receipt.stage === 'attempted'
+                && receipt.attemptId === attempt.id
+                && receipt.status === 'pending_world'
+            ));
+            if (
+                !existingReceipt
+                || !actorRefsMatch(existingReceipt.actorRef, actorRef)
+                || !actorActionTargetMatches(existingReceipt.target, attemptTarget)
+            ) {
+                fail('action_attempt.receipt_missing');
+                continue;
+            }
+            recorded.push(attempt);
+            continue;
+        }
+        const receipt = stageReceipt(attempt.id, actor.id, 'attempted', attempt.turn, {
+            attemptId: attempt.id,
+            actorRef,
+            target: attemptTarget,
+            summary: cleanText(attempt.action, 700),
+            route: attempt.route,
+            status: 'pending_world',
+            worldAdjudicated: false,
+            semanticProgress: false,
+            playerActionSettled: false,
+            playerConsentSettled: false,
+            playerFeelingSettled: false,
+        });
+        ledger.actionReceipts.push(receipt);
+        ledger.actionAttempts.push(normalizeActionAttempt(attempt));
+        existingByAttempt.set(attempt.id, attempt);
+        recorded.push(attempt);
+    }
+    const compactedAttempts = compactActionAttempts(ledger.actionAttempts);
+    const compactedReceipts = compactActionReceipts(
+        ledger.actionReceipts,
+        compactedAttempts.attempts,
+    );
+    ledger.actionAttempts = compactedAttempts.attempts;
+    ledger.actionReceipts = compactedReceipts.receipts;
+    ledger.actionAttemptBacklog = {
+        ...compactedAttempts.backlog,
+        receiptProtectedCount: compactedReceipts.protectedCount,
+        receiptTerminalDropped: compactedReceipts.terminalDropped,
+        receiptOverCapacity: compactedReceipts.overCapacity,
+    };
+    if (recorded.length) ledger.updatedAt = Date.now();
+    return { ledger, recorded, rejected };
+}
+
+export function actorActionAttemptsMatchLedger(value, expected = {}) {
+    const ledger = normalizeActorLedger(value, { chatId: expected.chatId || value?.chatId });
+    const target = normalizeActorActionTarget(expected.target);
+    const mismatches = [];
+    for (const attempt of Array.isArray(expected.attempts) ? expected.attempts : []) {
+        const receipt = ledger.actionReceipts.find((entry) => (
+            entry.stage === 'attempted'
+            && entry.attemptId === attempt?.id
+            && entry.status === 'pending_world'
+        ));
+        const journaledAttempt = ledger.actionAttempts.find((entry) => (
+            entry.id === attempt?.id && entry.settlementEligible === true
+        ));
+        if (!receipt || !journaledAttempt) {
+            mismatches.push(`attempt:${cleanText(attempt?.id, 160)}`);
+            continue;
+        }
+        if (
+            receipt.actorId !== cleanText(attempt?.actorId, 120)
+            || !actorRefsMatch(receipt.actorRef, attempt?.actorRef)
+            || !actorRefsMatch(journaledAttempt.actorRef, attempt?.actorRef)
+            || !actorActionTargetMatches(receipt.target, attempt?.target)
+            || (target && !actorActionTargetMatches(receipt.target, target))
+            || actionAttemptFingerprint(journaledAttempt) !== actionAttemptFingerprint(attempt)
+        ) mismatches.push(`binding:${cleanText(attempt?.id, 160)}`);
+    }
+    return { ok: mismatches.length === 0, mismatches };
+}
+
+export function actorActionSettlementsMatchLedger(value, expected = {}) {
+    const ledger = normalizeActorLedger(value, { chatId: expected.chatId || value?.chatId });
+    const target = normalizeActorActionTarget(expected.target);
+    const mismatches = [];
+    for (const result of Array.isArray(expected.results) ? expected.results : []) {
+        const journaledAttempt = ledger.actionAttempts.find((entry) => (
+            entry.id === cleanText(result?.attemptId, 160)
+        ));
+        const attemptReceipt = ledger.actionReceipts.find((entry) => (
+            entry.stage === 'attempted'
+            && entry.attemptId === cleanText(result?.attemptId, 160)
+        ));
+        if (!journaledAttempt || !attemptReceipt) {
+            mismatches.push(`settlement:${cleanText(result?.attemptId, 160)}`);
+            continue;
+        }
+        const expectedReceiptStatus = result?.status === 'pending_player'
+            ? 'pending_player'
+            : 'adjudicated';
+        if (
+            journaledAttempt.status !== result?.status
+            || journaledAttempt.outcome !== result?.id
+            || journaledAttempt.settlementEligible === true
+            || fingerprint(JSON.stringify(journaledAttempt.worldAdjudicationResult))
+                !== fingerprint(JSON.stringify(result))
+            || attemptReceipt.status !== expectedReceiptStatus
+            || attemptReceipt.resultId !== result?.id
+            || attemptReceipt.worldAdjudicated !== true
+            || !actorRefsMatch(journaledAttempt.actorRef, result?.actorRef)
+            || !actorRefsMatch(attemptReceipt.actorRef, result?.actorRef)
+            || !actorActionTargetMatches(journaledAttempt.target, target)
+            || !actorActionTargetMatches(attemptReceipt.target, target)
+        ) mismatches.push(`binding:${cleanText(result?.attemptId, 160)}`);
+    }
+    return { ok: mismatches.length === 0, mismatches };
+}
+
+export function pendingActorActionAttempts(value, {
+    target = null,
+} = {}) {
+    const ledger = normalizeActorLedger(value);
+    const expectedTarget = normalizeActorActionTarget(target);
+    if (!expectedTarget) return { ledger, attempts: [], candidates: [] };
+    const attempts = [];
+    const candidates = [];
+    for (const journaledAttempt of ledger.actionAttempts) {
+        const receipt = ledger.actionReceipts.find((entry) => (
+            entry.stage === 'attempted'
+            && entry.status === 'pending_world'
+            && entry.attemptId === journaledAttempt.id
+        ));
+        if (
+            !receipt
+            || journaledAttempt.settlementEligible !== true
+            || (expectedTarget && !actorActionTargetMatches(receipt.target, expectedTarget))
+        ) continue;
+        const attempt = actionAttemptPayload(journaledAttempt);
+        const candidate = clone(attempt.candidateSnapshot);
+        const actor = ledger.actors.find((entry) => entry.id === attempt.actorId);
+        const actorRef = registeredActorRef(ledger, actor);
+        if (
+            !candidate
+            || typeof candidate !== 'object'
+            || Array.isArray(candidate)
+            || !actor
+            || !actorRef
+            || !actorActionEligibilityInLedger(ledger, actor.id).ready
+            || !actorRefsMatch(actorRef, attempt.actorRef)
+            || !actorRefsMatch(receipt.actorRef, attempt.actorRef)
+            || !actorActionTargetMatches(journaledAttempt.target, receipt.target)
+        ) continue;
+        attempts.push(attempt);
+        candidates.push({ ...candidate, attemptId: attempt.id });
+    }
+    return { ledger, attempts, candidates };
+}
+
+export function planActorAttemptRecovery(value, {
+    target = null,
+    scheduledActorIds = [],
+} = {}) {
+    const recovered = pendingActorActionAttempts(value, { target });
+    const resumesPersistedAttempts = recovered.attempts.length > 0;
+    const recoveredActorIds = [...new Set(
+        recovered.attempts
+            .map((attempt) => cleanText(attempt?.actorId, 120))
+            .filter((actorId) => (
+                isActorId(actorId)
+                && actorActionEligibilityInLedger(recovered.ledger, actorId).ready
+            )),
+    )];
+    const generatedActorIds = [...new Set(
+        cleanList(scheduledActorIds, ACTOR_LEDGER_MAX_ACTORS, 120)
+            .filter((actorId) => (
+                isActorId(actorId)
+                && actorActionEligibilityInLedger(recovered.ledger, actorId).ready
+            )),
+    )];
+    const actorIds = resumesPersistedAttempts ? recoveredActorIds : generatedActorIds;
+    return {
+        ...recovered,
+        mode: resumesPersistedAttempts ? 'resume' : 'generate',
+        actorIds,
+        recoveredActorIds,
+        scheduledActorIds: generatedActorIds,
+        shouldRunActorWorker: !resumesPersistedAttempts && actorIds.length > 0,
+    };
+}
+
 export function settleActorActionCandidates(value, candidates, {
     turn = null,
     attemptedActorIds = [],
     playerNames = [],
+    attempts: suppliedAttempts = [],
+    target = null,
     worldAdjudications = [],
 } = {}) {
     const ledger = normalizeActorLedger(value);
@@ -2368,28 +3636,105 @@ export function settleActorActionCandidates(value, candidates, {
     const attempts = [];
     const results = [];
     const pendingWorld = [];
+    const expectedTarget = normalizeActorActionTarget(target);
+    const suppliedAttemptById = new Map(
+        (Array.isArray(suppliedAttempts) ? suppliedAttempts : [])
+            .map((attempt) => [cleanText(attempt?.id, 160), clone(attempt)])
+            .filter(([attemptId]) => attemptId),
+    );
+    const adjudicationBatch = validateWorldAdjudicationBatch(
+        worldAdjudications,
+        suppliedAttempts,
+    );
     const adjudicationByAttempt = new Map(
-        (Array.isArray(worldAdjudications) ? worldAdjudications : [])
+        (adjudicationBatch.valid ? adjudicationBatch.decisions : [])
             .map((entry) => [cleanText(entry?.attemptId, 160), entry])
             .filter(([attemptId]) => attemptId),
     );
     const semanticAcceptedIds = new Set();
     for (const raw of Array.isArray(candidates) ? candidates : []) {
-        const candidate = clone(raw);
-        const actor = byId.get(cleanText(candidate?.actorId, 120));
-        const reasons = validateCandidate(actor, candidate, currentTurn);
-        if (reasons.length) {
+        const requestedAttemptId = cleanText(raw?.attemptId, 160);
+        const attempt = suppliedAttemptById.get(requestedAttemptId) || null;
+        if (!attempt) {
             rejected.push({
-                actorId: cleanText(candidate?.actorId, 120),
-                reasons,
+                actorId: cleanText(raw?.actorId, 120),
+                phase: 'settlement_admission',
+                worldAdjudicated: false,
+                reasons: ['action-attempt-missing'],
             });
             continue;
         }
-        const attempt = createActorActionAttempt(candidate, {
-            actor,
-            turn: currentTurn,
-            playerNames,
-        });
+        const candidate = clone(attempt.candidateSnapshot);
+        const actor = byId.get(cleanText(attempt?.actorId, 120));
+        const eligibility = actorActionEligibilityInLedger(
+            ledger,
+            cleanText(attempt?.actorId, 120),
+        );
+        const reasons = [
+            ...validateCandidate(ledger, actor, candidate, currentTurn),
+            ...(eligibility.ready ? [] : [eligibility.reason]),
+            ...(!expectedTarget ? ['action-attempt-target-missing'] : []),
+            ...(
+                cleanText(raw?.actorId, 120) !== cleanText(attempt?.actorId, 120)
+                || requestedAttemptId !== cleanText(attempt?.id, 160)
+                    ? ['action-attempt-request-mismatch']
+                    : []
+            ),
+        ].filter(Boolean);
+        if (reasons.length) {
+            rejected.push({
+                actorId: cleanText(attempt?.actorId, 120),
+                phase: 'settlement_admission',
+                worldAdjudicated: false,
+                reasons: [...new Set(reasons)],
+            });
+            continue;
+        }
+        const attemptValidation = validateActorActionAttempt(attempt);
+        if (
+            !attemptValidation.valid
+            || !actorRefsMatch(attempt.actorRef, eligibility.actorRef)
+            || cleanText(attempt.actorId, 120) !== actor.id
+            || cleanText(attempt.action, 700) !== cleanText(candidate.action, 700)
+            || integer(attempt.turn, 0, Number.MAX_SAFE_INTEGER, -1) !== currentTurn
+        ) {
+            rejected.push({
+                actorId: actor.id,
+                phase: 'settlement_admission',
+                worldAdjudicated: false,
+                reasons: [attemptValidation.valid
+                    ? 'action-attempt-mismatch'
+                    : attemptValidation.reason],
+            });
+            continue;
+        }
+        const persistedAttemptReceipt = ledger.actionReceipts.find((receipt) => (
+            receipt.stage === 'attempted'
+            && receipt.status === 'pending_world'
+            && receipt.attemptId === attempt.id
+        ));
+        const journaledAttempt = ledger.actionAttempts.find((entry) => (
+            entry.id === attempt.id && entry.settlementEligible === true
+        ));
+        if (
+            !actorActionTargetMatches(attempt.target, expectedTarget)
+            || !persistedAttemptReceipt
+            || !journaledAttempt
+            || !actorRefsMatch(persistedAttemptReceipt.actorRef, eligibility.actorRef)
+            || !actorRefsMatch(journaledAttempt.actorRef, eligibility.actorRef)
+            || !actorActionTargetMatches(persistedAttemptReceipt.target, expectedTarget)
+            || !actorActionTargetMatches(journaledAttempt.target, expectedTarget)
+            || actionAttemptFingerprint(journaledAttempt)
+                !== actionAttemptFingerprint(attempt)
+        ) {
+            rejected.push({
+                actorId: actor.id,
+                phase: 'settlement_admission',
+                worldAdjudicated: false,
+                reasons: ['action-attempt-not-persisted'],
+            });
+            continue;
+        }
         const adjudicated = adjudicateActorActionAttempt(attempt, {
             actor,
             risk: candidate.contact ? 'contact' : 'ordinary',
@@ -2413,32 +3758,38 @@ export function settleActorActionCandidates(value, candidates, {
         }
         const next = clone(actor);
         next.lastAttemptTurn = currentTurn;
-        const stimulusDecisionById = new Map(
-            (Array.isArray(candidate.stimulusDecisions) ? candidate.stimulusDecisions : [])
-                .map((entry) => [cleanText(entry?.stimulusId, 180), entry])
-                .filter(([id]) => id),
-        );
-        next.stimuli = next.stimuli.map((stimulus) => {
-            const decision = stimulusDecisionById.get(stimulus.id);
-            if (!decision) return stimulus;
-            return {
-                ...stimulus,
-                status: ['adopted', 'ignored', 'misread', 'used', 'opposed']
-                    .includes(decision.decision)
-                    ? decision.decision
-                    : stimulus.status,
-                decidedTurn: currentTurn,
-                decisionReason: cleanText(decision.reason, 300),
-            };
-        });
-        if (result.status === 'settled') {
+        const appliesWorldResult = ['settled', 'partial'].includes(result.status)
+            && result.worldAdjudicated === true;
+        if (appliesWorldResult) {
+            const stimulusDecisionById = new Map(
+                (Array.isArray(candidate.stimulusDecisions) ? candidate.stimulusDecisions : [])
+                    .map((entry) => [cleanText(entry?.stimulusId, 180), entry])
+                    .filter(([id]) => id),
+            );
+            next.stimuli = next.stimuli.map((stimulus) => {
+                const decision = stimulusDecisionById.get(stimulus.id);
+                if (!decision) return stimulus;
+                return {
+                    ...stimulus,
+                    status: ['adopted', 'ignored', 'misread', 'used', 'opposed']
+                        .includes(decision.decision)
+                        ? decision.decision
+                        : stimulus.status,
+                    decidedTurn: currentTurn,
+                    decisionReason: cleanText(decision.reason, 300),
+                };
+            });
             for (const cost of result.resourceCosts) {
                 const resource = next.resources.find(
                     (item) => item.id === cleanText(cost.resourceId, 100),
                 );
                 if (resource) resource.amount -= number(cost.amount, 0, resource.amount, 0);
             }
-            if (candidate.intent === 'execute' && candidate.location.to !== next.location.name) {
+            if (
+                result.appliedStateChanges.some((change) => change.kind === 'location')
+                && candidate.intent === 'execute'
+                && candidate.location.to !== next.location.name
+            ) {
                 next.location = {
                     name: cleanText(candidate.location.to, 180),
                     sinceTurn: currentTurn + integer(candidate.location.travelTurns, 0, 10_000, 0),
@@ -2446,10 +3797,6 @@ export function settleActorActionCandidates(value, candidates, {
                 };
             }
         }
-        const planUpdate = cleanText(candidate.planUpdate, 500);
-        if (planUpdate) next.plan.summary = planUpdate;
-        if (candidate.intent === 'wait') next.plan.status = 'blocked';
-        else if (candidate.intent === 'replan') next.plan.status = 'active';
         const stateChanges = (Array.isArray(result.appliedStateChanges)
             ? result.appliedStateChanges
             : [])
@@ -2459,6 +3806,12 @@ export function settleActorActionCandidates(value, candidates, {
                 summary: cleanText(item.summary, 500),
             }))
             .filter((item) => item.kind && item.summary);
+        const planWasApplied = appliesWorldResult
+            && stateChanges.some((change) => change.kind === 'plan');
+        const planUpdate = cleanText(candidate.planUpdate, 500);
+        if (planWasApplied && planUpdate) next.plan.summary = planUpdate;
+        if (planWasApplied && candidate.intent === 'wait') next.plan.status = 'blocked';
+        else if (planWasApplied && candidate.intent === 'replan') next.plan.status = 'active';
         const semanticProgress = ['settled', 'partial'].includes(result.status)
             && candidate.intent !== 'wait'
             && stateChanges.length > 0;
@@ -2505,6 +3858,8 @@ export function settleActorActionCandidates(value, candidates, {
                 turn: currentTurn,
                 route: attempt.route,
                 attempt: attempt.action,
+                actorRef: clone(attempt.actorRef || null),
+                target: clone(attempt.target || null),
                 resultStatus: result.status,
                 resultId: result.id,
                 visibility: result.visibility,
@@ -2547,24 +3902,14 @@ export function settleActorActionCandidates(value, candidates, {
             result,
             semanticProgress,
         });
-        receipts.push(stageReceipt(actionId, next.id, 'planned', currentTurn, {
-            summary: cleanText(candidate.planUpdate || next.plan.summary, 500),
-            route: attempt.route,
-        }));
-        receipts.push(stageReceipt(actionId, next.id, 'attempted', currentTurn, {
-            summary: cleanText(candidate.action, 700),
-            route: attempt.route,
-            semanticProgress,
-            playerActionSettled: false,
-            playerConsentSettled: false,
-            playerFeelingSettled: false,
-        }));
-        receipts.push({
-            ...adjudicated.receipt,
-            worldEventId: event?.id || '',
-            observableConsequence: event?.observableConsequence || '',
-            semanticProgress,
-        });
+        if (adjudicated.receipt.stage === 'world_settled') {
+            receipts.push({
+                ...adjudicated.receipt,
+                worldEventId: event?.id || '',
+                observableConsequence: event?.observableConsequence || '',
+                semanticProgress,
+            });
+        }
         if (event) worldEvents.push(event);
         const injection = actorActionNarrativeInjection(attempt, result);
         if (injection.text) {
@@ -2593,8 +3938,56 @@ export function settleActorActionCandidates(value, candidates, {
         }
         return next;
     });
-    ledger.actionReceipts = [...ledger.actionReceipts, ...receipts]
-        .slice(-ACTOR_LEDGER_MAX_RECEIPTS);
+    if (results.length) {
+        const resultByAttempt = new Map(results.map((result) => [result.attemptId, result]));
+        ledger.actionReceipts = ledger.actionReceipts.map((receipt) => {
+            const result = resultByAttempt.get(receipt.attemptId);
+            if (!result || receipt.stage !== 'attempted' || receipt.status !== 'pending_world') {
+                return receipt;
+            }
+            if (result.status === 'pending_world') return receipt;
+            return {
+                ...receipt,
+                status: result.status === 'pending_player' ? 'pending_player' : 'adjudicated',
+                resultId: result.id,
+                worldAdjudicated: result.worldAdjudicated === true,
+                resultSummary: result.summary,
+                visibility: result.visibility,
+                disclosure: result.disclosure,
+                risk: result.risk,
+                costs: clone(result.costs),
+                durationTurns: result.durationTurns,
+                observableConsequence: result.observableConsequence,
+                revealPath: result.revealPath,
+                adjudicatedAt: result.settledAt,
+            };
+        });
+        ledger.actionAttempts = ledger.actionAttempts.map((attempt) => {
+            const result = resultByAttempt.get(attempt.id);
+            if (!result) return attempt;
+            return {
+                ...attempt,
+                status: result.status,
+                outcome: result.id,
+                settlementEligible: result.status === 'pending_world',
+                adjudicatedAt: result.settledAt,
+                worldAdjudicationResult: clone(result),
+            };
+        });
+    }
+    const compactedAttempts = compactActionAttempts(ledger.actionAttempts);
+    const compactedReceipts = compactActionReceipts(
+        [...ledger.actionReceipts, ...receipts],
+        compactedAttempts.attempts,
+    );
+    ledger.actionAttempts = compactedAttempts.attempts;
+    ledger.actionReceipts = compactedReceipts.receipts;
+    ledger.actionAttemptBacklog = {
+        ...compactedAttempts.backlog,
+        receiptProtectedCount: compactedReceipts.protectedCount,
+        receiptTerminalDropped: compactedReceipts.terminalDropped,
+        receiptOverCapacity: compactedReceipts.overCapacity,
+    };
     ledger.updatedAt = Date.now();
     return {
         ledger,
@@ -2658,6 +4051,9 @@ export function actorLedgerView(value) {
         version: ledger.version,
         turn: ledger.turn,
         actorCount: ledger.actors.length,
+        registryVersion: ledger.actorRegistry.version,
+        registeredActorCount: ledger.actorRegistry.entries
+            .filter((entry) => entry.state === 'registered').length,
         activeCount: ledger.actors.filter((item) => item.status === 'active').length,
         dormantCount: ledger.actors.filter((item) => item.status === 'dormant').length,
         semanticProgressCount: ledger.actors.reduce(
@@ -2679,6 +4075,7 @@ export function actorLedgerView(value) {
             delete publicActor.hidden;
             return publicActor;
         }),
+        attempts: clone(ledger.actionAttempts),
         receipts: clone(ledger.actionReceipts),
         observationReceipts: clone(ledger.observationReceipts),
         privateThoughtsExposed: false,

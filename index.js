@@ -25,9 +25,23 @@ import {
     validatePatchResult,
 } from './core.mjs';
 import {
+    contentAddressedJsonRef,
     decodeContentAddressedJson,
     encodeContentAddressedJson,
 } from './checkpoint-codec-core.mjs';
+import {
+    actorSovereigntyMigrationDigest,
+    actorSovereigntyMigrationIsCurrent,
+    actorSovereigntyScopeDigest,
+    actorSovereigntyScopesMatch,
+    actorSovereigntyWorldbookDescriptor,
+    createActorSovereigntyScope,
+    createActorSovereigntyWorldbookManifest,
+    ensureActorSovereigntyMigration,
+    flattenActorSovereigntyScopeValues as flattenedScopeStrings,
+    migrateActorSovereigntyNamespace,
+    prepareActorSovereigntyFieldWriteCandidate,
+} from './compatibility-migration-core.mjs';
 import {
     appendRepairJournal,
     advanceContinuityClocks,
@@ -68,23 +82,37 @@ import {
     selectActorShardCandidates,
     userPromptSlotMetadata,
 } from './actor-shard-core.mjs';
-import { validateWorldAdjudication } from './actor-authority-core.mjs';
+import {
+    actorActionTargetMatches,
+    actorActionAttemptWorldView,
+    normalizeActorActionTarget,
+    validateWorldAdjudicationBatch,
+} from './actor-authority-core.mjs';
 import { isActorId } from './actor-ref-core.mjs';
 import {
     actorActionCandidatesFromShard,
     actorLedgerView,
+    actorActionAttemptsMatchLedger,
+    actorActionSettlementsMatchLedger,
+    actorRegistryDigest,
+    actorRegistryMatchesLedger,
     applyAcceptedContentObservations,
     discoverActorsFromTurnSources,
     emptyActorLedger,
     inferObserverActorIds,
-    mergeActorProfilePatches,
+    actorProfileCommitMatchesLedger,
     mergeActorWorldEventsIntoContinuity,
     migrateActorLedgerFromContinuity,
     normalizeActorLedger,
+    pendingActorActionAttempts,
+    planActorAttemptRecovery,
     prepareActorActionAttempts,
+    recordActorActionAttempts,
+    promoteActorCandidatesToRegistry,
     reconcileActorIdentityRevealsFromAcceptedContent,
     reconcileActorLifecycleFromAcceptedContent,
     reconcileActorMutationLineageFromAcceptedContent,
+    replaceActorProfileBaselineInLedger,
     scheduleActorTurns,
     settleActorActionCandidates,
     settleActorInjectionReceipts,
@@ -119,18 +147,16 @@ import {
 } from './model-queue.mjs';
 import {
     actorProfileReadyForAction,
+    actorProfileBaselineDigest,
     actorProfileV6View,
-    actorProfileCompletionMissingFields,
-    applyActorProfileCompletionToV6,
     applyActorProfileV6Override,
-    bindActorProfileDesignRolls,
+    bindCharacterCreationTicketsToRegisteredActors,
     buildActorProfileCompletionMessages,
-    buildActorProfileRepairMessages,
-    mergeActorProfileCompletionPatches,
+    issueCharacterCreationTicket,
+    materializeActorProfileBaseline,
     parseActorProfileCompletionOutput,
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
-    rollActorProfileDiversity,
     selectActorProfileCompletionCandidates,
     setActorProfileV6Lock,
 } from './actor-profile-v6-core.mjs';
@@ -139,6 +165,7 @@ import {
     claimNextSovereigntyTask,
     cancelSovereigntyTaskAsStale,
     combineDoctorSemanticHealth,
+    completeSovereigntyObservationGaps,
     commitSovereigntyTask,
     dueSovereigntyTasks,
     emptySovereigntyRuntime,
@@ -153,6 +180,8 @@ import {
     retrySovereigntyTaskNow,
     sovereigntyHealthView,
     sovereigntyRetryDelay,
+    supersedeSovereigntyObservationSources,
+    sovereigntySourceKey,
 } from './sovereignty-runtime-core.mjs';
 import {
     composeScopedModelInstruction,
@@ -197,7 +226,7 @@ import {
 const PLUGIN_ID = 'mvu_auto_doctor';
 const VERSION = '2.0.0-rc.14';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
-const CHAT_NAMESPACE_VERSION = 12;
+const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
 const CONTINUITY_INJECTION_SENTINEL = '【MVU医生·活世界注入】';
 const SOCIAL_INJECTION_NAME = 'mvu-auto-doctor-social-contract';
@@ -309,7 +338,8 @@ const DEFAULTS = Object.freeze({
     actorLedgerCollisionIntensity: 2,
     actorLedgerSettingsVersion: 2,
     actorProfileCompletionMode: 'full',
-    actorProfileSettingsVersion: 1,
+    actorProfileSemanticRetries: 1,
+    actorProfileSettingsVersion: 2,
     globalModelInstructionEnabled: false,
     globalModelInstruction: '',
     globalModelInstructionScopes: ['all'],
@@ -334,6 +364,7 @@ let continuityChain = Promise.resolve();
 let forumChain = Promise.resolve();
 let runtimePersistenceChain = Promise.resolve();
 const chatNamespaceWriteChains = new Map();
+const actorSovereigntyMigrationPromises = new Map();
 let lastChatNamespaceWriteFailureCode = '';
 const chatNamespacePersistenceMetrics = {
     version: 1,
@@ -350,6 +381,11 @@ const chatNamespacePersistenceMetrics = {
     readbackAttempts: 0,
     readbackFailures: 0,
     readbackMs: 0,
+    migrationPayloadCommits: 0,
+    migrationMarkerCommits: 0,
+    migrationSingleflightJoins: 0,
+    migrationGuardAttempts: 0,
+    migrationGuardBlocked: 0,
 };
 
 function persistenceClock() {
@@ -427,7 +463,13 @@ function persistedNamespaceMatches(candidate, persisted, selectedFields) {
     ));
 }
 
-async function verifyPersistedChatNamespace(context, expectedChatId, candidate, selectedFields) {
+async function verifyPersistedChatNamespace(
+    context,
+    expectedChatId,
+    candidate,
+    selectedFields,
+    { requireReadback = false, contentValidator = null } = {},
+) {
     const startedAt = persistenceClock();
     let supported = false;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -437,11 +479,23 @@ async function verifyPersistedChatNamespace(context, expectedChatId, candidate, 
             supported ||= readback.supported;
             if (!readback.supported) {
                 chatNamespacePersistenceMetrics.readbackMs += persistenceClock() - startedAt;
-                return { supported: false, verified: true };
+                return {
+                    supported: false,
+                    verified: !requireReadback,
+                    namespace: null,
+                };
             }
-            if (persistedNamespaceMatches(candidate, readback.namespace, selectedFields)) {
+            const revisionsMatch = persistedNamespaceMatches(
+                candidate,
+                readback.namespace,
+                selectedFields,
+            );
+            const contentMatches = revisionsMatch && typeof contentValidator === 'function'
+                ? contentValidator(readback.namespace) === true
+                : revisionsMatch;
+            if (contentMatches) {
                 chatNamespacePersistenceMetrics.readbackMs += persistenceClock() - startedAt;
-                return { supported: true, verified: true };
+                return { supported: true, verified: true, namespace: readback.namespace };
             }
         } catch {
             supported = true;
@@ -450,7 +504,7 @@ async function verifyPersistedChatNamespace(context, expectedChatId, candidate, 
     }
     chatNamespacePersistenceMetrics.readbackFailures += 1;
     chatNamespacePersistenceMetrics.readbackMs += persistenceClock() - startedAt;
-    return { supported, verified: false };
+    return { supported, verified: false, namespace: null };
 }
 const modelConnectionScheduler = new ConnectionTaskScheduler();
 const actorShardLeaseManager = new TaskLeaseManager(new MemoryVersionedAdapter(), {
@@ -537,6 +591,8 @@ const activeSovereigntyTaskIds = new Set();
 let activeSovereigntyRecoveryCount = 0;
 let pendingSovereigntyRetryTimer = null;
 let pendingSovereigntyRetry = null;
+const pendingSovereigntyObservations = new Map();
+const actorSovereigntyScopeManifestCache = new Map();
 
 function hasPendingSovereigntyRetryForChat(context = getContext()) {
     return Boolean(
@@ -593,6 +649,7 @@ let lastRegisteredSerendipityContent = '';
 let pendingSerendipityDraft = null;
 let pendingSerendipityBaseline = null;
 let pendingNpcDesignTicketBatch = null;
+const npcDesignTicketBatches = new Map();
 const pendingSerendipityOpportunities = new Map();
 let lastSocialPromptSanitization = {
     checkedAt: 0,
@@ -851,8 +908,17 @@ function getSettings() {
         settings.actorProfileCompletionMode = DEFAULTS.actorProfileCompletionMode;
         changed = true;
     }
+    settings.actorProfileSemanticRetries = Math.min(
+        2,
+        Math.max(0, Math.floor(Number(settings.actorProfileSemanticRetries) || 0)),
+    );
     if (previousActorProfileSettingsVersion < 1) {
         settings.actorProfileSettingsVersion = 1;
+        changed = true;
+    }
+    if (previousActorProfileSettingsVersion < 2) {
+        settings.actorProfileSemanticRetries = DEFAULTS.actorProfileSemanticRetries;
+        settings.actorProfileSettingsVersion = 2;
         changed = true;
     }
     const globalInstruction = normalizeGlobalInstructionConfig({
@@ -1399,8 +1465,13 @@ function doctorSemanticHealthView(namespaceValue = null, runtimeValue = null) {
         ? namespace.continuityInjectionQueue
         : [];
     const currentTurn = Number(namespace.continuity?.turn || 0);
+    const projectedRuntime = sovereigntyRuntimeWithSessionObservationFailures(
+        namespace,
+        runtimeValue ?? namespace.sovereigntyRuntime,
+        getContext(),
+    );
     return combineDoctorSemanticHealth(
-        sovereigntyHealthView(runtimeValue ?? namespace.sovereigntyRuntime),
+        sovereigntyHealthView(projectedRuntime),
         {
             identityPollutionCount: ledger.actors.filter((actor) => (
                 isActorId(actor.name)
@@ -1452,9 +1523,10 @@ function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = nu
     const namespace = namespaceValue && typeof namespaceValue === 'object'
         ? namespaceValue
         : readChatNamespace();
-    const runtime = normalizeSovereigntyRuntime(
+    const runtime = sovereigntyRuntimeWithSessionObservationFailures(
+        namespace,
         runtimeValue ?? namespace.sovereigntyRuntime,
-        { chatId: getContext()?.chatId || '' },
+        getContext(),
     );
     const health = doctorSemanticHealthView(namespace, runtime);
     const ledger = normalizeActorLedger(namespace.actorLedger, {
@@ -1512,6 +1584,7 @@ function doctorRuntimePresentation(namespaceValue = null, runtimeValue = null, o
 }
 
 const RUNTIME_ALERT_LABELS = Object.freeze({
+    'actor_tasks.journal_over_capacity': '人物尝试恢复日志超过安全容量，已保留全部未完成项',
     'identity.pollution': '发现身份污染',
     'sovereignty.failed_before_success': '存在从未成功的模块',
     'surface.status_error': '正文或变量检查报错',
@@ -1548,6 +1621,7 @@ function appendRuntimeHealthMetric(host, label, value, kind = '') {
 }
 
 const RUNTIME_MODULE_LABELS = Object.freeze({
+    observation: '观察持久化',
     profile: '人物档案',
     physiology: '生理档案',
     actor: '人物行动',
@@ -1555,6 +1629,8 @@ const RUNTIME_MODULE_LABELS = Object.freeze({
 });
 
 const RUNTIME_FAILURE_LABELS = Object.freeze({
+    'observation.persistence_failed': '当前观察尚未持久化，将在宿主保存恢复后重试',
+    host_save_rejected: '宿主拒绝保存，当前观察只保留在本会话恢复层',
     'profile.preparation_incomplete': '人物档案仍待补全',
     'profile.content_incomplete': '人物档案缺列，未作为成功档案提交',
     'profile.persistence_failed': '人物档案保存失败',
@@ -1582,15 +1658,27 @@ function runtimeFailureSummary(presentation) {
 
 function renderSovereigntyHealth(value = readChatNamespace()?.sovereigntyRuntime) {
     const namespace = readChatNamespace();
-    const health = doctorSemanticHealthView(namespace, value);
-    const presentation = doctorRuntimePresentation(namespace, value);
+    const runtime = sovereigntyRuntimeWithSessionObservationFailures(
+        namespace,
+        value,
+        getContext(),
+    );
+    const health = doctorSemanticHealthView(namespace, runtime);
+    const presentation = doctorRuntimePresentation(namespace, runtime);
     const routeSummary = (label, channel) => [
         `${label} ${channel.healthy}/${channel.total} 健康`,
         channel.poisoned ? `响应解析隔离 ${channel.poisoned}` : '',
         channel.isolated ? `传输隔离 ${channel.isolated}` : '',
         channel.degraded ? `待确认 ${channel.degraded}` : '',
     ].filter(Boolean).join('，');
-    for (const root of [ui?.sovereigntyHealth, ui?.floatingSovereigntyHealth]) {
+    const healthRoots = new Set([
+        ui?.sovereigntyHealth,
+        ui?.floatingSovereigntyHealth,
+        ...document.querySelectorAll(
+            '.mvuad-sovereignty-health, .mvuad-floating-sovereignty-health',
+        ),
+    ]);
+    for (const root of healthRoots) {
         if (!root) continue;
         root.replaceChildren();
         root.dataset.healthColor = presentation.color;
@@ -1683,14 +1771,23 @@ function renderSovereigntyHealth(value = readChatNamespace()?.sovereigntyRuntime
     for (const button of [ui?.sovereigntyRestore, ui?.floatingSovereigntyRestore]) {
         if (button) button.disabled = !presentation.controls.canRestore;
     }
+    applyFloatingOrbPresentation(
+        presentation,
+        Number(ui?.floatingCount?.textContent) || 0,
+    );
+    syncTaskCancelButtons();
     return { ...health, color: presentation.color, runtimePresentation: presentation };
 }
 
 function sovereigntyHealthWithScheduler(namespace = readChatNamespace()) {
-    const health = doctorSemanticHealthView(namespace);
     const context = getContext();
     const retryQueued = hasPendingSovereigntyRetryForChat(context);
-    const runtime = sovereigntyRuntimeFromNamespace(namespace);
+    const runtime = sovereigntyRuntimeWithSessionObservationFailures(
+        namespace,
+        namespace?.sovereigntyRuntime,
+        context,
+    );
+    const health = doctorSemanticHealthView(namespace, runtime);
     const scheduler = {
         dueTaskCount: dueSovereigntyTasks(runtime).length,
         autoRetryQueued: retryQueued,
@@ -1717,7 +1814,17 @@ async function retrySovereigntyNow() {
     const context = getContext();
     const chatId = context?.chatId || '';
     if (!chatId) return { status: 'blocked' };
-    const namespace = readChatNamespace(context);
+    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    if (!migration.ok) {
+        toast('warning', '迁移尚未完成；旧任务继续隔离，当前观察会在迁移成功后补入。');
+        return { status: 'blocked', reason: migration.reason };
+    }
+    let namespace = migration.namespace || readChatNamespace(context);
+    const replay = await replayPendingSovereigntyObservations(namespace, context, {
+        reconstruct: true,
+    });
+    if (!replay.ok) return { status: 'blocked', reason: replay.reason };
+    namespace = replay.namespace;
     const retried = retrySovereigntyTaskNow(
         sovereigntyRuntimeFromNamespace(namespace),
     );
@@ -1741,7 +1848,17 @@ async function restoreLatestSovereigntyCheckpoint() {
     const context = getContext();
     const chatId = context?.chatId || '';
     if (!chatId) return { status: 'blocked' };
-    const namespace = readChatNamespace(context);
+    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    if (!migration.ok) {
+        toast('warning', '迁移尚未完成；旧检查点保持只读隔离。');
+        return { status: 'blocked', reason: migration.reason };
+    }
+    let namespace = migration.namespace || readChatNamespace(context);
+    const replay = await replayPendingSovereigntyObservations(namespace, context, {
+        reconstruct: true,
+    });
+    if (!replay.ok) return { status: 'blocked', reason: replay.reason };
+    namespace = replay.namespace;
     const restored = restoreSovereigntyCheckpoint(
         sovereigntyRuntimeFromNamespace(namespace),
     );
@@ -1759,7 +1876,7 @@ async function restoreLatestSovereigntyCheckpoint() {
     });
     renderSovereigntyHealth(namespace.sovereigntyRuntime);
     if (saved) {
-        applyContinuityInjection();
+        await applyContinuityInjection();
         renderContinuityLedger();
     }
     toast(saved ? 'success' : 'warning', saved
@@ -2923,6 +3040,23 @@ function ensureRuntimeTargetIdentity(context, message, index, messageId) {
             fingerprint(message?.mes || ''),
         ]))].join(':');
     }
+    let stableGenerationSerial = Number(
+        swipeInfo?.extra?.mvu_auto_doctor_generation_serial
+        ?? message?.extra?.mvu_auto_doctor_generation_serial,
+    );
+    let stableGenerationType = String(
+        swipeInfo?.extra?.mvu_auto_doctor_generation_type
+        || message?.extra?.mvu_auto_doctor_generation_type
+        || '',
+    );
+    if (latest.index === Number(index) && Number(lastGeneration.serial) > 0) {
+        stableGenerationSerial = Number(lastGeneration.serial);
+        stableGenerationType = String(lastGeneration.type || 'normal');
+    }
+    if (!Number.isInteger(stableGenerationSerial) || stableGenerationSerial < 0) {
+        stableGenerationSerial = 0;
+    }
+    if (!stableGenerationType) stableGenerationType = 'normal';
     let changed = false;
     for (const holder of holders) {
         if (holder.extra.mvu_auto_doctor_branch_id !== branchId) {
@@ -2933,63 +3067,353 @@ function ensureRuntimeTargetIdentity(context, message, index, messageId) {
             holder.extra.mvu_auto_doctor_generation_id = generationId;
             changed = true;
         }
+        if (holder.extra.mvu_auto_doctor_generation_serial !== stableGenerationSerial) {
+            holder.extra.mvu_auto_doctor_generation_serial = stableGenerationSerial;
+            changed = true;
+        }
+        if (holder.extra.mvu_auto_doctor_generation_type !== stableGenerationType) {
+            holder.extra.mvu_auto_doctor_generation_type = stableGenerationType;
+            changed = true;
+        }
     }
     if (changed) scheduleSafeChatSave(context, context?.chatId);
-    return { branchId, generationId };
+    return {
+        branchId,
+        generationId,
+        generationSerial: stableGenerationSerial,
+        generationType: stableGenerationType,
+    };
+}
+
+function cardScopeIdentity(context, character) {
+    if (context?.groupId != null && String(context.groupId).trim()) {
+        return { id: `group:${String(context.groupId).trim()}`, status: 'confirmed' };
+    }
+    const characterId = String(context?.characterId ?? '').trim();
+    const avatar = String(character?.avatar || character?.data?.avatar || '').trim();
+    if (!characterId && !avatar) return { id: 'character:unresolved', status: 'unresolved' };
+    return {
+        id: `character:${characterId || 'no-index'}:${avatar || 'no-avatar'}`,
+        status: 'confirmed',
+    };
+}
+
+function cardScopeVersion(character) {
+    const explicit = character?.data?.character_version
+        || character?.character_version
+        || character?.data?.extensions?.version
+        || character?.extensions?.version;
+    if (explicit) return `host:${String(explicit).trim()}`;
+    return `synthetic:${contentAddressedJsonRef({
+        avatar: character?.avatar || character?.data?.avatar || '',
+        description: character?.data?.description || character?.description || '',
+        personality: character?.data?.personality || character?.personality || '',
+        scenario: character?.data?.scenario || character?.scenario || '',
+        systemPrompt: character?.data?.system_prompt || character?.system_prompt || '',
+    })}`;
+}
+
+function configuredWorldbookIds(context, character) {
+    return [...new Set([
+        ...flattenedScopeStrings(context?.chatMetadata?.world_info),
+        ...flattenedScopeStrings(character?.data?.extensions?.world),
+        ...flattenedScopeStrings(character?.extensions?.world),
+        ...flattenedScopeStrings(character?.json_data?.data?.extensions?.world),
+        ...flattenedScopeStrings(character?.json_data?.extensions?.world),
+    ])].sort((left, right) => left.localeCompare(right));
+}
+
+function embeddedWorldbookDescriptors(character, cardId) {
+    return embeddedBooks(character).map((book, index) => {
+        const rawId = String(book?.id || book?.name || book?.title || index).trim();
+        return actorSovereigntyWorldbookDescriptor(
+            `embedded:${cardId}:${rawId}`,
+            book,
+            { kind: 'embedded' },
+        );
+    }).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function scopeWorldbookManifest(context, character, cardId) {
+    const chatId = String(context?.chatId || '');
+    const stored = actorSovereigntyScopeManifestCache.get(chatId)
+        || context?.chatMetadata?.[PLUGIN_ID]?.actorSovereigntyWorldbookManifest
+        || null;
+    const embedded = embeddedWorldbookDescriptors(character, cardId);
+    const external = (Array.isArray(stored?.books) ? stored.books : [])
+        .filter((book) => book?.kind === 'external');
+    const configuredExternal = configuredWorldbookIds(context, character);
+    const status = stored?.status === 'confirmed'
+        ? 'confirmed'
+        : configuredExternal.length
+            ? 'unresolved'
+            : 'confirmed';
+    const manifest = createActorSovereigntyWorldbookManifest(
+        [...external, ...embedded],
+        {
+            status,
+            reason: status === 'confirmed'
+                ? ''
+                : stored?.reason || 'worldbook_manifest_not_loaded',
+        },
+    );
+    actorSovereigntyScopeManifestCache.set(chatId, manifest);
+    return manifest;
+}
+
+async function resolveActorSovereigntyWorldbookManifest(context, character, cardId) {
+    const configuredIds = new Set(configuredWorldbookIds(context, character));
+    const descriptors = embeddedWorldbookDescriptors(character, cardId);
+    const loadedById = new Map();
+    let hostModuleReadable = false;
+    try {
+        const module = await import('/scripts/world-info.js');
+        hostModuleReadable = true;
+        for (const id of flattenedScopeStrings(module.selected_world_info)) configuredIds.add(id);
+        const sorted = typeof module.getSortedEntries === 'function'
+            ? await module.getSortedEntries()
+            : [];
+        const entriesByWorld = new Map();
+        for (const entry of Array.isArray(sorted) ? sorted : []) {
+            const id = String(entry?.world || '').trim();
+            if (!id) continue;
+            configuredIds.add(id);
+            if (!entriesByWorld.has(id)) entriesByWorld.set(id, []);
+            entriesByWorld.get(id).push(entry);
+        }
+        const globalRevision = context?.chatMetadata?.world_info_version
+            || character?.data?.extensions?.world_version
+            || character?.extensions?.world_version
+            || '';
+        for (const id of [...configuredIds].sort()) {
+            let book = null;
+            if (typeof module.loadWorldInfo === 'function') {
+                try {
+                    book = await module.loadWorldInfo(id);
+                } catch {
+                    book = null;
+                }
+            }
+            if (!book && entriesByWorld.has(id)) book = { entries: entriesByWorld.get(id) };
+            if (!book && globalRevision) book = { entries: [] };
+            if (!book) continue;
+            loadedById.set(id, actorSovereigntyWorldbookDescriptor(id, book, {
+                kind: 'external',
+                explicitRevision: globalRevision,
+            }));
+        }
+    } catch {
+        hostModuleReadable = false;
+    }
+    descriptors.push(...loadedById.values());
+    const unresolvedIds = [...configuredIds]
+        .filter((id) => !loadedById.has(id))
+        .sort((left, right) => left.localeCompare(right));
+    if (unresolvedIds.length) {
+        const persisted = context?.chatMetadata?.[PLUGIN_ID]
+            ?.actorSovereigntyWorldbookManifest;
+        const expectedIds = [...new Set([
+            ...unresolvedIds,
+            ...descriptors.map((entry) => entry.id),
+        ])].sort();
+        if (
+            persisted?.status === 'confirmed'
+            && JSON.stringify(persisted.ids || []) === JSON.stringify(expectedIds)
+        ) return deepClone(persisted);
+        return createActorSovereigntyWorldbookManifest(
+            descriptors,
+            {
+                status: 'unresolved',
+                reason: hostModuleReadable
+                ? `worldbook_unreadable:${unresolvedIds.join('|')}`
+                : `worldbook_module_unavailable:${unresolvedIds.join('|')}`,
+            },
+        );
+    }
+    return createActorSovereigntyWorldbookManifest(descriptors);
+}
+
+function currentActorSovereigntyScope(context = getContext()) {
+    const character = currentCharacter(context);
+    const card = cardScopeIdentity(context, character);
+    const cached = scopeWorldbookManifest(context, character, card.id);
+    return createActorSovereigntyScope({
+        chatId: context?.chatId || '',
+        cardId: card.id,
+        cardStatus: card.status,
+        cardVersion: cardScopeVersion(character),
+        worldbookIds: cached.ids,
+        worldbookVersion: cached.status === 'confirmed'
+            ? cached.manifestDigest
+            : 'unresolved',
+        worldbookStatus: cached.status,
+        runtimeVersion: `${VERSION}:namespace-${CHAT_NAMESPACE_VERSION}`,
+    });
+}
+
+async function resolveCurrentActorSovereigntyScope(context = getContext()) {
+    const character = currentCharacter(context);
+    const card = cardScopeIdentity(context, character);
+    const manifest = await resolveActorSovereigntyWorldbookManifest(
+        context,
+        character,
+        card.id,
+    );
+    actorSovereigntyScopeManifestCache.set(String(context?.chatId || ''), manifest);
+    return {
+        scope: currentActorSovereigntyScope(context),
+        manifest,
+        resolved: card.status === 'confirmed' && manifest.status === 'confirmed',
+        reason: card.status !== 'confirmed' ? 'card_identity_unresolved' : manifest.reason || '',
+    };
+}
+
+function emptyChatNamespace(context = getContext()) {
+    const chatId = String(context?.chatId || '');
+    const actorSovereigntyScope = currentActorSovereigntyScope(context);
+    const scopeDigest = actorSovereigntyScopeDigest(actorSovereigntyScope);
+    const actorSovereigntyWorldbookManifest = actorSovereigntyScopeManifestCache.get(chatId)
+        || context?.chatMetadata?.[PLUGIN_ID]?.actorSovereigntyWorldbookManifest
+        || null;
+    return {
+        version: CHAT_NAMESPACE_VERSION,
+        rev: 0,
+        fieldRevisions: {},
+        chatId,
+        actorSovereigntyScope,
+        actorSovereigntyWorldbookManifest,
+        actorSovereigntyMigration: null,
+        compatibilityScopeArchives: [],
+        actorSovereigntyObservationWAL: [],
+        repairJournal: [],
+        operationLog: [],
+        modelCallStats: normalizedModelCallStats(null),
+        modelDiagnostics: [],
+        openingResourceSync: {
+            version: 1,
+            synced: {},
+            suppressed: {},
+        },
+        socialAudits: [],
+        continuity: emptyContinuityState(chatId),
+        continuityCheckpoint: null,
+        actorLedger: emptyActorLedger(chatId),
+        actorLedgerCheckpoint: null,
+        actorLedgerCheckpointBlobs: {},
+        sovereigntyRuntime: emptySovereigntyRuntime(chatId, {
+            mode: getSettings().sovereigntyMode,
+            scopeDigest,
+        }),
+        customInstructionInjections: [],
+        worldPressure: emptyWorldPressureState(),
+        serendipity: emptySerendipityLedger(chatId),
+        forum: emptyForumState(chatId),
+        forumCheckpoint: null,
+        phase6Runtime: {
+            version: 1,
+            records: {},
+        },
+    };
+}
+
+function archivedActorSovereigntyScope(value, report) {
+    const digest = fingerprint(safeJson({
+        sourceDigest: report?.sourceDigest || '',
+        scope: value?.actorSovereigntyScope || null,
+        repairJournal: value?.repairJournal || [],
+        openingResourceSync: value?.openingResourceSync || null,
+        forum: value?.forum || null,
+        forumCheckpoint: value?.forumCheckpoint || null,
+        socialAudits: value?.socialAudits || [],
+        serendipity: value?.serendipity || null,
+        operationLog: value?.operationLog || [],
+        modelCallStats: value?.modelCallStats || null,
+        modelDiagnostics: value?.modelDiagnostics || [],
+    }, 0));
+    return {
+        id: `SCOPE-ARCHIVE-${digest.replace(/[^a-z0-9]/giu, '').slice(-32)}`,
+        digest,
+        scope: deepClone(value?.actorSovereigntyScope || null),
+        worldbookManifest: deepClone(value?.actorSovereigntyWorldbookManifest || null),
+        reason: report?.reason || 'migration.scope_mismatch',
+        actorLedger: deepClone(value?.actorLedger || null),
+        actorLedgerCheckpoint: deepClone(value?.actorLedgerCheckpoint || null),
+        actorLedgerCheckpointBlobs: deepClone(value?.actorLedgerCheckpointBlobs || {}),
+        continuity: deepClone(value?.continuity || null),
+        continuityCheckpoint: deepClone(value?.continuityCheckpoint || null),
+        sovereigntyRuntime: deepClone(value?.sovereigntyRuntime || null),
+        worldPressure: deepClone(value?.worldPressure || null),
+        phase6Runtime: deepClone(value?.phase6Runtime || null),
+        repairJournal: deepClone(value?.repairJournal || []),
+        openingResourceSync: deepClone(value?.openingResourceSync || null),
+        forum: deepClone(value?.forum || null),
+        forumCheckpoint: deepClone(value?.forumCheckpoint || null),
+        socialAudits: deepClone(value?.socialAudits || []),
+        serendipity: deepClone(value?.serendipity || null),
+        continuityInjectionQueue: deepClone(value?.continuityInjectionQueue || []),
+        continuityInjectionBatches: deepClone(value?.continuityInjectionBatches || []),
+        operationLog: deepClone(value?.operationLog || []),
+        modelCallStats: deepClone(value?.modelCallStats || null),
+        modelDiagnostics: deepClone(value?.modelDiagnostics || []),
+    };
 }
 
 function readChatNamespace(context = getContext()) {
     const value = context?.chatMetadata?.[PLUGIN_ID];
     const currentChatId = String(context?.chatId || '');
     const storedChatId = String(value?.chatId || '');
+    const scope = currentActorSovereigntyScope(context);
     if (
         !value
         || typeof value !== 'object'
         || Array.isArray(value)
         || (currentChatId && storedChatId && storedChatId !== currentChatId)
     ) {
-        return {
-            version: CHAT_NAMESPACE_VERSION,
-            rev: 0,
-            fieldRevisions: {},
-            chatId: currentChatId,
-            repairJournal: [],
-            operationLog: [],
-            modelCallStats: normalizedModelCallStats(null),
-            modelDiagnostics: [],
-            openingResourceSync: {
-                version: 1,
-                synced: {},
-                suppressed: {},
-            },
-            socialAudits: [],
-            continuity: emptyContinuityState(context?.chatId || ''),
-            continuityCheckpoint: null,
-            actorLedger: emptyActorLedger(context?.chatId || ''),
-            actorLedgerCheckpoint: null,
-            actorLedgerCheckpointBlobs: {},
-            sovereigntyRuntime: emptySovereigntyRuntime(context?.chatId || '', {
-                mode: getSettings().sovereigntyMode,
-            }),
-            customInstructionInjections: [],
-            worldPressure: emptyWorldPressureState(),
-            serendipity: emptySerendipityLedger(context?.chatId || ''),
-            forum: emptyForumState(context?.chatId || ''),
-            forumCheckpoint: null,
-            phase6Runtime: {
-                version: 1,
-                records: {},
-            },
-        };
+        const migrated = migrateActorSovereigntyNamespace(emptyChatNamespace(context), {
+            scope,
+            namespaceVersion: CHAT_NAMESPACE_VERSION,
+        });
+        return migrated.namespace || emptyChatNamespace(context);
     }
-    const cloned = typeof structuredClone === 'function'
-        ? structuredClone(value)
-        : deepClone(value);
-    // A chat namespace may be copied by the host while opening a new chat.
-    // Legacy namespaces without an id are claimed by their current owner, but
-    // a namespace bearing another chat's id must never leak into this one.
-    if (!storedChatId && currentChatId) cloned.chatId = currentChatId;
-    return cloned;
+    if (actorSovereigntyMigrationIsCurrent(value, scope)) {
+        return typeof structuredClone === 'function'
+            ? structuredClone(value)
+            : deepClone(value);
+    }
+    const migrated = migrateActorSovereigntyNamespace(value, {
+        scope,
+        namespaceVersion: CHAT_NAMESPACE_VERSION,
+    });
+    if (migrated.applicable && migrated.namespace) return migrated.namespace;
+
+    // A same-chat card/worldbook/version change is isolated without deleting
+    // its old actor/world history. The new active scope starts empty, while the
+    // previous scope remains a read-only archive and can never be recovered as
+    // current work. A copied namespace from another chat is rejected above and
+    // remains intact in its owning chat.
+    const fresh = emptyChatNamespace(context);
+    fresh.rev = Math.max(0, Number(value.rev) || 0);
+    fresh.fieldRevisions = isPlainObject(value.fieldRevisions)
+        ? deepClone(value.fieldRevisions)
+        : {};
+    const archives = Array.isArray(value.compatibilityScopeArchives)
+        ? deepClone(value.compatibilityScopeArchives)
+        : [];
+    const archive = archivedActorSovereigntyScope(value, migrated.report);
+    if (!archives.some((entry) => entry?.digest === archive.digest)) archives.push(archive);
+    fresh.compatibilityScopeArchives = archives;
+    fresh.actorSovereigntyObservationWAL = Array.isArray(
+        value.actorSovereigntyObservationWAL,
+    ) ? deepClone(value.actorSovereigntyObservationWAL) : [];
+    const isolated = migrateActorSovereigntyNamespace(fresh, {
+        scope,
+        namespaceVersion: CHAT_NAMESPACE_VERSION,
+    });
+    if (isolated.namespace) {
+        isolated.namespace.compatibilityScopeArchives = archives;
+        isolated.namespace.actorSovereigntyMigration.scopeIsolation = deepClone(migrated.report);
+    }
+    return isolated.namespace || fresh;
 }
 
 function openingSyncState(namespace = readChatNamespace()) {
@@ -3006,7 +3430,11 @@ async function performChatNamespaceWrite(next, expectedChatId, {
     fields = null,
     durable = false,
     failureSink = null,
+    successSink = null,
     retainOnFailure = false,
+    requireReadback = false,
+    contentValidator = null,
+    precondition = null,
 } = {}) {
     chatNamespacePersistenceMetrics.writeAttempts += 1;
     if (durable) chatNamespacePersistenceMetrics.durableAttempts += 1;
@@ -3015,6 +3443,15 @@ async function performChatNamespaceWrite(next, expectedChatId, {
         if (failureSink && typeof failureSink === 'object') failureSink.code = code;
         return false;
     };
+    const preconditionHolds = () => {
+        if (typeof precondition !== 'function') return true;
+        try {
+            return precondition() === true;
+        } catch {
+            return false;
+        }
+    };
+    if (!preconditionHolds()) return fail('write_precondition_failed');
     const context = getContext();
     if (!context || context.chatId !== expectedChatId) {
         return fail('chat_context_changed');
@@ -3075,6 +3512,20 @@ async function performChatNamespaceWrite(next, expectedChatId, {
             : [];
     if (staleFields.length) {
         chatNamespacePersistenceMetrics.rejectedStale += 1;
+        if (failureSink && typeof failureSink === 'object') {
+            failureSink.staleFields = [...staleFields];
+            failureSink.currentRev = Math.max(0, Number(current.rev) || 0);
+            failureSink.candidateRev = nextRevision;
+            failureSink.currentFieldRevisions = Object.fromEntries(staleFields.map(
+                (field) => [field, Math.max(0, Number(currentFieldRevisions[field]) || 0)],
+            ));
+            failureSink.candidateFieldRevisions = Object.fromEntries(staleFields.map(
+                (field) => [field, Math.max(
+                    0,
+                    Number(nextFieldRevisions[field]) || nextRevision,
+                )],
+            ));
+        }
         return fail('stale_namespace_revision');
     }
     const candidate = selectedFields ? { ...current } : { ...(next || {}) };
@@ -3103,6 +3554,7 @@ async function performChatNamespaceWrite(next, expectedChatId, {
     if (context.chatId !== expectedChatId) {
         return fail('chat_context_changed');
     }
+    if (!preconditionHolds()) return fail('write_precondition_failed');
     const durableSaver = typeof context.saveMetadata === 'function'
         ? () => context.saveMetadata()
         : typeof context.saveChat === 'function'
@@ -3124,6 +3576,11 @@ async function performChatNamespaceWrite(next, expectedChatId, {
         } else {
             return fail('metadata_container_unavailable');
         }
+        if (!preconditionHolds()) {
+            const error = new Error('host_save_target_stale');
+            error.code = 'host_save_target_stale';
+            throw error;
+        }
         if (context.chatId !== expectedChatId) {
             return fail('chat_context_changed');
         }
@@ -3141,18 +3598,43 @@ async function performChatNamespaceWrite(next, expectedChatId, {
         chatNamespacePersistenceMetrics.hostSaveMs += persistenceClock() - hostSaveStartedAt;
         const retainedChat = context.chatId === expectedChatId;
         if (!retainedChat) return fail('chat_context_changed_after_save');
+        if (!preconditionHolds()) {
+            const error = new Error('host_save_target_stale');
+            error.code = 'host_save_target_stale';
+            throw error;
+        }
+        let durableReadback = null;
         if (durable) {
             const readback = await verifyPersistedChatNamespace(
                 context,
                 expectedChatId,
                 candidate,
                 selectedFields,
+                { requireReadback, contentValidator },
             );
-            if (readback.supported && !readback.verified) {
+            durableReadback = readback;
+            if (!readback.supported && requireReadback) {
+                const error = new Error('host_save_readback_unsupported');
+                error.code = 'host_save_readback_unsupported';
+                throw error;
+            }
+            if (!readback.verified) {
                 const error = new Error('host_save_readback_mismatch');
                 error.code = 'host_save_readback_mismatch';
                 throw error;
             }
+        }
+        if (!preconditionHolds()) {
+            const error = new Error('host_save_target_stale');
+            error.code = 'host_save_target_stale';
+            throw error;
+        }
+        if (successSink && typeof successSink === 'object') {
+            successSink.namespace = deepClone(candidate);
+            successSink.readbackNamespace = durableReadback?.namespace
+                ? deepClone(durableReadback.namespace)
+                : null;
+            successSink.readbackSupported = durableReadback?.supported === true;
         }
         if (failureSink && typeof failureSink === 'object') failureSink.code = '';
         lastChatNamespaceWriteFailureCode = '';
@@ -3173,8 +3655,12 @@ async function performChatNamespaceWrite(next, expectedChatId, {
                 // refresh recovery idempotent instead of claiming success.
             }
         }
-        if (error?.code === 'host_save_readback_mismatch') {
+        if (error?.code === 'host_save_readback_unsupported') {
+            fail('host_save_readback_unsupported');
+        } else if (error?.code === 'host_save_readback_mismatch') {
             fail('host_save_readback_mismatch');
+        } else if (error?.code === 'host_save_target_stale') {
+            fail('write_precondition_failed');
         } else {
             fail('host_save_rejected');
         }
@@ -3186,7 +3672,7 @@ async function performChatNamespaceWrite(next, expectedChatId, {
     }
 }
 
-async function writeChatNamespace(next, expectedChatId, options = {}) {
+async function enqueueChatNamespaceWrite(next, expectedChatId, options = {}) {
     const chatId = String(expectedChatId || '');
     if (!chatId) return false;
     const previous = chatNamespaceWriteChains.get(chatId) || Promise.resolve();
@@ -3201,6 +3687,233 @@ async function writeChatNamespace(next, expectedChatId, options = {}) {
         }
     });
     return task;
+}
+
+function rejectChatNamespaceWrite(options, code, detail = '') {
+    lastChatNamespaceWriteFailureCode = code;
+    if (options?.failureSink && typeof options.failureSink === 'object') {
+        options.failureSink.code = code;
+        if (detail) options.failureSink.migrationReason = detail;
+    }
+    chatNamespacePersistenceMetrics.migrationGuardBlocked += 1;
+    return false;
+}
+
+async function writeChatNamespace(next, expectedChatId, options = {}) {
+    const chatId = String(expectedChatId || '');
+    if (!chatId) return false;
+    chatNamespacePersistenceMetrics.migrationGuardAttempts += 1;
+    const context = getContext();
+    if (!context || String(context.chatId || '') !== chatId) {
+        return rejectChatNamespaceWrite(options, 'chat_context_changed');
+    }
+    const candidateScope = next?.actorSovereigntyScope;
+    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    if (
+        migration?.ok !== true
+        || migration?.current !== true
+        || !migration?.namespace
+        || !actorSovereigntyMigrationIsCurrent(
+            migration.namespace,
+            migration.namespace.actorSovereigntyScope,
+        )
+    ) {
+        return rejectChatNamespaceWrite(
+            options,
+            'actor_sovereignty_migration_not_current',
+            migration?.reason || 'migration.readback_not_current',
+        );
+    }
+    const committedScope = migration.namespace.actorSovereigntyScope;
+    const liveContext = getContext();
+    const authoritative = liveContext?.chatMetadata?.[PLUGIN_ID];
+    if (
+        !liveContext
+        || String(liveContext.chatId || '') !== chatId
+        || !actorSovereigntyScopesMatch(candidateScope, committedScope)
+        || !actorSovereigntyMigrationIsCurrent(authoritative, committedScope)
+    ) {
+        return rejectChatNamespaceWrite(
+            options,
+            'actor_sovereignty_scope_changed',
+            'migration.authoritative_readback_scope_changed',
+        );
+    }
+    const prepared = prepareActorSovereigntyFieldWriteCandidate(next, authoritative, {
+        scope: committedScope,
+        fields: options.fields,
+    });
+    if (!prepared.allowed) {
+        return rejectChatNamespaceWrite(
+            options,
+            prepared.reason === 'migration.write_scope_mismatch'
+                ? 'actor_sovereignty_scope_changed'
+                : prepared.reason === 'migration.write_field_revision_stale'
+                    ? 'stale_namespace_revision'
+                    : 'actor_sovereignty_migration_candidate_stale',
+            prepared.reason,
+        );
+    }
+    const callerPrecondition = options.precondition;
+    const guardedOptions = {
+        ...options,
+        precondition: () => {
+            if (typeof callerPrecondition === 'function' && callerPrecondition() !== true) {
+                return false;
+            }
+            const liveContext = getContext();
+            if (!liveContext || String(liveContext.chatId || '') !== chatId) return false;
+            const stored = liveContext.chatMetadata?.[PLUGIN_ID];
+            const liveScope = currentActorSovereigntyScope(liveContext);
+            return actorSovereigntyScopesMatch(liveScope, committedScope)
+                && actorSovereigntyMigrationIsCurrent(stored, committedScope);
+        },
+    };
+    return enqueueChatNamespaceWrite(prepared.candidate, expectedChatId, guardedOptions);
+}
+
+function rebaseIdenticalNamespaceFields(next, current, fields) {
+    const rebased = deepClone(next);
+    const currentFieldRevisions = isPlainObject(current?.fieldRevisions)
+        ? current.fieldRevisions
+        : {};
+    const nextFieldRevisions = isPlainObject(rebased?.fieldRevisions)
+        ? rebased.fieldRevisions
+        : {};
+    const verified = [];
+    for (const field of Array.isArray(fields) ? fields : []) {
+        const currentRevision = Math.max(0, Number(currentFieldRevisions[field]) || 0);
+        const candidateRevision = Math.max(
+            0,
+            Number(nextFieldRevisions[field]) || Number(rebased?.rev) || 0,
+        );
+        if (currentRevision <= candidateRevision) continue;
+        if (fingerprint(safeJson(current?.[field], 0)) !== fingerprint(
+            safeJson(rebased?.[field], 0),
+        )) continue;
+        rebased[field] = deepClone(current[field]);
+        nextFieldRevisions[field] = currentRevision;
+        verified.push(field);
+    }
+    rebased.fieldRevisions = nextFieldRevisions;
+    return { namespace: rebased, verified };
+}
+
+async function runActorSovereigntyMigrationPersisted(context, resolution, chatId) {
+    const scope = resolution.scope;
+    const source = readChatNamespace(context);
+    source.actorSovereigntyWorldbookManifest = deepClone(resolution.manifest);
+    const scopeStillCurrent = () => {
+        const freshContext = getContext();
+        return freshContext?.chatId === chatId
+            && actorSovereigntyScopesMatch(
+                currentActorSovereigntyScope(freshContext),
+                scope,
+            );
+    };
+    // The only raw writer lives inside this migration transaction. Its token is
+    // unreachable from profile/action/world/UI writers, so payload and marker
+    // commits cannot recurse through the public migration guard.
+    const migrationWriteToken = Symbol('actor-sovereignty-migration-write');
+    const commitMigrationNamespace = (candidate, options, token) => {
+        if (token !== migrationWriteToken) {
+            throw new Error('migration.write_token_invalid');
+        }
+        return enqueueChatNamespaceWrite(candidate, chatId, options);
+    };
+    const result = await ensureActorSovereigntyMigration(source, {
+        scope,
+        namespaceVersion: CHAT_NAMESPACE_VERSION,
+        commitPayload: async (candidate, evidence) => {
+            chatNamespacePersistenceMetrics.migrationPayloadCommits += 1;
+            const failureSink = {};
+            const successSink = {};
+            const ok = await commitMigrationNamespace(candidate, {
+                durable: true,
+                force: true,
+                requireReadback: true,
+                failureSink,
+                successSink,
+                precondition: scopeStillCurrent,
+                contentValidator: (persisted) => (
+                    actorSovereigntyScopesMatch(persisted?.actorSovereigntyScope, scope)
+                    && actorSovereigntyScopeDigest(persisted?.actorSovereigntyScope)
+                        === evidence.scopeDigest
+                    && actorSovereigntyMigrationDigest(persisted, scope)
+                        === evidence.contentDigest
+                    && persisted?.actorSovereigntyMigration?.status
+                        === 'migrated_pending_persist'
+                    && persisted?.actorSovereigntyMigration?.readbackVerified !== true
+                ),
+            }, migrationWriteToken);
+            return {
+                ok,
+                reason: failureSink.code || '',
+                readbackNamespace: successSink.readbackNamespace,
+            };
+        },
+        commitMarker: async (candidate) => {
+            chatNamespacePersistenceMetrics.migrationMarkerCommits += 1;
+            const failureSink = {};
+            const successSink = {};
+            const ok = await commitMigrationNamespace(candidate, {
+                fields: ['actorSovereigntyMigration'],
+                durable: true,
+                force: true,
+                requireReadback: true,
+                failureSink,
+                successSink,
+                precondition: scopeStillCurrent,
+                contentValidator: (persisted) => (
+                    actorSovereigntyMigrationIsCurrent(persisted, scope)
+                ),
+            }, migrationWriteToken);
+            return {
+                ok,
+                reason: failureSink.code || '',
+                readbackNamespace: successSink.readbackNamespace,
+            };
+        },
+    });
+    if (!result.ok) {
+        lastChatNamespaceWriteFailureCode = result.reason || 'migration.persistence_failed';
+    }
+    return result;
+}
+
+async function ensureActorSovereigntyMigrationPersisted(context = getContext()) {
+    const chatId = String(context?.chatId || '');
+    if (!chatId) {
+        return { ok: false, current: false, reason: 'migration.chat_missing', namespace: null };
+    }
+    const hintedScope = currentActorSovereigntyScope(context);
+    const key = `${chatId}|${actorSovereigntyScopeDigest(hintedScope)}`;
+    const existing = actorSovereigntyMigrationPromises.get(key);
+    if (existing) {
+        chatNamespacePersistenceMetrics.migrationSingleflightJoins += 1;
+        return deepClone(await existing);
+    }
+    const task = (async () => {
+        const resolution = await resolveCurrentActorSovereigntyScope(context);
+        if (!resolution.resolved) {
+            return {
+                ok: false,
+                current: false,
+                reason: resolution.reason || 'migration.scope_unresolved',
+                namespace: readChatNamespace(context),
+                scope: resolution.scope,
+            };
+        }
+        return runActorSovereigntyMigrationPersisted(context, resolution, chatId);
+    })();
+    actorSovereigntyMigrationPromises.set(key, task);
+    try {
+        return deepClone(await task);
+    } finally {
+        if (actorSovereigntyMigrationPromises.get(key) === task) {
+            actorSovereigntyMigrationPromises.delete(key);
+        }
+    }
 }
 
 function phase6RuntimeState(namespace = readChatNamespace()) {
@@ -4144,8 +4857,8 @@ function captureTarget(context, index) {
         branchId: runtimeIdentity.branchId,
         generationId: runtimeIdentity.generationId,
         epoch: operationEpoch,
-        generationSerial,
-        generationType: lastGeneration.type || 'normal',
+        generationSerial: runtimeIdentity.generationSerial,
+        generationType: runtimeIdentity.generationType,
     };
 }
 
@@ -4318,27 +5031,646 @@ function sourceRefOf(captured) {
         index: captured.index,
         swipeId: captured.swipeId,
         generation: captured.generationSerial,
+        generationId: captured.generationId,
+        generationType: captured.generationType,
         branchId: captured.branchId,
         hash: captured.fingerprint,
+        target: observationConvergenceTargetOf(actorActionTargetOf(captured)),
     };
+}
+
+function actorActionTargetOf(captured) {
+    if (!captured) return null;
+    const contentHash = captured.contentFingerprint || captured.fingerprint;
+    return {
+        chatId: captured.chatId,
+        logicalIndex: captured.index,
+        index: captured.index,
+        messageId: captured.messageId,
+        swipeId: captured.swipeId,
+        generation: captured.generationSerial,
+        generationId: captured.generationId,
+        generationType: captured.generationType,
+        branchId: captured.branchId,
+        contentHash,
+        hash: contentHash,
+    };
+}
+
+function observationConvergenceTargetOf(value) {
+    const target = normalizeActorActionTarget(value);
+    return target ? {
+        chatId: target.chatId,
+        logicalIndex: target.logicalIndex,
+        messageId: target.messageId,
+        swipeId: target.swipeId,
+        generation: target.generation,
+        generationId: target.generationId,
+        generationType: target.generationType,
+        branchId: target.branchId,
+        contentHash: target.contentHash,
+    } : null;
 }
 
 function sovereigntySourceRefOf(captured) {
     if (!captured) return null;
+    const scopeDigest = actorSovereigntyScopeDigest(currentActorSovereigntyScope(getContext()));
     return {
         chatId: captured.chatId,
         logicalIndex: captured.index,
         messageId: captured.messageId,
         swipeId: captured.swipeId,
         generation: captured.generationSerial,
+        generationId: captured.generationId,
+        generationType: captured.generationType,
         branchId: captured.branchId,
         contentHash: captured.contentFingerprint || captured.fingerprint,
+        scopeDigest,
     };
 }
 
+function sovereigntyObservationRecord(
+    captured,
+    reason = 'migration_pending',
+    failureStage = 'migration_commit',
+) {
+    const context = getContext();
+    const scope = currentActorSovereigntyScope(context);
+    const scopeDigest = actorSovereigntyScopeDigest(scope);
+    const sourceRef = {
+        ...sovereigntySourceRefOf(captured),
+        scopeDigest,
+    };
+    const sourceKey = sovereigntySourceKey(sourceRef);
+    return {
+        version: 1,
+        id: `OBS-WAL-${sourceKey}`,
+        chatId: captured.chatId,
+        scope,
+        scopeDigest,
+        sourceKey,
+        sourceRef,
+        observedAt: Date.now(),
+        status: 'pending_migration',
+        observationDurable: false,
+        persistencePending: true,
+        failureStage: String(failureStage || 'migration_commit').slice(0, 80),
+        requiresConvergence: true,
+        reason: String(reason || 'migration_pending').slice(0, 160),
+        target: observationConvergenceTargetOf(actorActionTargetOf(captured)),
+    };
+}
+
+function currentPendingSovereigntyObservationRecords(context = getContext()) {
+    const chatId = String(context?.chatId || '');
+    if (!chatId) {
+        pendingSovereigntyObservations.clear();
+        return [];
+    }
+    const scope = currentActorSovereigntyScope(context);
+    const scopeDigest = actorSovereigntyScopeDigest(scope);
+    const current = [];
+    for (const [key, record] of pendingSovereigntyObservations.entries()) {
+        const matches = (
+            record?.chatId === chatId
+            && record?.scopeDigest === scopeDigest
+            && actorSovereigntyScopesMatch(record?.scope, scope)
+            && record?.sourceRef?.scopeDigest === scopeDigest
+            && sovereigntySourceKey(record?.sourceRef) === record?.sourceKey
+            && normalizeActorActionTarget(record?.target)
+            && actorActionTargetMatches(record.target, record.sourceRef)
+        );
+        if (matches) current.push(deepClone(record));
+        else pendingSovereigntyObservations.delete(key);
+    }
+    return current;
+}
+
+function sovereigntyRuntimeWithSessionObservationFailures(
+    namespace,
+    runtimeValue = null,
+    context = getContext(),
+) {
+    const scopeDigest = actorSovereigntyScopeDigest(currentActorSovereigntyScope(context));
+    const runtime = normalizeSovereigntyRuntime(
+        runtimeValue ?? namespace?.sovereigntyRuntime,
+        { chatId: context?.chatId || '', scopeDigest },
+    );
+    const pending = currentPendingSovereigntyObservationRecords(context)
+        .filter((record) => !runtime.observations.some(
+            (observation) => observation.sourceKey === record.sourceKey,
+        ));
+    if (!pending.length) return runtime;
+    const now = Date.now();
+    for (const record of pending) {
+        if (runtime.backlog.some((task) => (
+            task?.sourceKey === record.sourceKey
+            && task?.metadata?.sessionObservationPersistenceFailure === true
+        ))) continue;
+        const turn = Math.max(1, Number(runtime.observedThrough?.turn || 0) + 1);
+        runtime.backlog.push({
+            id: `SESSION-OBS-RECOVERY-${record.sourceKey}`,
+            sourceKey: record.sourceKey,
+            sourceRef: deepClone(record.sourceRef),
+            turn,
+            module: 'observation',
+            status: 'retryable_failed',
+            attemptCount: 1,
+            retryCount: 0,
+            technicalFailureCount: 1,
+            nextRetryTurn: turn,
+            claimedAt: 0,
+            createdAt: Number(record.observedAt) || now,
+            updatedAt: now,
+            committedAt: 0,
+            lastFailureCode: String(record.reason || 'observation.persistence_failed'),
+            recoveryMode: 'source_turn',
+            historicalActionAllowed: false,
+            commitRef: '',
+            claimToken: '',
+            metadata: {
+                sessionOnly: true,
+                durable: false,
+                persistencePending: true,
+                sessionObservationPersistenceFailure: true,
+                failureStage: record.failureStage,
+                simulationRequired: true,
+                actorActionsAllowed: false,
+                target: deepClone(record.target),
+            },
+        });
+    }
+    runtime.moduleHealth.observation.technicalFailureCount = Math.max(
+        1,
+        Number(runtime.moduleHealth.observation.technicalFailureCount) || 0,
+    );
+    runtime.moduleHealth.observation.lastFailureCode = String(
+        pending.at(-1)?.reason || 'observation.persistence_failed',
+    );
+    runtime.moduleHealth.observation.nextRetryTurn = Math.max(
+        1,
+        Number(runtime.observedThrough?.turn || 0) + 1,
+    );
+    return normalizeSovereigntyRuntime(runtime, {
+        chatId: context?.chatId || '',
+        scopeDigest,
+    });
+}
+
+async function queuePendingSovereigntyObservation(captured, reason, {
+    failureStage = 'migration_commit',
+} = {}) {
+    const record = sovereigntyObservationRecord(captured, reason, failureStage);
+    if (!record.sourceKey) return { queued: false, persisted: false, record: null };
+    const key = `${record.scopeDigest}|${record.sourceKey}`;
+    pendingSovereigntyObservations.set(key, deepClone(record));
+    const namespace = readChatNamespace(getContext());
+    namespace.rev = Math.max(
+        Number(namespace.rev) || 0,
+        Number(getContext()?.chatMetadata?.[PLUGIN_ID]?.rev) || 0,
+    );
+    const existing = Array.isArray(namespace.actorSovereigntyObservationWAL)
+        ? namespace.actorSovereigntyObservationWAL
+        : [];
+    namespace.actorSovereigntyObservationWAL = [
+        ...existing.filter((entry) => (
+            `${entry?.scopeDigest || ''}|${entry?.sourceKey || ''}` !== key
+        )),
+        record,
+    ];
+    const persisted = await writeChatNamespace(namespace, captured.chatId, {
+        fields: ['actorSovereigntyObservationWAL'],
+        durable: true,
+        force: true,
+    });
+    return { queued: true, persisted, record };
+}
+
+function reconstructMissingSovereigntyObservations(context, runtime, scope) {
+    const scopeDigest = actorSovereigntyScopeDigest(scope);
+    const observed = new Set((runtime?.observations || []).map((entry) => entry.sourceKey));
+    return (Array.isArray(context?.chat) ? context.chat : [])
+        .map((message, index) => ({ message, index }))
+        .filter(({ message }) => (
+            message
+            && !message.is_user
+            && !message.is_system
+            && sovereigntyNarrativeEligible(message.mes || '')
+        ))
+        .map(({ index }) => captureTarget(context, index))
+        .filter(Boolean)
+        .map((captured) => sovereigntyObservationRecord(captured, 'chat_gap_reconstructed'))
+        .filter((record) => (
+            record.scopeDigest === scopeDigest
+            && record.sourceKey
+            && !observed.has(record.sourceKey)
+        ));
+}
+
+function currentObservationConvergenceProof(runtime, context, scope) {
+    const scopeDigest = actorSovereigntyScopeDigest(scope);
+    const gaps = (runtime?.backlog || []).filter((task) => (
+        task?.module === 'observation'
+        && task?.status === 'committed'
+        && task?.metadata?.observationGapRecovery === true
+        && task?.metadata?.simulationRequired === true
+    ));
+    if (!gaps.length) return null;
+    const expected = gaps
+        .map((task) => task.metadata?.convergenceTargets)
+        .filter(Array.isArray)
+        .sort((left, right) => right.length - left.length)[0] || [];
+    if (!expected.length) return null;
+    const entries = [];
+    for (const item of expected) {
+        const expectedTarget = normalizeActorActionTarget(item?.target);
+        const logicalIndex = Number(expectedTarget?.logicalIndex);
+        if (!expectedTarget || !Number.isInteger(logicalIndex)) return null;
+        const captured = captureTarget(context, logicalIndex);
+        const currentTarget = actorActionTargetOf(captured);
+        const currentSourceRef = sovereigntySourceRefOf(captured);
+        if (
+            !currentTarget
+            || !currentSourceRef
+            || currentSourceRef.scopeDigest !== scopeDigest
+            || !actorActionTargetMatches(currentTarget, expectedTarget)
+            || sovereigntySourceKey(currentSourceRef) !== item.sourceKey
+        ) return null;
+        entries.push({
+            sourceKey: item.sourceKey,
+            target: observationConvergenceTargetOf(currentTarget),
+        });
+    }
+    const body = {
+        version: 1,
+        kind: 'current_chat_observation_convergence',
+        scopeDigest,
+        entries,
+        latestSourceKey: entries.at(-1)?.sourceKey || '',
+    };
+    return {
+        ...body,
+        proofDigest: contentAddressedJsonRef(body),
+    };
+}
+
+function supersedeReplacedSovereigntyObservations(
+    value,
+    context,
+    scope,
+    pendingRecords = [],
+) {
+    const scopeDigest = actorSovereigntyScopeDigest(scope);
+    let runtime = normalizeSovereigntyRuntime(value, {
+        chatId: context?.chatId,
+        scopeDigest,
+    });
+    const expected = new Map();
+    for (const task of runtime.backlog || []) {
+        if (
+            task?.module !== 'observation'
+            || task?.metadata?.observationGapRecovery !== true
+            || task?.metadata?.simulationRequired !== true
+        ) continue;
+        for (const item of Array.isArray(task.metadata?.convergenceTargets)
+            ? task.metadata.convergenceTargets
+            : []) {
+            const target = normalizeActorActionTarget(item?.target);
+            if (item?.sourceKey && target) {
+                expected.set(item.sourceKey, {
+                    sourceKey: item.sourceKey,
+                    target,
+                    sourceRef: null,
+                    observedAt: task.updatedAt || Date.now(),
+                });
+            }
+        }
+    }
+    for (const record of pendingRecords) {
+        const target = normalizeActorActionTarget(record?.target);
+        if (
+            record?.scopeDigest === scopeDigest
+            && record?.sourceKey
+            && target
+        ) {
+            expected.set(record.sourceKey, {
+                sourceKey: record.sourceKey,
+                target,
+                sourceRef: record.sourceRef,
+                observedAt: record.observedAt || Date.now(),
+            });
+        }
+    }
+    const replacements = [];
+    const staleSourceKeys = new Set();
+    for (const item of expected.values()) {
+        const logicalIndex = Number(item.target.logicalIndex);
+        if (!Number.isInteger(logicalIndex)) continue;
+        const captured = captureTarget(context, logicalIndex);
+        const currentTarget = actorActionTargetOf(captured);
+        const currentSourceRef = sovereigntySourceRefOf(captured);
+        if (
+            !currentTarget
+            || !currentSourceRef
+            || currentSourceRef.scopeDigest !== scopeDigest
+        ) continue;
+        const currentSourceKey = sovereigntySourceKey(currentSourceRef);
+        if (
+            actorActionTargetMatches(currentTarget, item.target)
+            && currentSourceKey === item.sourceKey
+        ) continue;
+        if (
+            item.sourceRef
+            && !runtime.observations.some((entry) => entry.sourceKey === item.sourceKey)
+        ) {
+            runtime = observeSovereigntyTurn(runtime, {
+                sourceRef: item.sourceRef,
+                modules: [],
+                observationOnlyFinal: false,
+                now: item.observedAt,
+            }).runtime;
+        }
+        replacements.push({
+            sourceKey: item.sourceKey,
+            currentSourceKey,
+            logicalIndex,
+            scopeDigest,
+            sourceRef: item.sourceRef || {
+                ...item.target,
+                scopeDigest,
+            },
+            currentSourceRef,
+        });
+        staleSourceKeys.add(item.sourceKey);
+    }
+    if (!replacements.length) {
+        return { runtime, superseded: [], staleSourceKeys };
+    }
+    const supersession = supersedeSovereigntyObservationSources(runtime, {
+        scopeDigest,
+        replacements,
+    });
+    return {
+        runtime: supersession.runtime,
+        superseded: supersession.superseded,
+        staleSourceKeys,
+    };
+}
+
+async function replayPendingSovereigntyObservations(
+    namespace,
+    context = getContext(),
+    { reconstruct = false } = {},
+) {
+    const scope = currentActorSovereigntyScope(context);
+    const scopeDigest = actorSovereigntyScopeDigest(scope);
+    let runtime = sovereigntyRuntimeFromNamespace(namespace);
+    const persistedWal = Array.isArray(namespace.actorSovereigntyObservationWAL)
+        ? namespace.actorSovereigntyObservationWAL
+        : [];
+    const inMemoryWal = [...pendingSovereigntyObservations.values()];
+    const supersession = supersedeReplacedSovereigntyObservations(
+        runtime,
+        context,
+        scope,
+        [...persistedWal, ...inMemoryWal],
+    );
+    runtime = supersession.runtime;
+    const candidates = [
+        ...persistedWal,
+        ...inMemoryWal,
+        ...(reconstruct
+            ? reconstructMissingSovereigntyObservations(context, runtime, scope)
+            : []),
+    ].filter((entry) => (
+        !supersession.staleSourceKeys.has(entry?.sourceKey)
+            &&
+        entry?.chatId === context?.chatId
+        && entry?.scopeDigest === scopeDigest
+            && actorSovereigntyScopesMatch(entry?.scope, scope)
+            && entry?.sourceRef?.scopeDigest === scopeDigest
+            && sovereigntySourceKey(entry?.sourceRef) === entry?.sourceKey
+            && normalizeActorActionTarget(entry?.target)
+            && actorActionTargetMatches(entry?.target, entry?.sourceRef)
+    ));
+    const unique = new Map(candidates.map((entry) => [entry.sourceKey, entry]));
+    const ordered = [...unique.values()].sort((left, right) => (
+        Number(left?.sourceRef?.logicalIndex || 0)
+            - Number(right?.sourceRef?.logicalIndex || 0)
+        || Number(left?.observedAt || 0) - Number(right?.observedAt || 0)
+        || String(left?.sourceKey || '').localeCompare(String(right?.sourceKey || ''))
+    ));
+    const convergenceEntry = [...ordered].reverse().find(
+        (entry) => entry.requiresConvergence !== false,
+    ) || null;
+    let replayed = 0;
+    for (const entry of ordered) {
+        const requiresConvergence = entry.sourceKey === convergenceEntry?.sourceKey;
+        const result = observeSovereigntyTurn(runtime, {
+            sourceRef: entry.sourceRef,
+            modules: [],
+            observationOnlyFinal: !requiresConvergence,
+            now: entry.observedAt || Date.now(),
+        });
+        runtime = result.runtime;
+        if (requiresConvergence && result.observed) {
+            const task = runtime.backlog.find((candidate) => (
+                candidate.sourceKey === entry.sourceKey
+                && candidate.module === 'observation'
+            ));
+            if (task) {
+                task.metadata = {
+                    ...(task.metadata || {}),
+                    observationGapRecovery: true,
+                    simulationRequired: true,
+                    observationOnlyFinal: false,
+                    actorActionsAllowed: false,
+                    convergenceCoversSourceKeys: ordered.map((item) => item.sourceKey),
+                    convergenceTargets: ordered.map((item) => ({
+                        sourceKey: item.sourceKey,
+                        target: observationConvergenceTargetOf(item.target),
+                    })),
+                    convergenceLatestSourceKey: ordered.at(-1)?.sourceKey || '',
+                };
+            }
+        }
+        if (result.observed) replayed += 1;
+    }
+    if (!unique.size) {
+        if (supersession.staleSourceKeys.size || supersession.superseded.length) {
+            const staleKeys = new Set([...supersession.staleSourceKeys].map(
+                (sourceKey) => `${scopeDigest}|${sourceKey}`,
+            ));
+            const supersededNamespace = deepClone(namespace);
+            supersededNamespace.sovereigntyRuntime = runtime;
+            supersededNamespace.actorSovereigntyObservationWAL = persistedWal.filter((entry) => (
+                !staleKeys.has(`${entry?.scopeDigest || ''}|${entry?.sourceKey || ''}`)
+            ));
+            const saved = await writeChatNamespace(supersededNamespace, context.chatId, {
+                fields: ['sovereigntyRuntime', 'actorSovereigntyObservationWAL'],
+                durable: true,
+                force: true,
+            });
+            if (!saved) {
+                return {
+                    ok: false,
+                    namespace,
+                    runtime: sovereigntyRuntimeFromNamespace(namespace),
+                    replayed: 0,
+                    observationGapPending: true,
+                    reason: lastChatNamespaceWriteFailureCode
+                        || 'observation_supersession.persistence_failed',
+                };
+            }
+            for (const key of staleKeys) pendingSovereigntyObservations.delete(key);
+            return {
+                ok: true,
+                namespace: supersededNamespace,
+                runtime,
+                replayed: 0,
+                converged: [],
+                superseded: supersession.superseded,
+            };
+        }
+        const proof = currentObservationConvergenceProof(runtime, context, scope);
+        const convergence = completeSovereigntyObservationGaps(runtime, {
+            scopeDigest,
+            proof,
+        });
+        if (!convergence.completed.length) {
+            const gapPending = runtime.backlog.some((task) => (
+                task?.module === 'observation'
+                && task?.metadata?.observationGapRecovery === true
+                && task?.metadata?.simulationRequired === true
+            ));
+            return gapPending
+                ? {
+                    ok: false,
+                    namespace,
+                    runtime,
+                    replayed: 0,
+                    converged: [],
+                    observationGapPending: true,
+                    reason: convergence.reason,
+                }
+                : { ok: true, namespace, runtime, replayed: 0, converged: [] };
+        }
+        const next = deepClone(namespace);
+        next.sovereigntyRuntime = convergence.runtime;
+        const saved = await writeChatNamespace(next, context.chatId, {
+            fields: ['sovereigntyRuntime'],
+            durable: true,
+            force: true,
+        });
+        return saved
+            ? {
+                ok: true,
+                namespace: next,
+                runtime: convergence.runtime,
+                replayed: 0,
+                converged: convergence.completed,
+            }
+            : {
+                ok: false,
+                namespace,
+                runtime,
+                replayed: 0,
+                observationGapPending: true,
+                reason: lastChatNamespaceWriteFailureCode
+                    || 'observation_gap.convergence_persistence_failed',
+            };
+    }
+    const drainedKeys = new Set([
+        ...[...unique.values()].map(
+            (entry) => `${entry.scopeDigest}|${entry.sourceKey}`,
+        ),
+        ...[...supersession.staleSourceKeys].map(
+            (sourceKey) => `${scopeDigest}|${sourceKey}`,
+        ),
+    ]);
+    const next = deepClone(namespace);
+    next.sovereigntyRuntime = runtime;
+    next.actorSovereigntyObservationWAL = persistedWal.filter((entry) => (
+        !drainedKeys.has(`${entry?.scopeDigest || ''}|${entry?.sourceKey || ''}`)
+    ));
+    const saved = await writeChatNamespace(next, context.chatId, {
+        fields: ['sovereigntyRuntime', 'actorSovereigntyObservationWAL'],
+        durable: true,
+        force: true,
+    });
+    if (!saved) {
+        return {
+            ok: false,
+            namespace,
+            runtime: sovereigntyRuntimeFromNamespace(namespace),
+            replayed: 0,
+            reason: lastChatNamespaceWriteFailureCode || 'observation_wal.persistence_failed',
+        };
+    }
+    for (const key of drainedKeys) pendingSovereigntyObservations.delete(key);
+    const materializedNamespace = readChatNamespace(context);
+    const proof = currentObservationConvergenceProof(runtime, context, scope);
+    const convergence = completeSovereigntyObservationGaps(runtime, {
+        scopeDigest,
+        proof,
+    });
+    if (convergence.completed.length) {
+        // The WAL materialization above advanced sovereigntyRuntime's field
+        // revision. Build convergence from that authoritative readback; using
+        // the pre-commit candidate here would either fail the revision guard or
+        // overwrite a concurrent runtime update.
+        const convergedNamespace = deepClone(materializedNamespace);
+        convergedNamespace.sovereigntyRuntime = convergence.runtime;
+        const converged = await writeChatNamespace(convergedNamespace, context.chatId, {
+            fields: ['sovereigntyRuntime'],
+            durable: true,
+            force: true,
+        });
+        if (!converged) {
+            return {
+                ok: false,
+                namespace: next,
+                runtime,
+                replayed,
+                observationGapPending: true,
+                reason: lastChatNamespaceWriteFailureCode
+                    || 'observation_gap.convergence_persistence_failed',
+            };
+        }
+        materializedNamespace.sovereigntyRuntime = convergence.runtime;
+        return {
+            ok: true,
+            namespace: materializedNamespace,
+            runtime: convergence.runtime,
+            replayed,
+            converged: convergence.completed,
+        };
+    }
+    if (runtime.backlog.some((task) => (
+        task?.module === 'observation'
+        && task?.metadata?.observationGapRecovery === true
+        && task?.metadata?.simulationRequired === true
+    ))) {
+        return {
+            ok: false,
+            namespace: next,
+            runtime,
+            replayed,
+            observationGapPending: true,
+            reason: convergence.reason,
+        };
+    }
+    next.sovereigntyRuntime = runtime;
+    return { ok: true, namespace: next, runtime, replayed, converged: [] };
+}
+
 function sovereigntyRuntimeFromNamespace(namespace, settings = getSettings()) {
+    const scopeDigest = actorSovereigntyScopeDigest(
+        namespace?.actorSovereigntyScope || currentActorSovereigntyScope(getContext()),
+    );
     const runtime = normalizeSovereigntyRuntime(namespace?.sovereigntyRuntime, {
         chatId: namespace?.chatId || getContext()?.chatId || '',
+        scopeDigest,
     });
     runtime.mode = settings.sovereigntyMode;
     return runtime;
@@ -4351,6 +5683,7 @@ async function persistSovereigntyRuntime(runtime, expectedChatId, {
     const namespace = readChatNamespace();
     namespace.sovereigntyRuntime = normalizeSovereigntyRuntime(runtime, {
         chatId: expectedChatId,
+        scopeDigest: actorSovereigntyScopeDigest(namespace.actorSovereigntyScope),
     });
     const saved = await writeChatNamespace(namespace, expectedChatId, {
         fields: ['sovereigntyRuntime'],
@@ -4372,14 +5705,23 @@ function scheduleSovereigntyAutoRetry(captured, runtime = null) {
     const settings = getSettings();
     const context = getContext();
     const chatId = context?.chatId || '';
-    const currentRuntime = normalizeSovereigntyRuntime(
-        runtime || readChatNamespace(context)?.sovereigntyRuntime,
-        { chatId },
-    );
+    const currentNamespace = readChatNamespace(context);
+    const currentRuntime = runtime
+        ? normalizeSovereigntyRuntime(runtime, {
+            chatId,
+            scopeDigest: actorSovereigntyScopeDigest(
+                currentNamespace.actorSovereigntyScope,
+            ),
+        })
+        : sovereigntyRuntimeFromNamespace(currentNamespace);
     const due = dueSovereigntyTasks(currentRuntime);
     if (
         !captured
         || !chatId
+        || !actorSovereigntyMigrationIsCurrent(
+            currentNamespace,
+            currentActorSovereigntyScope(context),
+        )
         || settings.sovereigntyMode === 'legacy'
         || settings.sovereigntyRunUntilCancelled === false
         || !due.length
@@ -4437,8 +5779,47 @@ function scheduleSovereigntyAutoRetry(captured, runtime = null) {
 
 async function observeSovereigntyTarget(captured) {
     const settings = getSettings();
-    const namespace = readChatNamespace();
-    let runtime = sovereigntyRuntimeFromNamespace(namespace, settings);
+    const migration = await ensureActorSovereigntyMigrationPersisted(getContext());
+    if (!migration.ok) {
+        const queued = await queuePendingSovereigntyObservation(
+            captured,
+            migration.reason || 'migration.persistence_failed',
+        );
+        recordOperation(
+            '人物主权迁移',
+            `本回合正文观察已进入待持久队列；人物/世界旧任务保持隔离：${migration.reason}`,
+            'error',
+        );
+        return {
+            observed: true,
+            recovered: [],
+            runtime: migration.namespace?.sovereigntyRuntime || null,
+            persisted: false,
+            observationQueued: queued.queued,
+            observationWalPersisted: queued.persisted,
+            migrationBlocked: true,
+            failureCode: migration.reason || 'migration.persistence_failed',
+        };
+    }
+    let namespace = migration.namespace || readChatNamespace();
+    const replay = await replayPendingSovereigntyObservations(namespace, getContext());
+    if (!replay.ok) {
+        const queued = await queuePendingSovereigntyObservation(captured, replay.reason);
+        return {
+            observed: true,
+            recovered: [],
+            runtime: replay.runtime,
+            persisted: false,
+            observationQueued: queued.queued,
+            observationWalPersisted: queued.persisted,
+            failureCode: replay.reason,
+        };
+    }
+    namespace = replay.namespace;
+    let runtime = normalizeSovereigntyRuntime(replay.runtime, {
+        chatId: captured.chatId,
+        scopeDigest: actorSovereigntyScopeDigest(namespace.actorSovereigntyScope),
+    });
     const recovered = recoverOrphanedSovereigntyTasks(runtime, {
         staleAfterMs: settings.sovereigntyHardTimeoutMs + 5_000,
         excludeTaskIds: [...activeSovereigntyTaskIds],
@@ -4484,9 +5865,35 @@ async function recoverSovereigntyOnChatLoad() {
     renderSovereigntyHealth();
     try {
         const settings = getSettings();
-        const namespace = readChatNamespace(context);
+        const migration = await ensureActorSovereigntyMigrationPersisted(context);
+        if (!migration.ok) {
+            return {
+                recovered: [],
+                scheduled: false,
+                migrationBlocked: true,
+                reason: migration.reason,
+            };
+        }
+        let namespace = migration.namespace || readChatNamespace(context);
+        const replay = await replayPendingSovereigntyObservations(
+            namespace,
+            context,
+            { reconstruct: true },
+        );
+        if (!replay.ok) {
+            return {
+                recovered: [],
+                scheduled: false,
+                observationPending: true,
+                reason: replay.reason,
+            };
+        }
+        namespace = replay.namespace;
         const recovered = recoverOrphanedSovereigntyTasks(
-            sovereigntyRuntimeFromNamespace(namespace, settings),
+            normalizeSovereigntyRuntime(replay.runtime, {
+                chatId,
+                scopeDigest: actorSovereigntyScopeDigest(namespace.actorSovereigntyScope),
+            }),
             {
                 staleAfterMs: settings.sovereigntyRunUntilCancelled ? 1_000 : settings.sovereigntyHardTimeoutMs + 5_000,
                 excludeTaskIds: [...activeSovereigntyTaskIds],
@@ -4518,7 +5925,18 @@ async function recoverSovereigntyOnChatLoad() {
 }
 
 async function claimSovereigntyModules(namespace, captured, modules) {
-    let runtime = sovereigntyRuntimeFromNamespace(namespace);
+    const migration = await ensureActorSovereigntyMigrationPersisted(getContext());
+    if (!migration.ok) {
+        return {
+            runtime: sovereigntyRuntimeFromNamespace(
+                migration.namespace || namespace,
+            ),
+            claimed: {},
+            migrationBlocked: true,
+            reason: migration.reason,
+        };
+    }
+    let runtime = sovereigntyRuntimeFromNamespace(migration.namespace || namespace);
     const claimed = {};
     for (const module of modules) {
         const result = claimNextSovereigntyTask(runtime, {
@@ -5319,6 +6737,17 @@ async function runOpeningResourceSync(targetId, { manual = false } = {}) {
             reason: candidate.reason || '开局资源补丁未通过 MVU/Schema 校验',
         };
     }
+    const migration = await ensureActorSovereigntyMigrationPersisted(freshContext);
+    if (!migration.ok) {
+        return {
+            status: 'failed',
+            reason: migration.reason || 'opening_resource.scope_migration_failed',
+            persistenceCommitted: false,
+            persistenceFailureStage: 'scope_migration',
+        };
+    }
+    guard = targetIsCurrent(captured, token);
+    if (!guard.ok) return { status: 'stale', reason: guard.reason };
     const result = await commitCandidate(Mvu, candidate, captured, token, {
         repairKind: 'opening-resource-sync',
         openingPaths: mismatches.map((item) => item.currentPath),
@@ -5335,9 +6764,20 @@ async function runOpeningResourceSync(targetId, { manual = false } = {}) {
         };
     }
     landedNamespace.openingResourceSync = landedOpeningState;
-    await writeChatNamespace(landedNamespace, captured.chatId, {
+    const openingStateSaved = await writeChatNamespace(landedNamespace, captured.chatId, {
         fields: ['openingResourceSync'],
     });
+    if (!openingStateSaved) {
+        setStatus('开局资源已经写入 MVU，但同步读回记录未能持久化；不会宣称完整成功。', 'error');
+        return {
+            ...result,
+            status: 'applied_unrecorded',
+            persistenceCommitted: false,
+            persistenceFailureStage: 'opening_resource_metadata',
+            persistenceFailureCode: lastChatNamespaceWriteFailureCode,
+            mismatches,
+        };
+    }
     const summary = mismatches.map(openingSyncLabel).join('、');
     setStatus(`已同步开局资源：${summary}`, 'ok');
     toast('success', `已修正开局初始化失配：${summary}`);
@@ -7734,6 +9174,19 @@ async function runTarget(targetId, {
     updateTaskProgress(progressId, '读取 MVU 与目标楼层');
 
     const Mvu = await getMvu();
+    updateTaskProgress(progressId, '核对聊天、角色卡与世界书作用域');
+    const migration = await ensureActorSovereigntyMigrationPersisted(initialContext);
+    if (!migration.ok || !migration.current) {
+        const result = {
+            status: 'failed',
+            reason: migration.reason || 'variable.scope_migration_failed',
+            persistenceCommitted: false,
+            persistenceFailureStage: 'scope_migration',
+            zeroWrite: true,
+        };
+        setStatus('变量检查：作用域迁移尚未完成，未读取兼容视图、未写入 MVU。', 'error');
+        return result;
+    }
     let targetCheck = targetIsCurrent(captured, token);
     if (!targetCheck.ok) return { status: 'stale', reason: targetCheck.reason };
     if (
@@ -8687,10 +10140,14 @@ async function undoLastUnlocked() {
         )
     ) {
         const updatedNamespace = markRepairUndone(readChatNamespace(), record.id);
-        await writeChatNamespace(updatedNamespace, record.chatId, {
+        const marked = await writeChatNamespace(updatedNamespace, record.chatId, {
             force: true,
             fields: ['repairJournal'],
         });
+        if (!marked) {
+            toast('warning', '变量无需撤销，但修复记录未能持久化；当前不会宣称撤销流程完整成功。');
+            return false;
+        }
         lastUndo = null;
         toast('info', '该恢复记录对应的写入没有落地，当前变量无需撤销。');
         return true;
@@ -8752,10 +10209,15 @@ async function undoLastUnlocked() {
         }
         updatedNamespace.openingResourceSync = state;
     }
-    await writeChatNamespace(updatedNamespace, record.chatId, {
+    const undoRecorded = await writeChatNamespace(updatedNamespace, record.chatId, {
         force: true,
         fields: ['repairJournal', 'openingResourceSync'],
     });
+    if (!undoRecorded) {
+        setStatus('变量已恢复，但撤销记录未能持久化；请勿重复操作。', 'error');
+        toast('warning', '变量已恢复，但撤销记录未能持久化；当前不会宣称完整成功。');
+        return false;
+    }
     lastUndo = null;
     setStatus('已撤销上一次自动修复', 'ok');
     toast('success', '已撤销上一次自动修复。');
@@ -8907,25 +10369,34 @@ function registerSocialInjection(content) {
 
 function prepareNpcDesignTicketBatch() {
     const context = getContext();
-    const namespace = readChatNamespace(context);
-    const ledger = normalizeActorLedger(namespace.actorLedger, {
-        chatId: context?.chatId || '',
-    });
+    const chatId = context?.chatId || '';
+    const target = {
+        chatId,
+        generation: generationSerial,
+        generationId: lastGeneration.id,
+        generationType: lastGeneration.type || 'normal',
+    };
     const tickets = Array.from({ length: 3 }, (_, index) => (
-        rollActorProfileDiversity({
+        issueCharacterCreationTicket({
             id: `${lastGeneration.id}|ticket:${index + 1}`,
             name: `原创人物骰票${index + 1}`,
         }, {
-            entropy: `${context?.chatId || ''}|${lastGeneration.id}|${index + 1}`,
+            entropy: `${chatId}|${lastGeneration.id}|${index + 1}`,
+            target,
+            order: index + 1,
         })
     ));
     pendingNpcDesignTicketBatch = {
-        generationId: lastGeneration.id,
-        generationSerial,
-        chatId: context?.chatId || '',
-        baselineActorIds: ledger.actors.map((actor) => actor.id),
+        ...target,
+        generationSerial: generationSerial,
         tickets,
     };
+    npcDesignTicketBatches.set(lastGeneration.id, pendingNpcDesignTicketBatch);
+    for (const [generationId, batch] of npcDesignTicketBatches) {
+        if (batch.chatId !== chatId || npcDesignTicketBatches.size > 12) {
+            npcDesignTicketBatches.delete(generationId);
+        }
+    }
     return pendingNpcDesignTicketBatch;
 }
 
@@ -8934,13 +10405,21 @@ function npcDesignTicketPrompt(batch) {
     const labels = {
         valuePriority: '价值',
         temperament: '气质',
+        coreDesire: '核心欲望',
+        thinkingStyle: '思考方式',
+        socialMotive: '社交动机',
         socialMethod: '社交',
+        interestOrientation: '利益取向',
         decisionMethod: '决策',
+        conflictStyle: '冲突方式',
+        moralBoundary: '道德边界',
         speechRhythm: '说话',
+        actionHabit: '行动习惯',
         humorMethod: '幽默',
         authorityAttitude: '权威态度',
         relationshipDistance: '关系距离',
         ordinaryFriction: '缺点摩擦',
+        selfDeception: '偏见与自我欺骗',
         pressureAndRecovery: '压力与恢复',
         everydayTexture: '日常纹理',
         independentLifeFocus: '个人生活目标',
@@ -8964,44 +10443,26 @@ function npcDesignTicketPrompt(batch) {
     ].join('\n');
 }
 
-async function settleNpcDesignTicketBatch(captured) {
-    const batch = pendingNpcDesignTicketBatch;
+function npcDesignTicketBatchForTarget(captured) {
+    const batch = npcDesignTicketBatches.get(captured?.generationId);
     if (
         !batch
-        || batch.generationId !== captured?.generationId
         || batch.chatId !== captured?.chatId
-    ) return { bound: 0 };
+        || Number(batch.generationSerial) !== Number(captured?.generationSerial)
+        || batch.generationType !== captured?.generationType
+    ) return null;
+    return batch;
+}
+
+function retireNpcDesignTicketInjection(captured) {
+    if (
+        !pendingNpcDesignTicketBatch
+        || pendingNpcDesignTicketBatch.generationId !== captured?.generationId
+        || pendingNpcDesignTicketBatch.chatId !== captured?.chatId
+    ) return false;
     pendingNpcDesignTicketBatch = null;
-    const context = getContext();
-    const namespace = readChatNamespace(context);
-    const ledger = normalizeActorLedger(namespace.actorLedger, {
-        chatId: captured.chatId,
-    });
-    const baseline = new Set(batch.baselineActorIds || []);
-    const newActors = ledger.actors.filter((actor) => !baseline.has(actor.id));
-    if (!newActors.length) return { bound: 0 };
-    const assignments = new Map(
-        newActors.slice(0, batch.tickets.length).map((actor, index) => (
-            [actor.id, batch.tickets[index]]
-        )),
-    );
-    ledger.actors = ledger.actors.map((actor) => (
-        assignments.has(actor.id)
-            ? bindActorProfileDesignRolls(actor, assignments.get(actor.id))
-            : actor
-    ));
-    namespace.actorLedger = ledger;
-    const saved = await writeChatNamespace(namespace, captured.chatId, {
-        fields: ['actorLedger'],
-    });
-    if (saved) {
-        recordOperation(
-            '原创人物骰票',
-            `已将 ${assignments.size} 组生成前骰票绑定到本轮新人物档案`,
-            'ok',
-        );
-    }
-    return { bound: saved ? assignments.size : 0 };
+    applySocialInjection();
+    return true;
 }
 
 function applySocialInjection() {
@@ -9340,10 +10801,15 @@ function registerContinuityInjection(content) {
 function continuityStateForInjection(namespace, { isReroll = false } = {}) {
     const context = getContext();
     const latest = latestAiMessage(context);
+    const captured = latest.message ? captureTarget(context, latest.index) : null;
     if (
         isReroll
         && namespace?.continuityCheckpoint?.state
-        && namespace.continuityCheckpoint.targetIndex === latest.index
+        && actorSovereigntyMigrationIsCurrent(
+            namespace,
+            currentActorSovereigntyScope(context),
+        )
+        && checkpointLogicalReplyMatches(namespace.continuityCheckpoint, captured)
     ) {
         return namespace.continuityCheckpoint.state;
     }
@@ -9848,7 +11314,8 @@ async function settleContinuityInjectionReceipts(captured) {
     namespace.continuityInjectionQueue = settled.queue;
     namespace.continuityInjectionBatches = settled.batches;
     if (!settled.changed) return;
-    await persistContinuityInjectionMetadata(namespace);
+    const saved = await persistContinuityInjectionMetadata(namespace);
+    if (!saved) return;
     recordOperation(
         '世界注入',
         `生成 ${captured.generationId}：正文消费 ${settled.consumed} 条，保留 ${settled.retained} 条`,
@@ -9870,9 +11337,10 @@ async function settleActorLedgerInjectionReceipts(captured) {
     });
     if (JSON.stringify(before) === JSON.stringify(after)) return;
     namespace.actorLedger = after;
-    await writeChatNamespace(namespace, captured.chatId, {
+    const saved = await writeChatNamespace(namespace, captured.chatId, {
         fields: ['actorLedger'],
     });
+    if (!saved) return;
     const settled = after.actionReceipts.filter((receipt) => (
         receipt.stage === 'response_settled'
         && receipt.responseSourceRef?.messageId === captured.messageId
@@ -9889,13 +11357,23 @@ async function settleActorLedgerInjectionReceipts(captured) {
     }
 }
 
-function applyContinuityInjection({ isReroll = false } = {}) {
+async function applyContinuityInjection({ isReroll = false } = {}) {
     const settings = getSettings();
     if (settings.continuityMode === 'off') {
         registerContinuityInjection('');
         return false;
     }
-    const namespace = readChatNamespace();
+    const context = getContext();
+    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    if (!migration.ok || !migration.current || !migration.namespace) {
+        registerContinuityInjection('');
+        setContinuityStatus(
+            '世界连续性：作用域迁移尚未完成，旧账本不会进入本次生成。',
+            'error',
+        );
+        return false;
+    }
+    const namespace = deepClone(migration.namespace);
     const state = normalizeContinuityState(
         continuityStateForInjection(namespace, { isReroll }),
         {
@@ -9961,7 +11439,16 @@ function applyContinuityInjection({ isReroll = false } = {}) {
         settings.continuityInjectionBudgetChars,
     );
     registerContinuityInjection(content);
-    if (batch.generationId) void persistContinuityInjectionMetadata(namespace);
+    if (batch.generationId) {
+        const persisted = await persistContinuityInjectionMetadata(namespace);
+        if (!persisted) {
+            setContinuityStatus(
+                '世界连续性：本次注入收据未持久化，当前不会宣称注入流程完整成功。',
+                'error',
+            );
+            return false;
+        }
+    }
     const active = state.threads.filter((thread) => thread.stage !== 'resolved').length;
     setContinuityStatus(
         active
@@ -9978,10 +11465,7 @@ function continuityBase(namespace, captured) {
     if (
         isReroll
         && checkpoint?.state
-        && checkpoint.targetIndex === captured.index
-        && checkpoint.chatId === captured.chatId
-        && checkpoint.messageId === captured.messageId
-        && checkpoint.branchId === captured.branchId
+        && checkpointLogicalReplyMatches(checkpoint, captured)
     ) {
         return normalizeContinuityState(checkpoint.state, {
             chatId: captured.chatId,
@@ -9995,20 +11479,42 @@ function continuityBase(namespace, captured) {
 }
 
 function checkpointMatchesTarget(checkpoint, captured) {
-    return !!(
-        checkpoint
-        && captured
-        && checkpoint.targetIndex === captured.index
-        && checkpoint.messageId === captured.messageId
-        && Number(checkpoint.swipeId || 0) === Number(captured.swipeId || 0)
-        && Number(checkpoint.generationSerial || 0) === Number(captured.generationSerial || 0)
-        && String(checkpoint.generationId || '') === String(captured.generationId || '')
-        && String(checkpoint.branchId || '') === String(captured.branchId || '')
-        && String(checkpoint.contentFingerprint || '') === String(captured.contentFingerprint || '')
+    if (!checkpoint || !captured) return false;
+    const expectedScopeDigest = actorSovereigntyScopeDigest(
+        currentActorSovereigntyScope(getContext()),
     );
+    return checkpoint.compatibilityOnly !== true
+        && checkpoint.restorable !== false
+        && checkpoint.scopeDigest === expectedScopeDigest
+        && actorActionTargetMatches(checkpoint.target, actorActionTargetOf(captured));
+}
+
+function checkpointLogicalReplyMatches(checkpoint, captured) {
+    if (!checkpoint || !captured) return false;
+    const target = normalizeActorActionTarget(checkpoint.target);
+    const expectedScopeDigest = actorSovereigntyScopeDigest(
+        currentActorSovereigntyScope(getContext()),
+    );
+    const exactLogicalMessage = target?.messageId === captured.messageId;
+    const explicitReplacement = ['swipe', 'regenerate'].includes(captured.generationType)
+        && target?.chatId === captured.chatId
+        && target?.logicalIndex === captured.index
+        && !actorActionTargetMatches(target, actorActionTargetOf(captured));
+    return checkpoint.compatibilityOnly !== true
+        && checkpoint.restorable !== false
+        && checkpoint.scopeDigest === expectedScopeDigest
+        && target?.chatId === captured.chatId
+        && target?.logicalIndex === captured.index
+        && (exactLogicalMessage || explicitReplacement);
 }
 
 async function actorLedgerCheckpointState(namespace, checkpoint) {
+    if (checkpoint?.compatibilityOnly === true || checkpoint?.restorable === false) return null;
+    if (checkpoint && !checkpointLogicalReplyMatches(checkpoint, {
+        chatId: checkpoint.target?.chatId,
+        index: checkpoint.target?.logicalIndex,
+        messageId: checkpoint.target?.messageId,
+    })) return null;
     if (checkpoint?.state) return checkpoint.state;
     const ref = String(checkpoint?.stateRef || '');
     if (!ref) return null;
@@ -10020,10 +11526,21 @@ async function actorLedgerCheckpointState(namespace, checkpoint) {
     }
 }
 
-function preserveMissingThreads(previous, next) {
+function preserveMissingThreads(previous, next, { supersededTarget = null } = {}) {
     const present = new Set((next.threads || []).map((thread) => thread.id));
     for (const thread of previous.threads || []) {
         if (present.has(thread.id)) continue;
+        const ownedTargets = (thread.sourceRefs || [])
+            .map((ref) => normalizeActorActionTarget(ref?.target))
+            .filter(Boolean);
+        if (
+            supersededTarget
+            && ownedTargets.length > 0
+            && ownedTargets.length === (thread.sourceRefs || []).length
+            && ownedTargets.every((target) => (
+                actorActionTargetMatches(target, supersededTarget)
+            ))
+        ) continue;
         next.threads.push(deepClone(thread));
         present.add(thread.id);
     }
@@ -10167,10 +11684,8 @@ function buildContinuityMessages({
         '- MVU仍是数值、资源、任务状态的唯一实时权威；不得输出或修改MVU、JSONPatch、数据库或SQL。',
         '- 只推动NPC、势力、环境、敌方、约定、谜团和离场角色，不得替玩家角色决定、说话、移动、消费资源或追加检定。',
         '- 世界采用双轨调度：人物轨维护有身份、有限认知与独立行动的角色；结构世界轨独立维护势力、环境、经济、长期趋势、传播与因果余波。任何一轨都不得替代或吞并另一轨。',
-        '- 人物轨还维护增量人物档案。职业、阵营和本轮强烈情绪不是完整人格；害怕不等于结巴失能，专业不等于冷酷面具，打手不等于咆哮虐待，战士不等于杀意机器。档案要记录人物各自的社交与决策办法、现实欲望、边界、日常习惯、盲点、说话节奏、信息取样与典型误读、受压反应与恢复路径、具体关系中的距离模式、自我形象和已观察行为的缝隙、训练形成的逆倾向能力，以及可共存矛盾。',
-        '- 不运行或输出MBTI、九型人格、Tritype、依恋类型、星座、病娇/地雷/白切黑/S-M等分类，也不把这些标签写进actorProfiles。角色卡若明确写了类型，只当弱参考；偏好不等于能力上限，训练、职责和生活经验可以形成与偏好相反的熟练做法。',
-        '- actorProfiles只能补充已在“当前人物档案”中存在的稳定actorId，并且每项evidence必须逐字摘录当前角色卡、世界书、MVU锚点或最近已发生正文中的具体短句；本地会拒绝找不到原文的转述和推测。禁止把一次恐惧、愤怒、绝望或服从直接固化为永久trait；没有新证据就返回空数组。既有档案只做增量补全，不因本轮刺激整套覆写。每名人物每轮最多补三个证据最强的新维度，其余保持未知，禁止为了填满字段发明隐藏创伤、反差或心理诊断。',
-        '- actionAttempts只是人物提出的尝试，绝不是已经成功的事实。你必须逐项用actionAdjudications裁决实际代价、耗时、风险与结果；attemptId必须原样对应。settled/partial必须给出非空appliedStateChanges、observableConsequence与以后可揭示结果的revealPath；不得替玩家同意、行动、付费、移动或产生感受。没有可验证裁决时返回held/rejected并说明结果，不得把尝试静默当成功。',
+        '- 人物轨只把已提交、已读回且行动就绪的人物档案作为身份、知识、能力与边界的只读约束；本输出没有人物档案写权限，也不得生成档案补丁。职业、阵营和本轮强烈情绪不是完整人格；害怕不等于失能，专业不等于冷酷，人物尝试仍必须受已知证据与有限认知约束。',
+        '- actionAttempts只是已持久化的人物尝试，绝不是已经成功的事实。你必须逐项用actionAdjudications裁决实际代价、耗时、风险与结果；attemptId、actorRef（kind、actorId、displayName、aliases规范化集合）与target必须逐字段原样回传并绑定同一人物、chat、logicalIndex、message、swipe、generation、generationId、generationType、branch和hash。status只用success/partial/failure/delayed/blocked；actualResourceCosts必须返回数组，只能从该尝试已有resourceCosts中选取且不得超量；visibility必须明确为public/private/observer_limited，observer_limited须列observerActorIds，public须给publicSummary。每项裁决都须给出actual duration、cost、risk、resultSummary与observableConsequence；success/partial还须给出非空appliedStateChanges，离屏结果须给以后可发现的revealPath。不得替玩家同意、行动、付费、移动或产生感受，也不得结算玩家关系。没有可验证成功依据时返回failure/delayed/blocked并说明结果，不得把尝试静默当成功。',
         '- 势力与环境过程可以没有单一代表人物，并可在没有人物候选、人物分片失败或人物行动留在幕后时继续推进、结算或自行结束；不得为了调用人物轨而虚构一个代言NPC。',
         '- 本地另有一个三通道共享压力闸：人物、势力、环境分别调度，但共同消耗医生自己的压力与注入预算。闸门延迟的候选保持未发生；禁止在JSON中换名复制或升级。',
         '- <content>是本回合已发生事实，只能读取和承认，绝不改写、截断或要求重生成。若正文已经出现过量威胁，承认现状，但本轮不得再新增、聚合、复制或升级威胁；优先恢复、错开、互相牵制、信息、资源、退路或远端留存。',
@@ -10335,7 +11850,8 @@ function buildContinuityMessages({
         }));
     const actorShardPromptPayload = actorShardCandidates?.actionAttempts?.length
         ? {
-            actionAttempts: actorShardCandidates.actionAttempts,
+            actionAttempts: actorShardCandidates.actionAttempts
+                .map((attempt) => actorActionAttemptWorldView(attempt)),
             rejectedActions: actorShardCandidates.rejectedActions || [],
             worldMustAdjudicateEveryAttempt: true,
         }
@@ -10371,9 +11887,9 @@ function buildContinuityMessages({
             ? [
                 '',
                 '=== 持久人物账本的本轮调度与行动收据 ===',
-                'proposals仍是无写权限候选；actionAttempts仅通过本地身份、知识、地点、资源、能力、因果和玩家主权预检，尚未发生。世界裁决器必须逐项返回actionAdjudications，之后本地才允许结算人物实际行动与世界后果。',
+                'proposals仍是无写权限候选；actionAttempts已经通过ActorRef、完整档案读回、知识、地点、资源、能力、因果和玩家主权预检，并以attempted/pending_world先行持久化，但仍只表示人物尝试。世界裁决器必须逐项原样回传attemptId、actorRef、target并返回actionAdjudications，之后本地才允许结算实际世界后果。',
                 'rejectedActions必须保持拒绝，禁止模型绕过本地原因重新采用。后台行动可以永不进入主线；只有worldEvents中的可观察后果或主动接触才可进入事件/世界表面，且仍受汇流门槛和注入预算限制。',
-                cropText(safeJson(actorShardPromptPayload), 7000, '人物行动尝试'),
+                safeJson(actorShardPromptPayload, 0),
             ]
             : []),
         ...(worldLaneSchedule?.selected?.length
@@ -10404,8 +11920,7 @@ function buildContinuityMessages({
         '输出格式：',
         jsonOnly ? '' : '<ContinuityState>',
         '{"turn":本轮整数,"lastTick":{"turn":本轮整数,"action":"created|advanced|manifested|resolved|dormant|held","threadId":"稳定ID或WORLD","reason":"不少于8字的具体依据"},',
-        '"actorProfiles":[{"actorId":"现有稳定ID","name":"同一人物名","evidence":["逐字短证据"],"identity":{"role":"角色","traits":[],"desires":[],"boundaries":[],"socialStyle":"","decisionStyle":"","speechStyle":"","copingStyle":"","informationStyle":"","typicalMisread":"","relationshipDistancePattern":"","selfImageGap":"","learnedCounterDisposition":"","pressureResponse":"","recoveryPath":"","everydayHabits":[],"blindSpots":[]},"longTermGoals":[],"capabilities":[],"hidden":{"emotionalInertia":[],"innerConflicts":[],"privateIntentions":[]}}],',
-        '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","status":"settled|partial|rejected|held","risk":"具体风险","costs":["具体代价"],"durationTurns":1,"resultSummary":"世界实际裁决结果","observableConsequence":"可观察后果","revealPath":"隐藏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],',
+        '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","actorRef":{"kind":"actor_ref","actorId":"输入原值","displayName":"输入原值","aliases":[]},"target":{"chatId":"输入原值","logicalIndex":0,"index":0,"messageId":"输入原值","swipeId":0,"generation":0,"generationId":"输入原值","generationType":"输入原值","branchId":"输入原值","contentHash":"输入原值","hash":"输入原值"},"status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],',
         '"threads":[{"id":"旧ID或null","title":"短标题","kind":"parallel|personal|promise|enemy|mystery","eventType":"conflict|progress","level":2,"origin":"main_derivative|setting_linked|setting_independent|ambient","relation":"linked|latent|independent|converging","stage":"seeded|advancing|manifested|resolved|dormant","stageProgress":3,"evolveResult":"success|hold|setback","stalled":false,"outcome":"","summary":"已成立事实","offscreenBeat":"本轮实际变化或空","nextBeat":"未来可能的一拍","trigger":"可验证条件","intersection":"交联复核","convergence": {"score": 0,"channels":[],"evidence":[],"entryBeat":"","lastCheckedTurn":1},"seedBasis":"依据","causedBy":[],"effects":[],"rumors":[],"resolution":"","actors":[],"locations":[],"knowledge":"hidden|rumor|observed","urgency":1,"createdTurn":1,"lastAdvancedTurn":1}],',
         '"scenarioPlan":{"baselineEvidence":[],"amendments":[]},',
         '"world":{"digest":"本轮变化或空","trends":[{"id":null,"sourceThreads": ["来源事件ID"]}],"factions":[],"winds":[],"reputation":{},"environment":{},"shadows":{"enemies":[],"secrets":[]},"influences":[]}}',
@@ -10424,6 +11939,8 @@ function actorShardLeaseFingerprint(captured) {
         messageId: String(captured?.messageId || ''),
         swipeId: Math.max(0, Number(captured?.swipeId) || 0),
         generation: Math.max(0, Number(captured?.generationSerial) || 0),
+        generationId: String(captured?.generationId || ''),
+        generationType: String(captured?.generationType || ''),
         branchId: String(captured?.branchId || ''),
         parentHash: fingerprint(String(captured?.generationId || captured?.branchId || 'root')),
         contentHash: String(captured?.contentFingerprint || ''),
@@ -10616,6 +12133,165 @@ async function collectActorShardProposals(captured, {
     };
 }
 
+async function persistActorRegistryForTurn(captured, {
+    previousLedger,
+    nextLedger,
+    actorIds = [],
+    token = null,
+} = {}) {
+    const previousDigest = actorRegistryDigest(previousLedger?.actorRegistry);
+    const digest = actorRegistryDigest(nextLedger?.actorRegistry);
+    if (previousDigest === digest) {
+        return { ok: true, ledger: nextLedger, persistenceMeta: null, reason: '' };
+    }
+    if (token && !continuityTargetIsCurrent(captured, token).ok) {
+        return {
+            ok: false,
+            ledger: previousLedger,
+            persistenceMeta: null,
+            reason: 'actor_registry.target_stale',
+        };
+    }
+    const expected = {
+        chatId: captured.chatId,
+        actorIds,
+        digest,
+    };
+    const namespace = readChatNamespace(getContext());
+    namespace.actorLedger = nextLedger;
+    const failureSink = {};
+    const successSink = {};
+    const saved = await writeChatNamespace(namespace, captured.chatId, {
+        fields: ['actorLedger'],
+        durable: true,
+        force: true,
+        failureSink,
+        successSink,
+        requireReadback: true,
+        contentValidator: (persisted) => actorRegistryMatchesLedger(
+            persisted?.actorLedger,
+            expected,
+        ).ok,
+        precondition: () => (
+            !token || continuityTargetIsCurrent(captured, token).ok
+        ),
+    });
+    if (!saved) {
+        const reason = failureSink.code === 'host_save_readback_unsupported'
+            ? 'actor_registry.readback_unsupported'
+            : failureSink.code === 'host_save_readback_mismatch'
+                ? 'actor_registry.readback_mismatch'
+                : [
+                    'chat_context_changed',
+                    'chat_context_changed_after_save',
+                    'write_precondition_failed',
+                ].includes(failureSink.code)
+                    ? 'actor_registry.target_stale'
+                    : 'actor_registry.commit_rejected';
+        return { ok: false, ledger: previousLedger, persistenceMeta: null, reason };
+    }
+    const persistedLedger = normalizeActorLedger(
+        successSink.readbackNamespace?.actorLedger,
+        { chatId: captured.chatId },
+    );
+    if (!actorRegistryMatchesLedger(persistedLedger, expected).ok) {
+        return {
+            ok: false,
+            ledger: previousLedger,
+            persistenceMeta: null,
+            reason: 'actor_registry.readback_mismatch',
+        };
+    }
+    return {
+        ok: true,
+        ledger: persistedLedger,
+        persistenceMeta: {
+            rev: successSink.namespace?.rev,
+            fieldRevisions: deepClone(successSink.namespace?.fieldRevisions || {}),
+        },
+        reason: '',
+    };
+}
+
+async function persistActorActionAttemptsForTurn(captured, {
+    previousLedger,
+    nextLedger,
+    attempts = [],
+    target = null,
+    token = null,
+} = {}) {
+    if (!attempts.length) {
+        return { ok: true, ledger: nextLedger, persistenceMeta: null, reason: '' };
+    }
+    if (token && !continuityTargetIsCurrent(captured, token).ok) {
+        return {
+            ok: false,
+            ledger: previousLedger,
+            persistenceMeta: null,
+            reason: 'action_attempt.target_stale',
+        };
+    }
+    const expected = {
+        chatId: captured.chatId,
+        target,
+        attempts,
+    };
+    const pendingNamespace = readChatNamespace(getContext());
+    pendingNamespace.actorLedger = nextLedger;
+    const failureSink = {};
+    const successSink = {};
+    const saved = await writeChatNamespace(pendingNamespace, captured.chatId, {
+        fields: ['actorLedger'],
+        durable: true,
+        force: true,
+        failureSink,
+        successSink,
+        requireReadback: true,
+        contentValidator: (persisted) => actorActionAttemptsMatchLedger(
+            persisted?.actorLedger,
+            expected,
+        ).ok,
+        precondition: () => (
+            !token || continuityTargetIsCurrent(captured, token).ok
+        ),
+    });
+    if (!saved) {
+        const reason = failureSink.code === 'host_save_readback_unsupported'
+            ? 'action_attempt.readback_unsupported'
+            : failureSink.code === 'host_save_readback_mismatch'
+                ? 'action_attempt.readback_mismatch'
+                : [
+                    'chat_context_changed',
+                    'chat_context_changed_after_save',
+                    'write_precondition_failed',
+                ].includes(failureSink.code)
+                    ? 'action_attempt.target_stale'
+                    : 'action_attempt.commit_rejected';
+        return { ok: false, ledger: previousLedger, persistenceMeta: null, reason };
+    }
+    const persistedLedger = normalizeActorLedger(
+        successSink.readbackNamespace?.actorLedger,
+        { chatId: captured.chatId },
+    );
+    if (!actorActionAttemptsMatchLedger(persistedLedger, expected).ok) {
+        return {
+            ok: false,
+            ledger: previousLedger,
+            persistenceMeta: null,
+            reason: 'action_attempt.readback_mismatch',
+        };
+    }
+    return {
+        ok: true,
+        ledger: persistedLedger,
+        persistenceMeta: {
+            rev: successSink.namespace?.rev,
+            fieldRevisions: deepClone(successSink.namespace?.fieldRevisions || {}),
+        },
+        reason: '',
+    };
+}
+
 async function completeActorProfilesForTurn(captured, {
     actorLedger,
     userText = '',
@@ -10631,7 +12307,14 @@ async function completeActorProfilesForTurn(captured, {
         turn,
     });
     if (!candidates.length || settings.actorProfileCompletionMode === 'off') {
-        return { ledger: actorLedger, candidates, accepted: [], rejected: [], failures: [] };
+        return {
+            ledger: actorLedger,
+            candidates,
+            accepted: [],
+            rejected: [],
+            failures: [],
+            persistenceMeta: null,
+        };
     }
     const evidenceText = [
         userText,
@@ -10647,140 +12330,208 @@ async function completeActorProfilesForTurn(captured, {
                 .slice(0, 16),
             evidenceText,
         ].filter(Boolean).join('\n\n');
-        const messages = buildActorProfileCompletionMessages([candidate], {
-            evidenceText: cropText(candidateEvidenceText, 42000, '人物档案材料'),
-        });
-        try {
-            let output = await callModel(messages, {
-                maxTokens: Math.max(2400, Math.min(6000, settings.actorShardMaxTokens)),
-                timeoutMs: settings.sovereigntyHardTimeoutMs,
-                task: '人物档案生成',
-                channel: 'fast',
-                instructionModule: 'profile',
-                targetIndex: captured.index,
-                jsonMode: false,
-                parallelLane: `profile:${candidate.actorId}`,
-                failover: true,
-                maxFailovers: 1,
-                runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
-            });
+        let validationFeedback = [];
+        const attempts = 1 + settings.actorProfileSemanticRetries;
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
             if (token && !continuityTargetIsCurrent(captured, token).ok) {
-                return { candidate, failure: 'target_stale' };
+                return { candidate, failure: 'actor_profile.target_stale' };
             }
-            let parsed = parseActorProfileCompletionOutput(output, {
-                candidates: [candidate],
-                evidenceText: candidateEvidenceText,
+            const messages = buildActorProfileCompletionMessages([candidate], {
+                evidenceText: cropText(candidateEvidenceText, 42000, '人物档案材料'),
+                validationFeedback,
             });
-            let profilePatch = parsed.profiles?.[0] || null;
-            let missingFields = actorProfileCompletionMissingFields(profilePatch, candidate);
-            if (!profilePatch || missingFields.length) {
-                const originalOutput = output;
-                output = await callModel(
-                    buildActorProfileRepairMessages(originalOutput, candidate, {
-                        missingFields,
-                        evidenceText: candidateEvidenceText,
-                    }),
-                    {
-                        maxTokens: Math.max(2400, Math.min(6000, settings.actorShardMaxTokens)),
-                        timeoutMs: settings.sovereigntyHardTimeoutMs,
-                        task: '人物档案 JSON 修复',
-                        channel: 'fast',
-                        instructionModule: 'profile',
-                        targetIndex: captured.index,
-                        jsonMode: true,
-                        parallelLane: `profile:${candidate.actorId}:repair`,
-                        failover: false,
-                        maxFailovers: 0,
-                        runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
-                    },
-                );
-                const repaired = parseActorProfileCompletionOutput(output, {
-                    candidates: [candidate],
-                    evidenceText: candidateEvidenceText,
+            try {
+                const output = await callModel(messages, {
+                    maxTokens: Math.max(2400, Math.min(6000, settings.actorShardMaxTokens)),
+                    timeoutMs: settings.sovereigntyHardTimeoutMs,
+                    task: attempt === 0 ? '人物完整档案生成' : '人物完整档案替换重试',
+                    channel: 'fast',
+                    instructionModule: 'profile',
+                    targetIndex: captured.index,
+                    jsonMode: false,
+                    parallelLane: `profile:${candidate.actorId}`,
+                    failover: true,
+                    maxFailovers: 1,
+                    runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
                 });
-                profilePatch = mergeActorProfileCompletionPatches(
-                    profilePatch,
-                    repaired.profiles?.[0] || null,
-                );
-                missingFields = actorProfileCompletionMissingFields(profilePatch, candidate);
-                parsed = profilePatch ? { profiles: [profilePatch], error: '' } : repaired;
-                if (profilePatch && !missingFields.length) {
-                    recordModelDiagnostic({
-                        phase: 'validation',
-                        task: '人物档案结构与缺列修复',
-                        channel: 'fast',
-                        status: 'recovered',
-                        targetIndex: captured.index,
-                        failureKind: 'profile-structure-repaired',
-                        outputChars: output.length,
-                        recovered: true,
-                        recoveryReason: 'complete-profile-repair',
-                    });
+                if (token && !continuityTargetIsCurrent(captured, token).ok) {
+                    return { candidate, failure: 'actor_profile.target_stale' };
                 }
-            }
-            return parsed.profiles && !missingFields.length
-                ? { candidate, profiles: parsed.profiles, evidenceText: candidateEvidenceText }
-                : {
+                const parsed = parseActorProfileCompletionOutput(output, {
+                    candidates: [candidate],
+                    completionMode: candidate.completionMode,
+                });
+                if (parsed.ok) {
+                    return {
+                        candidate,
+                        insertCandidate: parsed.candidate,
+                        repairs: parsed.repairs,
+                        resolutions: parsed.resolutions,
+                    };
+                }
+                if (parsed.errorCode === 'actor_profile.actor_ref_mismatch') {
+                    return { candidate, failure: parsed.errorCode };
+                }
+                validationFeedback = parsed.missingFields?.length
+                    ? parsed.missingFields.map((path) => `缺失或无效 ${path}`)
+                    : [parsed.errorCode || 'actor_profile.format_unrecoverable'];
+                if (attempt + 1 >= attempts) {
+                    return {
+                        candidate,
+                        failure: parsed.errorCode || 'actor_profile.format_unrecoverable',
+                        missingFields: parsed.missingFields || [],
+                    };
+                }
+            } catch (error) {
+                return {
                     candidate,
-                    failure: missingFields.length
-                        ? `actor_profile.content_incomplete:${missingFields.join(',')}`
-                        : parsed.error || 'actor_profile.output_invalid',
+                    failure: 'actor_profile.transport_failed',
+                    reason: String(error?.validationReason || error?.message || error),
                 };
-        } catch (error) {
-            return {
-                candidate,
-                failure: String(error?.validationReason || error?.message || error),
-            };
+            }
         }
+        return { candidate, failure: 'actor_profile.format_unrecoverable' };
     }));
     let ledger = actorLedger;
     const accepted = [];
     const rejected = [];
     const failures = [];
+    let persistenceMeta = null;
     for (const result of settled) {
         if (result.failure) {
             failures.push({
                 actorId: result.candidate.actorId,
                 name: result.candidate.name,
                 reason: result.failure,
+                missingFields: result.missingFields || [],
             });
             continue;
         }
-        const merged = mergeActorProfilePatches(ledger, result.profiles, {
-            turn,
-            sourceRef: sourceRefOf(captured),
-            maxPatches: 1,
-            evidenceCorpus: result.evidenceText || evidenceText,
-            mergeMode: 'consolidate',
-        });
-        ledger = merged.ledger;
-        const profilePatch = result.profiles[0];
-        const actorIndex = ledger.actors.findIndex((actor) => actor.id === profilePatch.actorId);
-        let physiologyApplied = false;
-        if (actorIndex >= 0) {
-            const before = JSON.stringify(ledger.actors[actorIndex].profileV6?.modules?.physiology || null);
-            ledger.actors[actorIndex].profileV6 = applyActorProfileCompletionToV6(
-                ledger.actors[actorIndex].profileV6,
-                profilePatch,
-                { turn },
-            );
-            physiologyApplied = before !== JSON.stringify(
-                ledger.actors[actorIndex].profileV6?.modules?.physiology || null,
-            );
-        }
-        if (merged.accepted.length) accepted.push(...merged.accepted);
-        else if (physiologyApplied) {
-            accepted.push({
-                actorId: profilePatch.actorId,
-                name: profilePatch.name,
-                evidence: profilePatch.evidence,
+        if (token && !continuityTargetIsCurrent(captured, token).ok) {
+            failures.push({
+                actorId: result.candidate.actorId,
+                name: result.candidate.name,
+                reason: 'actor_profile.target_stale',
             });
+            continue;
         }
-        rejected.push(...merged.rejected.filter((entry) => (
-            !physiologyApplied || entry.reason !== 'no-new-profile-facts'
-        )));
+        const actor = ledger.actors.find((entry) => entry.id === result.candidate.actorId);
+        if (!actor) {
+            failures.push({
+                actorId: result.candidate.actorId,
+                name: result.candidate.name,
+                reason: 'actor_profile.target_stale',
+            });
+            continue;
+        }
+        const baseline = materializeActorProfileBaseline(
+            actor.profileV6,
+            result.insertCandidate,
+            { turn, completionMode: result.candidate.completionMode },
+        );
+        const digest = actorProfileBaselineDigest(baseline);
+        const commitId = `PBI-${fingerprint(JSON.stringify([
+            captured.chatId,
+            captured.messageId,
+            captured.swipeId,
+            captured.generationId,
+            result.candidate.actorId,
+            digest,
+        ])).slice(0, 24)}`;
+        const expectedCommit = {
+            actorRef: {
+                actorId: result.candidate.actorId,
+                name: result.candidate.name,
+            },
+            schemaVersion: baseline.version,
+            commitId,
+            digest,
+        };
+        const replaced = replaceActorProfileBaselineInLedger(
+            ledger,
+            expectedCommit.actorRef,
+            baseline,
+            {
+                ...expectedCommit,
+                sourceRef: sourceRefOf(captured),
+                committedTurn: turn,
+                readbackVerified: true,
+            },
+        );
+        if (!replaced.committed) {
+            failures.push({
+                actorId: result.candidate.actorId,
+                name: result.candidate.name,
+                reason: replaced.reason || 'actor_profile.commit_rejected',
+            });
+            continue;
+        }
+        const namespace = readChatNamespace(getContext());
+        namespace.actorLedger = replaced.ledger;
+        const failureSink = {};
+        const successSink = {};
+        const saved = await writeChatNamespace(namespace, captured.chatId, {
+            fields: ['actorLedger'],
+            durable: true,
+            force: true,
+            failureSink,
+            successSink,
+            requireReadback: true,
+            contentValidator: (persisted) => actorProfileCommitMatchesLedger(
+                persisted?.actorLedger,
+                expectedCommit,
+            ).ok,
+            precondition: () => (
+                !token || continuityTargetIsCurrent(captured, token).ok
+            ),
+        });
+        if (!saved) {
+            const reason = failureSink.code === 'host_save_readback_unsupported'
+                ? 'actor_profile.readback_unsupported'
+                : failureSink.code === 'host_save_readback_mismatch'
+                    ? 'actor_profile.readback_mismatch'
+                    : [
+                        'chat_context_changed',
+                        'chat_context_changed_after_save',
+                        'write_precondition_failed',
+                    ].includes(
+                        failureSink.code,
+                    )
+                        ? 'actor_profile.target_stale'
+                        : 'actor_profile.commit_rejected';
+            failures.push({
+                actorId: result.candidate.actorId,
+                name: result.candidate.name,
+                reason,
+            });
+            continue;
+        }
+        const persistedLedger = normalizeActorLedger(
+            successSink.readbackNamespace?.actorLedger,
+            { chatId: captured.chatId },
+        );
+        if (!actorProfileCommitMatchesLedger(persistedLedger, expectedCommit).ok) {
+            failures.push({
+                actorId: result.candidate.actorId,
+                name: result.candidate.name,
+                reason: 'actor_profile.readback_mismatch',
+            });
+            continue;
+        }
+        ledger = persistedLedger;
+        persistenceMeta = {
+            rev: successSink.namespace?.rev,
+            fieldRevisions: deepClone(successSink.namespace?.fieldRevisions || {}),
+        };
+        accepted.push({
+            actorId: result.candidate.actorId,
+            name: result.candidate.name,
+            commitId,
+            digest,
+            repairs: result.repairs || [],
+        });
     }
-    return { ledger, candidates, accepted, rejected, failures };
+    return { ledger, candidates, accepted, rejected, failures, persistenceMeta };
 }
 
 async function runContinuityTarget(captured, { force = false } = {}) {
@@ -10803,11 +12554,30 @@ async function runContinuityTarget(captured, { force = false } = {}) {
     let sovereigntyRuntime = sovereigntyRuntimeFromNamespace(namespace, settings);
     let sovereigntyTasks = {};
     if (settings.sovereigntyMode !== 'legacy') {
+        const migration = await ensureActorSovereigntyMigrationPersisted(context);
+        if (!migration.ok) {
+            return {
+                status: 'failed',
+                reason: migration.reason || 'migration.persistence_failed',
+            };
+        }
+        namespace = migration.namespace || readChatNamespace(context);
+        const replay = await replayPendingSovereigntyObservations(namespace, context);
+        if (!replay.ok) {
+            return {
+                status: 'failed',
+                reason: replay.reason || 'observation_wal.persistence_failed',
+            };
+        }
+        namespace = replay.namespace;
+        sovereigntyRuntime = normalizeSovereigntyRuntime(replay.runtime, {
+            chatId: captured.chatId,
+            scopeDigest: actorSovereigntyScopeDigest(namespace.actorSovereigntyScope),
+        });
         const sourceRef = sovereigntySourceRefOf(captured);
+        const sourceKey = sovereigntySourceKey(sourceRef);
         const alreadyObserved = sovereigntyRuntime.observations.some((entry) => (
-            entry.sourceRef?.chatId === sourceRef?.chatId
-            && entry.sourceRef?.messageId === sourceRef?.messageId
-            && entry.sourceRef?.contentHash === sourceRef?.contentHash
+            entry.sourceKey === sourceKey
         ));
         if (!alreadyObserved) {
             const observed = observeSovereigntyTurn(sovereigntyRuntime, {
@@ -10827,10 +12597,26 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                 force: true,
             });
             if (!walSaved) {
+                const failureCode = lastChatNamespaceWriteFailureCode
+                    || 'observation.persistence_failed';
+                const pending = await queuePendingSovereigntyObservation(
+                    captured,
+                    failureCode,
+                    { failureStage: 'observation_commit' },
+                );
+                // The rejected candidate contains the observation only in the
+                // failed write attempt. Render from the authoritative readback
+                // plus the session WAL overlay; never let that candidate hide
+                // the durable=false technical failure.
+                renderSovereigntyHealth();
                 return {
                     status: 'failed',
-                    reason: lastChatNamespaceWriteFailureCode
-                        || 'observation.persistence_failed',
+                    persistenceCommitted: false,
+                    persistenceFailureStage: 'observation_commit',
+                    persistenceFailureCode: failureCode,
+                    failureStatePersisted: pending.persisted,
+                    observationPendingInMemory: pending.queued,
+                    reason: failureCode,
                 };
             }
             namespace = readChatNamespace(context);
@@ -10845,10 +12631,20 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         ]);
         sovereigntyRuntime = claimed.runtime;
         sovereigntyTasks = claimed.claimed;
+        if (claimed.migrationBlocked) {
+            return {
+                status: 'failed',
+                reason: claimed.reason || 'migration.persistence_failed',
+            };
+        }
         namespace.sovereigntyRuntime = sovereigntyRuntime;
     }
     try {
     const checkpointBase = continuityBase(namespace, captured);
+    const supersededContinuityTarget = isReroll
+        && checkpointLogicalReplyMatches(namespace.continuityCheckpoint, captured)
+        ? normalizeActorActionTarget(namespace.continuityCheckpoint?.target)
+        : null;
     let base = checkpointBase;
     base = mergeMarkerRecords(base, markers.records, {
         chatId: captured.chatId,
@@ -10879,7 +12675,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         settings.sovereigntyMode === 'legacy'
         && !continuityFeatureActive(settings, markers, base, worldContext, force)
     ) {
-        applyContinuityInjection();
+        await applyContinuityInjection();
         return { status: 'disabled' };
     }
     const director = detectContinuityDirector(context, messageText, markers);
@@ -10950,10 +12746,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         : null;
     const rerollActorBase = isReroll
         && actorCheckpointState
-        && actorCheckpoint.chatId === captured.chatId
-        && actorCheckpoint.targetIndex === captured.index
-        && actorCheckpoint.messageId === captured.messageId
-        && actorCheckpoint.branchId === captured.branchId
+        && checkpointLogicalReplyMatches(actorCheckpoint, captured)
         ? actorCheckpointState
         : namespace.actorLedger;
     const storedActorLedger = normalizeActorLedger(
@@ -10983,10 +12776,20 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         knownThreatPressure,
     });
     const excludedActorNames = currentPlayerActorNames(context);
+    const preRegistryLedger = normalizeActorLedger(storedActorLedger, {
+        chatId: captured.chatId,
+        excludedActorNames,
+    });
     let actorLedger = migrateActorLedgerFromContinuity(
         storedActorLedger,
         scheduledBase,
-        { excludedActorNames },
+        {
+            excludedActorNames,
+            allowLegacyRegistration: (
+                Number(rerollActorBase?.version) < 7
+                || !rerollActorBase?.actorRegistry
+            ),
+        },
     );
     actorLedger.turn = tickTurn;
     const actorDiscovery = discoverActorsFromTurnSources(actorLedger, {
@@ -10997,7 +12800,53 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         sourceRef: sourceRefOf(captured),
         turn: tickTurn,
     });
-    actorLedger = actorDiscovery.ledger;
+    const actorRegistration = promoteActorCandidatesToRegistry(
+        actorDiscovery.ledger,
+        actorDiscovery.candidates,
+        {
+            chatId: captured.chatId,
+            turn: tickTurn,
+            excludedActorNames,
+        },
+    );
+    actorLedger = actorRegistration.ledger;
+    const characterCreationTicketBatch = npcDesignTicketBatchForTarget(captured);
+    const characterCreationTicketBinding = characterCreationTicketBatch
+        ? bindCharacterCreationTicketsToRegisteredActors(actorLedger, {
+            registration: actorRegistration,
+            candidates: actorDiscovery.candidates,
+            batch: characterCreationTicketBatch,
+            target: {
+                ...sourceRefOf(captured),
+                generationId: captured.generationId,
+                generationType: captured.generationType,
+            },
+            protectedActorNames: [
+                ...excludedActorNames,
+                ...actorNamesFromMvuData(currentMvuData),
+                character?.name,
+                context?.name2,
+                context?.characterName,
+            ],
+            authorityText: worldContext.text,
+        })
+        : null;
+    if (characterCreationTicketBinding?.matched) {
+        actorLedger = characterCreationTicketBinding.ledger;
+    }
+    if (actorRegistration.quarantined.length) {
+        recordModelDiagnostic({
+            phase: 'identity',
+            task: '人物候选登记',
+            channel: 'local',
+            status: 'quarantined',
+            targetIndex: captured.index,
+            failureKind: 'actor-candidate-quarantined',
+            reason: [...new Set(actorRegistration.quarantined.map((entry) => entry.reason))]
+                .join(','),
+            outputChars: 0,
+        });
+    }
     actorLedger = reconcileActorIdentityRevealsFromAcceptedContent(actorLedger, {
         content: acceptedNarrative,
         sourceRef: sourceRefOf(captured),
@@ -11016,6 +12865,35 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         sourceRef: sourceRefOf(captured),
         observerActorIds,
     });
+    const registryPersistence = await persistActorRegistryForTurn(captured, {
+        previousLedger: preRegistryLedger,
+        nextLedger: actorLedger,
+        actorIds: actorRegistration.promoted.map((entry) => entry.actorRef.actorId),
+        token,
+    });
+    if (!registryPersistence.ok) {
+        await requeueClaimedSovereigntyTasks(
+            sovereigntyTasks,
+            captured,
+            registryPersistence.reason,
+        );
+        return { status: 'failed', reason: registryPersistence.reason };
+    }
+    actorLedger = registryPersistence.ledger;
+    if (characterCreationTicketBinding?.matched) {
+        npcDesignTicketBatches.delete(characterCreationTicketBatch.generationId);
+        if (characterCreationTicketBinding.bindings.length) {
+            recordOperation(
+                '原创人物骰票',
+                `已将 ${characterCreationTicketBinding.bindings.length} 张生成前人物票随身份注册原子保存`,
+                'ok',
+            );
+        }
+    }
+    if (registryPersistence.persistenceMeta) {
+        namespace.rev = registryPersistence.persistenceMeta.rev;
+        namespace.fieldRevisions = registryPersistence.persistenceMeta.fieldRevisions;
+    }
     let profilePreparation = prepareActorLedgerProfilesV6(actorLedger, {
         mode: settings.actorProfileCompletionMode,
         turn: tickTurn,
@@ -11033,11 +12911,27 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         token,
     });
     actorLedger = profileCompletion.ledger;
-    profilePreparation = prepareActorLedgerProfilesV6(actorLedger, {
-        mode: settings.actorProfileCompletionMode,
-        turn: tickTurn,
-    });
-    actorLedger = profilePreparation.ledger;
+    if (profileCompletion.persistenceMeta) {
+        namespace.rev = profileCompletion.persistenceMeta.rev;
+        namespace.fieldRevisions = profileCompletion.persistenceMeta.fieldRevisions;
+    }
+    const profileViews = actorLedger.actors.map((actor) => ({
+        actorId: actor.id,
+        view: actorProfileV6View(actor),
+    }));
+    profilePreparation = {
+        ledger: actorLedger,
+        prepared: profileViews
+            .filter((entry) => entry.view.preparedForAction)
+            .map((entry) => entry.actorId),
+        deferred: profileViews
+            .filter((entry) => !entry.view.preparedForAction)
+            .map((entry) => entry.actorId),
+        coverage: profileViews.length
+            ? Math.round(profileViews.reduce((sum, entry) => sum + entry.view.coverage, 0)
+                / profileViews.length)
+            : 100,
+    };
     const persistedProfileNames = new Set(
         profileCompletion.accepted.map((entry) => entry.name),
     );
@@ -11068,14 +12962,29 @@ async function runContinuityTarget(captured, { force = false } = {}) {
             ].slice(0, settings.actorLedgerMaxActorsPerTurn),
         };
     }
-    if (sovereigntyTasks.actor && actorSchedule.selected.length) {
+    const recoveredActorAttemptBatch = planActorAttemptRecovery(actorLedger, {
+        target: actorActionTargetOf(captured),
+        scheduledActorIds: actorSchedule.selected.map((item) => item.actorId),
+    });
+    if (recoveredActorAttemptBatch.mode === 'resume') {
+        const authoritativeActorIds = new Set(recoveredActorAttemptBatch.actorIds);
+        for (const [actorId, task] of Object.entries(sovereigntyTasks.actorById || {})) {
+            if (authoritativeActorIds.has(actorId)) continue;
+            sovereigntyRuntime = cancelSovereigntyTaskAsStale(sovereigntyRuntime, {
+                taskId: task.id,
+                reason: 'actor_recovery_scope_superseded',
+            }).runtime;
+            activeSovereigntyTaskIds.delete(task.id);
+            delete sovereigntyTasks.actorById[actorId];
+        }
+    }
+    if (sovereigntyTasks.actor && recoveredActorAttemptBatch.actorIds.length) {
         const alreadyClaimedActorIds = new Set(
             Object.keys(sovereigntyTasks.actorById || {}),
         );
         const materialized = materializeSovereigntyActorTasks(sovereigntyRuntime, {
             parentTaskId: sovereigntyTasks.actor.id,
-            actorIds: actorSchedule.selected
-                .map((item) => item.actorId)
+            actorIds: recoveredActorAttemptBatch.actorIds
                 .filter((actorId) => !alreadyClaimedActorIds.has(actorId)),
         });
         sovereigntyRuntime = materialized.runtime;
@@ -11127,12 +13036,13 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                     failed: profileCompletion.failures.length,
                 },
             },
-            {
+            ...(recoveredActorAttemptBatch.shouldRunActorWorker ? [{
                 agentType: 'actor',
                 agentId: `actor-pool-${tickTurn}`,
-                input: { selected: actorSchedule.selected.length },
-            },
-            ...(actorSchedule.selected.length ? [] : [{
+                input: { selected: recoveredActorAttemptBatch.actorIds.length },
+            }] : []),
+            ...(recoveredActorAttemptBatch.actorIds.length
+                ? [] : [{
                 agentType: 'world',
                 agentId: `world-${tickTurn}`,
                 input: { lanes: provisionalWorldLaneSchedule.selected.length },
@@ -11212,11 +13122,22 @@ async function runContinuityTarget(captured, { force = false } = {}) {
     );
     const pooledCandidate = (agentType) => adjudicatedBlackboard.adjudication.accepted
         .find((candidate) => candidate.agentType === agentType)?.payload;
-    const pooledActorShardResult = pooledCandidate('actor') || null;
+    const pooledActorShardResult = recoveredActorAttemptBatch.attempts.length
+        ? {
+            status: 'resumed',
+            candidates: {
+                proposals: [],
+                failures: [],
+                recoveredAttempts: recoveredActorAttemptBatch.attempts,
+                recoveredCandidates: recoveredActorAttemptBatch.candidates,
+            },
+        }
+        : pooledCandidate('actor') || null;
     const prefetchedWorldOutput = typeof pooledCandidate('world') === 'string'
         ? pooledCandidate('world')
         : '';
-    const prefetchedWorldFailure = !actorSchedule.selected.length && !prefetchedWorldOutput
+    const prefetchedWorldFailure = !recoveredActorAttemptBatch.actorIds.length
+        && !prefetchedWorldOutput
         ? adjudicatedBlackboard.failures.find((entry) => entry.agentType === 'world')?.code
             || 'world.agent_output_missing'
         : '';
@@ -11234,7 +13155,10 @@ async function runContinuityTarget(captured, { force = false } = {}) {
     let pendingActorAttempts = [];
     let actorShardStatus = 'not-run';
     let actorTechnicalFailure = '';
-    const scheduledActorIds = actorSchedule.selected.map((item) => item.actorId);
+    // In recovery mode the persisted exact-target journal is authoritative.
+    // A fresh scheduler result cannot substitute different actors into the
+    // already-created attempt/receipt chain.
+    const scheduledActorIds = recoveredActorAttemptBatch.actorIds;
     try {
         const actorShardResult = pooledActorShardResult || {
             status: 'completed',
@@ -11251,7 +13175,47 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         }
         actorShardCandidates = actorShardResult.candidates;
         actorSettlement.technicalFailures = actorShardResult.candidates?.failures || [];
-        if (actorShardResult.candidates?.proposals?.length) {
+        if (actorShardResult.candidates?.recoveredAttempts?.length) {
+            pendingActorAttempts = actorShardResult.candidates.recoveredAttempts;
+            pendingActorActionCandidates = actorShardResult.candidates.recoveredCandidates;
+            actorSettlement = {
+                ledger: actorLedger,
+                accepted: [],
+                rejected: [],
+                worldEvents: [],
+                receipts: [],
+                attempts: pendingActorAttempts,
+                pendingWorld: pendingActorAttempts.map((attempt) => ({
+                    actorId: attempt.actorId,
+                    attempt,
+                    failureCode: 'world_adjudication_pending',
+                })),
+                technicalFailures: [],
+            };
+            actorShardCandidates = {
+                ...actorShardResult.candidates,
+                actionAttempts: pendingActorAttempts,
+                acceptedActions: [],
+                rejectedActions: [],
+                worldEvents: [],
+                receiptIds: [],
+            };
+            latestActorShardDiagnostics = {
+                ...latestActorShardDiagnostics,
+                status: 'resumed',
+                proposedActions: pendingActorAttempts.length,
+                acceptedActions: 0,
+                semanticActions: 0,
+                heldActions: 0,
+                rejectedActions: 0,
+                worldEvents: 0,
+            };
+            recordOperation(
+                '人物尝试',
+                `已从持久账本恢复 ${pendingActorAttempts.length} 项同一尝试；未重新生成或改写候选`,
+                'ok',
+            );
+        } else if (actorShardResult.candidates?.proposals?.length) {
             const actionCandidates = actorActionCandidatesFromShard(
                 actorLedger,
                 actorShardResult.candidates.proposals,
@@ -11285,14 +13249,67 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                 {
                     turn: tickTurn,
                     playerNames: excludedActorNames,
+                    sourceRef: actorActionTargetOf(captured),
+                    target: actorActionTargetOf(captured),
                 },
             );
-            pendingActorActionCandidates = preparedActorAttempts.admittedCandidates;
-            pendingActorAttempts = preparedActorAttempts.attempts;
+            const recordedActorAttempts = recordActorActionAttempts(
+                preparedActorAttempts.ledger,
+                preparedActorAttempts.attempts,
+                { target: actorActionTargetOf(captured) },
+            );
+            const attemptPersistence = await persistActorActionAttemptsForTurn(captured, {
+                previousLedger: actorLedger,
+                nextLedger: recordedActorAttempts.ledger,
+                attempts: recordedActorAttempts.recorded,
+                target: actorActionTargetOf(captured),
+                token,
+            });
+            if (!attemptPersistence.ok && attemptPersistence.reason === 'action_attempt.target_stale') {
+                await requeueClaimedSovereigntyTasks(
+                    sovereigntyTasks,
+                    captured,
+                    attemptPersistence.reason,
+                );
+                return { status: 'stale', reason: attemptPersistence.reason };
+            }
+            if (!attemptPersistence.ok) {
+                actorTechnicalFailure = attemptPersistence.reason;
+                recordOperation(
+                    '人物尝试',
+                    '人物尝试未通过原子持久化与内容读回；未发送世界裁决，结构世界轨继续运行',
+                    'warn',
+                );
+            } else {
+                actorLedger = attemptPersistence.ledger;
+                if (attemptPersistence.persistenceMeta) {
+                    namespace.rev = attemptPersistence.persistenceMeta.rev;
+                    namespace.fieldRevisions = attemptPersistence.persistenceMeta.fieldRevisions;
+                }
+            }
+            const recordedAttemptIds = new Set(
+                (attemptPersistence.ok ? recordedActorAttempts.recorded : [])
+                    .map((attempt) => attempt.id),
+            );
+            pendingActorActionCandidates = preparedActorAttempts.admittedCandidates
+                .filter((candidate) => recordedAttemptIds.has(candidate.attemptId));
+            pendingActorAttempts = (attemptPersistence.ok
+                ? recordedActorAttempts.recorded
+                : []);
             actorSettlement = {
                 ledger: actorLedger,
                 accepted: [],
-                rejected: [...preparedActorAttempts.rejected],
+                rejected: [
+                    ...preparedActorAttempts.rejected,
+                    ...recordedActorAttempts.rejected.map((entry) => ({
+                        actorId: entry.actorId,
+                        reasons: [entry.reason],
+                    })),
+                    ...(!attemptPersistence.ok ? preparedActorAttempts.attempts.map((attempt) => ({
+                        actorId: attempt.actorId,
+                        reasons: [attemptPersistence.reason],
+                    })) : []),
+                ],
                 worldEvents: [],
                 receipts: [],
                 attempts: pendingActorAttempts,
@@ -11525,21 +13542,16 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                             };
                         }
                         if (!pendingActorAttempts.length) return true;
-                        const decisions = new Map(
-                            (Array.isArray(parsedCandidate.raw?.actionAdjudications)
-                                ? parsedCandidate.raw.actionAdjudications
-                                : []).map((entry) => [String(entry?.attemptId || ''), entry]),
+                        const adjudicationBatch = validateWorldAdjudicationBatch(
+                            parsedCandidate.raw?.actionAdjudications,
+                            pendingActorAttempts,
                         );
-                        const invalid = pendingActorAttempts.find((pendingAttempt) => (
-                            !validateWorldAdjudication(
-                                decisions.get(pendingAttempt.id),
-                                pendingAttempt,
-                            ).valid
-                        ));
-                        return invalid
+                        return !adjudicationBatch.valid
                             ? {
                                 valid: false,
-                                reason: `world_adjudication_invalid:${invalid.actorId}`,
+                                reason: `world_adjudication_invalid:${adjudicationBatch.errors
+                                    .map((entry) => `${entry.attemptId}:${entry.reason}`)
+                                    .join(',')}`,
                             }
                             : true;
                     },
@@ -11582,6 +13594,8 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                             turn: tickTurn,
                             attemptedActorIds: scheduledActorIds,
                             playerNames: excludedActorNames,
+                            attempts: pendingActorAttempts,
+                            target: actorActionTargetOf(captured),
                             worldAdjudications: parsed.raw?.actionAdjudications,
                         },
                     );
@@ -11631,24 +13645,6 @@ async function runContinuityTarget(captured, { force = false } = {}) {
                         rejectedActions: actorSettlement.rejected.length,
                         worldEvents: actorSettlement.worldEvents.length,
                     };
-                }
-                const profileMerge = mergeActorProfilePatches(
-                    actorLedger,
-                    parsed.raw?.actorProfiles,
-                    {
-                        turn: tickTurn,
-                        sourceRef: sourceRefOf(captured),
-                        maxPatches: settings.actorLedgerMaxActorsPerTurn + 4,
-                        evidenceCorpus: [
-                            acceptedNarrative,
-                            worldContext,
-                            stateAnchors,
-                        ].join('\n'),
-                    },
-                );
-                if (profileMerge.accepted.length) {
-                    actorLedger = profileMerge.ledger;
-                    for (const item of profileMerge.accepted) persistedProfileNames.add(item.name);
                 }
                 const rawTick = parsed.raw?.lastTick;
                 const heldThread = scheduledBase.threads.find(
@@ -11715,7 +13711,9 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         } else {
             retryReason = '模型没有返回账本JSON';
         }
-        candidate = preserveMissingThreads(scheduledBase, candidate);
+        candidate = preserveMissingThreads(scheduledBase, candidate, {
+            supersededTarget: supersededContinuityTarget,
+        });
         // `enforceContinuityPolicy` stamps accepted changes at
         // `previous.turn + 1`. The deterministic scheduler has already moved
         // `scheduledBase.turn` to the current tick, so expose the immediately
@@ -11898,30 +13896,27 @@ async function runContinuityTarget(captured, { force = false } = {}) {
     ].slice(-80);
     namespace.continuityDirector = director;
     namespace.continuityDetected = true;
+    const checkpointScopeDigest = actorSovereigntyScopeDigest(
+        namespace.actorSovereigntyScope,
+    );
     if (!isReroll && !checkpointMatchesTarget(namespace.continuityCheckpoint, captured)) {
         namespace.continuityCheckpoint = {
-            chatId: captured.chatId,
-            targetIndex: captured.index,
-            messageId: captured.messageId,
-            swipeId: captured.swipeId,
-            generationSerial: captured.generationSerial,
-            generationId: captured.generationId,
-            branchId: captured.branchId,
-            contentFingerprint: captured.contentFingerprint,
+            version: 2,
+            scopeDigest: checkpointScopeDigest,
+            target: actorActionTargetOf(captured),
+            compatibilityOnly: false,
+            restorable: true,
             state: checkpointBase,
         };
     }
     if (!isReroll && !checkpointMatchesTarget(namespace.actorLedgerCheckpoint, captured)) {
         const encodedActorCheckpoint = await encodeContentAddressedJson(storedActorLedger);
         namespace.actorLedgerCheckpoint = {
-            chatId: captured.chatId,
-            targetIndex: captured.index,
-            messageId: captured.messageId,
-            swipeId: captured.swipeId,
-            generationSerial: captured.generationSerial,
-            generationId: captured.generationId,
-            branchId: captured.branchId,
-            contentFingerprint: captured.contentFingerprint,
+            version: 2,
+            scopeDigest: checkpointScopeDigest,
+            target: actorActionTargetOf(captured),
+            compatibilityOnly: false,
+            restorable: true,
             stateRef: encodedActorCheckpoint.ref,
         };
         namespace.actorLedgerCheckpointBlobs = {
@@ -11961,16 +13956,58 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         'continuityDetected',
         'continuitySourceReceipts',
     ];
+    const settlementReadbackRequired = actorSettlementFinalized
+        && Array.isArray(actorSettlement.results)
+        && actorSettlement.results.length > 0;
+    const settlementFailureSink = {};
+    const identicalRebase = rebaseIdenticalNamespaceFields(
+        namespace,
+        readChatNamespace(context),
+        cycleFields,
+    );
+    namespace = identicalRebase.namespace;
     const stateCommitted = await writeChatNamespace(namespace, captured.chatId, {
         fields: cycleFields,
         durable: true,
         force: true,
+        failureSink: settlementFailureSink,
+        requireReadback: settlementReadbackRequired,
+        contentValidator: settlementReadbackRequired
+            ? (persisted) => actorActionSettlementsMatchLedger(
+                persisted?.actorLedger,
+                {
+                    chatId: captured.chatId,
+                    target: actorActionTargetOf(captured),
+                    results: actorSettlement.results,
+                },
+            ).ok
+            : null,
+        precondition: () => continuityTargetIsCurrent(captured, token).ok,
     });
+    const cycleCommitFailureCode = stateCommitted
+        ? ''
+        : settlementFailureSink.code
+            || lastChatNamespaceWriteFailureCode
+            || 'continuity.persistence_failed';
+    let failureStatePersisted = null;
+    if (!stateCommitted && settlementReadbackRequired) {
+        actorTechnicalFailure = settlementFailureSink.code === 'host_save_readback_unsupported'
+            ? 'actor_adjudication.readback_unsupported'
+            : settlementFailureSink.code === 'host_save_readback_mismatch'
+                ? 'actor_adjudication.readback_mismatch'
+                : [
+                    'chat_context_changed',
+                    'chat_context_changed_after_save',
+                    'write_precondition_failed',
+                ].includes(settlementFailureSink.code)
+                    ? 'actor_adjudication.target_stale'
+                    : 'actor_adjudication.commit_rejected';
+    }
     if (stateCommitted) {
-        if (actorDiscovery.discovered.length) {
+        if (actorRegistration.discovered.length) {
             recordOperation(
                 '人物档案',
-                `已登记 ${actorDiscovery.discovered.map((item) => item.name).join('、')}；等待证据化档案后才允许自主行动`,
+                `已登记 ${actorRegistration.discovered.map((item) => item.name).join('、')}；等待证据化档案后才允许自主行动`,
                 'ok',
             );
         }
@@ -12018,6 +14055,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
             force: true,
             retainOnFailure: true,
         });
+        failureStatePersisted = failureStateSaved;
         if (!failureStateSaved) {
             recordOperation(
                 '人物主权',
@@ -12028,7 +14066,7 @@ async function runContinuityTarget(captured, { force = false } = {}) {
     }
     guard = continuityTargetIsCurrent(captured, token);
     if (!guard.ok) return { status: 'stale', reason: guard.reason };
-    applyContinuityInjection();
+    await applyContinuityInjection();
     const active = next.threads.filter((thread) => thread.stage !== 'resolved').length;
     const held = next.lastTick?.action === 'held';
     if (!stateCommitted) {
@@ -12069,8 +14107,14 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         ).length,
         actorActionRejected: actorSettlement.rejected.length,
         reason: !stateCommitted
-            ? lastChatNamespaceWriteFailureCode || 'continuity.persistence_failed'
+            ? cycleCommitFailureCode
             : modelFailure || undefined,
+        persistenceFailureStage: stateCommitted ? '' : 'cycle_commit',
+        persistenceFailureCode: cycleCommitFailureCode,
+        failureStatePersisted,
+        persistenceFailureFields: stateCommitted
+            ? []
+            : settlementFailureSink.staleFields || [],
     };
     } finally {
         for (const task of [
@@ -12164,6 +14208,8 @@ function enqueueContinuity(targetId, {
                     sovereigntyRuntimeFromNamespace(readChatNamespace(freshContext)),
                 );
             }
+            renderSovereigntyHealth();
+            syncTaskCancelButtons();
         });
     return continuityChain;
 }
@@ -12219,7 +14265,7 @@ async function clearContinuityState() {
     namespace.continuityInjectionQueue = [];
     namespace.continuityInjectionBatches = [];
     namespace.continuityDirector = 'standalone';
-    await writeChatNamespace(namespace, context.chatId, {
+    const cleared = await writeChatNamespace(namespace, context.chatId, {
         force: true,
         fields: [
             'continuity',
@@ -12235,6 +14281,10 @@ async function clearContinuityState() {
             'continuityDetected',
         ],
     });
+    if (!cleared) {
+        setContinuityStatus('世界连续性：迁移或持久化尚未完成，未清空当前账本。', 'error');
+        return false;
+    }
     registerContinuityInjection('');
     setContinuityStatus('世界连续性：当前聊天账本已清空');
     return true;
@@ -12651,10 +14701,14 @@ async function clearForumState() {
     const namespace = readChatNamespace(context);
     namespace.forum = emptyForumState(context.chatId);
     namespace.forumCheckpoint = null;
-    await writeChatNamespace(namespace, context.chatId, {
+    const cleared = await writeChatNamespace(namespace, context.chatId, {
         force: true,
         fields: ['forum', 'forumCheckpoint'],
     });
+    if (!cleared) {
+        setForumStatus('论坛：迁移或持久化尚未完成，未清空当前论坛。', 'error');
+        return false;
+    }
     setForumStatus('论坛：当前聊天的内置帖子已清空');
     renderForum();
     return true;
@@ -14135,6 +16189,7 @@ function showFloatingPanel() {
     applyFloatingViewportOffset();
     renderContinuityLedger();
     renderForum();
+    renderSovereigntyHealth();
     let page = 'world';
     try {
         page = localStorage.getItem(FLOATING_PAGE_KEY) || 'world';
@@ -14861,20 +16916,9 @@ function makeFloatingOrbDraggable(orb) {
     });
 }
 
-function updateFloatingOrb(view = null) {
+function applyFloatingOrbPresentation(presentation, count = 0) {
     const orb = ui?.floatingOrb;
-    if (!orb) return;
-    let ledgerView = view;
-    if (!ledgerView) {
-        const context = getContext();
-        ledgerView = continuityLedgerView(readChatNamespace(context).continuity, {
-            chatId: context?.chatId || '',
-            maxThreads: getSettings().continuityMaxThreads,
-        });
-    }
-    const count = Number(ledgerView?.activeCount) || 0;
-    if (ui.floatingCount) ui.floatingCount.textContent = String(count);
-    const presentation = doctorRuntimePresentation(readChatNamespace());
+    if (!orb || !presentation) return;
     orb.dataset.kind = presentation.kind;
     orb.dataset.healthColor = presentation.color;
     orb.title = [
@@ -14890,6 +16934,23 @@ function updateFloatingOrb(view = null) {
         '点击打开世界、人物与事件',
     ].join('；');
     orb.setAttribute('aria-label', orb.title);
+}
+
+function updateFloatingOrb(view = null) {
+    const orb = ui?.floatingOrb;
+    if (!orb) return;
+    let ledgerView = view;
+    if (!ledgerView) {
+        const context = getContext();
+        ledgerView = continuityLedgerView(readChatNamespace(context).continuity, {
+            chatId: context?.chatId || '',
+            maxThreads: getSettings().continuityMaxThreads,
+        });
+    }
+    const count = Number(ledgerView?.activeCount) || 0;
+    if (ui.floatingCount) ui.floatingCount.textContent = String(count);
+    const presentation = doctorRuntimePresentation(readChatNamespace());
+    applyFloatingOrbPresentation(presentation, count);
 }
 
 function syncFloatingUiVisibility() {
@@ -15991,6 +18052,14 @@ function buildSettingsPanel() {
                                 </select>
                             </label>
                             <label class="mvuad-select">
+                                <span>档案未通过时整表重试</span>
+                                <select class="text_pole mvuad-profile-semantic-retries">
+                                    <option value="0">不重试</option>
+                                    <option value="1">重试 1 次（推荐）</option>
+                                    <option value="2">重试 2 次</option>
+                                </select>
+                            </label>
+                            <label class="mvuad-select">
                                 <span>运行模式</span>
                                 <select class="text_pole mvuad-continuity-mode">
                                     <option value="auto">自动活世界（推荐）</option>
@@ -16368,6 +18437,18 @@ function buildSettingsPanel() {
             : 'full';
         saveSettings();
     });
+    const profileSemanticRetries = wrapper.querySelector('.mvuad-profile-semantic-retries');
+    profileSemanticRetries.value = String(getSettings().actorProfileSemanticRetries);
+    profileSemanticRetries.addEventListener('change', () => {
+        const requested = Number(profileSemanticRetries.value);
+        const normalized = Math.min(
+            2,
+            Math.max(0, Number.isFinite(requested) ? Math.floor(requested) : 1),
+        );
+        getSettings().actorProfileSemanticRetries = normalized;
+        profileSemanticRetries.value = String(normalized);
+        saveSettings();
+    });
     wrapper.querySelector('.mvuad-sovereignty-retry').addEventListener(
         'click',
         retrySovereigntyNow,
@@ -16381,14 +18462,14 @@ function buildSettingsPanel() {
     continuityMode.addEventListener('change', () => {
         getSettings().continuityMode = continuityMode.value;
         saveSettings();
-        applyContinuityInjection();
+        void applyContinuityInjection();
     });
     const continuityAutonomy = wrapper.querySelector('.mvuad-continuity-autonomy');
     continuityAutonomy.value = getSettings().continuityAutonomy;
     continuityAutonomy.addEventListener('change', () => {
         getSettings().continuityAutonomy = continuityAutonomy.value;
         saveSettings();
-        applyContinuityInjection();
+        void applyContinuityInjection();
     });
     const continuityMaxVisible = wrapper.querySelector('.mvuad-continuity-max-visible');
     continuityMaxVisible.value = String(getSettings().continuityMaxVisible);
@@ -16405,7 +18486,7 @@ function buildSettingsPanel() {
         getSettings().continuityMaxVisible = normalized;
         continuityMaxVisible.value = String(normalized);
         saveSettings();
-        applyContinuityInjection();
+        void applyContinuityInjection();
     });
     const actorShardMode = wrapper.querySelector('.mvuad-actor-shard-mode');
     actorShardMode.value = getSettings().actorShardMode;
@@ -16695,7 +18776,10 @@ async function restoreBranchCheckpointsForSwipe(value, { force = false } = {}) {
     const resolved = index < 0 ? latest.index : index;
     if (resolved !== latest.index || !latest.message) return false;
     const messageId = ensureMessageStableId(context, latest.message, latest.index);
-    const namespace = readChatNamespace(context);
+    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    const migrationReady = migration.ok === true;
+    const namespace = migration.namespace || readChatNamespace(context);
+    const captured = captureTarget(context, resolved);
     const continuityCheckpoint = namespace.continuityCheckpoint;
     const actorLedgerCheckpoint = namespace.actorLedgerCheckpoint;
     const actorLedgerCheckpointStateValue = await actorLedgerCheckpointState(
@@ -16707,8 +18791,10 @@ async function restoreBranchCheckpointsForSwipe(value, { force = false } = {}) {
     const forumSource = namespace.forum?.lastSource;
     const currentSwipeId = Number(latest.message.swipe_id) || 0;
     const continuityMatches = !!(
+        migrationReady
+        &&
         continuityCheckpoint?.state
-        && continuityCheckpoint.targetIndex === resolved
+        && checkpointLogicalReplyMatches(continuityCheckpoint, captured)
         && (
             force
             || (
@@ -16721,8 +18807,10 @@ async function restoreBranchCheckpointsForSwipe(value, { force = false } = {}) {
         )
     );
     const actorLedgerMatches = !!(
+        migrationReady
+        &&
         actorLedgerCheckpointStateValue
-        && actorLedgerCheckpoint.targetIndex === resolved
+        && checkpointLogicalReplyMatches(actorLedgerCheckpoint, captured)
         && (force || continuityMatches)
     );
     const forumMatches = !!(
@@ -16758,7 +18846,7 @@ async function restoreBranchCheckpointsForSwipe(value, { force = false } = {}) {
     const saved = await writeChatNamespace(namespace, context.chatId, { fields });
     if (!saved) return false;
     if (continuityMatches) {
-        applyContinuityInjection({ isReroll: true });
+        await applyContinuityInjection({ isReroll: true });
         setContinuityStatus('世界连续性：已恢复到本楼生成前存档点，等待当前 swipe 重新结算');
     }
     if (forumMatches) {
@@ -16833,7 +18921,7 @@ function bindEvents() {
             prepareNpcDesignTicketBatch();
             applySocialInjection();
             prepareSerendipityGeneration(generationType);
-            applyContinuityInjection({
+            await applyContinuityInjection({
                 isReroll: ['swipe', 'regenerate'].includes(lastGeneration.type),
             });
         },
@@ -16871,7 +18959,7 @@ function bindEvents() {
                 );
             }
             if (sovereigntyObservation.persisted) {
-                await settleNpcDesignTicketBatch(captured);
+                retireNpcDesignTicketInjection(captured);
             }
             await settleContinuityInjectionReceipts(captured);
             await settleActorLedgerInjectionReceipts(captured);
@@ -17012,7 +19100,7 @@ function bindEvents() {
             });
         },
     );
-    const onChatChanged = () => {
+    const onChatChanged = async () => {
             clearTimeout(pendingChatSaveTimer);
             pendingChatSaveTimer = null;
             clearTimeout(pendingOperationLogSaveTimer);
@@ -17031,9 +19119,11 @@ function bindEvents() {
             forumPendingKeys.clear();
             forumCompletedKeys.clear();
             targetSettlementRecords.clear();
+            currentPendingSovereigntyObservationRecords(getContext());
             pendingSerendipityDraft = null;
             pendingSerendipityBaseline = null;
             pendingNpcDesignTicketBatch = null;
+            npcDesignTicketBatches.clear();
             pendingSerendipityOpportunities.clear();
             downstreamBarrierProtocol = null;
             downstreamBarrierProtocolChatId = '';
@@ -17064,14 +19154,14 @@ function bindEvents() {
             setForumStatus('论坛：等待世界消息', '', { record: false });
             loadOperationLogFromChat();
             applySocialInjection();
-            applyContinuityInjection();
+            await applyContinuityInjection();
             registerSerendipityInjection('');
             renderForum();
             disableStoryOracleAutoIfNeeded();
             scheduleOpeningResourceSync();
             scheduleLatestHardContractAudit();
             inspectEnvironment({ waitForMvu: true });
-            recoverSovereigntyOnChatLoad().catch((error) => {
+            await recoverSovereigntyOnChatLoad().catch((error) => {
                 console.warn('[MVU Auto Doctor] 人物主权积压恢复失败：', error);
             });
         };
@@ -17253,7 +19343,9 @@ async function mutateActorProfileV6(actorId, mutate) {
     const context = getContext();
     const chatId = context?.chatId || '';
     if (!chatId || typeof mutate !== 'function') return { applied: false, reason: 'chat_missing' };
-    const namespace = readChatNamespace(context);
+    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    if (!migration.ok) return { applied: false, reason: migration.reason };
+    const namespace = migration.namespace || readChatNamespace(context);
     const ledger = normalizeActorLedger(namespace.actorLedger, { chatId });
     const index = ledger.actors.findIndex((actor) => actor.id === String(actorId || ''));
     if (index < 0) return { applied: false, reason: 'actor_missing' };
@@ -17283,7 +19375,7 @@ function initialize() {
     disableStoryOracleAutoIfNeeded();
     lastUndo = latestUndoRecord(readChatNamespace());
     applySocialInjection();
-    applyContinuityInjection();
+    void applyContinuityInjection();
     registerSerendipityInjection('');
     scheduleOpeningResourceSync();
     scheduleLatestHardContractAudit();
@@ -17374,11 +19466,21 @@ function initialize() {
         getWorldLaneReceipts: () => deepClone(
             readChatNamespace().continuityWorldLaneReceipts || [],
         ),
-        getSovereigntyRuntime: () => deepClone(
-            normalizeSovereigntyRuntime(readChatNamespace().sovereigntyRuntime),
+        getSovereigntyRuntime: () => {
+            const namespace = readChatNamespace();
+            return deepClone(sovereigntyRuntimeWithSessionObservationFailures(
+                namespace,
+                namespace.sovereigntyRuntime,
+                getContext(),
+            ));
+        },
+        getPendingSovereigntyObservationWAL: () => deepClone(
+            currentPendingSovereigntyObservationRecords(getContext()),
         ),
         getSovereigntyHealth: () => deepClone(sovereigntyHealthWithScheduler()),
+        ensureSovereigntyMigration: () => ensureActorSovereigntyMigrationPersisted(getContext()),
         getPersistenceMetrics: persistenceMetricsSnapshot,
+        getLastPersistenceFailureCode: () => lastChatNamespaceWriteFailureCode,
         resetPersistenceMetrics,
         retrySovereigntyNow,
         restoreLatestSovereigntyCheckpoint,

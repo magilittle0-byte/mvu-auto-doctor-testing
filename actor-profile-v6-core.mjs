@@ -1,6 +1,9 @@
 import { fingerprint } from './core.mjs';
 
-export const ACTOR_PROFILE_V6_VERSION = 6;
+// The public API keeps its V6 name for compatibility, while version 7 adds
+// the persisted baseline transaction receipt required by the stage-2
+// sovereignty contract. normalizeActorProfileV6 continues to accept V6 data.
+export const ACTOR_PROFILE_V6_VERSION = 7;
 export const ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT = `
 【人物主权与多样性】
 - 人物不是职业、阵营、物种、性别、外貌或心理类型标签的函数；不得默认粗暴、冷漠、疯癫、绝望、敌对或同质化善良。
@@ -54,6 +57,24 @@ const PHYSIOLOGY_CONTENT_FIELDS = Object.freeze([
     'footAppearance',
     'lactationBodyFluid',
     'sensitiveParts',
+]);
+
+const BASELINE_MODULES = Object.freeze([
+    'identity',
+    'personality',
+    'relationships',
+    'goals',
+    'knowledge',
+    'resourcesCapabilities',
+    'physiology',
+]);
+const PROFILE_INSERT_SOURCE_LAYERS = Object.freeze([
+    'ai',
+    'characterCreationTicket',
+    'confirmedProfile',
+    'stitcher',
+    'acceptedNarrative',
+    'authority',
 ]);
 
 const SOURCE_SET = new Set(ACTOR_PROFILE_SOURCES);
@@ -215,6 +236,7 @@ export function emptyActorProfileV6(actorId = '', name = '', { mode = 'full' } =
         manualOverrides: {},
         moduleVersions: Object.fromEntries(ACTOR_PROFILE_MODULES.map((module) => [module, 0])),
         history: [],
+        baselineCommit: null,
         updatedTurn: 0,
     };
 }
@@ -225,6 +247,12 @@ export function normalizeActorProfileV6(value, {
     mode = 'full',
 } = {}) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const sourceVersion = Number(source.version);
+    const legacyPersisted = Number.isFinite(sourceVersion)
+        && sourceVersion > 0
+        && sourceVersion <= 6
+        && source.preparedForAction === true
+        && integer(source.coverage, 0, 100, 0) === 100;
     const output = emptyActorProfileV6(
         actorId || source.actorId,
         name || source.name,
@@ -274,6 +302,63 @@ export function normalizeActorProfileV6(value, {
         }))
         .filter((entry) => entry.id)
         .slice(-40);
+    output.baselineCommit = source.baselineCommit
+        && typeof source.baselineCommit === 'object'
+        && !Array.isArray(source.baselineCommit)
+        ? {
+            schemaVersion: integer(source.baselineCommit.schemaVersion, 1, Number.MAX_SAFE_INTEGER, 0),
+            commitId: cleanText(source.baselineCommit.commitId, 180),
+            actorRef: {
+                actorId: cleanText(
+                    source.baselineCommit.actorRef?.actorId
+                        || source.baselineCommit.actorId,
+                    120,
+                ),
+                name: cleanText(source.baselineCommit.actorRef?.name, 160),
+            },
+            digest: cleanText(source.baselineCommit.digest, 120),
+            sourceRef: source.baselineCommit.sourceRef
+                && typeof source.baselineCommit.sourceRef === 'object'
+                && !Array.isArray(source.baselineCommit.sourceRef)
+                ? clone(source.baselineCommit.sourceRef)
+                : null,
+            committedTurn: integer(
+                source.baselineCommit.committedTurn,
+                0,
+                Number.MAX_SAFE_INTEGER,
+                0,
+            ),
+            readbackVerified: source.baselineCommit.readbackVerified === true,
+            status: cleanText(source.baselineCommit.status, 60),
+        }
+        : null;
+    if (
+        output.baselineCommit?.status === 'legacy_persisted'
+        && output.baselineCommit.actorRef.actorId
+    ) {
+        output.baselineCommit = {
+            ...output.baselineCommit,
+            schemaVersion: Math.min(6, output.baselineCommit.schemaVersion || 6),
+            commitId: '',
+            digest: '',
+            readbackVerified: false,
+            status: 'legacy_persisted',
+        };
+    } else if (!output.baselineCommit?.commitId || !output.baselineCommit.actorRef.actorId) {
+        output.baselineCommit = null;
+    }
+    if (!output.baselineCommit && legacyPersisted) {
+        output.baselineCommit = {
+            schemaVersion: sourceVersion,
+            commitId: '',
+            actorRef: { actorId: output.actorId, name: output.name },
+            digest: '',
+            sourceRef: null,
+            committedTurn: integer(source.updatedTurn),
+            readbackVerified: false,
+            status: 'legacy_persisted',
+        };
+    }
     output.updatedTurn = integer(source.updatedTurn);
     return output;
 }
@@ -439,6 +524,76 @@ const EVERYDAY_SEEDS = [
     '喜欢在走路时默背要做的事，到地方后可能漏掉最后一项',
     '会记住熟人的忌口和常用物，却经常想不起纪念日',
     '遇到长队会观察队伍怎么移动，并暗中猜哪个窗口更快',
+];
+const THINKING_STYLE_SEEDS = [
+    '先把亲眼所见、他人转述和自己的猜测分开，再决定哪一项值得行动',
+    '习惯从反例检查结论，哪怕结论正好符合自己的期待也会多问一句',
+    '更依赖具体案例理解抽象规则，听完原则后会追问它落到眼前该怎么做',
+    '先找系统里最容易卡住的一环，再判断局部修补还是整体改道',
+    '会把问题讲给别人听来整理思路，说到一半也允许自己推翻原判断',
+    '先估算最坏损失和撤回办法，再给值得一试的新方案留下空间',
+    '对数字和清单敏感，但知道统计没有覆盖的生活细节仍可能改变结论',
+    '倾向沿时间顺序复盘因果，发现空档时宁可标记未知也不自动补齐',
+];
+const SOCIAL_MOTIVE_SEEDS = [
+    '希望在群体里成为能交换实际帮助的人，而不是单纯获得所有人的喜欢',
+    '想被少数可信对象准确理解，对广泛关注和热闹人缘兴趣有限',
+    '重视获得同行认可，希望别人看见自己的手艺与判断而非只看身份',
+    '需要保留稳定的私人空间，愿意维持关系但不接受全天候可用',
+    '享受撮合彼此有用的人，也会在中间人的成本过高时退出',
+    '希望自己在共同决定中有真实发言权，不满足于被礼貌地告知结果',
+    '倾向守住熟人网络的日常运转，宁愿做琐碎协调也不追求中心位置',
+    '把结识新的人当作扩展生活经验，但不会因此自动交付信任和承诺',
+];
+const INTEREST_ORIENTATION_SEEDS = [
+    '优先保护自己的时间与稳定收入，额外投入需要看见清楚回报',
+    '愿意为长期信誉承担当下小损失，但拒绝没有边界的道德绑架',
+    '对能带来新技能和新入口的机会更有耐心，即使短期收益普通',
+    '在熟人与制度冲突时会努力找可公开解释的偏袒范围，不愿装作绝对中立',
+    '先保证基本安全与退路，再考虑名望、冒险和更大的共同目标',
+    '重视自己对成果的控制权，宁可慢一点也不愿把关键决定完全外包',
+    '愿意共享可复制的知识，但会为稀缺工具、材料和劳动明确计价',
+    '把生活质量视为真实利益，不会为了宏大叙事无限牺牲休息与普通快乐',
+];
+const CONFLICT_STYLE_SEEDS = [
+    '先把争议缩成一件能核对的事实和一项具体要求，避免一次清算整段关系',
+    '会当场指出越界，但倾向把惩罚与补救分开谈，不靠羞辱迫使对方服从',
+    '冲突升温时先暂停现场互动，约定时间后带着方案回来而不是永久消失',
+    '善于讨价还价，会主动交换让步，但对模糊的以后补偿保持怀疑',
+    '不喜欢公开争执，通常先私下沟通；私下无效时才把问题带入正式程序',
+    '面对强势对象会暂时收集证据和盟友，不把延迟反应等同于已经接受',
+    '容易直接竞争，用结果决定一部分分歧，同时承认有些边界不能靠输赢决定',
+    '优先维持共同任务的最低协作面，私人不满可以留到任务结束后再处理',
+];
+const MORAL_BOUNDARY_SEEDS = [
+    '可以隐瞒自己的私事，但不能伪造会让无辜者承担现实风险的关键信息',
+    '接受对自愿承担风险的人做等价交易，拒绝利用对方不知情或无法退出牟利',
+    '为了保护具体的人可以违背低层程序，但不会把保护扩张成替对方决定人生',
+    '允许对敌对者施压和欺骗，却不接受把无关旁人当成报复工具',
+    '能容忍资源分配不平均，但要求受损者至少知道规则并保有申诉入口',
+    '重视承诺，环境根本变化时可以重谈；不能假装旧承诺从未存在',
+    '允许保留秘密与策略，不允许借亲密关系强迫对方交出全部隐私',
+    '危急时可以优先求生，但事后必须承认自己把代价留给了谁并尝试补救',
+];
+const ACTION_HABIT_SEEDS = [
+    '开始前会先确认工具、出口和交接人，完成后习惯留下一条可核验回执',
+    '喜欢先做十分钟的小样，再决定是否投入整段时间和更多资源',
+    '遇到复杂任务会边做边记短清单，但经常把清单写在手边任何纸片上',
+    '优先处理会阻塞别人的步骤，自己的收尾则容易拖到最后一刻',
+    '行动前常向现场最熟悉的人问一个具体问题，不因头衔自动选择咨询对象',
+    '会为常见失败准备低成本备用方案，却不为极小概率情况囤积全部资源',
+    '倾向亲手检查关键节点，次要部分愿意委托并用结果而非姿态评估',
+    '做决定后会明确下一次复核条件，条件未出现时不反复被场面情绪带走',
+];
+const SELF_DECEPTION_SEEDS = [
+    '自认只是讲效率，实际有时用效率避开需要道歉或解释的关系成本',
+    '相信自己不在乎评价，却会对贡献被忽略记得比预想更久',
+    '把迟迟不求助解释成独立，往往忽略了别人因此失去提前协作的机会',
+    '认为自己对所有人一视同仁，实际会给熟悉的人更多解释机会',
+    '声称只是谨慎，某些时候其实是在等待别人先承担失败责任',
+    '觉得自己善于照顾人，却可能先做了安排才想起询问对方是否需要',
+    '把持续忙碌当成可靠，容易低估疲惫已经怎样影响判断和脾气',
+    '认为自己很容易改变主意，但面对亲手建立的方法时会要求过高的新证据',
 ];
 const PERSONAL_GOAL_SEEDS = [
     {
@@ -667,22 +822,62 @@ function diceEntry(actor, salt, values) {
     };
 }
 
-export function rollActorProfileDiversity(actor, { entropy = '' } = {}) {
+function normalizeCharacterCreationTarget(value) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return {
+        chatId: cleanText(source.chatId, 180),
+        messageId: cleanText(source.messageId, 180),
+        index: Number.isInteger(Number(source.index)) ? Number(source.index) : -1,
+        swipeId: integer(source.swipeId),
+        generation: integer(source.generation ?? source.generationSerial),
+        generationId: cleanText(source.generationId, 180),
+        generationType: cleanText(source.generationType, 40),
+        branchId: cleanText(source.branchId, 180),
+        hash: cleanText(source.hash ?? source.fingerprint, 180),
+    };
+}
+
+function targetIdentityMatches(left, right, fields) {
+    return fields.every((field) => left?.[field] === right?.[field]);
+}
+
+export function issueCharacterCreationTicket(actor, {
+    entropy = '',
+    target = null,
+    order = 0,
+} = {}) {
     const roller = {
         id: cleanText(actor?.id || actor?.actorId, 120),
         name: cleanText(actor?.name, 160),
     };
-    const salted = (axis) => `actor-profile-v1|${cleanText(entropy, 240)}|${axis}`;
+    const issuanceTarget = normalizeCharacterCreationTarget(target);
+    const salted = (axis) => `character-creation-ticket-v2|${cleanText(entropy, 240)}|${axis}`;
     const axes = {
         valuePriority: diceEntry(roller, salted('value'), VALUE_SEEDS),
         temperament: diceEntry(roller, salted('temperament'), TEMPERAMENT_SEEDS),
+        coreDesire: diceEntry(
+            roller,
+            salted('core-desire'),
+            PERSONAL_GOAL_SEEDS.map((item) => item.longTerm),
+        ),
+        thinkingStyle: diceEntry(roller, salted('thinking-style'), THINKING_STYLE_SEEDS),
+        socialMotive: diceEntry(roller, salted('social-motive'), SOCIAL_MOTIVE_SEEDS),
         socialMethod: diceEntry(roller, salted('social'), SOCIAL_SEEDS),
+        interestOrientation: diceEntry(
+            roller,
+            salted('interest-orientation'),
+            INTEREST_ORIENTATION_SEEDS,
+        ),
         decisionMethod: diceEntry(roller, salted('decision'), DECISION_SEEDS),
+        conflictStyle: diceEntry(roller, salted('conflict-style'), CONFLICT_STYLE_SEEDS),
+        moralBoundary: diceEntry(roller, salted('moral-boundary'), MORAL_BOUNDARY_SEEDS),
         speechRhythm: diceEntry(roller, salted('speech'), SPEECH_SEEDS),
+        actionHabit: diceEntry(roller, salted('action-habit'), ACTION_HABIT_SEEDS),
         humorMethod: diceEntry(roller, salted('humor'), HUMOR_SEEDS),
         authorityAttitude: diceEntry(roller, salted('authority'), AUTHORITY_SEEDS),
         relationshipDistance: diceEntry(roller, salted('relationship'), RELATIONSHIP_SEEDS),
         ordinaryFriction: diceEntry(roller, salted('friction'), FRICTION_SEEDS),
+        selfDeception: diceEntry(roller, salted('self-deception'), SELF_DECEPTION_SEEDS),
         pressureAndRecovery: diceEntry(
             roller,
             salted('pressure-recovery'),
@@ -697,18 +892,33 @@ export function rollActorProfileDiversity(actor, { entropy = '' } = {}) {
     };
     const seed = fingerprint(`${roller.id}|${roller.name}|${cleanText(entropy, 240)}`);
     return {
-        version: 1,
+        version: 2,
+        kind: 'character_creation_ticket',
         seed,
         ticketId: `NPC-DICE-${fingerprint(`${seed}|${JSON.stringify(axes)}`).split(':').at(-1)}`,
+        issuance: {
+            ...issuanceTarget,
+            order: integer(order, 1, 999, 1),
+        },
+        binding: null,
+        discardedAxes: [],
         axes,
     };
 }
 
-function normalizeActorProfileDesignRolls(value) {
+// Compatibility API for explicit legacy callers. Runtime generation uses
+// issueCharacterCreationTicket so a post-generation profile path can be proven
+// free of dice issuance.
+export function rollActorProfileDiversity(actor, options = {}) {
+    return issueCharacterCreationTicket(actor, options);
+}
+
+export function normalizeActorProfileDesignRolls(value) {
     const source = value && typeof value === 'object' && !Array.isArray(value)
         ? value
         : null;
-    if (!source || integer(source.version) !== 1 || !source.axes) return null;
+    const version = integer(source?.version);
+    if (!source || ![1, 2].includes(version) || !source.axes) return null;
     const axes = Object.fromEntries(Object.entries(source.axes)
         .map(([axis, entry]) => [cleanText(axis, 80), {
             die: cleanText(entry?.die, 20),
@@ -716,13 +926,76 @@ function normalizeActorProfileDesignRolls(value) {
             result: clone(entry?.result),
         }])
         .filter(([axis, entry]) => axis && entry.die && hasText(entry.result)));
-    if (Object.keys(axes).length < 8) return null;
-    return {
-        version: 1,
+    if (Object.keys(axes).length < (version === 1 ? 8 : 13)) return null;
+    const base = {
+        version,
         seed: cleanText(source.seed, 120),
         ticketId: cleanText(source.ticketId, 120),
         axes,
     };
+    if (version === 1) return base;
+    const issuance = normalizeCharacterCreationTarget(source.issuance);
+    const bindingTarget = normalizeCharacterCreationTarget(source.binding);
+    const bindingActorId = cleanText(source.binding?.actorRef?.actorId, 120);
+    return {
+        ...base,
+        kind: 'character_creation_ticket',
+        issuance: {
+            ...issuance,
+            order: integer(source.issuance?.order, 1, 999, 1),
+        },
+        binding: source.binding && bindingActorId
+            ? {
+                ...bindingTarget,
+                order: integer(source.binding.order, 1, 999, 1),
+                actorRef: {
+                    actorId: bindingActorId,
+                    displayName: cleanText(
+                        source.binding.actorRef?.displayName
+                            || source.binding.actorRef?.name,
+                        160,
+                    ),
+                    aliases: cleanList(source.binding.actorRef?.aliases, 12, 160),
+                },
+            }
+            : null,
+        discardedAxes: cleanList(source.discardedAxes, 32, 80)
+            .filter((axis) => Object.hasOwn(axes, axis)),
+    };
+}
+
+export function bindCharacterCreationTicket(ticket, {
+    target = null,
+    actorRef = null,
+    order = 0,
+    discardedAxes = [],
+} = {}) {
+    const normalized = normalizeActorProfileDesignRolls(ticket);
+    if (normalized?.version !== 2 || normalized.binding) return null;
+    const targetIdentity = normalizeCharacterCreationTarget(target);
+    if (!targetIdentityMatches(normalized.issuance, targetIdentity, [
+        'chatId',
+        'generation',
+        'generationId',
+        'generationType',
+    ])) return null;
+    const actorId = cleanText(actorRef?.actorId, 120);
+    if (!actorId || !targetIdentity.messageId || targetIdentity.index < 0) return null;
+    const discarded = cleanList(discardedAxes, 32, 80)
+        .filter((axis) => Object.hasOwn(normalized.axes, axis));
+    return normalizeActorProfileDesignRolls({
+        ...normalized,
+        binding: {
+            ...targetIdentity,
+            order: integer(order, 1, 999, 1),
+            actorRef: {
+                actorId,
+                displayName: cleanText(actorRef?.displayName || actorRef?.name, 160),
+                aliases: cleanList(actorRef?.aliases, 12, 160),
+            },
+        },
+        discardedAxes: discarded,
+    });
 }
 
 function evidenceForActor(actor) {
@@ -845,9 +1118,10 @@ function assignModule(profile, module, data, {
 function moduleReady(profile, module) {
     const record = profile.modules[module];
     if (record?.status !== 'ready') return false;
-    // Locally designed defaults are display scaffolding, not a persisted NPC
-    // dossier. They must never unlock autonomous action.
-    if (record.source === 'designed_seed' || record.source === 'deprecated') return false;
+    // Designed seeds are allowed only after the complete baseline transaction
+    // has been durably read back. The commit gate, rather than the source label,
+    // separates local scaffolding from a persisted dossier.
+    if (record.source === 'deprecated') return false;
     const data = record.data || {};
     if (module === 'identity') return [
         data.name,
@@ -928,6 +1202,92 @@ function calculateOptionalCoverage(profile) {
     return moduleReady(profile, 'physiology') ? 100 : 0;
 }
 
+function canonicalProfileValue(value) {
+    if (Array.isArray(value)) return value.map(canonicalProfileValue);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [
+        key,
+        canonicalProfileValue(value[key]),
+    ]));
+}
+
+export function actorProfileBaselineDigest(value) {
+    const profile = normalizeActorProfileV6(value, {
+        actorId: value?.actorId,
+        name: value?.name,
+        mode: value?.completionMode,
+    });
+    const baselineFieldSources = Object.fromEntries(
+        Object.entries(profile.fieldSources || {})
+            .filter(([path]) => BASELINE_MODULES.some((module) => (
+                path === `modules.${module}` || path.startsWith(`modules.${module}.`)
+            )))
+            .sort(([left], [right]) => left.localeCompare(right)),
+    );
+    const payload = {
+        schemaVersion: profile.version,
+        actorId: profile.actorId,
+        name: profile.name,
+        completionMode: profile.completionMode,
+        modules: Object.fromEntries(BASELINE_MODULES.map((module) => [
+            module,
+            profile.modules[module],
+        ])),
+        fieldSources: baselineFieldSources,
+        designRolls: profile.designRolls,
+        locks: profile.locks,
+        manualOverrides: profile.manualOverrides,
+    };
+    return `profile-v1:${fingerprint(JSON.stringify(canonicalProfileValue(payload)))}`;
+}
+
+function baselineCommitReady(profile) {
+    const commit = profile?.baselineCommit;
+    return calculateCoverage(profile) === 100
+        && profile.preparedForAction === true
+        && commit?.readbackVerified === true
+        && commit.status === 'committed'
+        && !!cleanText(commit.commitId, 180)
+        && commit.schemaVersion === profile.version
+        && commit.actorRef?.actorId === profile.actorId
+        && !!cleanText(commit.digest, 120)
+        && commit.digest === actorProfileBaselineDigest(profile);
+}
+
+export function actorProfileActionReadiness(actor) {
+    const profile = normalizeActorProfileV6(actor?.profileV6, {
+        actorId: actor?.id,
+        name: actor?.name,
+    });
+    const commit = profile.baselineCommit;
+    if (calculateCoverage(profile) !== 100) {
+        return { ready: false, reason: 'actor_profile.incomplete', migrationRequired: false };
+    }
+    if (commit?.status === 'legacy_persisted') {
+        return { ready: false, reason: 'actor_profile.legacy_migration_required', migrationRequired: true };
+    }
+    if (!commit || commit.status !== 'committed') {
+        return { ready: false, reason: 'actor_profile.not_committed', migrationRequired: false };
+    }
+    if (!commit.commitId || !commit.digest) {
+        return { ready: false, reason: 'actor_profile.commit_receipt_incomplete', migrationRequired: false };
+    }
+    if (commit.readbackVerified !== true) {
+        return { ready: false, reason: 'actor_profile.readback_unverified', migrationRequired: false };
+    }
+    if (
+        commit.schemaVersion !== profile.version
+        || commit.actorRef?.actorId !== profile.actorId
+        || commit.digest !== actorProfileBaselineDigest(profile)
+    ) {
+        return { ready: false, reason: 'actor_profile.commit_digest_mismatch', migrationRequired: false };
+    }
+    if (profile.preparedForAction !== true) {
+        return { ready: false, reason: 'actor_profile.not_prepared', migrationRequired: false };
+    }
+    return { ready: true, reason: '', migrationRequired: false };
+}
+
 function projectedFieldSource(previousProfile, module, relativePath, value, fallback) {
     const path = `modules.${module}.data.${relativePath}`;
     const previousValue = getPath(previousProfile, pathParts(path));
@@ -937,6 +1297,62 @@ function projectedFieldSource(previousProfile, module, relativePath, value, fall
         && JSON.stringify(previousValue) === JSON.stringify(value)
     ) return previousSource;
     return sourceOf(fallback, 'hypothesis');
+}
+
+function persistedBaselineProjectionMatchesActor(profile, actor) {
+    const identity = profile.modules.identity?.data || {};
+    const personality = profile.modules.personality?.data || {};
+    const profileProjection = {
+        identity: Object.fromEntries([
+            'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
+            'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
+        ].map((field) => [field, identity[field]])),
+        personality: Object.fromEntries([
+            'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
+            'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
+            'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
+        ].map((field) => [field, personality[field]])),
+        longTermGoals: profile.modules.goals?.data?.longTerm || [],
+        relationships: profile.modules.relationships?.data?.entries || [],
+        knowledge: profile.modules.knowledge?.data?.entries || [],
+        resources: profile.modules.resourcesCapabilities?.data?.resources || [],
+        capabilities: profile.modules.resourcesCapabilities?.data?.capabilities || [],
+    };
+    const actorProjection = {
+        identity: Object.fromEntries(Object.keys(profileProjection.identity).map((field) => [
+            field,
+            actor?.identity?.[field],
+        ])),
+        personality: Object.fromEntries(Object.keys(profileProjection.personality).map((field) => [
+            field,
+            actor?.identity?.[field],
+        ])),
+        longTermGoals: actor?.longTermGoals || [],
+        relationships: actor?.relationships || [],
+        knowledge: actor?.knowledge || [],
+        resources: actor?.resources || [],
+        capabilities: actor?.capabilities || [],
+    };
+    return JSON.stringify(canonicalProfileValue(profileProjection))
+        === JSON.stringify(canonicalProfileValue(actorProjection));
+}
+
+function refreshDynamicProfileModules(profile, actor, { evidence, turn, now }) {
+    assignModule(profile, 'dynamicState', {
+        location: clone(actor?.location || {}),
+        stateFacts: clone(actor?.stateFacts || []),
+        stimuli: clone(actor?.stimuli || []),
+        constraints: cleanList(actor?.constraints, 12, 500),
+        status: cleanText(actor?.status, 40),
+    }, { source: 'confirmed', evidence, turn, now });
+    assignModule(profile, 'actionHistory', {
+        entries: clone(actor?.actionHistory || []),
+        lastAction: clone(actor?.lastAction || null),
+        historicalActionsInvented: false,
+        coverageState: actor?.actionHistory?.length
+            ? 'confirmed_entries'
+            : 'no_actions_recorded',
+    }, { source: 'confirmed', evidence, turn, now });
 }
 
 export function prepareActorProfileV6(actor, {
@@ -951,17 +1367,28 @@ export function prepareActorProfileV6(actor, {
         mode: completionMode,
     });
     const previousProfile = clone(profile);
-    if (!profile.designRolls) {
-        profile.designRolls = rollActorProfileDiversity(actor, {
-            entropy: `${integer(turn)}|${integer(now)}`,
-        });
-    }
+    // Missing tickets stay missing here. Only the pre-generation issuer, or an
+    // already persisted V1 legacy ticket normalized above, may provide them.
+    // The doctor must never invent personality after accepted text exists.
     profile.completionMode = completionMode;
     const evidence = evidenceForActor(actor);
     if (completionMode === 'off') {
         profile.coverage = calculateCoverage(profile);
-        profile.preparedForAction = profile.coverage === 100;
+        profile.preparedForAction = baselineCommitReady(profile);
         profile.backgroundPending = !profile.preparedForAction;
+        profile.updatedTurn = integer(turn);
+        return profile;
+    }
+    if (
+        profile.completionMode === completionMode
+        && baselineCommitReady(profile)
+        && persistedBaselineProjectionMatchesActor(profile, actor)
+    ) {
+        refreshDynamicProfileModules(profile, actor, { evidence, turn, now });
+        profile.coverage = calculateCoverage(profile);
+        profile.preparedForAction = baselineCommitReady(profile);
+        profile.backgroundPending = !profile.preparedForAction
+            || calculateOptionalCoverage(profile) < 100;
         profile.updatedTurn = integer(turn);
         return profile;
     }
@@ -1167,21 +1594,7 @@ export function prepareActorProfileV6(actor, {
         turn,
         now,
     });
-    assignModule(profile, 'dynamicState', {
-        location: clone(actor?.location || {}),
-        stateFacts: clone(actor?.stateFacts || []),
-        stimuli: clone(actor?.stimuli || []),
-        constraints: cleanList(actor?.constraints, 12, 500),
-        status: cleanText(actor?.status, 40),
-    }, { source: 'confirmed', evidence, turn, now });
-    assignModule(profile, 'actionHistory', {
-        entries: clone(actor?.actionHistory || []),
-        lastAction: clone(actor?.lastAction || null),
-        historicalActionsInvented: false,
-        coverageState: actor?.actionHistory?.length
-            ? 'confirmed_entries'
-            : 'no_actions_recorded',
-    }, { source: 'confirmed', evidence, turn, now });
+    refreshDynamicProfileModules(profile, actor, { evidence, turn, now });
 
     const physiologyEnabled = completionMode === 'full_adult';
     const preserveCompletedPhysiology = physiologyEnabled && completedPhysiologyModule(previousProfile);
@@ -1226,7 +1639,7 @@ export function prepareActorProfileV6(actor, {
         if (preservedValue !== undefined) setPath(profile, parts, preservedValue);
     }
     profile.coverage = calculateCoverage(profile);
-    profile.preparedForAction = profile.coverage === 100;
+    profile.preparedForAction = baselineCommitReady(profile);
     profile.backgroundPending = !profile.preparedForAction
         || calculateOptionalCoverage(profile) < 100;
     const previousComparable = { ...clone(previousProfile), updatedTurn: 0 };
@@ -1245,9 +1658,194 @@ export function bindActorProfileDesignRolls(actor, designRolls) {
         actorId: next.id,
         name: next.name,
     });
+    if (
+        profile.designRolls
+        && (
+            profile.designRolls.ticketId !== normalizedRolls.ticketId
+            || profile.designRolls.version === 1
+        )
+    ) return next;
     profile.designRolls = normalizedRolls;
     next.profileV6 = profile;
     return next;
+}
+
+function ticketCandidateMatchesTarget(candidate, target) {
+    const sourceRef = normalizeCharacterCreationTarget(candidate?.sourceRef);
+    return targetIdentityMatches(sourceRef, target, [
+        'chatId',
+        'messageId',
+        'index',
+        'swipeId',
+        'generation',
+        'branchId',
+        'hash',
+    ]);
+}
+
+function actorNameProtected(name, protectedActorNames) {
+    const key = cleanText(name, 160).toLocaleLowerCase('zh-CN');
+    if (!key) return true;
+    const protectedSet = new Set(cleanList(protectedActorNames, 256, 160)
+        .map((item) => item.toLocaleLowerCase('zh-CN')));
+    return protectedSet.has(key);
+}
+
+const EXPLICIT_AUTHORITY_TICKET_AXIS_LABELS = Object.freeze({
+    temperament: ['基础气质'],
+    coreDesire: ['核心欲望'],
+    valuePriority: ['价值观'],
+    thinkingStyle: ['思考方式'],
+    socialMotive: ['社交动机'],
+    socialMethod: ['社交方式'],
+    relationshipDistance: ['关系模式'],
+    interestOrientation: ['利益取向'],
+    decisionMethod: ['决策方式'],
+    conflictStyle: ['冲突方式'],
+    pressureAndRecovery: ['压力反应', '恢复方式'],
+    moralBoundary: ['道德边界'],
+    speechRhythm: ['表达习惯'],
+    actionHabit: ['行动习惯'],
+    ordinaryFriction: ['弱点'],
+    selfDeception: ['偏见', '自我欺骗'],
+    humorMethod: ['幽默方式'],
+    everydayTexture: ['非极端日常特征'],
+});
+
+function actorStructuredOccupiedTicketAxes(actor) {
+    const identity = actor?.identity || {};
+    const occupied = [];
+    const add = (axis, value) => {
+        if (hasText(value)) occupied.push(axis);
+    };
+    add('temperament', identity.traits);
+    add('coreDesire', [...(actor?.longTermGoals || []), ...(identity.desires || [])]);
+    add('thinkingStyle', identity.informationStyle);
+    add('decisionMethod', identity.decisionStyle);
+    add('socialMethod', identity.socialStyle);
+    add('relationshipDistance', [
+        identity.relationshipDistancePattern,
+        ...(actor?.relationships || []),
+    ]);
+    add('pressureAndRecovery', [
+        identity.copingStyle,
+        identity.pressureResponse,
+        identity.recoveryPath,
+    ]);
+    add('moralBoundary', identity.boundaries);
+    add('speechRhythm', identity.speechStyle);
+    add('ordinaryFriction', identity.blindSpots);
+    add('selfDeception', [identity.selfImageGap, identity.typicalMisread]);
+    add('everydayTexture', identity.everydayHabits);
+    return occupied;
+}
+
+function ticketAxesEstablishedByAuthority(name, authorityText) {
+    const actorName = cleanText(name, 160);
+    const text = cleanText(authorityText, 200000);
+    if (!actorName || !text.includes(actorName)) return [];
+    const relevant = text
+        .split(/[\n。！？!?]/u)
+        .filter((fragment) => fragment.includes(actorName))
+        .join('\n');
+    if (!relevant) return [];
+    return Object.entries(EXPLICIT_AUTHORITY_TICKET_AXIS_LABELS)
+        .filter(([, labels]) => labels.some((label) => new RegExp(
+            `${label}\\s*[：:=]`,
+            'u',
+        ).test(relevant)))
+        .map(([axis]) => axis);
+}
+
+export function bindCharacterCreationTicketsToRegisteredActors(value, {
+    registration = null,
+    candidates = [],
+    batch = null,
+    target = null,
+    protectedActorNames = [],
+    authorityText = '',
+    discardedAxesByActor = {},
+} = {}) {
+    const ledger = clone(value);
+    if (!ledger || typeof ledger !== 'object' || !Array.isArray(ledger.actors)) {
+        return { ledger, matched: false, bindings: [], skipped: ['ledger_invalid'] };
+    }
+    const targetIdentity = normalizeCharacterCreationTarget(target);
+    const batchTarget = normalizeCharacterCreationTarget(batch);
+    if (!targetIdentityMatches(batchTarget, targetIdentity, [
+        'chatId',
+        'generation',
+        'generationId',
+        'generationType',
+    ])) {
+        return { ledger, matched: false, bindings: [], skipped: ['target_mismatch'] };
+    }
+    const tickets = (Array.isArray(batch?.tickets) ? batch.tickets : [])
+        .map(normalizeActorProfileDesignRolls)
+        .filter((ticket) => ticket?.version === 2 && !ticket.binding);
+    const promoted = Array.isArray(registration?.promoted) ? registration.promoted : [];
+    const candidateById = new Map((Array.isArray(candidates) ? candidates : [])
+        .map((candidate) => [cleanText(candidate?.candidateId, 120), candidate]));
+    const bindings = [];
+    const skipped = [];
+    let ticketIndex = 0;
+    for (const promotedActor of promoted) {
+        const actorId = cleanText(promotedActor?.actorRef?.actorId, 120);
+        const candidate = candidateById.get(cleanText(promotedActor?.candidateId, 120));
+        const actorIndex = ledger.actors.findIndex((actor) => actor?.id === actorId);
+        const actor = actorIndex >= 0 ? ledger.actors[actorIndex] : null;
+        if (!promotedActor?.created || !candidate || !actor) {
+            skipped.push(`${actorId || 'unknown'}:existing_or_missing`);
+            continue;
+        }
+        if (
+            candidate.sourceKind !== 'accepted_narrative'
+            || !ticketCandidateMatchesTarget(candidate, targetIdentity)
+        ) {
+            skipped.push(`${actorId}:source_not_current_narrative`);
+            continue;
+        }
+        if (actorNameProtected(actor.name, protectedActorNames)) {
+            skipped.push(`${actorId}:authority_protected`);
+            continue;
+        }
+        if (normalizeActorProfileDesignRolls(actor?.profileV6?.designRolls)) {
+            skipped.push(`${actorId}:ticket_already_bound`);
+            continue;
+        }
+        const ticket = tickets[ticketIndex];
+        if (!ticket) {
+            skipped.push(`${actorId}:ticket_pool_exhausted`);
+            continue;
+        }
+        const explicitDiscardedAxes = discardedAxesByActor instanceof Map
+            ? discardedAxesByActor.get(actorId)
+            : discardedAxesByActor?.[actorId];
+        const discardedAxes = [
+            ...(Array.isArray(explicitDiscardedAxes) ? explicitDiscardedAxes : []),
+            ...actorStructuredOccupiedTicketAxes(actor),
+            ...ticketAxesEstablishedByAuthority(actor.name, authorityText),
+        ];
+        const boundTicket = bindCharacterCreationTicket(ticket, {
+            target: targetIdentity,
+            actorRef: promotedActor.actorRef,
+            order: ticketIndex + 1,
+            discardedAxes,
+        });
+        if (!boundTicket) {
+            skipped.push(`${actorId}:ticket_bind_rejected`);
+            continue;
+        }
+        ledger.actors[actorIndex] = bindActorProfileDesignRolls(actor, boundTicket);
+        bindings.push({
+            ticketId: boundTicket.ticketId,
+            actorRef: clone(boundTicket.binding.actorRef),
+            order: boundTicket.binding.order,
+            discardedAxes: clone(boundTicket.discardedAxes),
+        });
+        ticketIndex += 1;
+    }
+    return { ledger, matched: true, bindings, skipped };
 }
 
 function removeProjectedDesignedSeeds(actor) {
@@ -1343,12 +1941,7 @@ export function prepareActorLedgerProfilesV6(value, {
 }
 
 export function actorProfileReadyForAction(actor) {
-    const profile = normalizeActorProfileV6(actor?.profileV6, {
-        actorId: actor?.id,
-        name: actor?.name,
-    });
-    const coverage = calculateCoverage(profile);
-    return profile.preparedForAction === true && coverage === 100;
+    return actorProfileActionReadiness(actor).ready;
 }
 
 export function selectActorProfileCompletionCandidates(value, {
@@ -1389,23 +1982,25 @@ export function selectActorProfileCompletionCandidates(value, {
     return incomplete
         .slice(0, integer(maxActors, 1, 24, 8))
         .map((actor) => ({
+            actorRef: {
+                actorId: cleanText(actor?.id, 120),
+                name: cleanText(actor?.name, 160),
+            },
             actorId: cleanText(actor?.id, 120),
             name: cleanText(actor?.name, 160),
             identity: clone(actor?.identity || {}),
             profileSummary: cleanText(actor?.identity?.profileSummary, 700),
             completionMode: modeOf(actor?.profileV6?.completionMode),
             longTermGoals: cleanList(actor?.longTermGoals, 12, 400),
-            currentGoals: cleanList(actor?.currentGoals, 8, 400),
-            plan: clone(actor?.plan || {}),
             capabilities: cleanList(actor?.capabilities, 24, 160),
+            resources: clone(actor?.resources || []),
             relationships: clone(actor?.relationships || []),
             knowledge: clone(actor?.knowledge || []),
-            location: clone(actor?.location || {}),
-            stateFacts: clone(actor?.stateFacts || []),
             evidence: cleanList(actor?.evidence, 16, 300),
             physiology: clone(actor?.profileV6?.modules?.physiology?.data || {}),
             fieldSources: clone(actor?.profileV6?.fieldSources || {}),
             designRolls: clone(actor?.profileV6?.designRolls || null),
+            previousProfile: clone(actor?.profileV6 || null),
         }))
         .filter((actor) => actor.actorId && actor.name);
 }
@@ -1436,36 +2031,49 @@ function actorProfilePromptContext(candidate) {
         'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
         'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
     ];
+    const baselineGoals = candidate?.previousProfile?.modules?.goals?.data || {};
     const goalsFor = (selectedSource) => ({
         longTerm: sourceFor('goals', 'longTerm') === selectedSource
-            ? cleanList(candidate.longTermGoals, 12, 400)
+            ? cleanList(baselineGoals.longTerm, 12, 400)
             : [],
-        current: sourceFor('goals', 'current') === selectedSource
-            ? cleanList(candidate.currentGoals, 8, 400)
+        pursuitPrinciples: sourceFor('goals', 'current') === selectedSource
+            ? cleanList(baselineGoals.current, 8, 400)
             : [],
-        plan: pick(
-            candidate.plan,
-            ['summary', 'steps', 'nextWindow'],
-            'goals',
-            selectedSource,
-            'plan',
-        ),
+        strategy: {
+            ...pick(
+                baselineGoals.plan,
+                ['summary', 'steps'],
+                'goals',
+                selectedSource,
+                'plan',
+            ),
+            ...(sourceFor('goals', 'nextWindow') === selectedSource
+                ? { reviewConditions: cleanText(baselineGoals.nextWindow, 400) }
+                : {}),
+        },
     });
     return {
-        actorId: candidate.actorId,
-        name: candidate.name,
+        actorRef: clone(candidate.actorRef || {
+            actorId: candidate.actorId,
+            name: candidate.name,
+        }),
         confirmedAnchors: {
             identity: pick(candidate.identity, identityFields, 'identity', 'confirmed'),
             personality: pick(candidate.identity, personalityFields, 'personality', 'confirmed'),
             goals: goalsFor('confirmed'),
+            relationships: clone(candidate.relationships || []),
+            knowledge: clone(candidate.knowledge || []),
+            resourcesCapabilities: {
+                resources: clone(candidate.resources || []),
+                capabilities: cleanList(candidate.capabilities, 24, 160),
+            },
         },
         editableDraft: {
             identity: pick(candidate.identity, identityFields, 'identity', 'hypothesis'),
             personality: pick(candidate.identity, personalityFields, 'personality', 'hypothesis'),
             goals: goalsFor('hypothesis'),
         },
-        designRolls: normalizeActorProfileDesignRolls(candidate.designRolls)
-            || rollActorProfileDiversity(candidate, { entropy: 'legacy-profile' }),
+        characterCreationTicket: normalizeActorProfileDesignRolls(candidate.designRolls),
     };
 }
 
@@ -1473,7 +2081,11 @@ function actorProfileFieldGuide(candidate) {
     const groups = [
         'identity: role, species, gender, age, briefIntro, appearance, identityText, relationState, attitudeToProtagonist, pastExperience',
         'personality: biography, primaryColor, primaryDerivatives, primarySentence, baseColor, baseDerivatives, baseSentence, accentColor, accentDerivatives, accentSentence, othersVoices, authorVoice',
-        'goals: longTerm, current, plan(summary, steps, nextWindow)',
+        'relationships: entries, patterns, coverageState',
+        'goals: longTerm, pursuitPrinciples, strategy(summary, steps, reviewConditions)',
+        'knowledge: entries, unknownRemainsUnknown, coverageState',
+        'resourcesCapabilities: resources, capabilities, noUnconfirmedAbilityGranted, coverageState',
+        'sources: 为各字段路径标记 confirmed / designed_seed / hypothesis；AI补空不得标 confirmed',
     ];
     if (modeOf(candidate?.completionMode) === 'full_adult') {
         groups.push('physiology: facialAppearance, oralCavity, hairstyle, neckShoulderArmpit, heightWeight, bodySpecial, skinTexture, bodyScent, bodyMeasurements, breastAppearance, waistAbdomen, vulvaAppearance, vaginalProfile, anusAppearance, buttockAppearance, legAppearance, footSize, footAppearance, lactationBodyFluid, sensitiveParts');
@@ -1484,6 +2096,7 @@ function actorProfileFieldGuide(candidate) {
 export function buildActorProfileCompletionMessages(candidates, {
     evidenceText = '',
     customPrompt = '',
+    validationFeedback = [],
 } = {}) {
     const selected = Array.isArray(candidates) ? candidates : [];
     const includesPhysiology = selected.some((candidate) => (
@@ -1492,13 +2105,14 @@ export function buildActorProfileCompletionMessages(candidates, {
     const system = [
         '你是数据库式NPC人物档案生成器，也是一名只负责填表的表格填写器。根据材料把同一个角色的碎片整理成自然、连贯、可直接阅读的人物档案；只填表，不续写剧情。',
         '人物数据分为 confirmedAnchors 与 editableDraft：数据库、角色卡或正文明确事实属于确认硬锚点，必须逐项保留；草稿只是以前的创作补全，可以重写，不能反过来冒充正文事实。材料没有设定的字段不是“待确认”，而是创作空间，直接补成可长期使用的设定。',
-        '输入优先级固定为：数据库/角色卡/原著硬设定 > 已接受正文事实 > 缝合怪已经明确给出的该人物设定 > 已保存档案 > designRolls人物骰票。低层不得改写高层；某个骰轴冲突时只丢弃该轴，不折中出第三种设定。缝合怪的剧情建议若尚未成为正文，只能约束创作方向，不能伪装成角色已经做过的事。',
+        '输入优先级固定为：数据库/角色卡/原著硬设定 > 已接受正文事实 > 缝合怪已经明确给出的该人物设定 > 已保存档案 > characterCreationTicket人物票。低层不得改写高层；某个票据轴冲突时只把该轴记入discardedAxes并停止采用，不折中出第三种设定。缝合怪的剧情建议若尚未成为正文，只能约束创作方向，不能伪装成角色已经做过的事。',
         '【追踪角色表】填写性别、年龄、外貌、身份、简介、关系、对主角态度和过去经历。外貌只写长期物理特征；本轮衣着、姿势、伤势、恐惧和高压反应只属于当前状态，不能写成一生不变的人格与身体特征。',
-        '【追踪人设基线】按数据库调色盘填写：主色优先从原文中提取，原文没有时使用本地已掷出的designRolls；底色和点缀用其余不冲突骰轴组合。骰子由脚本选择，你只负责融合成一个自洽的人，不能自行换成更熟悉的冷酷、怯懦、绝望、完美面具模板。每种颜色都写清对什么对象生效、何时活跃、何时消退的具体行为，不能只堆标签；每组衍生写2-3条，每条30-100字。',
-        'designRolls是创作底稿而非正文证据。将价值取向、现实欲望、社交办法、权威态度、决策习惯、说话节奏、幽默、缺点、关系距离、日常纹理与压力—恢复路径交叉组合；不要逐项照抄成属性表，也不要让职业决定全部轴。',
+        '【追踪人设基线】按数据库调色盘填写：主色优先从原文中提取，原文没有时使用生成前同票绑定的characterCreationTicket；底色和点缀用其余不冲突票据轴组合。票据内的骰子由脚本选择并在正文前锁定，你只负责融合成一个自洽的人，不能重掷、换票或改成更熟悉的冷酷、怯懦、绝望、完美面具模板。每种颜色都写清对什么对象生效、何时活跃、何时消退的具体行为，不能只堆标签；每组衍生写2-3条，每条30-100字。',
+        'characterCreationTicket是创作底稿而非正文证据。将基础气质、核心欲望、价值观、思考方式、关系与社交动机、利益取向、冲突方式、压力与恢复、道德边界、表达与行动习惯、弱点偏见与自我欺骗、非极端日常特征交叉组合；不要逐项照抄成属性表，也不要让职业决定全部轴。',
         '履历用角色第一人称写遇到主角之前也成立的普通完整人生，把身份、外貌、经历和人际关系写成人话。不要自动发明秘密组织、系统底层身份、漫长受难、隐藏虐杀癖、人格崩坏或与主角的命定关系；只有确认锚点明确提供时才沿用。',
         '他者声部写4-7句有视角差、落到具体轶事的旁人议论，允许互相矛盾和看不懂。作者声部用第一人称陈列“越写越不确定”的困惑，不替角色下最终结论，控制在200字以内。',
-        '【行动方向】长期目标属于角色自己的人生，当前目标和下一步计划只使用已经成立的地点、任务、知识与资源；不凭空发明角色已经监控、犯罪、施术、持有装备或知道秘密。',
+        '【长期行动基线】只写人物长期目标、稳定追求原则和通常采用的策略；本轮当前目标、即时计划、下一行动窗口、地点、情绪、伤势和执行进度属于动态状态，不得写进这张基线表。',
+        'relationships、knowledge、resourcesCapabilities 必须整段返回。已确认条目逐项保留；没有确认条目时返回空数组并使用对应 no_confirmed_* coverageState。不得凭空授予关系、秘密知识、物品或能力。',
         ...(includesPhysiology ? [
             '【追踪身体基线】按相貌、口腔、发型、肩颈腋窝、身高体重、身材与特异性征、肌肤、气味、三围、胸部、腰腹、外阴、阴道、菊穴、臀部、腿部、足码脚型、足部、泌乳与特殊体液、敏感部位填写长期稳定的客观身体特征。只写物理白描，不写性格、态度、衣物、性经历或本轮临时状态；材料未写的项目自行创作补全，但不能与已有数据库事实冲突。',
         ] : []),
@@ -1506,7 +2120,10 @@ export function buildActorProfileCompletionMessages(candidates, {
         customPrompt
             ? `【用户自定义人物档案/破限提示】\n${customPrompt}\n【用户自定义提示结束】`
             : '',
-        '按上述字段名直接填写。可以用JSON、键值表或清晰的小标题；内容完整、自然、可读比格式整齐更重要。',
+        '只返回一个完整 ProfileInsertCandidate JSON 对象，不返回数组、不解释。顶层必须含 actorRef、identity、personality、relationships、goals、knowledge、resourcesCapabilities、sources；full_adult 还必须含 physiology。JSON 只是传输格式，内容仍需自然完整。',
+        ...(cleanList(validationFeedback, 64, 240).length ? [
+            `上一张候选没有通过本地验证：${cleanList(validationFeedback, 64, 240).join('；')}。本次必须重新返回整张完整替换候选；不得只补缺列，也不得引用或合并上一张输出。`,
+        ] : []),
     ].filter(Boolean).join('\n\n');
     const user = selected.map((candidate) => [
         `人物与数据库锚点：${JSON.stringify(actorProfilePromptContext(candidate))}`,
@@ -1514,36 +2131,9 @@ export function buildActorProfileCompletionMessages(candidates, {
             ...cleanList(candidate.evidence, 16, 300),
             cleanText(evidenceText, 42000),
         ].filter(Boolean).join('\n')}`,
-        `可用字段（按 identity / personality / goals${modeOf(candidate?.completionMode) === 'full_adult' ? ' / physiology' : ''} 分区）：\n${actorProfileFieldGuide(candidate)}`,
+        `完整候选字段：\n${actorProfileFieldGuide(candidate)}`,
     ].join('\n\n')).join('\n\n');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
-}
-
-export function buildActorProfileRepairMessages(output, candidate, {
-    missingFields = [],
-    evidenceText = '',
-} = {}) {
-    const missing = cleanList(missingFields, 64, 160);
-    return [{
-        role: 'system',
-        content: [
-            '你负责数据库人物档案在提交前的结构修复与缺列补全。保留原输出中所有有效字段和值，不审核、不删减、不改写已明确事实。',
-            missing.length
-                ? '下面列出的缺失字段必须结合现有角色事实合理补齐；正文没有设定的地方直接创作，但不得与数据库、角色卡或原输出冲突。不得填写“未知”“未设定”“未登记”“待确认”“暂无”或空值。'
-                : '只修复字段名和结构，不改变内容含义。',
-            '输入优先级是数据库/角色卡/原著 > 已接受正文 > 缝合怪明确人物设定 > 已保存档案 > designRolls。骰票只补空白，冲突轴直接忽略；不得用骰票覆盖已存在事实。',
-            '返回一个完整JSON对象，使用 identity、personality、goals、physiology 分区；不要解释。',
-        ].join('\n'),
-    }, {
-        role: 'user',
-        content: [
-            `当前人物与数据库锚点：${JSON.stringify(actorProfilePromptContext(candidate))}`,
-            `可用字段：\n${actorProfileFieldGuide(candidate)}`,
-            missing.length ? `必须补齐的缺列：${missing.join(', ')}` : '',
-            evidenceText ? `参考材料：\n${cleanText(evidenceText, 42000)}` : '',
-            `待修复原输出：\n${String(output || '')}`,
-        ].filter(Boolean).join('\n\n'),
-    }];
 }
 
 function firstJsonObject(text) {
@@ -1597,6 +2187,9 @@ const LOOSE_PROFILE_SECTIONS = Object.freeze({
     identity: ['identity', '身份', '角色表', '追踪角色表', '人物档案', '角色档案'],
     personality: ['personality', 'persona', '性格', '人设', '人设基线', '追踪人设基线'],
     goals: ['goals', '目标', '行动方向', '计划'],
+    relationships: ['relationships', '关系基线', '长期关系'],
+    knowledge: ['knowledge', '知识边界', '知识'],
+    resourcesCapabilities: ['resourcescapabilities', 'resources_capabilities', '资源能力', '能力资源'],
     physiology: ['physiology', 'bodybaseline', '身体', '身体基线', '生理档案', '追踪身体基线'],
 });
 
@@ -1629,10 +2222,26 @@ const LOOSE_PROFILE_FIELDS = Object.freeze({
     },
     goals: {
         longTerm: ['longterm', 'longtermgoals', '长期目标'],
-        current: ['current', 'currentgoals', '当前目标'],
-        summary: ['summary', '计划摘要', '下一步计划'],
-        steps: ['steps', '步骤', '计划步骤'],
-        nextWindow: ['nextwindow', '下一行动窗口', '行动窗口'],
+        pursuitPrinciples: ['pursuitprinciples', '追求原则', '长期行动原则'],
+        summary: ['summary', '策略摘要', '长期策略'],
+        steps: ['steps', '策略步骤', '长期步骤'],
+        reviewConditions: ['reviewconditions', '复核条件', '调整条件'],
+    },
+    relationships: {
+        entries: ['entries', '关系条目'],
+        patterns: ['patterns', '关系规律', '长期关系规律'],
+        coverageState: ['coveragestate', '覆盖状态'],
+    },
+    knowledge: {
+        entries: ['entries', '知识条目'],
+        unknownRemainsUnknown: ['unknownremainsunknown', '未知保持未知'],
+        coverageState: ['coveragestate', '覆盖状态'],
+    },
+    resourcesCapabilities: {
+        resources: ['resources', '资源'],
+        capabilities: ['capabilities', '能力'],
+        noUnconfirmedAbilityGranted: ['nounconfirmedabilitygranted', '不授予未确认能力'],
+        coverageState: ['coveragestate', '覆盖状态'],
     },
     physiology: {
         facialAppearance: ['facialappearance', '相貌', '面部外观'],
@@ -1664,8 +2273,12 @@ const LOOSE_PROFILE_LIST_FIELDS = new Set([
     'accentDerivatives',
     'othersVoices',
     'longTerm',
-    'current',
+    'pursuitPrinciples',
     'steps',
+    'patterns',
+    'entries',
+    'resources',
+    'capabilities',
 ]);
 
 function looseProfileKey(value) {
@@ -1707,7 +2320,10 @@ function parseLooseProfileTable(text) {
     const result = {
         identity: {},
         personality: {},
-        goals: { plan: {} },
+        goals: { strategy: {} },
+        relationships: {},
+        knowledge: {},
+        resourcesCapabilities: {},
         physiology: {},
     };
     let section = '';
@@ -1715,12 +2331,11 @@ function parseLooseProfileTable(text) {
     const write = (target, rawValue, { append = false } = {}) => {
         if (!target) return;
         const { section: targetSection, field } = target;
-        const container = targetSection === 'goals' && ['summary', 'steps', 'nextWindow'].includes(field)
-            ? result.goals.plan
+        const container = targetSection === 'goals'
+            && ['summary', 'steps', 'reviewConditions'].includes(field)
+            ? result.goals.strategy
             : result[targetSection];
-        const outputField = targetSection === 'goals' && field === 'summary' ? 'summary'
-            : targetSection === 'goals' && field === 'nextWindow' ? 'nextWindow'
-                : field;
+        const outputField = field;
         if (LOOSE_PROFILE_LIST_FIELDS.has(field)) {
             const items = looseProfileList(rawValue);
             container[outputField] = cleanList([
@@ -1780,14 +2395,14 @@ function parseLooseProfileTable(text) {
     }
     const hasContent = Object.values(result).some((value) => (
         value && typeof value === 'object' && Object.keys(value).some((key) => (
-            key !== 'plan' || Object.keys(value.plan || {}).length
+            key !== 'strategy' || Object.keys(value.strategy || {}).length
         ))
     ));
     return hasContent ? result : null;
 }
 
 function normalizeLooseProfileSection(raw, section) {
-    const result = section === 'goals' ? { plan: {} } : {};
+    const result = section === 'goals' ? { strategy: {} } : {};
     const sources = [];
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         sources.push(raw);
@@ -1799,8 +2414,9 @@ function normalizeLooseProfileSection(raw, section) {
         }
     }
     const assign = (field, value) => {
-        const goalPlanField = section === 'goals' && ['summary', 'steps', 'nextWindow'].includes(field);
-        const target = goalPlanField ? result.plan : result;
+        const goalStrategyField = section === 'goals'
+            && ['summary', 'steps', 'reviewConditions'].includes(field);
+        const target = goalStrategyField ? result.strategy : result;
         if (LOOSE_PROFILE_LIST_FIELDS.has(field)) {
             const rawItems = Array.isArray(value) ? value
                 : value && typeof value === 'object' ? Object.values(value)
@@ -1819,12 +2435,12 @@ function normalizeLooseProfileSection(raw, section) {
         for (const [key, value] of Object.entries(source)) {
             if (
                 section === 'goals'
-                && ['plan', '计划'].includes(looseProfileKey(key))
+                && ['plan', '计划', 'strategy', '策略'].includes(looseProfileKey(key))
                 && value && typeof value === 'object' && !Array.isArray(value)
             ) {
                 for (const [planKey, planValue] of Object.entries(value)) {
-                    const planField = looseProfileField('goals', planKey);
-                    if (planField?.section === 'goals') assign(planField.field, planValue);
+                    const strategyField = looseProfileField('goals', planKey);
+                    if (strategyField?.section === 'goals') assign(strategyField.field, planValue);
                 }
                 continue;
             }
@@ -1832,7 +2448,7 @@ function normalizeLooseProfileSection(raw, section) {
             if (target?.section === section) assign(target.field, value);
         }
     }
-    if (section === 'goals' && !Object.keys(result.plan).length) delete result.plan;
+    if (section === 'goals' && !Object.keys(result.strategy).length) delete result.strategy;
     return result;
 }
 
@@ -1865,264 +2481,687 @@ function candidateForProfile(raw, candidates, index) {
     )) || (candidates.length === 1 ? candidates[0] : candidates[index]);
 }
 
-function normalizedProfilePatch(raw, candidate, evidenceText) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !candidate) return null;
+function isRecord(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeJsonLikeText(output, repairs) {
+    let source = String(output || '').slice(0, 120000)
+        .replace(/```(?:json|javascript|js)?/giu, '')
+        .replace(/```/gu, '')
+        .replace(/[“”]/gu, '"')
+        .replace(/[‘’]/gu, "'");
+    const first = [source.indexOf('{'), source.indexOf('[')]
+        .filter((index) => index >= 0)
+        .sort((left, right) => left - right)[0];
+    if (first === undefined) return '';
+    if (first > 0) repairs.push('prose_prefix_removed');
+    source = source.slice(first);
+    let quoted = false;
+    let escaped = false;
+    let normalized = '';
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (quoted) {
+            if (escaped) {
+                normalized += char;
+                escaped = false;
+                continue;
+            }
+            if (char === '\\') {
+                normalized += char;
+                escaped = true;
+                continue;
+            }
+            if (char === '"') {
+                const next = source.slice(index + 1).match(/\S/u)?.[0] || '';
+                if ([':', ',', '}', ']'].includes(next) || !next) {
+                    normalized += char;
+                    quoted = false;
+                } else {
+                    normalized += '\\"';
+                    repairs.push('unescaped_quote_escaped');
+                }
+                continue;
+            }
+            if (char === '\n' || char === '\r' || char === '\t' || char.codePointAt(0) < 0x20) {
+                normalized += char === '\t' ? '\\t' : '\\n';
+                repairs.push('control_character_escaped');
+                continue;
+            }
+            normalized += char;
+            continue;
+        }
+        if (char === '"') {
+            quoted = true;
+            normalized += char;
+        } else if (char === '：') {
+            normalized += ':';
+            repairs.push('fullwidth_colon_normalized');
+        } else if (char === '，') {
+            normalized += ',';
+            repairs.push('fullwidth_comma_normalized');
+        } else if (char.codePointAt(0) >= 0x20 || char === '\n' || char === '\r' || char === '\t') {
+            normalized += char;
+        } else {
+            repairs.push('control_character_removed');
+        }
+    }
+    normalized = normalized.replace(
+        /([{,]\s*)([\p{L}\p{N}_$-]+)\s*:/gu,
+        (_match, prefix, key) => {
+            repairs.push('unquoted_key_quoted');
+            return `${prefix}"${key}":`;
+        },
+    );
+    normalized = normalized.replace(/,\s*([}\]])/gu, (_match, close) => {
+        repairs.push('trailing_comma_removed');
+        return close;
+    });
+    const stack = [];
+    quoted = false;
+    escaped = false;
+    let end = normalized.length;
+    for (let index = 0; index < normalized.length; index += 1) {
+        const char = normalized[index];
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === '"') quoted = false;
+            continue;
+        }
+        if (char === '"') quoted = true;
+        else if (char === '{' || char === '[') stack.push(char);
+        else if (char === '}' || char === ']') {
+            const expected = char === '}' ? '{' : '[';
+            if (stack.at(-1) !== expected) return '';
+            stack.pop();
+            if (!stack.length) {
+                end = index + 1;
+                break;
+            }
+        }
+    }
+    normalized = normalized.slice(0, end);
+    if (stack.length) {
+        normalized += [...stack].reverse().map((open) => open === '{' ? '}' : ']').join('');
+        repairs.push('closing_bracket_added');
+    }
+    return normalized;
+}
+
+function flattenCandidateSources(value, prefix = '', output = {}) {
+    if (!isRecord(value)) return output;
+    for (const [rawKey, entry] of Object.entries(value)) {
+        const key = cleanText(rawKey, 240);
+        if (!key) continue;
+        const path = prefix ? `${prefix}.${key}` : key;
+        if (typeof entry === 'string') {
+            // Model output is not a provenance authority. Confirmed and ticket
+            // sources are restored only by the independently supplied fact
+            // layers below; all candidate self-claims start as hypotheses.
+            output[path] = 'hypothesis';
+        } else if (isRecord(entry)) {
+            flattenCandidateSources(entry, path, output);
+        }
+    }
+    return output;
+}
+
+function candidateSection(raw, section) {
+    if (isRecord(raw?.[section])) return raw[section];
+    const match = Object.entries(raw || {}).find(([key, value]) => (
+        looseProfileSection(key) === section && isRecord(value)
+    ));
+    return match?.[1] || {};
+}
+
+function normalizeCandidateArray(value, { text = false, limit = 24, itemLimit = 500 } = {}) {
+    let entries;
+    if (Array.isArray(value)) {
+        entries = value;
+    } else if (isRecord(value)) {
+        const indexed = Object.entries(value);
+        if (!indexed.length || indexed.some(([key]) => !/^\d+$/u.test(key))) return undefined;
+        entries = indexed
+            .sort(([left], [right]) => Number(left) - Number(right))
+            .map(([, entry]) => entry);
+    } else {
+        return undefined;
+    }
+    return text ? meaningfulProfileList(entries, limit, itemLimit) : clone(entries);
+}
+
+function normalizeProfileInsertCandidate(raw) {
+    if (!isRecord(raw)) return null;
+    const rawRef = isRecord(raw.actorRef) ? raw.actorRef
+        : isRecord(raw.actor_ref) ? raw.actor_ref
+            : {};
     const identity = normalizeLooseProfileSection(raw, 'identity');
     const personality = {
         ...normalizeLooseProfileSection(raw, 'personality'),
         ...normalizeLooseProfileSection(raw.identity, 'personality'),
     };
+    const rawGoals = candidateSection(raw, 'goals');
     const goals = normalizeLooseProfileSection(raw, 'goals');
-    const normalizedPhysiology = normalizeLooseProfileSection(raw, 'physiology');
-    const physiology = Object.keys(normalizedPhysiology).length ? normalizedPhysiology : null;
-    const evidence = cleanList(candidate.evidence, 8, 300);
-    if (!evidence.length) {
-        evidence.push(...buildActorProfileEvidenceBank(evidenceText, {
-            candidates: [candidate],
-            limit: 8,
-        }).map((entry) => entry.text));
-    }
-    const patch = {
-        ...raw,
-        actorId: candidate.actorId,
-        name: candidate.name,
-        identity: { ...identity, ...personality },
-        longTermGoals: goals.longTerm ?? [],
-        currentGoals: goals.current ?? [],
-        plan: goals.plan ?? {},
-        physiology,
-        evidence,
+    const rawStrategy = isRecord(rawGoals.strategy) ? rawGoals.strategy
+        : isRecord(rawGoals.plan) ? rawGoals.plan
+            : {};
+    const relationshipsRaw = raw.relationships ?? candidateSection(raw, 'relationships');
+    const knowledgeRaw = raw.knowledge ?? candidateSection(raw, 'knowledge');
+    const resourcesRaw = raw.resourcesCapabilities
+        ?? raw.resources_capabilities
+        ?? candidateSection(raw, 'resourcesCapabilities');
+    const physiologyRaw = candidateSection(raw, 'physiology');
+    const sources = flattenCandidateSources(raw.sources);
+    return {
+        actorRef: {
+            actorId: cleanText(rawRef.actorId || rawRef.actor_id || raw.actorId || raw.actor_id, 120),
+            name: cleanText(rawRef.name || rawRef.displayName || raw.name || raw.姓名, 160),
+        },
+        identity,
+        personality,
+        relationships: Array.isArray(relationshipsRaw)
+            ? { entries: clone(relationshipsRaw), patterns: [], coverageState: '' }
+            : {
+                entries: normalizeCandidateArray(relationshipsRaw?.entries),
+                patterns: meaningfulProfileList(relationshipsRaw?.patterns, 12, 500),
+                coverageState: cleanText(relationshipsRaw?.coverageState, 80),
+            },
+        goals: {
+            longTerm: meaningfulProfileList(
+                goals.longTerm ?? rawGoals.longTerm ?? raw.longTermGoals,
+                12,
+                500,
+            ),
+            pursuitPrinciples: meaningfulProfileList(
+                goals.pursuitPrinciples ?? rawGoals.pursuitPrinciples ?? rawGoals.current,
+                8,
+                500,
+            ),
+            strategy: {
+                summary: meaningfulProfileText(
+                    goals.strategy?.summary ?? rawStrategy.summary,
+                    700,
+                ),
+                steps: meaningfulProfileList(
+                    goals.strategy?.steps ?? rawStrategy.steps,
+                    12,
+                    500,
+                ),
+                reviewConditions: meaningfulProfileText(
+                    goals.strategy?.reviewConditions
+                        ?? rawStrategy.reviewConditions
+                        ?? rawStrategy.nextWindow,
+                    400,
+                ),
+            },
+        },
+        knowledge: Array.isArray(knowledgeRaw)
+            ? { entries: clone(knowledgeRaw), unknownRemainsUnknown: true, coverageState: '' }
+            : {
+                entries: normalizeCandidateArray(knowledgeRaw?.entries),
+                unknownRemainsUnknown: knowledgeRaw?.unknownRemainsUnknown === true,
+                coverageState: cleanText(knowledgeRaw?.coverageState, 80),
+            },
+        resourcesCapabilities: isRecord(resourcesRaw) ? {
+            resources: normalizeCandidateArray(resourcesRaw.resources),
+            capabilities: normalizeCandidateArray(resourcesRaw.capabilities, {
+                text: true,
+                limit: 24,
+                itemLimit: 240,
+            }),
+            noUnconfirmedAbilityGranted: resourcesRaw.noUnconfirmedAbilityGranted === true,
+            coverageState: cleanText(resourcesRaw.coverageState, 80),
+        } : {
+            resources: undefined,
+            capabilities: undefined,
+            noUnconfirmedAbilityGranted: false,
+            coverageState: '',
+        },
+        physiology: Object.keys(physiologyRaw).length
+            ? normalizePhysiology({ ...physiologyRaw, enabled: true, adultEnabled: true })
+            : null,
+        sources,
     };
-    const hasContent = Object.keys(patch.identity).length
-        || cleanList(patch.longTermGoals).length
-        || cleanList(patch.currentGoals).length
-        || Object.keys(patch.plan || {}).length
-        || (patch.physiology && Object.keys(patch.physiology).length);
-    return hasContent ? patch : null;
 }
 
-export function actorProfileCompletionMissingFields(patch, candidate = {}) {
-    const identity = { ...(candidate?.identity || {}), ...(patch?.identity || {}) };
-    const plan = { ...(candidate?.plan || {}), ...(patch?.plan || {}) };
-    const longTerm = [
-        ...(candidate?.longTermGoals || []),
-        ...(patch?.longTermGoals || []),
+function getCandidatePath(value, path) {
+    return path.split('.').reduce((cursor, key) => (
+        cursor && typeof cursor === 'object' ? cursor[key] : undefined
+    ), value);
+}
+
+function setCandidatePath(value, path, nextValue) {
+    const parts = path.split('.');
+    let cursor = value;
+    for (const part of parts.slice(0, -1)) {
+        if (!isRecord(cursor[part])) cursor[part] = {};
+        cursor = cursor[part];
+    }
+    cursor[parts.at(-1)] = clone(nextValue);
+}
+
+function candidateLeafEntries(value, prefix = '') {
+    if (Array.isArray(value) || !isRecord(value)) return prefix ? [[prefix, value]] : [];
+    return Object.entries(value).flatMap(([key, entry]) => candidateLeafEntries(
+        entry,
+        prefix ? `${prefix}.${key}` : key,
+    ));
+}
+
+function reconcileProfileFactLayers(candidate, context = {}) {
+    const resolved = clone(candidate);
+    const resolutions = [];
+    const explicitLayers = isRecord(context.factLayers) ? context.factLayers : {};
+    for (const layer of PROFILE_INSERT_SOURCE_LAYERS.slice(1)) {
+        const facts = explicitLayers[layer];
+        if (!isRecord(facts)) continue;
+        for (const [path, value] of candidateLeafEntries(facts)) {
+            if (path === 'actorRef' || path.startsWith('actorRef.')) continue;
+            const before = getCandidatePath(resolved, path);
+            if (JSON.stringify(before) !== JSON.stringify(value)) {
+                resolutions.push({ path, keptLayer: layer, discardedValue: clone(before) });
+            }
+            setCandidatePath(resolved, path, value);
+            resolved.sources[path] = layer === 'characterCreationTicket'
+                ? 'designed_seed'
+                : 'confirmed';
+        }
+    }
+    return { candidate: resolved, resolutions };
+}
+
+function sourceAtPath(candidate, path) {
+    let cursor = path;
+    while (cursor) {
+        if (SOURCE_SET.has(candidate?.sources?.[cursor])) return candidate.sources[cursor];
+        cursor = cursor.includes('.') ? cursor.slice(0, cursor.lastIndexOf('.')) : '';
+    }
+    return '';
+}
+
+const INSERT_IDENTITY_FIELDS = Object.freeze([
+    'role', 'species', 'gender', 'age', 'briefIntro', 'appearance', 'identityText',
+    'relationState', 'attitudeToProtagonist', 'pastExperience',
+]);
+const INSERT_PERSONALITY_TEXT_FIELDS = Object.freeze([
+    'biography', 'primaryColor', 'primarySentence', 'baseColor', 'baseSentence',
+    'accentColor', 'accentSentence', 'authorVoice',
+]);
+const INSERT_PERSONALITY_LIST_FIELDS = Object.freeze({
+    primaryDerivatives: 2,
+    baseDerivatives: 2,
+    accentDerivatives: 2,
+    othersVoices: 4,
+});
+
+function existingProfileCandidateFactLayers(previousProfile) {
+    if (!previousProfile || typeof previousProfile !== 'object') return {};
+    const profile = normalizeActorProfileV6(previousProfile, {
+        actorId: previousProfile.actorId,
+        name: previousProfile.name,
+        mode: previousProfile.completionMode,
+    });
+    const layers = { characterCreationTicket: {}, confirmedProfile: {} };
+    const mappings = [
+        ...INSERT_IDENTITY_FIELDS.map((field) => ['identity', field, `identity.${field}`]),
+        ...INSERT_PERSONALITY_TEXT_FIELDS.map((field) => [
+            'personality', field, `personality.${field}`,
+        ]),
+        ...Object.keys(INSERT_PERSONALITY_LIST_FIELDS).map((field) => [
+            'personality', field, `personality.${field}`,
+        ]),
+        ...['entries', 'patterns', 'coverageState'].map((field) => [
+            'relationships', field, `relationships.${field}`,
+        ]),
+        ['goals', 'longTerm', 'goals.longTerm'],
+        ['goals', 'current', 'goals.pursuitPrinciples'],
+        ['goals', 'plan.summary', 'goals.strategy.summary'],
+        ['goals', 'plan.steps', 'goals.strategy.steps'],
+        ['goals', 'nextWindow', 'goals.strategy.reviewConditions'],
+        ...['entries', 'unknownRemainsUnknown', 'coverageState'].map((field) => [
+            'knowledge', field, `knowledge.${field}`,
+        ]),
+        ...['resources', 'capabilities', 'noUnconfirmedAbilityGranted', 'coverageState']
+            .map((field) => [
+                'resourcesCapabilities', field, `resourcesCapabilities.${field}`,
+            ]),
+        ...PHYSIOLOGY_CONTENT_FIELDS.map((field) => [
+            'physiology', field, `physiology.${field}`,
+        ]),
     ];
-    const current = [
-        ...(candidate?.currentGoals || []),
-        ...(patch?.currentGoals || []),
-    ];
+    for (const [module, modulePath, candidatePath] of mappings) {
+        const value = getPath(profile, ['modules', module, 'data', ...modulePath.split('.')]);
+        const meaningful = Array.isArray(value)
+            || value === true
+            || (typeof value === 'string' && Boolean(meaningfulProfileText(value, 4000)))
+            || (isRecord(value) && Object.keys(value).length > 0);
+        if (!meaningful) continue;
+        const fieldPath = `modules.${module}.data.${modulePath}`;
+        const fieldSource = sourceOf(
+            profile.fieldSources[fieldPath],
+            profile.modules[module]?.source || 'hypothesis',
+        );
+        const layer = fieldSource === 'confirmed'
+            ? 'confirmedProfile'
+            : fieldSource === 'designed_seed'
+                ? 'characterCreationTicket'
+                : '';
+        if (layer) setCandidatePath(layers[layer], candidatePath, value);
+    }
+    return layers;
+}
+
+function profileFactLayersForContext(context = {}) {
+    const merged = existingProfileCandidateFactLayers(context.previousProfile);
+    const explicit = isRecord(context.factLayers) ? context.factLayers : {};
+    for (const layer of PROFILE_INSERT_SOURCE_LAYERS.slice(1)) {
+        if (!isRecord(explicit[layer])) continue;
+        if (!isRecord(merged[layer])) merged[layer] = {};
+        for (const [path, value] of candidateLeafEntries(explicit[layer])) {
+            setCandidatePath(merged[layer], path, value);
+        }
+    }
+    return merged;
+}
+
+export function validateActorProfileInsertCandidate(candidate, context = {}) {
+    if (!isRecord(candidate)) {
+        return {
+            ok: false,
+            candidate: null,
+            repairs: [],
+            errorCode: 'actor_profile.format_unrecoverable',
+            missingFields: [],
+            resolutions: [],
+        };
+    }
+    const expectedActorId = cleanText(
+        context?.actorRef?.actorId || context?.actorId,
+        120,
+    );
+    const actualActorId = cleanText(candidate.actorRef?.actorId, 120);
+    const actualName = cleanText(candidate.actorRef?.name, 160);
+    const expectedName = cleanText(context?.actorRef?.name || context?.name, 160);
+    if (
+        (expectedActorId && actualActorId && expectedActorId !== actualActorId)
+        || (expectedName && actualName && expectedName !== actualName)
+    ) {
+        return {
+            ok: false,
+            candidate: null,
+            repairs: [],
+            errorCode: 'actor_profile.actor_ref_mismatch',
+            missingFields: [],
+            resolutions: [],
+        };
+    }
+    if (context.__candidateOnly !== true) {
+        const candidateOnly = validateActorProfileInsertCandidate(candidate, {
+            actorRef: context.actorRef,
+            actorId: context.actorId,
+            name: context.name,
+            completionMode: context.completionMode,
+            __candidateOnly: true,
+        });
+        if (!candidateOnly.ok) return candidateOnly;
+    }
+    const reconciled = context.__candidateOnly === true
+        ? { candidate, resolutions: [] }
+        : reconcileProfileFactLayers(candidate, {
+            ...context,
+            factLayers: profileFactLayersForContext(context),
+        });
+    const value = reconciled.candidate;
     const missing = [];
-    for (const field of [
-        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance', 'identityText',
-        'relationState', 'attitudeToProtagonist', 'pastExperience',
-    ]) {
-        if (!meaningfulProfileText(identity[field], 4000)) missing.push(`identity.${field}`);
+    if (!actualActorId) missing.push('actorRef.actorId');
+    if (!actualName) missing.push('actorRef.name');
+    for (const field of INSERT_IDENTITY_FIELDS) {
+        if (!meaningfulProfileText(value.identity?.[field], 4000)) missing.push(`identity.${field}`);
     }
-    for (const field of [
-        'biography', 'primaryColor', 'primarySentence', 'baseColor', 'baseSentence',
-        'accentColor', 'accentSentence', 'authorVoice',
-    ]) {
-        if (!meaningfulProfileText(identity[field], 4000)) missing.push(`personality.${field}`);
-    }
-    for (const [field, minimum] of [
-        ['primaryDerivatives', 2],
-        ['baseDerivatives', 2],
-        ['accentDerivatives', 2],
-        ['othersVoices', 4],
-    ]) {
-        if (meaningfulProfileList(identity[field], 12, 700).length < minimum) {
+    for (const field of INSERT_PERSONALITY_TEXT_FIELDS) {
+        if (!meaningfulProfileText(value.personality?.[field], 4000)) {
             missing.push(`personality.${field}`);
         }
     }
-    if (!meaningfulProfileList(longTerm, 12, 400).length) missing.push('goals.longTerm');
-    if (!meaningfulProfileList(current, 8, 400).length) missing.push('goals.current');
-    if (!meaningfulProfileText(plan.summary, 500)) missing.push('goals.plan.summary');
-    if (!meaningfulProfileList(plan.steps, 12, 300).length) missing.push('goals.plan.steps');
-    if (!meaningfulProfileText(plan.nextWindow, 180)) missing.push('goals.plan.nextWindow');
-    if (modeOf(candidate?.completionMode) === 'full_adult') {
-        const physiology = { ...(candidate?.physiology || {}), ...(patch?.physiology || {}) };
-        for (const field of PHYSIOLOGY_CONTENT_FIELDS) {
-            if (!meaningfulProfileText(physiology[field], 4000)) {
-                missing.push(`physiology.${field}`);
-            }
+    for (const [field, minimum] of Object.entries(INSERT_PERSONALITY_LIST_FIELDS)) {
+        if (meaningfulProfileList(value.personality?.[field], 12, 700).length < minimum) {
+            missing.push(`personality.${field}`);
         }
     }
-    return missing;
-}
-
-export function mergeActorProfileCompletionPatches(base, addition) {
-    if (!base) return clone(addition);
-    if (!addition) return clone(base);
+    if (!Array.isArray(value.relationships?.entries)) missing.push('relationships.entries');
+    if (!meaningfulProfileList(value.relationships?.patterns, 12, 500).length) {
+        missing.push('relationships.patterns');
+    }
+    if (!['confirmed_entries', 'no_confirmed_relationships'].includes(
+        value.relationships?.coverageState,
+    )) missing.push('relationships.coverageState');
+    if (!meaningfulProfileList(value.goals?.longTerm, 12, 500).length) {
+        missing.push('goals.longTerm');
+    }
+    if (!meaningfulProfileList(value.goals?.pursuitPrinciples, 8, 500).length) {
+        missing.push('goals.pursuitPrinciples');
+    }
+    if (!meaningfulProfileText(value.goals?.strategy?.summary, 700)) {
+        missing.push('goals.strategy.summary');
+    }
+    if (!meaningfulProfileList(value.goals?.strategy?.steps, 12, 500).length) {
+        missing.push('goals.strategy.steps');
+    }
+    if (!meaningfulProfileText(value.goals?.strategy?.reviewConditions, 400)) {
+        missing.push('goals.strategy.reviewConditions');
+    }
+    if (!Array.isArray(value.knowledge?.entries)) missing.push('knowledge.entries');
+    if (value.knowledge?.unknownRemainsUnknown !== true) {
+        missing.push('knowledge.unknownRemainsUnknown');
+    }
+    if (!['confirmed_entries', 'no_confirmed_knowledge'].includes(
+        value.knowledge?.coverageState,
+    )) missing.push('knowledge.coverageState');
+    if (!Array.isArray(value.resourcesCapabilities?.resources)) {
+        missing.push('resourcesCapabilities.resources');
+    }
+    if (!Array.isArray(value.resourcesCapabilities?.capabilities)) {
+        missing.push('resourcesCapabilities.capabilities');
+    }
+    if (value.resourcesCapabilities?.noUnconfirmedAbilityGranted !== true) {
+        missing.push('resourcesCapabilities.noUnconfirmedAbilityGranted');
+    }
+    if (!['confirmed_entries', 'no_confirmed_resources_or_capabilities'].includes(
+        value.resourcesCapabilities?.coverageState,
+    )) missing.push('resourcesCapabilities.coverageState');
+    if (modeOf(context?.completionMode) === 'full_adult') {
+        if (!isRecord(value.physiology)) missing.push('physiology');
+        for (const field of PHYSIOLOGY_CONTENT_FIELDS) {
+            const text = meaningfulProfileText(value.physiology?.[field], 4000);
+            if (!text || (/^不适用[。.!！]?$/u.test(text))) missing.push(`physiology.${field}`);
+        }
+    }
+    const sourcePaths = [
+        ...INSERT_IDENTITY_FIELDS.map((field) => `identity.${field}`),
+        ...INSERT_PERSONALITY_TEXT_FIELDS.map((field) => `personality.${field}`),
+        ...Object.keys(INSERT_PERSONALITY_LIST_FIELDS).map((field) => `personality.${field}`),
+        'relationships.patterns',
+        'goals.longTerm',
+        'goals.pursuitPrinciples',
+        'goals.strategy.summary',
+        'goals.strategy.steps',
+        'goals.strategy.reviewConditions',
+        ...(modeOf(context?.completionMode) === 'full_adult'
+            ? PHYSIOLOGY_CONTENT_FIELDS.map((field) => `physiology.${field}`)
+            : []),
+    ];
+    for (const path of sourcePaths) {
+        if (!sourceAtPath(value, path)) missing.push(`sources.${path}`);
+    }
+    const uniqueMissing = [...new Set(missing)];
     return {
-        ...clone(base),
-        ...clone(addition),
-        actorId: addition.actorId || base.actorId,
-        name: addition.name || base.name,
-        identity: { ...(clone(base.identity) || {}), ...(clone(addition.identity) || {}) },
-        longTermGoals: meaningfulProfileList(addition.longTermGoals, 12, 400).length
-            ? clone(addition.longTermGoals)
-            : clone(base.longTermGoals || []),
-        currentGoals: meaningfulProfileList(addition.currentGoals, 8, 400).length
-            ? clone(addition.currentGoals)
-            : clone(base.currentGoals || []),
-        plan: { ...(clone(base.plan) || {}), ...(clone(addition.plan) || {}) },
-        physiology: base.physiology || addition.physiology
-            ? { ...(clone(base.physiology) || {}), ...(clone(addition.physiology) || {}) }
-            : null,
-        evidence: cleanList([...(base.evidence || []), ...(addition.evidence || [])], 16, 300),
+        ok: uniqueMissing.length === 0,
+        candidate: uniqueMissing.length ? null : value,
+        repairs: [],
+        errorCode: uniqueMissing.length ? 'actor_profile.schema_incomplete' : '',
+        missingFields: uniqueMissing,
+        resolutions: reconciled.resolutions,
     };
 }
 
-export function parseActorProfileCompletionOutput(output, {
-    candidates = [],
-    evidenceText = '',
-} = {}) {
-    const parsed = firstJsonObject(output) || parseLooseProfileTable(output);
+export function repairActorProfileInsertLocally(output, context = {}) {
+    const repairs = [];
+    let parsed = firstJsonObject(output);
     if (!parsed) {
-        return { profiles: null, error: 'actor_profile.json_invalid' };
+        const repairedText = normalizeJsonLikeText(output, repairs);
+        try {
+            parsed = repairedText ? JSON.parse(repairedText) : null;
+        } catch {
+            parsed = null;
+        }
     }
-    const selected = Array.isArray(candidates) ? candidates : [];
-    const profiles = profileObjectsFromParsed(parsed);
-    const normalized = [];
-    const seen = new Set();
-    for (const [index, raw] of profiles.entries()) {
-        const candidate = candidateForProfile(raw, selected, index);
-        const patch = normalizedProfilePatch(raw, candidate, evidenceText);
-        if (!patch || seen.has(patch.actorId)) continue;
-        seen.add(patch.actorId);
-        normalized.push(patch);
+    if (!parsed) parsed = parseLooseProfileTable(output);
+    const objects = profileObjectsFromParsed(parsed);
+    if (objects.length !== 1) {
+        return {
+            ok: false,
+            candidate: null,
+            repairs: [...new Set(repairs)],
+            errorCode: 'actor_profile.format_unrecoverable',
+            missingFields: [],
+        };
     }
-    if (!normalized.length) {
-        return { profiles: null, error: 'actor_profile.content_missing' };
+    const candidate = normalizeProfileInsertCandidate(objects[0]);
+    if (!candidate) {
+        return {
+            ok: false,
+            candidate: null,
+            repairs: [...new Set(repairs)],
+            errorCode: 'actor_profile.format_unrecoverable',
+            missingFields: [],
+        };
     }
-    return { profiles: normalized, error: '' };
+    const validation = validateActorProfileInsertCandidate(candidate, context);
+    return {
+        ...validation,
+        repairs: [...new Set([...repairs, ...(validation.repairs || [])])],
+    };
 }
 
-export function applyActorProfileCompletionToV6(value, patch, {
+export function parseActorProfileCompletionOutput(output, options = {}) {
+    return repairActorProfileInsertLocally(output, options.candidates?.[0] || options);
+}
+
+export function actorProfileCompletionMissingFields(candidate, context = {}) {
+    return validateActorProfileInsertCandidate(candidate, context).missingFields;
+}
+
+function candidateModuleSources(candidate, section, relativePaths) {
+    const overrides = Object.fromEntries(relativePaths.map((path) => [
+        path,
+        sourceAtPath(candidate, `${section}.${path}`) || 'hypothesis',
+    ]));
+    return {
+        source: Object.values(overrides).some((source) => source === 'confirmed')
+            ? 'confirmed'
+            : Object.values(overrides).some((source) => source === 'designed_seed')
+                ? 'designed_seed'
+                : 'hypothesis',
+        overrides,
+    };
+}
+
+export function materializeActorProfileBaseline(previousProfile, candidate, {
     turn = 0,
     now = Date.now(),
+    completionMode = 'full',
 } = {}) {
-    const profile = normalizeActorProfileV6(value, {
-        actorId: patch?.actorId,
-        name: patch?.name,
+    const profile = normalizeActorProfileV6(previousProfile, {
+        actorId: candidate?.actorRef?.actorId,
+        name: candidate?.actorRef?.name,
+        mode: completionMode,
     });
-    const evidence = cleanList(patch?.evidence, 16, 300);
-    const patchIdentity = patch?.identity && typeof patch.identity === 'object'
-        && !Array.isArray(patch.identity)
-        ? patch.identity
-        : {};
-    const identityFields = [
-        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
-        'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
-    ];
-    const personalityFields = [
-        'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
-        'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
-        'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
-    ];
-    const completionSourceOverrides = (module, fields) => Object.fromEntries(fields.map((field) => [
-        field,
-        profile.fieldSources[`modules.${module}.data.${field}`] === 'confirmed'
-            ? 'confirmed'
-            : 'hypothesis',
-    ]));
-    if (!moduleLocked(profile, 'identity')) {
-        const identity = clone(profile.modules.identity.data || {});
-        for (const field of identityFields) {
-            if (hasText(patchIdentity[field])) identity[field] = clone(patchIdentity[field]);
-        }
-        assignModule(profile, 'identity', identity, {
-            source: profile.modules.identity.source === 'confirmed' ? 'confirmed' : 'hypothesis',
+    profile.version = ACTOR_PROFILE_V6_VERSION;
+    profile.actorId = cleanText(candidate?.actorRef?.actorId, 120);
+    profile.name = cleanText(candidate?.actorRef?.name, 160);
+    profile.completionMode = modeOf(completionMode || profile.completionMode);
+    const evidence = cleanList(previousProfile?.modules?.identity?.evidence, 16, 300);
+    const assignBaseline = (module, data, paths) => {
+        const sourceInfo = candidateModuleSources(candidate, module, paths);
+        assignModule(profile, module, data, {
+            source: sourceInfo.source,
             unknownFields: [],
             evidence,
             turn,
             now,
-            action: 'model_completion',
-            fieldSourceOverrides: completionSourceOverrides('identity', identityFields),
+            action: 'profile_insert',
+            fieldSourceOverrides: sourceInfo.overrides,
         });
-    }
-    if (!moduleLocked(profile, 'personality')) {
-        const personality = clone(profile.modules.personality.data || {});
-        for (const field of personalityFields) {
-            if (hasText(patchIdentity[field])) personality[field] = clone(patchIdentity[field]);
-        }
-        assignModule(profile, 'personality', personality, {
-            source: Object.values(completionSourceOverrides('personality', personalityFields))
-                .some((source) => source === 'confirmed')
-                ? 'confirmed'
-                : 'hypothesis',
-            unknownFields: [],
-            evidence,
-            turn,
-            now,
-            action: 'model_completion',
-            fieldSourceOverrides: completionSourceOverrides('personality', personalityFields),
-        });
-    }
-    if (!moduleLocked(profile, 'goals')) {
-        const goals = clone(profile.modules.goals.data || {});
-        if (meaningfulProfileList(patch?.longTermGoals, 12, 400).length) {
-            goals.longTerm = cleanList(patch.longTermGoals, 12, 400);
-        }
-        if (meaningfulProfileList(patch?.currentGoals, 8, 400).length) {
-            goals.current = cleanList(patch.currentGoals, 8, 400);
-        }
-        const proposedPlan = patch?.plan && typeof patch.plan === 'object'
-            && !Array.isArray(patch.plan)
-            ? patch.plan
-            : {};
-        goals.plan = { ...(goals.plan || {}) };
-        if (meaningfulProfileText(proposedPlan.summary, 500)) {
-            goals.plan.summary = cleanText(proposedPlan.summary, 500);
-        }
-        if (meaningfulProfileList(proposedPlan.steps, 12, 300).length) {
-            goals.plan.steps = cleanList(proposedPlan.steps, 12, 300);
-        }
-        if (meaningfulProfileText(proposedPlan.nextWindow, 180)) {
-            goals.nextWindow = cleanText(proposedPlan.nextWindow, 180);
-        }
-        const goalFields = ['longTerm', 'current', 'plan.summary', 'plan.steps', 'nextWindow'];
-        assignModule(profile, 'goals', goals, {
-            source: goalFields.some((field) => (
-                profile.fieldSources[`modules.goals.data.${field}`] === 'confirmed'
-            )) ? 'confirmed' : 'hypothesis',
-            unknownFields: [],
-            evidence,
-            turn,
-            now,
-            action: 'model_completion',
-            fieldSourceOverrides: completionSourceOverrides('goals', goalFields),
-        });
-    }
-    if (
-        profile.completionMode === 'full_adult'
-        && patch?.physiology
-        && typeof patch.physiology === 'object'
-        && !Array.isArray(patch.physiology)
-        && !moduleLocked(profile, 'physiology')
-    ) {
-        const source = patch?.sources?.physiology === 'confirmed' ? 'confirmed' : 'hypothesis';
-        const data = normalizePhysiology({
-            ...clone(patch.physiology),
+    };
+    assignBaseline('identity', {
+        name: profile.name,
+        aliases: cleanList(previousProfile?.modules?.identity?.data?.aliases, 8, 120),
+        lineage: clone(previousProfile?.modules?.identity?.data?.lineage || {}),
+        ...clone(candidate.identity),
+    }, ['name', ...INSERT_IDENTITY_FIELDS]);
+    assignBaseline('personality', clone(candidate.personality), [
+        ...INSERT_PERSONALITY_TEXT_FIELDS,
+        ...Object.keys(INSERT_PERSONALITY_LIST_FIELDS),
+    ]);
+    assignBaseline('relationships', clone(candidate.relationships), [
+        'entries', 'patterns', 'coverageState',
+    ]);
+    assignBaseline('goals', {
+        longTerm: clone(candidate.goals.longTerm),
+        current: clone(candidate.goals.pursuitPrinciples),
+        plan: {
+            summary: candidate.goals.strategy.summary,
+            steps: clone(candidate.goals.strategy.steps),
+            status: 'baseline',
+            priority: 'normal',
+        },
+        nextWindow: candidate.goals.strategy.reviewConditions,
+        baselineKind: 'long_term',
+        commitments: [],
+        obstacles: [],
+        costs: [],
+        alternatives: [],
+    }, ['longTerm', 'current', 'plan.summary', 'plan.steps', 'nextWindow']);
+    assignBaseline('knowledge', clone(candidate.knowledge), [
+        'entries', 'unknownRemainsUnknown', 'coverageState',
+    ]);
+    assignBaseline('resourcesCapabilities', clone(candidate.resourcesCapabilities), [
+        'resources', 'capabilities', 'noUnconfirmedAbilityGranted', 'coverageState',
+    ]);
+    if (profile.completionMode === 'full_adult') {
+        assignBaseline('physiology', normalizePhysiology({
+            ...candidate.physiology,
             enabled: true,
             adultEnabled: true,
-        });
-        assignModule(profile, 'physiology', data, {
-            source,
+        }), PHYSIOLOGY_CONTENT_FIELDS);
+    } else if (!moduleLocked(profile, 'physiology')) {
+        assignModule(profile, 'physiology', emptyPhysiology(), {
+            source: 'confirmed',
             unknownFields: [],
             evidence,
             turn,
             now,
-            action: 'model_completion',
+            action: 'profile_insert',
         });
     }
+    for (const [path, overrideValue] of Object.entries(profile.manualOverrides || {})) {
+        const parts = pathParts(path);
+        if (parts[0] !== 'modules' || !BASELINE_MODULES.includes(parts[1])) continue;
+        setPath(profile, parts, overrideValue);
+        profile.fieldSources[path] = 'confirmed';
+    }
+    profile.baselineCommit = null;
     profile.coverage = calculateCoverage(profile);
-    profile.preparedForAction = profile.coverage === 100;
-    profile.backgroundPending = !profile.preparedForAction
-        || calculateOptionalCoverage(profile) < 100;
+    profile.preparedForAction = false;
+    profile.backgroundPending = true;
     profile.updatedTurn = integer(turn);
     return profile;
+}
+
+export function applyActorProfileCompletionToV6(value, candidate, options = {}) {
+    return materializeActorProfileBaseline(value, candidate, options);
 }
 
 function pathParts(path) {
@@ -2195,7 +3234,7 @@ export function applyActorProfileV6Override(value, {
     profile.modules[module].status = 'ready';
     recordHistory(profile, module, 'manual_override', before, profile.modules[module], turn, now);
     profile.coverage = calculateCoverage(profile);
-    profile.preparedForAction = profile.coverage === 100;
+    profile.preparedForAction = baselineCommitReady(profile);
     profile.updatedTurn = integer(turn);
     return { profile, applied: true };
 }
@@ -2225,7 +3264,7 @@ export function regenerateActorProfileV6Module(value, actor, {
     profile.moduleVersions[module] += 1;
     recordHistory(profile, module, 'regenerate', before, profile.modules[module], turn, now);
     profile.coverage = calculateCoverage(profile);
-    profile.preparedForAction = profile.coverage === 100;
+    profile.preparedForAction = baselineCommitReady(profile);
     profile.updatedTurn = integer(turn);
     return { profile, regenerated: true };
 }
@@ -2237,7 +3276,7 @@ export function actorProfileV6View(actor) {
     });
     const coverage = calculateCoverage(profile);
     const optionalCoverage = calculateOptionalCoverage(profile);
-    const preparedForAction = profile.preparedForAction === true && coverage === 100;
+    const preparedForAction = baselineCommitReady(profile);
     const requiredUnknownFieldCount = Object.entries(profile.modules)
         .filter(([module]) => module !== 'physiology')
         .reduce((total, [, module]) => total + module.unknownFields.length, 0);
