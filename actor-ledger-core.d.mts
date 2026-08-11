@@ -4,7 +4,10 @@ export interface ActorLedgerSourceRef {
     index: number;
     swipeId: number;
     generation: number;
+    generationId: string;
+    generationType: string;
     branchId: string;
+    identityScopeId: string;
     hash: string;
 }
 
@@ -42,20 +45,33 @@ export interface ActorRegistryEntry {
         displayName: string;
         aliases: string[];
     };
-    state: 'registered' | 'retired';
     origin: string;
-    identityKeys: string[];
-    lifecycle: { status: string; inactiveReason: string };
-    lineage: Record<string, unknown>;
     sourceRefs: ActorLedgerSourceRef[];
     registeredTurn: number;
+    updatedTurn: number;
+}
+
+export interface ActorRegistryCandidateRow {
+    kind: 'actor_candidate';
+    candidateId: string;
+    name: string;
+    aliases: string[];
+    actorRef: ActorRegistryEntry['actorRef'];
+    sourceKind: ActorCandidate['sourceKind'];
+    sourceRefs: ActorLedgerSourceRef[];
+    evidence: string[];
+    present: boolean;
+    location: string;
+    discoveredTurn: number;
     updatedTurn: number;
 }
 
 export interface ActorRegistry {
     version: number;
     chatId: string;
-    entries: ActorRegistryEntry[];
+    identityScopeId: string;
+    characters: Record<string, ActorRegistryCandidateRow>;
+    registered: Record<string, ActorRegistryEntry>;
     updatedAt: number;
 }
 
@@ -204,24 +220,47 @@ export const ACTOR_LEDGER_MAX_RECEIPTS: number;
 export const ACTOR_LEDGER_MAX_ACTION_ATTEMPTS: number;
 
 export function emptyActorLedger(chatId?: string): ActorLedger;
-export function emptyActorRegistry(chatId?: string): ActorRegistry;
+export function emptyActorRegistry(chatId?: string, identityScopeId?: string): ActorRegistry;
+export function explicitDelimitedActorAliases(value: unknown): string[];
+export function resolveActorRegistryTargetName(value: unknown): string;
+export function acceptedActorSourceRefMatches(value: unknown, expected: unknown): boolean;
 export function normalizeActorRegistry(
     value: unknown,
-    options?: { chatId?: string; actors?: unknown[]; migrateLegacy?: boolean },
+    options?: {
+        chatId?: string;
+        identityScopeId?: string;
+        actors?: unknown[];
+        migrateLegacy?: boolean;
+    },
 ): ActorRegistry;
 export function actorRegistryDigest(value: unknown): string;
 export function actorRegistryMatchesLedger(
     value: unknown,
     expected?: { chatId?: string; digest?: string; actorIds?: string[] },
 ): { ok: boolean; mismatches: string[] };
+export function parseRegisteredActorGateNames(result: unknown, registeredSet: Set<string> | string[]): string[];
+export function runRegisteredActorGate(
+    value: unknown,
+    candidateNames: string[],
+): { ok: true; names: string[]; actorRefs: ActorRegistryEntry['actorRef'][] };
 export function normalizeActorLedger(
     value: unknown,
-    options?: { chatId?: string; maxActors?: number; excludedActorNames?: string[] },
+    options?: {
+        chatId?: string;
+        identityScopeId?: string;
+        maxActors?: number;
+        excludedActorNames?: string[];
+    },
 ): ActorLedger;
 export function migrateActorLedgerFromContinuity(
     value: unknown,
     continuity: unknown,
-    options?: { excludedActorNames?: string[]; allowLegacyRegistration?: boolean },
+    options?: {
+        excludedActorNames?: string[];
+        allowLegacyRegistration?: boolean;
+        currentRegistryAuthoritative?: boolean;
+        migrationTimestamp?: number | null;
+    },
 ): ActorLedger;
 export function replaceActorProfileBaselineInLedger(
     value: unknown,
@@ -259,7 +298,13 @@ export function discoverActorsFromTurnSources(
 export function promoteActorCandidatesToRegistry(
     value: unknown,
     candidates: ActorCandidate[],
-    options?: { chatId?: string; turn?: number | null; excludedActorNames?: string[] },
+    options?: {
+        chatId?: string;
+        identityScopeId?: string;
+        expectedSourceRef?: ActorLedgerSourceRef | null;
+        turn?: number | null;
+        excludedActorNames?: string[];
+    },
 ): {
     ledger: ActorLedger;
     promoted: Array<Record<string, unknown>>;
@@ -268,9 +313,47 @@ export function promoteActorCandidatesToRegistry(
     quarantined: Array<{ candidateId: string; name: string; reason: string }>;
     changed: boolean;
 };
+export function applyCandidateRegistryResult(
+    characters: Record<string, ActorRegistryCandidateRow>,
+    result: ActorRegistryCandidateRow,
+): ActorRegistryCandidateRow;
+export function runActorRegistryUpsert(
+    value: unknown,
+    candidates: ActorCandidate[],
+    options?: {
+        chatId?: string;
+        identityScopeId?: string;
+        expectedSourceRef?: ActorLedgerSourceRef | null;
+        turn?: number | null;
+        excludedActorNames?: string[];
+    },
+): {
+    ledger: ActorLedger;
+    inserted: Array<Record<string, unknown>>;
+    updated: Array<Record<string, unknown>>;
+    quarantined: Array<Record<string, unknown>>;
+    changed: boolean;
+};
+export function actorCandidatesForRegistryPromotion(
+    candidates: ActorCandidate[],
+    upsertResult: {
+        ledger?: ActorLedger;
+        inserted?: Array<{
+            candidateId?: string;
+            actorRef?: ActorRegistryEntry['actorRef'];
+            table?: string;
+        }>;
+        updated?: Array<{
+            candidateId?: string;
+            actorRef?: ActorRegistryEntry['actorRef'];
+            table?: string;
+        }>;
+    },
+): ActorCandidate[];
+/** @deprecated Fail-closed compatibility reader; P1 ProfileInsertCandidate is the only writer. */
 export function mergeActorProfilePatches(
     value: unknown,
-    patches: unknown[],
+    patches: unknown,
     options?: {
         turn?: number | null;
         sourceRef?: ActorLedgerSourceRef | null;
@@ -280,8 +363,20 @@ export function mergeActorProfilePatches(
     },
 ): {
     ledger: ActorLedger;
-    accepted: Array<{ actorId: string; name: string; evidence: string[] }>;
-    rejected: Array<{ actorId: string; name?: string; reason: string }>;
+    accepted: [];
+    rejected: Array<{
+        actorId: string;
+        name?: string;
+        inputIndex: number;
+        startIndex?: number;
+        count?: number;
+        total?: number;
+        reason: string;
+    }>;
+    inputCount: number;
+    processedCount: number;
+    overflowCount: number;
+    retired: true;
 };
 export function mergeActorIdentityReveal(
     value: unknown,
@@ -290,6 +385,7 @@ export function mergeActorIdentityReveal(
         revealedName: string;
         aliases?: string[];
         evidence?: string[];
+        sourceRef?: ActorLedgerSourceRef | null;
         turn?: number | null;
     },
 ): ActorLedger;

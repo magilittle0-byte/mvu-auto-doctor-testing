@@ -3,6 +3,8 @@ export const ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT: string;
 export const ACTOR_PROFILE_COMPLETION_MODES: readonly string[];
 export const ACTOR_PROFILE_SOURCES: readonly string[];
 export const ACTOR_PROFILE_MODULES: readonly string[];
+export const CHARACTER_CREATION_TICKET_VERSION: number;
+export const CHARACTER_CREATION_TICKET_AXIS_NAMES: readonly string[];
 export function emptyActorProfileV6(actorId?: string, name?: string, options?: object): object;
 export function normalizeActorProfileV6(value: unknown, options?: object): object;
 export function prepareActorProfileV6(actor: unknown, options?: object): object;
@@ -28,6 +30,7 @@ export function buildActorProfileCompletionMessages(candidates: unknown[], optio
 export function repairActorProfileInsertLocally(output: string, context?: object): object;
 export function validateActorProfileInsertCandidate(candidate: unknown, context?: object): object;
 export function parseActorProfileCompletionOutput(output: string, options?: object): object;
+export function parseActorProfileCompletionBatchOutput(output: string, options?: object): object;
 export function actorProfileCompletionMissingFields(candidate: unknown, context?: object): string[];
 export function materializeActorProfileBaseline(
     previousProfile: unknown,

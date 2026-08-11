@@ -72,7 +72,7 @@ export interface ActorShardConvergence {
     }>;
 }
 
-export const ACTOR_SHARD_MAX_WORKERS: 5;
+export const ACTOR_SHARD_MAX_WORKERS: 6;
 export const ACTOR_SHARD_PROMPT_MAX_CHARS: 6000;
 
 export function normalizeUserPromptSlot(value: unknown, maxChars?: number): string;
@@ -97,6 +97,13 @@ export function buildActorShardMessages(
         customPrompt?: string;
     },
 ): Array<{ role: 'system' | 'user'; content: string }>;
+export function buildActorShardBatchMessages(
+    candidates: ActorShardCandidate[],
+    options?: {
+        target?: Record<string, unknown>;
+        customPrompt?: string;
+    },
+): Array<{ role: 'system' | 'user'; content: string }>;
 export function parseActorShardProposal(
     output: unknown,
     options: { candidate: ActorShardCandidate },
@@ -105,6 +112,24 @@ export function parseActorShardProposal(
     error?: string;
     repaired?: boolean;
     repairKinds?: string[];
+};
+export function parseActorShardProposalBatch(
+    output: unknown,
+    options: { candidates: ActorShardCandidate[] },
+): {
+    proposals: ActorShardProposal[];
+    failures: Array<{ actorId: string; itemIndex?: number; code: string }>;
+    repaired: boolean;
+    repairKinds: string[];
+    semanticSuccess: boolean;
+    error: string;
+    diagnostics: {
+        selected: number;
+        completed: number;
+        succeeded: number;
+        failed: number;
+        semanticSuccess: boolean;
+    };
 };
 export function actorShardCompatibility(
     left: ActorShardProposal,
@@ -144,5 +169,35 @@ export function runActorShardBatch(options: {
         completed: number;
         succeeded: number;
         failed: number;
+    };
+}>;
+export function runActorShardProposalBatch(options: {
+    candidates?: ActorShardCandidate[];
+    callBatch: (
+        candidates: ActorShardCandidate[],
+        context: { signal: AbortSignal | null },
+    ) => Promise<unknown>;
+    isCurrent?: () => boolean;
+    onProgress?: (progress: {
+        total: number;
+        completed: number;
+        succeeded: number;
+        failed: number;
+        modelCalls: number;
+        semanticSuccess: boolean;
+    }) => void;
+    signal?: AbortSignal | null;
+}): Promise<{
+    status: 'completed' | 'semantic-failed' | 'failed' | 'stale';
+    proposals: ActorShardProposal[];
+    convergence: ActorShardConvergence;
+    failures: Array<{ actorId: string; code: string }>;
+    diagnostics: {
+        selected: number;
+        completed: number;
+        succeeded: number;
+        failed: number;
+        modelCalls: number;
+        semanticSuccess: boolean;
     };
 }>;

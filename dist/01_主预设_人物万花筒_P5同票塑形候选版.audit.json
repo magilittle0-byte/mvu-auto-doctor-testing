@@ -1,0 +1,31 @@
+{
+  "transformVersion": "2.4-p5-character-ticket-pool",
+  "sourceName": "01_主预设_人物万花筒_可调篇幅最小修复候选版",
+  "outputName": "01_主预设_人物万花筒_可调篇幅最小修复候选版",
+  "promptCount": 215,
+  "orderCount": 183,
+  "enabledCount": 75,
+  "characterDiversityIdentifier": "cf9b6278-b776-4c56-b02d-d34f0f0f7d31",
+  "narrativeSurfaceIdentifier": "941c6128-f8b7-470f-b598-8351e24724cc",
+  "storyRegexIds": [],
+  "strictExistingPromptOnly": true,
+  "modifications": [
+    {
+      "identifier": "cf9b6278-b776-4c56-b02d-d34f0f0f7d31",
+      "beforeName": "🎭人物万花筒V2（动态人格·证据渐变·去类型标签）",
+      "afterName": "🎭人物万花筒V2（动态人格·证据渐变·去类型标签）",
+      "beforeLength": 2364,
+      "afterLength": 1080,
+      "beforeSha256": "424C13B0C55176863AD7D5C000E80C35F3E6BC1993FCF118E778E7F3FE4660B6",
+      "afterSha256": "EBEA4AF354E6D403828B49F970AF48383D0C063449B8402F2A5061D1167515D3"
+    }
+  ],
+  "sourceFile": "01_主预设_人物万花筒_可调篇幅最小修复候选版(2).json",
+  "outputFile": "01_主预设_人物万花筒_P5同票塑形候选版.json",
+  "sourceBytes": 570663,
+  "outputBytes": 537140,
+  "sourceSha256": "9C44071EC664BD2C03B1B181C669A4E70CBB768987EABB5177E5F7A0E658CE78",
+  "outputSha256": "55D39112E2B2B539044D3223F0A58D892855F97A956DE3120E673F3B7FC37E6D",
+  "sourceUnchanged": true,
+  "createdAt": "2026-08-11T05:43:54.387Z"
+}

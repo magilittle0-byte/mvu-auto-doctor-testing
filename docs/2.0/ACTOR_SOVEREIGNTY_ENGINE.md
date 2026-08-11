@@ -162,9 +162,9 @@
 | 用版本化公开 API 共存，不改对方内部 | 上游 `StoryOracleAPI.version/isCompatible/registerMode/context/run`；当前 `disableStoryOracleAutoIfNeeded()` 和 `callModel()` 的 story-oracle provider | 保留 `api.isCompatible(1)`、`api.run()`、设置回读和防双写 | 只在 API capability 明示时传 abort signal；失败回到本项目任务恢复 | 禁止 `unsafe.eval`、DOM 注入、复制内部 builder/forge/parser | 上游根目录无许可证；`unsafe.eval` 明示非正式且无兼容承诺 |
 | Story Oracle 不是人物真源、Registry 或 profile commit 系统 | 当前只把它当模型 provider/自动诊断兼容 | 原样保留这个边界 | 无 | 删除任何计划把 Story Oracle 角色工坊输出直接写 ActorProfileBaseline 的路径 | 其侧聊历史和角色工坊有独立状态所有权，版本更新频繁，不满足本项目事务/ActorRef 合同 |
 
-## 4. 当前生产调用链复核
+## 4. 历史审计时生产调用链复核（已由后续 P0–P5 取代）
 
-当前真实链路位于 `index.js:10786 runContinuityTarget()`：
+以下内容是阶段1审计时的生产快照，用于说明后续 P0–P5 为什么替换旧入口；不是当前“旧路径与迁移收敛”的生产调用链。该历史链路当时位于 `index.js:10786 runContinuityTarget()`：
 
 1. 从最终接受正文计算压力和连续性。
 2. `migrateActorLedgerFromContinuity()` 读取旧账本。
@@ -396,9 +396,9 @@ node --test tests/actor-profile-v6-core.test.mjs tests/actor-ledger-core.test.mj
 
 阶段1到此结束；阶段2必须在独立新任务中开始。
 
-## 9. 阶段6实施回填（2026-08-10）
+## 9. 历史阶段6实施回填（2026-08-10，兼容旧名）
 
-阶段6已经在不改变阶段1—5权威合同的前提下完成旧路径迁移与兼容收敛。详细矩阵和来源分类见 [`ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md`](ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md)。
+本节保留 2026-08-10 报告中的历史“阶段6”编号和当时实现事实，仅供旧报告、字段和测试名称对照；它不把当前阶段重新编号。当前“旧路径与迁移收敛”的唯一合同与实测证据见 [`ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md`](ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md)。
 
 ### 9.1 唯一迁移写路径
 
@@ -435,4 +435,13 @@ node --test tests/actor-profile-v6-core.test.mjs tests/actor-ledger-core.test.mj
 
 ### 9.6 阶段边界
 
-阶段6只完成迁移、旧入口收敛和本地受控验证；没有运行真实外部模型、真实数据库、真实 SillyTavern/Tauri、构建、CI 或正式发布门，也没有提交或推送。阶段7负责全量验证和发布候选收口，不得把本节当成正式发布证据。
+历史阶段6只完成当时的迁移、旧入口收敛和本地受控验证；没有运行真实外部模型、真实数据库、真实 SillyTavern/Tauri、构建、CI 或正式发布门，也没有提交或推送。不得把本节当成当前源码或正式发布证据。
+
+## 10. 旧路径与迁移收敛当前回填（2026-08-11）
+
+- `migrateActorLedgerFromContinuity()` 保留公开兼容 export，但生产调用只剩 `compatibility-migration-core.mjs` 一处；普通 `index.js/runContinuityTarget()` 为零调用。
+- adapter 只在 raw pre-Registry 证据下重建旧身份。已有当前 Registry 时，未登记 ledger actor 和 continuity 姓名都不能越过 P0 注册；原已登记 ActorRef 保留。
+- `migrationTimestamp` 由 raw 持久字段确定，`continuityV5=true` 在 adapter 前端纯 normalize/no-op；同一输入及 marker 写失败重试保持 ledger、payload digest 与 replayKey 稳定。
+- `mergeActorProfilePatches()` 只保留有界、逐项可核账、显式 overflow 的 fail-closed 兼容壳；它不写 profile、receipt、actor version 或 ledger 时间。P1 完整 `ProfileInsertCandidate` 的原子保存和读回仍是唯一正式档案写入口。
+- scope mismatch 继续复用 `readChatNamespace() -> archivedActorSovereigntyScope() -> compatibilityScopeArchives + emptyChatNamespace()`：旧 actor/profile/task 可读归档但不能进入新 active scope，也不能 action、settle、claim 或 restore。
+- 历史 `phase6Runtime`、旧报告和测试文件名只作为兼容旧名保留；当前阶段名称始终是“旧路径与迁移收敛”。

@@ -56,17 +56,6 @@ function cleanText(value, limit = 500) {
     return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, limit);
 }
 
-const PROFILE_PLACEHOLDER_RE = /^(?:未设定|未登记|未填写|未生成|未知|待确认|暂无(?:资料|信息|设定)?|不详|无资料|无信息|unknown|unset|unregistered|pending|n\/?a|null|none|[-—]+)[。.!！]?$/iu;
-
-function profileValueText(value, limit = 500) {
-    const text = cleanText(value, limit);
-    return text && !PROFILE_PLACEHOLDER_RE.test(text) ? text : '';
-}
-
-function profileValueList(value, limit = 12, itemLimit = 300) {
-    return cleanList(value, limit, itemLimit).filter((item) => profileValueText(item, itemLimit));
-}
-
 function cleanList(value, limit = 12, itemLimit = 300) {
     if (!Array.isArray(value)) return [];
     const result = [];
@@ -133,16 +122,45 @@ function normalizeSourceRef(value) {
         index: integer(value.index, 0, Number.MAX_SAFE_INTEGER, 0),
         swipeId: integer(value.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
         generation: integer(value.generation, 0, Number.MAX_SAFE_INTEGER, 0),
+        generationId: cleanText(value.generationId, 180),
+        generationType: cleanText(value.generationType, 80),
         branchId: cleanText(value.branchId, 180),
+        identityScopeId: cleanText(value.identityScopeId, 300),
         hash,
     };
 }
 
-export function emptyActorRegistry(chatId = '') {
+// caikis first_npc/second_npc: an explicit full-name delimiter is the only
+// automatic source of aliases. No suffix or semantic inference is allowed.
+export function explicitDelimitedActorAliases(value) {
+    const name = cleanText(value, 160);
+    if (!/[·・•]/u.test(name)) return [];
+    return cleanList(name.split(/[·・•]/u), 12, 160).filter((item) => item !== name);
+}
+
+// npc_tracker registry.js: resolveRegistryTargetName, adapted to a local value.
+export function resolveActorRegistryTargetName(value) {
+    return cleanText(value, 160);
+}
+
+// Doctor-required accepted-narrative adapter: source/generation/swipe binding.
+export function acceptedActorSourceRefMatches(value, expected) {
+    const actual = normalizeSourceRef(value);
+    const target = normalizeSourceRef(expected);
+    if (!actual || !target) return false;
+    return [
+        'chatId', 'messageId', 'index', 'swipeId', 'generation',
+        'generationId', 'generationType', 'branchId', 'identityScopeId', 'hash',
+    ].every((field) => actual[field] === target[field]);
+}
+
+export function emptyActorRegistry(chatId = '', identityScopeId = '') {
     return {
         version: ACTOR_REGISTRY_VERSION,
         chatId: cleanText(chatId, 180),
-        entries: [],
+        identityScopeId: cleanText(identityScopeId, 300),
+        characters: {},
+        registered: {},
         updatedAt: 0,
     };
 }
@@ -158,7 +176,10 @@ function registrySourceRefs(value, chatId) {
             ref.messageId,
             ref.swipeId,
             ref.generation,
+            ref.generationId,
+            ref.generationType,
             ref.branchId,
+            ref.identityScopeId,
             ref.hash,
         ].join('|');
         if (seen.has(key)) continue;
@@ -171,7 +192,6 @@ function registrySourceRefs(value, chatId) {
 function registryEntryFromActor(actor, chatId, {
     origin = 'legacy_persisted',
     sourceRefs = [],
-    identityKeys = [],
     registeredTurn = null,
 } = {}) {
     const actorId = cleanText(actor?.id, 120);
@@ -186,32 +206,7 @@ function registryEntryFromActor(actor, chatId, {
             displayName,
             aliases,
         },
-        state: 'registered',
         origin: cleanText(origin, 80) || 'legacy_persisted',
-        identityKeys: cleanList([
-            ...identityKeys,
-            `actor-id:${actorId.toLocaleLowerCase()}`,
-        ], 24, 300),
-        lifecycle: {
-            status: STATUSES.has(actor?.status) ? actor.status : 'active',
-            inactiveReason: ['sleep', 'absence', 'quiet'].includes(actor?.inactiveReason)
-                ? actor.inactiveReason
-                : '',
-        },
-        lineage: {
-            rootActorId: cleanText(actor?.lineage?.rootActorId, 120) || actorId,
-            currentForm: cleanText(actor?.lineage?.currentForm, 160) || displayName,
-            mergedActorIds: cleanList(actor?.lineage?.mergedActorIds, 24, 120),
-            forms: (Array.isArray(actor?.lineage?.forms) ? actor.lineage.forms : [])
-                .filter((item) => item && typeof item === 'object')
-                .map((item) => ({
-                    name: cleanText(item.name, 160),
-                    turn: integer(item.turn, 0, Number.MAX_SAFE_INTEGER, 0),
-                    evidence: cleanList(item.evidence, 8, 240),
-                }))
-                .filter((item) => item.name)
-                .slice(-12),
-        },
         sourceRefs: registrySourceRefs(sourceRefs, chatId),
         registeredTurn: integer(
             registeredTurn,
@@ -252,16 +247,43 @@ function normalizeRegistryEntry(value, chatId) {
     const entry = registryEntryFromActor(actor, chatId, {
         origin: value.origin,
         sourceRefs: value.sourceRefs,
-        identityKeys: value.identityKeys,
         registeredTurn: value.registeredTurn,
     });
-    if (!entry) return null;
-    entry.state = value.state === 'retired' ? 'retired' : 'registered';
     return entry;
+}
+
+function normalizeCandidateRegistryRow(value, chatId) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const name = resolveActorRegistryTargetName(value.name || value.actorRef?.displayName);
+    const actorId = cleanText(value.actorRef?.actorId || value.explicitActorId, 120);
+    if (!name || !isActorId(actorId)) return null;
+    const aliases = cleanList([
+        ...(value.aliases || []),
+        ...(value.actorRef?.aliases || []),
+        ...explicitDelimitedActorAliases(name),
+    ], 12, 160).filter((item) => item !== name);
+    return {
+        kind: 'actor_candidate',
+        candidateId: cleanText(value.candidateId, 120)
+            || `AC-${fingerprint(`${chatId}|${actorId}|${name}`).slice(0, 18)}`,
+        name,
+        aliases,
+        actorRef: { kind: 'actor_ref', actorId, displayName: name, aliases },
+        sourceKind: ACTOR_CANDIDATE_SOURCES.has(value.sourceKind)
+            ? value.sourceKind
+            : 'accepted_narrative',
+        sourceRefs: registrySourceRefs(value.sourceRefs || [value.sourceRef], chatId),
+        evidence: cleanList(value.evidence, 12, 300),
+        present: value.present === true,
+        location: cleanText(value.location, 180),
+        discoveredTurn: integer(value.discoveredTurn, 0, Number.MAX_SAFE_INTEGER, 0),
+        updatedTurn: integer(value.updatedTurn, 0, Number.MAX_SAFE_INTEGER, 0),
+    };
 }
 
 export function normalizeActorRegistry(value, {
     chatId = '',
+    identityScopeId = '',
     actors = [],
     migrateLegacy = false,
 } = {}) {
@@ -269,28 +291,53 @@ export function normalizeActorRegistry(value, {
     const expectedChatId = cleanText(chatId || source.chatId, 180);
     const sourceChatId = cleanText(source.chatId, 180);
     if (chatId && sourceChatId && cleanText(chatId, 180) !== sourceChatId) {
-        return emptyActorRegistry(chatId);
+        return emptyActorRegistry(chatId, identityScopeId);
     }
-    const entries = [];
-    const used = new Set();
-    for (const raw of Array.isArray(source.entries) ? source.entries : []) {
+    const expectedScopeId = cleanText(identityScopeId || source.identityScopeId, 300);
+    const sourceScopeId = cleanText(source.identityScopeId, 300);
+    if (identityScopeId && sourceScopeId && expectedScopeId !== sourceScopeId) {
+        return emptyActorRegistry(expectedChatId, expectedScopeId);
+    }
+    const characters = {};
+    const registered = {};
+    const usedActorIds = new Set();
+    for (const raw of Object.values(source.characters || {})) {
+        const row = normalizeCandidateRegistryRow(raw, expectedChatId);
+        if (!row || usedActorIds.has(row.actorRef.actorId) || characters[row.name]) continue;
+        usedActorIds.add(row.actorRef.actorId);
+        characters[row.name] = row;
+    }
+    const legacyEntries = Array.isArray(source.entries)
+        ? source.entries.filter((entry) => entry?.state !== 'retired')
+        : [];
+    for (const raw of [...Object.values(source.registered || {}), ...legacyEntries]) {
         const entry = normalizeRegistryEntry(raw, expectedChatId);
-        if (!entry || used.has(entry.actorRef.actorId)) continue;
-        used.add(entry.actorRef.actorId);
-        entries.push(entry);
+        if (
+            !entry
+            || usedActorIds.has(entry.actorRef.actorId)
+            || registered[entry.actorRef.displayName]
+        ) continue;
+        usedActorIds.add(entry.actorRef.actorId);
+        registered[entry.actorRef.displayName] = entry;
     }
-    if (migrateLegacy && !entries.length) {
+    if (migrateLegacy && !Object.keys(registered).length) {
         for (const actor of Array.isArray(actors) ? actors : []) {
             const entry = registryEntryFromActor(actor, expectedChatId);
-            if (!entry || used.has(entry.actorRef.actorId)) continue;
-            used.add(entry.actorRef.actorId);
-            entries.push(entry);
+            if (
+                !entry
+                || usedActorIds.has(entry.actorRef.actorId)
+                || registered[entry.actorRef.displayName]
+            ) continue;
+            usedActorIds.add(entry.actorRef.actorId);
+            registered[entry.actorRef.displayName] = entry;
         }
     }
     return {
         version: ACTOR_REGISTRY_VERSION,
         chatId: expectedChatId,
-        entries: entries.slice(0, ACTOR_LEDGER_MAX_ACTORS),
+        identityScopeId: expectedScopeId,
+        characters: Object.fromEntries(Object.entries(characters).slice(0, ACTOR_LEDGER_MAX_ACTORS)),
+        registered: Object.fromEntries(Object.entries(registered).slice(0, ACTOR_LEDGER_MAX_ACTORS)),
         updatedAt: integer(source.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
     };
 }
@@ -300,15 +347,14 @@ export function actorRegistryDigest(value) {
     const payload = {
         version: registry.version,
         chatId: registry.chatId,
-        entries: [...registry.entries]
+        identityScopeId: registry.identityScopeId,
+        characters: Object.values(registry.characters)
+            .sort((left, right) => left.actorRef.actorId.localeCompare(right.actorRef.actorId)),
+        registered: Object.values(registry.registered)
             .sort((left, right) => left.actorRef.actorId.localeCompare(right.actorRef.actorId))
             .map((entry) => ({
                 actorRef: entry.actorRef,
-                state: entry.state,
                 origin: entry.origin,
-                identityKeys: [...entry.identityKeys].sort(),
-                lifecycle: entry.lifecycle,
-                lineage: entry.lineage,
                 sourceRefs: entry.sourceRefs,
                 registeredTurn: entry.registeredTurn,
                 updatedTurn: entry.updatedTurn,
@@ -324,8 +370,7 @@ export function actorRegistryMatchesLedger(value, expected = {}) {
     if (expected.digest && actorRegistryDigest(ledger.actorRegistry) !== expected.digest) {
         mismatches.push('digest');
     }
-    const registered = new Set(ledger.actorRegistry.entries
-        .filter((entry) => entry.state === 'registered')
+    const registered = new Set(Object.values(ledger.actorRegistry.registered)
         .map((entry) => entry.actorRef.actorId));
     for (const actorId of cleanList(expected.actorIds, ACTOR_LEDGER_MAX_ACTORS, 120)) {
         if (!registered.has(actorId)) mismatches.push(`actorRef:${actorId}`);
@@ -333,20 +378,59 @@ export function actorRegistryMatchesLedger(value, expected = {}) {
     return { ok: mismatches.length === 0, mismatches };
 }
 
-function normalizeKnowledge(value, index, turn) {
-    if (!value || typeof value !== 'object') return null;
-    const claim = cleanText(value.claim, 700);
-    if (!claim) return null;
-    const sourceRef = normalizeSourceRef(value.sourceRef);
+// npc_tracker gate.js parseGateNames, direct rename.
+export function parseRegisteredActorGateNames(result, registeredSet) {
+    const allowed = registeredSet instanceof Set
+        ? registeredSet
+        : new Set(Array.isArray(registeredSet) ? registeredSet : []);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
+    if (!Array.isArray(result.characters)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const item of result.characters) {
+        const name = String(item ?? '').trim();
+        if (!name || seen.has(name) || !allowed.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+    }
+    return out;
+}
+
+// npc_tracker runGate control flow, with accepted local candidates replacing
+// its model call: build characters once, then intersect with registeredSet.
+export function runRegisteredActorGate(value, candidateNames) {
+    const registry = normalizeActorRegistry(value, {
+        chatId: value?.chatId,
+        identityScopeId: value?.identityScopeId,
+    });
+    const registeredSet = new Set(Object.keys(registry.registered));
+    const result = { characters: Array.isArray(candidateNames) ? candidateNames : [] };
+    const names = parseRegisteredActorGateNames(result, registeredSet);
     return {
-        id: cleanText(value.id, 100)
+        ok: true,
+        names,
+        actorRefs: names.map((name) => clone(registry.registered[name].actorRef)),
+    };
+}
+
+function normalizeKnowledge(value, index, turn) {
+    const stringShorthand = typeof value === 'string';
+    const source = stringShorthand ? { claim: value } : value;
+    if (!source || typeof source !== 'object') return null;
+    const claim = cleanText(source.claim, 700);
+    if (!claim) return null;
+    const sourceRef = normalizeSourceRef(source.sourceRef);
+    return {
+        id: cleanText(source.id, 100)
             || `K-${fingerprint(`${claim}|${sourceRef?.hash || index}`).slice(0, 16)}`,
         claim,
-        kind: KNOWLEDGE_KINDS.has(value.kind) ? value.kind : 'reported',
-        confidence: number(value.confidence, 0, 1, value.kind === 'observed' ? 1 : 0.6),
-        learnedTurn: integer(value.learnedTurn, 0, Number.MAX_SAFE_INTEGER, turn),
+        kind: KNOWLEDGE_KINDS.has(source.kind)
+            ? source.kind
+            : stringShorthand ? 'inferred' : 'reported',
+        confidence: number(source.confidence, 0, 1, source.kind === 'observed' ? 1 : 0.6),
+        learnedTurn: integer(source.learnedTurn, 0, Number.MAX_SAFE_INTEGER, turn),
         sourceRef,
-        propagation: cleanList(value.propagation, 12, 160),
+        propagation: cleanList(source.propagation, 12, 160),
     };
 }
 
@@ -356,7 +440,7 @@ function normalizeResources(value) {
     const used = new Set();
     for (const raw of value) {
         if (!raw || typeof raw !== 'object') continue;
-        const name = cleanText(raw.name || raw.id, 120);
+        const name = cleanText(raw.name || raw.kind || raw.id, 120);
         const id = cleanText(raw.id, 100)
             || `RES-${fingerprint(name.toLocaleLowerCase()).slice(0, 12)}`;
         if (!name || used.has(id)) continue;
@@ -366,6 +450,7 @@ function normalizeResources(value) {
             name,
             amount: number(raw.amount, 0, 1_000_000_000, 0),
             unit: cleanText(raw.unit, 60),
+            description: cleanText(raw.description || raw.detail, 300),
             evidence: cleanList(raw.evidence, 6, 240),
         });
         if (result.length >= 24) break;
@@ -519,13 +604,20 @@ function normalizeActor(value, index, turn) {
         resources: normalizeResources(value.resources),
         capabilities: cleanList(value.capabilities, 24, 160),
         relationships: (Array.isArray(value.relationships) ? value.relationships : [])
+            .map((item) => typeof item === 'string'
+                ? { name: '关系背景', summary: item }
+                : item)
             .filter((item) => item && typeof item === 'object')
             .map((item) => ({
                 actorId: cleanText(item.actorId, 120),
-                summary: cleanText(item.summary, 300),
+                name: cleanText(
+                    item.name || item.counterparty || item.targetName || item.relation,
+                    160,
+                ),
+                summary: cleanText(item.summary || item.detail || item.relation, 500),
                 evidence: cleanList(item.evidence, 6, 240),
             }))
-            .filter((item) => item.actorId && item.summary)
+            .filter((item) => (item.actorId || item.name) && item.summary)
             .slice(0, 24),
         commitments: normalizeCommitments(value.commitments, turn),
         hidden: {
@@ -696,23 +788,26 @@ function actionAttemptFingerprint(value) {
 
 function normalizeActionAttempt(value, { migratedFromLegacyReceipt = false } = {}) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const legacyReceiptHistory = migratedFromLegacyReceipt
+        || value.migratedFromLegacyReceipt === true
+        || value.compatibilityReason === 'action_attempt.legacy_embedded_receipt';
     const attempt = actionAttemptPayload(value);
     const id = cleanText(attempt.id, 160);
     if (!id) return null;
     const validation = validateActorActionAttempt(attempt);
     const status = cleanText(attempt.status, 80) || 'attempted';
     const terminal = !['attempted', 'pending_world'].includes(status);
-    const compatibilityOnly = migratedFromLegacyReceipt || !validation.valid;
+    const compatibilityOnly = legacyReceiptHistory || !validation.valid;
     return {
         ...attempt,
         id,
         status,
-        settlementEligible: validation.valid && !terminal && !migratedFromLegacyReceipt,
+        settlementEligible: validation.valid && !terminal && !legacyReceiptHistory,
         compatibilityOnly,
-        compatibilityReason: migratedFromLegacyReceipt
+        compatibilityReason: legacyReceiptHistory
             ? 'action_attempt.legacy_embedded_receipt'
             : validation.valid ? '' : validation.reason,
-        migratedFromLegacyReceipt,
+        migratedFromLegacyReceipt: legacyReceiptHistory,
     };
 }
 
@@ -828,6 +923,7 @@ export function emptyActorLedger(chatId = '') {
 
 export function normalizeActorLedger(value, {
     chatId = '',
+    identityScopeId = '',
     maxActors = ACTOR_LEDGER_MAX_ACTORS,
     excludedActorNames = [],
 } = {}) {
@@ -857,32 +953,44 @@ export function normalizeActorLedger(value, {
         && Number(source.actorRegistry.version) >= 1;
     const actorRegistry = normalizeActorRegistry(source.actorRegistry, {
         chatId: expectedChatId,
+        identityScopeId,
         actors,
         migrateLegacy: !hasPersistedRegistry,
     });
-    const registeredIds = new Set(actorRegistry.entries
-        .filter((entry) => entry.state === 'registered')
+    const registeredIds = new Set(Object.values(actorRegistry.registered)
         .map((entry) => entry.actorRef.actorId));
     const registeredActors = actors.filter((actor) => registeredIds.has(actor.id));
     const actorById = new Map(registeredActors.map((actor) => [actor.id, actor]));
-    actorRegistry.entries = actorRegistry.entries
-        .filter((entry) => entry.state === 'retired' || actorById.has(entry.actorRef.actorId))
+    actorRegistry.registered = Object.fromEntries(Object.values(actorRegistry.registered)
+        .filter((entry) => actorById.has(entry.actorRef.actorId))
         .map((entry) => {
             const actor = actorById.get(entry.actorRef.actorId);
-            if (!actor) return entry;
             const synced = registryEntryFromActor(actor, expectedChatId, {
                 origin: entry.origin,
                 sourceRefs: entry.sourceRefs,
-                identityKeys: entry.identityKeys,
                 registeredTurn: entry.registeredTurn,
             });
-            synced.state = entry.state;
-            return synced;
-        });
+            return [synced.actorRef.displayName, synced];
+        }));
     const identityQuarantine = (Array.isArray(source.identityQuarantine)
         ? source.identityQuarantine
         : [])
         .map((entry, index) => {
+            if (cleanText(entry?.reason, 160) === 'actor_candidate.alias_conflict') {
+                const conflictingActorIds = cleanList(entry?.conflictingActorIds, 12, 120);
+                const name = cleanText(entry?.name, 160);
+                if (!name || conflictingActorIds.length < 2) return null;
+                return {
+                    id: cleanText(entry?.id, 120)
+                        || `IQ-${fingerprint(`${name}|${conflictingActorIds.join('|')}`).slice(0, 18)}`,
+                    reason: 'actor_candidate.alias_conflict',
+                    name,
+                    conflictingActorIds,
+                    sourceRef: normalizeSourceRef(entry?.sourceRef),
+                    quarantinedTurn: integer(entry?.quarantinedTurn, 0, Number.MAX_SAFE_INTEGER, turn),
+                    evidence: cleanList(entry?.evidence, 12, 300),
+                };
+            }
             const actor = normalizeActor(entry?.actor || entry, index, turn);
             if (!actor || !isActorId(actor.name)) return null;
             return {
@@ -1406,12 +1514,54 @@ function mergeActorStimuli(current, additions, limit = 48) {
 export function migrateActorLedgerFromContinuity(value, continuity, {
     excludedActorNames = [],
     allowLegacyRegistration = false,
+    currentRegistryAuthoritative = false,
+    migrationTimestamp = null,
 } = {}) {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
-    const ledger = repairPollutedActorIdentities(normalizeActorLedger(value, {
+    const currentRegistryBoundary = currentRegistryAuthoritative === true
+        && allowLegacyRegistration !== true
+        && value?.actorRegistry
+        && typeof value.actorRegistry === 'object'
+        && !Array.isArray(value.actorRegistry)
+        && Number(value.actorRegistry.version) >= ACTOR_REGISTRY_VERSION
+        && value.actorRegistry.characters
+        && typeof value.actorRegistry.characters === 'object'
+        && !Array.isArray(value.actorRegistry.characters)
+        && value.actorRegistry.registered
+        && typeof value.actorRegistry.registered === 'object'
+        && !Array.isArray(value.actorRegistry.registered);
+    // normalizeActorLedger can reconstruct Registry rows for pre-Registry
+    // data. A current raw Registry is an explicit boundary even when its old
+    // migration marker is missing, so do not let normalization promote stray
+    // ledger actors before the adapter guard runs.
+    const normalizationInput = currentRegistryBoundary
+        ? {
+            ...clone(value),
+            migrations: { ...(value?.migrations || {}), actorRegistryV1: true },
+        }
+        : value;
+    const normalized = normalizeActorLedger(normalizationInput, {
         chatId: continuity?.chatId || value?.chatId,
         excludedActorNames,
-    }));
+    });
+    // This export remains available to compatibility callers, but a completed
+    // migration is a pure normalized read. In particular it must not refresh
+    // timestamps or reinterpret later continuity as a second identity source.
+    if (normalized.migrations.continuityV5 === true) return normalized;
+    const ledger = repairPollutedActorIdentities(normalized);
+    const persistedMigrationTimestamp = Math.max(
+        integer(value?.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+        integer(value?.actorRegistry?.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+        integer(continuity?.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+    );
+    const stableMigrationTimestamp = migrationTimestamp == null
+        ? persistedMigrationTimestamp
+        : integer(
+            migrationTimestamp,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            persistedMigrationTimestamp,
+        );
     const byId = new Map();
     const byName = new Map();
     for (const actor of ledger.actors) {
@@ -1541,16 +1691,23 @@ export function migrateActorLedgerFromContinuity(value, continuity, {
     }
     const migratedActors = [...byId.values()];
     const actorRegistry = clone(ledger.actorRegistry);
-    for (const actor of migratedActors) {
-        if (actorRegistry.entries.some((entry) => entry.actorRef.actorId === actor.id)) continue;
-        const entry = registryEntryFromActor(actor, ledger.chatId || continuity?.chatId, {
-            origin: 'legacy_continuity_migration',
-            identityKeys: [`continuity:${actor.id.toLocaleLowerCase()}`],
-            registeredTurn: turn,
-        });
-        if (entry) actorRegistry.entries.push(entry);
+    if (allowLegacyRegistration === true) {
+        for (const actor of migratedActors) {
+            if (Object.values(actorRegistry.registered)
+                .some((entry) => entry.actorRef.actorId === actor.id)) continue;
+            const entry = registryEntryFromActor(actor, ledger.chatId || continuity?.chatId, {
+                origin: 'legacy_continuity_migration',
+                registeredTurn: turn,
+            });
+            if (entry && !actorRegistry.registered[entry.actorRef.displayName]) {
+                actorRegistry.registered[entry.actorRef.displayName] = entry;
+            }
+        }
     }
-    actorRegistry.updatedAt = Date.now();
+    actorRegistry.updatedAt = Math.max(
+        integer(actorRegistry.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+        stableMigrationTimestamp,
+    );
     return normalizeActorLedger({
         ...ledger,
         turn: Math.max(ledger.turn, turn),
@@ -1565,7 +1722,10 @@ export function migrateActorLedgerFromContinuity(value, continuity, {
             actorRefV1: true,
             actorRegistryV1: true,
         },
-        updatedAt: Date.now(),
+        updatedAt: Math.max(
+            integer(ledger.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+            stableMigrationTimestamp,
+        ),
     }, {
         chatId: ledger.chatId || continuity?.chatId,
         excludedActorNames,
@@ -1631,6 +1791,7 @@ function actActorFacts(userText) {
 
 function structuredContentActorFacts(content) {
     const facts = [];
+    let ordinal = 0;
     for (const match of String(content || '').matchAll(
         /【(?:敌方|人物|角色|NPC)(?:档案|资料|状态)[·・:：]\s*([^】]+)】/giu,
     )) {
@@ -1641,6 +1802,8 @@ function structuredContentActorFacts(content) {
             present: true,
             sourceKind: 'accepted_narrative',
             identityKey: `narrative-name:${name.toLocaleLowerCase('zh-CN')}`,
+            position: match.index || 0,
+            ordinal: ordinal++,
         });
     }
     for (const match of String(content || '').matchAll(/<(?:actor|npc)\b([^>]*)>/giu)) {
@@ -1660,30 +1823,13 @@ function structuredContentActorFacts(content) {
             identityKey: rawId
                 ? `narrative-id:${rawId.toLocaleLowerCase()}`
                 : `narrative-name:${name.toLocaleLowerCase('zh-CN')}`,
+            position: match.index || 0,
+            ordinal: ordinal++,
         });
     }
-    return facts;
-}
-
-function canonicalActorName(name, knownNames, actors) {
-    const source = cleanText(name, 160);
-    if (!source) return '';
-    const candidates = [
-        ...(Array.isArray(knownNames) ? knownNames : []),
-        ...(Array.isArray(actors) ? actors.flatMap((actor) => [
-            actor?.name,
-            ...(actor?.identity?.aliases || []),
-        ]) : []),
-    ].map((item) => cleanText(item, 160)).filter(Boolean);
-    const exact = candidates.find((item) => item.toLocaleLowerCase() === source.toLocaleLowerCase());
-    if (exact) return exact;
-    if (source.length >= 3) {
-        const suffixMatches = [...new Set(candidates.filter((item) => (
-            item.length > source.length && item.endsWith(source)
-        )))];
-        if (suffixMatches.length === 1) return suffixMatches[0];
-    }
-    return source;
+    return facts
+        .sort((left, right) => left.position - right.position || left.ordinal - right.ordinal)
+        .map(({ position: _position, ordinal: _ordinal, ...fact }) => fact);
 }
 
 export function discoverActorsFromTurnSources(value, {
@@ -1716,7 +1862,7 @@ export function discoverActorsFromTurnSources(value, {
     const candidates = [];
     const byKey = new Map();
     for (const [factIndex, fact] of facts.entries()) {
-        const actorName = canonicalActorName(fact.name, knownActorNames, ledger.actors);
+        const actorName = resolveActorRegistryTargetName(fact.name);
         if (!isActorName(actorName, excluded)) continue;
         const sourceKind = ACTOR_CANDIDATE_SOURCES.has(fact.sourceKind)
             ? fact.sourceKind
@@ -1771,27 +1917,55 @@ export function discoverActorsFromTurnSources(value, {
     };
 }
 
-function registryEntriesForName(registry, name) {
-    const key = cleanText(name, 160).toLocaleLowerCase('zh-CN');
-    if (!key) return [];
-    return registry.entries.filter((entry) => (
-        entry.state === 'registered'
-        && [entry.actorRef.displayName, ...entry.actorRef.aliases]
-            .some((candidate) => cleanText(candidate, 160).toLocaleLowerCase('zh-CN') === key)
+function exactRegistryRows(table, claims) {
+    const names = new Set(cleanList(claims, 16, 160));
+    return Object.values(table || {}).filter((row) => (
+        [row?.name || row?.actorRef?.displayName, ...(row?.aliases || row?.actorRef?.aliases || [])]
+            .some((name) => names.has(cleanText(name, 160)))
     ));
 }
 
-function registryEntriesForIdentityKey(registry, identityKey) {
-    const key = cleanText(identityKey, 300).toLocaleLowerCase('zh-CN');
-    if (!key) return [];
-    return registry.entries.filter((entry) => entry.state === 'registered'
-        && entry.identityKeys.some((candidate) => (
-            cleanText(candidate, 300).toLocaleLowerCase('zh-CN') === key
-        )));
+function unresolvedQuarantineEntriesForActorId(ledger, actorId) {
+    const id = cleanText(actorId, 120);
+    if (!isActorId(id)) return [];
+    return (Array.isArray(ledger?.identityQuarantine) ? ledger.identityQuarantine : [])
+        .filter((entry) => (
+            cleanText(entry?.reason, 160) === 'unresolved_internal_id_as_name'
+            && cleanText(entry?.actor?.id, 120) === id
+            && isActorId(cleanText(entry?.actor?.name, 160))
+        ));
 }
 
-export function promoteActorCandidatesToRegistry(value, candidates, {
+function explicitQuarantineRevealEntries(ledger, candidate) {
+    if (
+        candidate?.kind !== 'actor_candidate'
+        || candidate?.state !== 'discovered'
+        || candidate?.sourceKind !== 'accepted_narrative'
+        || candidate?.identityDisambiguated !== true
+    ) return [];
+    return unresolvedQuarantineEntriesForActorId(ledger, candidate?.explicitActorId);
+}
+
+function preferredActorRegistryName(currentName, incomingName) {
+    const current = resolveActorRegistryTargetName(currentName);
+    const incoming = resolveActorRegistryTargetName(incomingName);
+    return explicitDelimitedActorAliases(incoming).includes(current) ? incoming : current;
+}
+
+// npc_tracker registry.js applyRegistryResult, renamed for caikis first_npc.
+export function applyCandidateRegistryResult(characters, result) {
+    const name = resolveActorRegistryTargetName(result?.name);
+    if (!name) throw new Error('actor registry candidate name is required');
+    if (characters[name]) throw new Error(`actor registry candidate already exists: ${name}`);
+    characters[name] = result;
+    return result;
+}
+
+// npc_tracker runRegistry + caikis first_npc INSERT/UPDATE control flow.
+export function runActorRegistryUpsert(value, candidates, {
     chatId = '',
+    identityScopeId = '',
+    expectedSourceRef = null,
     turn = null,
     excludedActorNames = [],
 } = {}) {
@@ -1800,9 +1974,8 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
     if (sourceChatId && expectedChatId && sourceChatId !== expectedChatId) {
         return {
             ledger: normalizeActorLedger(value),
-            promoted: [],
-            discovered: [],
-            touched: [],
+            inserted: [],
+            updated: [],
             quarantined: (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
                 candidateId: cleanText(candidate?.candidateId, 120),
                 name: cleanText(candidate?.name, 160),
@@ -1814,15 +1987,15 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = normalizeActorLedger(value, {
         chatId: expectedChatId,
+        identityScopeId,
         excludedActorNames,
     });
     const currentTurn = turn === null || turn === undefined
         ? ledger.turn
         : integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
     const registry = clone(ledger.actorRegistry);
-    const promoted = [];
-    const discovered = [];
-    const touched = [];
+    const inserted = [];
+    const updated = [];
     const quarantined = [];
     const candidateList = Array.isArray(candidates) ? candidates : [];
     const beforeDigest = actorRegistryDigest(registry);
@@ -1830,10 +2003,8 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
         const candidateId = cleanText(raw?.candidateId, 120);
         const name = cleanText(raw?.name, 160);
         const candidateChatId = cleanText(raw?.chatId, 180);
-        const identityKey = cleanText(raw?.identityKey, 300);
         const sourceKind = cleanText(raw?.sourceKind, 80);
         const sourceRef = normalizeSourceRef(raw?.sourceRef);
-        const explicitActorId = cleanText(raw?.explicitActorId, 120);
         const reject = (reason) => quarantined.push({ candidateId, name, reason });
         if (raw?.kind !== 'actor_candidate' || raw?.state !== 'discovered') {
             reject('actor_candidate.invalid_state');
@@ -1848,138 +2019,346 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
             reject('actor_candidate.chat_mismatch');
             continue;
         }
-        if (!ACTOR_CANDIDATE_SOURCES.has(sourceKind) || !identityKey) {
+        if (!ACTOR_CANDIDATE_SOURCES.has(sourceKind)) {
             reject('actor_candidate.source_invalid');
+            continue;
+        }
+        if (
+            !registry.identityScopeId
+            || !sourceRef.identityScopeId
+            || (expectedSourceRef && !acceptedActorSourceRefMatches(sourceRef, expectedSourceRef))
+            || (registry.identityScopeId && sourceRef.identityScopeId !== registry.identityScopeId)
+        ) {
+            reject('actor_candidate.source_ref_mismatch');
             continue;
         }
         if (!isActorName(name, excluded) || isActorId(name)) {
             reject('actor_candidate.identity_quarantined');
             continue;
         }
-        if (explicitActorId && !isActorId(explicitActorId)) {
-            reject('actor_candidate.actor_ref_invalid');
+        const quarantineRevealEntries = explicitQuarantineRevealEntries(ledger, raw);
+        if (quarantineRevealEntries.length > 1) {
+            reject('actor_candidate.identity_quarantined');
             continue;
         }
-        let entry = explicitActorId
-            ? registry.entries.find((item) => item.actorRef.actorId === explicitActorId)
-            : null;
-        let boundBy = entry ? 'actor_ref' : '';
-        if (!entry && !explicitActorId && raw?.identityDisambiguated !== true) {
-            const identityMatches = registryEntriesForIdentityKey(registry, identityKey);
-            if (identityMatches.length > 1) {
-                reject('actor_candidate.identity_ambiguous');
+        const quarantineReveal = quarantineRevealEntries[0] || null;
+        const aliases = explicitDelimitedActorAliases(name);
+        const claims = [name, ...aliases];
+        const candidateMatches = exactRegistryRows(registry.characters, claims);
+        const registeredMatches = exactRegistryRows(registry.registered, claims);
+        const matches = [...candidateMatches, ...registeredMatches];
+        if (
+            quarantineReveal
+            && matches.some((entry) => (
+                entry?.actorRef?.actorId !== quarantineReveal.actor.id
+            ))
+        ) {
+            reject('actor_candidate.alias_conflict');
+            continue;
+        }
+        if (matches.length > 1) {
+            const conflictingActorIds = [...new Set(matches.map((item) => item.actorRef.actorId))];
+            const conflict = {
+                id: `IQ-${fingerprint(`${name}|${conflictingActorIds.join('|')}`).slice(0, 18)}`,
+                candidateId,
+                name,
+                reason: 'actor_candidate.alias_conflict',
+                conflictingActorIds,
+                sourceRef,
+                evidence: cleanList(raw.evidence, 12, 300),
+                quarantinedTurn: currentTurn,
+            };
+            quarantined.push(conflict);
+            ledger.identityQuarantine.push(conflict);
+            continue;
+        }
+        if (registeredMatches.length === 1) {
+            if (quarantineReveal) {
+                reject('actor_candidate.identity_quarantined');
                 continue;
             }
-            if (identityMatches.length === 1) {
-                [entry] = identityMatches;
-                boundBy = 'identity_key';
+            const entry = registeredMatches[0];
+            const previousName = entry.actorRef.displayName;
+            const nextName = preferredActorRegistryName(previousName, name);
+            const nextAliases = cleanList([
+                ...entry.actorRef.aliases,
+                previousName,
+                name,
+                ...aliases,
+            ], 12, 160).filter((item) => item !== nextName);
+            entry.actorRef = { ...entry.actorRef, displayName: nextName, aliases: nextAliases };
+            entry.sourceRefs = registrySourceRefs([...entry.sourceRefs, sourceRef], expectedChatId);
+            entry.updatedTurn = currentTurn;
+            if (nextName !== previousName) {
+                delete registry.registered[previousName];
+                registry.registered[nextName] = entry;
             }
+            const actor = ledger.actors.find((item) => item.id === entry.actorRef.actorId);
+            if (actor) {
+                actor.name = nextName;
+                actor.identity.aliases = nextAliases;
+                actor.evidence = mergeEvidence(actor.evidence, raw.evidence, 24);
+                actor.updatedTurn = Math.max(actor.updatedTurn, currentTurn);
+            }
+            updated.push({ candidateId, actorRef: clone(entry.actorRef), table: 'registered' });
+            continue;
         }
-        if (!entry && !explicitActorId) {
-            const nameMatches = registryEntriesForName(registry, name);
-            if (nameMatches.length > 1) {
-                reject('actor_candidate.name_ambiguous');
+        if (candidateMatches.length === 1) {
+            const row = candidateMatches[0];
+            if (
+                quarantineReveal
+                && row.actorRef.actorId !== quarantineReveal.actor.id
+            ) {
+                reject('actor_candidate.alias_conflict');
                 continue;
             }
-            if (nameMatches.length === 1) {
-                [entry] = nameMatches;
-                boundBy = 'unique_name';
+            const previousName = row.name;
+            const nextName = preferredActorRegistryName(previousName, name);
+            const nextAliases = cleanList([
+                ...row.aliases,
+                previousName,
+                name,
+                ...aliases,
+            ], 12, 160).filter((item) => item !== nextName);
+            row.name = nextName;
+            row.aliases = nextAliases;
+            row.actorRef = { ...row.actorRef, displayName: nextName, aliases: nextAliases };
+            row.sourceRefs = registrySourceRefs([...row.sourceRefs, sourceRef], expectedChatId);
+            if (sourceKind === 'accepted_narrative') row.sourceKind = sourceKind;
+            row.evidence = mergeEvidence(row.evidence, raw.evidence, 12);
+            row.present ||= raw.present === true;
+            if (raw.present && raw.location) row.location = cleanText(raw.location, 180);
+            row.updatedTurn = currentTurn;
+            if (nextName !== previousName) {
+                delete registry.characters[previousName];
+                registry.characters[nextName] = row;
             }
+            updated.push({ candidateId, actorRef: clone(row.actorRef), table: 'characters' });
+            continue;
         }
-        let actor = null;
-        let created = false;
-        if (!entry) {
-            const actorId = explicitActorId || actorIdFromScopedIdentity(name, {
-                chatId: expectedChatId,
-                identityKey,
-            });
-            if (!actorId || registry.entries.some((item) => item.actorRef.actorId === actorId)) {
+
+        const actorId = quarantineReveal?.actor?.id || actorIdFromScopedIdentity(name, {
+            chatId: registry.identityScopeId,
+            identityKey: `name:${name}`,
+        });
+        if (
+            !actorId
+            || [...Object.values(registry.characters), ...Object.values(registry.registered)]
+                .some((item) => item.actorRef.actorId === actorId)
+        ) {
                 reject('actor_candidate.actor_ref_collision');
                 continue;
+        }
+        const row = normalizeCandidateRegistryRow({
+            candidateId,
+            name,
+            aliases,
+            actorRef: { kind: 'actor_ref', actorId, displayName: name, aliases },
+            sourceKind,
+            sourceRefs: [sourceRef],
+            evidence: raw.evidence,
+            present: raw.present,
+            location: raw.location,
+            discoveredTurn: currentTurn,
+            updatedTurn: currentTurn,
+        }, expectedChatId);
+        applyCandidateRegistryResult(registry.characters, row);
+        inserted.push({ candidateId, actorRef: clone(row.actorRef), table: 'characters' });
+    }
+    registry.updatedAt = Date.now();
+    ledger.actorRegistry = registry;
+    ledger.turn = Math.max(ledger.turn, currentTurn);
+    ledger.updatedAt = Date.now();
+    ledger.migrations.actorRegistryV1 = true;
+    const normalized = normalizeActorLedger(ledger, {
+        chatId: expectedChatId,
+        identityScopeId: registry.identityScopeId,
+        excludedActorNames,
+    });
+    return {
+        ledger: normalized,
+        inserted,
+        updated,
+        quarantined,
+        changed: beforeDigest !== actorRegistryDigest(normalized.actorRegistry),
+    };
+}
+
+// Production wiring for caikis first_npc UPDATE-only versus second_npc promotion.
+export function actorCandidatesForRegistryPromotion(candidates, upsertResult) {
+    const acceptedByCandidateId = new Map();
+    const duplicateCandidateIds = new Set();
+    for (const candidate of Array.isArray(candidates) ? candidates : []) {
+        const candidateId = cleanText(candidate?.candidateId, 120);
+        if (!candidateId || candidate?.sourceKind !== 'accepted_narrative') continue;
+        if (acceptedByCandidateId.has(candidateId)) {
+            duplicateCandidateIds.add(candidateId);
+            acceptedByCandidateId.delete(candidateId);
+            continue;
+        }
+        if (!duplicateCandidateIds.has(candidateId)) {
+            acceptedByCandidateId.set(candidateId, candidate);
+        }
+    }
+
+    const characterRows = Object.values(
+        upsertResult?.ledger?.actorRegistry?.characters || {},
+    );
+    const selectedByStoredCandidateId = new Map();
+    for (const result of [
+        ...(Array.isArray(upsertResult?.inserted) ? upsertResult.inserted : []),
+        ...(Array.isArray(upsertResult?.updated) ? upsertResult.updated : []),
+    ]) {
+        const candidateId = cleanText(result?.candidateId, 120);
+        const candidate = acceptedByCandidateId.get(candidateId);
+        if (result?.table !== 'characters' || !candidate) continue;
+        const matchingRows = characterRows.filter((row) => (
+            actorRefsMatch(row?.actorRef, result?.actorRef)
+        ));
+        if (matchingRows.length !== 1) continue;
+        const storedCandidateId = cleanText(matchingRows[0]?.candidateId, 120);
+        if (!storedCandidateId || selectedByStoredCandidateId.has(storedCandidateId)) continue;
+        selectedByStoredCandidateId.set(storedCandidateId, {
+            ...candidate,
+            candidateId: storedCandidateId,
+        });
+    }
+    return [...selectedByStoredCandidateId.values()];
+}
+
+// caikis second_npc INSERT ... SELECT, then DELETE first_npc.
+export function promoteActorCandidatesToRegistry(value, candidates, {
+    chatId = '',
+    identityScopeId = '',
+    expectedSourceRef = null,
+    turn = null,
+    excludedActorNames = [],
+} = {}) {
+    const expectedChatId = cleanText(chatId || value?.chatId, 180);
+    const ledger = normalizeActorLedger(value, {
+        chatId: expectedChatId,
+        identityScopeId,
+        excludedActorNames,
+    });
+    const registry = clone(ledger.actorRegistry);
+    const currentTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
+    const promoted = [];
+    const discovered = [];
+    const touched = [];
+    const quarantined = [];
+    const beforeDigest = actorRegistryDigest(registry);
+
+    for (const raw of Array.isArray(candidates) ? candidates : []) {
+        const candidateId = cleanText(raw?.candidateId, 120);
+        const name = resolveActorRegistryTargetName(raw?.name);
+        const sourceRef = normalizeSourceRef(raw?.sourceRef);
+        if (raw?.sourceKind !== 'accepted_narrative') {
+            quarantined.push({ candidateId, name, reason: 'actor_candidate.promotion_not_accepted' });
+            continue;
+        }
+        const row = Object.values(registry.characters).find((item) => (
+            (candidateId && item.candidateId === candidateId) || item.name === name
+        ));
+        if (!row) {
+            const claims = new Set([name, ...explicitDelimitedActorAliases(name)]);
+            const alreadyCopied = promoted.some((item) => (
+                [item.actorRef.displayName, ...item.actorRef.aliases]
+                    .some((claim) => claims.has(claim))
+            ));
+            if (alreadyCopied) {
+                continue;
             }
+            quarantined.push({ candidateId, name, reason: 'actor_candidate.candidate_missing' });
+            continue;
+        }
+        const quarantineRevealEntries = explicitQuarantineRevealEntries(ledger, raw);
+        const quarantineReveal = quarantineRevealEntries.length === 1
+            ? quarantineRevealEntries[0]
+            : null;
+        const rowQuarantineEntries = unresolvedQuarantineEntriesForActorId(
+            ledger,
+            row.actorRef.actorId,
+        );
+        if (
+            quarantineRevealEntries.length > 1
+            || (rowQuarantineEntries.length && !quarantineReveal)
+            || (quarantineReveal && row.actorRef.actorId !== quarantineReveal.actor.id)
+        ) {
+            quarantined.push({
+                candidateId,
+                name: row.name,
+                reason: 'actor_candidate.identity_quarantined',
+            });
+            continue;
+        }
+        if (
+            (expectedSourceRef && !row.sourceRefs.some((ref) => (
+                acceptedActorSourceRefMatches(ref, expectedSourceRef)
+            )))
+            || (sourceRef && !row.sourceRefs.some((ref) => acceptedActorSourceRefMatches(ref, sourceRef)))
+        ) {
+            quarantined.push({ candidateId, name, reason: 'actor_candidate.source_ref_mismatch' });
+            continue;
+        }
+        const conflicts = exactRegistryRows(registry.registered, [row.name, ...row.aliases]);
+        if (conflicts.length) {
+            quarantined.push({ candidateId, name: row.name, reason: 'actor_candidate.alias_conflict' });
+            continue;
+        }
+        let actor = ledger.actors.find((item) => item.id === row.actorRef.actorId);
+        const restoring = !actor && Boolean(quarantineReveal);
+        const created = !actor && !restoring;
+        if (restoring) {
+            actor = clone(quarantineReveal.actor);
+            actor.name = row.name;
+            actor.identity.aliases = cleanList([
+                ...actor.identity.aliases.filter((item) => !isActorId(item)),
+                ...row.aliases,
+            ], 12, 160).filter((item) => item !== row.name);
+            if (isActorId(actor.lineage.currentForm)) actor.lineage.currentForm = row.name;
+            actor.evidence = mergeEvidence(actor.evidence, row.evidence, 24);
+            actor.updatedTurn = Math.max(actor.updatedTurn, currentTurn);
+            actor.version += 1;
+            ledger.actors.push(actor);
+        } else if (!actor) {
             actor = normalizeActor({
-                id: actorId,
-                name,
-                tier: raw.present === true ? 'secondary' : 'background',
+                id: row.actorRef.actorId,
+                name: row.name,
+                tier: row.present ? 'secondary' : 'background',
                 status: 'active',
+                identity: { aliases: row.aliases },
                 location: {
-                    name: cleanText(raw.location, 180) || 'unknown',
+                    name: row.location || 'unknown',
                     sinceTurn: currentTurn,
-                    evidence: cleanList(raw.evidence, 12, 300),
+                    evidence: row.evidence,
                 },
-                evidence: cleanList(raw.evidence, 12, 300),
+                evidence: row.evidence,
                 nextActionTurn: currentTurn + 1,
                 createdTurn: currentTurn,
                 updatedTurn: currentTurn,
             }, ledger.actors.length, currentTurn);
-            entry = registryEntryFromActor(actor, expectedChatId, {
-                origin: sourceKind,
-                sourceRefs: [sourceRef],
-                identityKeys: [identityKey],
-                registeredTurn: currentTurn,
-            });
-            registry.entries.push(entry);
             ledger.actors.push(actor);
-            created = true;
-            boundBy = explicitActorId ? 'actor_ref_created' : 'scoped_identity_created';
-        } else {
-            actor = ledger.actors.find((item) => item.id === entry.actorRef.actorId);
-            if (!actor) {
-                reject('actor_candidate.registry_actor_missing');
-                continue;
-            }
-            entry.identityKeys = cleanList([
-                ...entry.identityKeys,
-                identityKey,
-            ], 24, 300);
-            entry.sourceRefs = registrySourceRefs([
-                ...entry.sourceRefs,
-                sourceRef,
-            ], expectedChatId);
-            if (
-                name !== entry.actorRef.displayName
-                && !entry.actorRef.aliases.includes(name)
-            ) {
-                entry.actorRef.aliases = cleanList([
-                    ...entry.actorRef.aliases,
-                    name,
-                ], 12, 160);
-                actor.identity.aliases = cleanList([
-                    ...actor.identity.aliases,
-                    name,
-                ], 12, 160);
-            }
-            actor.evidence = mergeEvidence(actor.evidence, raw.evidence, 24);
-            if (raw.present === true && raw.location) {
-                actor.location = {
-                    name: cleanText(raw.location, 180),
-                    sinceTurn: currentTurn,
-                    evidence: mergeEvidence(actor.location?.evidence, raw.evidence, 12),
-                };
-            }
-            actor.updatedTurn = Math.max(actor.updatedTurn, currentTurn);
+        }
+        const entry = registryEntryFromActor(actor, expectedChatId, {
+            origin: row.sourceKind,
+            sourceRefs: row.sourceRefs,
+            registeredTurn: currentTurn,
+        });
+        // SELECT/COPY the candidate row into registered, then DELETE the original.
+        registry.registered[entry.actorRef.displayName] = entry;
+        delete registry.characters[row.name];
+        if (restoring) {
+            ledger.identityQuarantine = ledger.identityQuarantine
+                .filter((entry) => entry !== quarantineReveal);
         }
         const actorRef = clone(entry.actorRef);
-        promoted.push({
-            candidateId,
-            actorRef,
-            state: 'registered',
-            created,
-            boundBy,
-        });
-        (created ? discovered : touched).push({
-            actorId: actorRef.actorId,
-            name: actorRef.displayName,
-        });
+        promoted.push({ candidateId, actorRef, created, boundBy: 'candidate_copy' });
+        (created ? discovered : touched).push({ actorId: actorRef.actorId, name: actorRef.displayName });
     }
+
     registry.updatedAt = Date.now();
     ledger.actorRegistry = registry;
     if (discovered.length) {
-        const sourceRefs = promoted
-            .map((item) => candidateList
-                .find((candidate) => candidate.candidateId === item.candidateId)?.sourceRef)
-            .map(normalizeSourceRef)
-            .filter(Boolean);
         ledger.observationReceipts.push({
             receiptId: `actor-registration:${fingerprint(JSON.stringify([
                 expectedChatId,
@@ -1987,7 +2366,7 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
                 discovered.map((entry) => entry.actorId),
             ])).slice(0, 18)}`,
             kind: 'actor-registration',
-            sourceRef: sourceRefs.at(-1) || null,
+            sourceRef: normalizeSourceRef(expectedSourceRef),
             actorIds: discovered.map((entry) => entry.actorId),
             settledAt: Date.now(),
         });
@@ -1995,9 +2374,9 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
     }
     ledger.turn = Math.max(ledger.turn, currentTurn);
     ledger.updatedAt = Date.now();
-    ledger.migrations.actorRegistryV1 = true;
     const normalized = normalizeActorLedger(ledger, {
         chatId: expectedChatId,
+        identityScopeId: registry.identityScopeId,
         excludedActorNames,
     });
     return {
@@ -2010,418 +2389,52 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
     };
 }
 
-function mergeProfileText(current, proposed, limit = 240) {
-    const oldValue = cleanText(current, limit);
-    return oldValue || cleanText(proposed, limit);
-}
-
-const VOLATILE_PROFILE_LABEL_RE = /^(?:冷酷|冰冷|暴躁|粗暴|凶狠|残忍|疯狂|狂热|病态|绝望|恐惧|怯懦|结巴|空洞|麻木|杀意|致命武器|忠诚|服从)$/iu;
-const TOTALIZING_PROFILE_RE = /(?:不再是.{0,18}而是(?:一件|一个)|彻底(?:失去|抹去|变成|沦为)|(?:全部人格|整个人).{0,12}(?:只剩|化作|变成))/iu;
-const TYPOLOGY_PROFILE_RE = /(?:\b(?:INTJ|INTP|ENTJ|ENTP|INFJ|INFP|ENFJ|ENFP|ISTJ|ISFJ|ESTJ|ESFJ|ISTP|ISFP|ESTP|ESFP)\b|\b[1-9]w[1-9]\b|\btritype\b|MBTI|迈尔斯|九型人格|三型组合|依恋类型|安全型依恋|焦虑型依恋|回避型依恋|恐惧型依恋|病娇|地雷系|白切黑|抖[SM]|S\s*\/\s*M)/iu;
-
-function stableProfileText(value, limit = 240) {
-    const cleaned = cleanText(value, limit);
-    if (
-        !cleaned
-        || VOLATILE_PROFILE_LABEL_RE.test(cleaned)
-        || TOTALIZING_PROFILE_RE.test(cleaned)
-        || TYPOLOGY_PROFILE_RE.test(cleaned)
-    ) {
-        return '';
-    }
-    return cleaned;
-}
-
-function stableProfileList(value, limit = 12, itemLimit = 240) {
-    return cleanList(value, limit, itemLimit).filter((item) => (
-        !VOLATILE_PROFILE_LABEL_RE.test(item)
-        && !TOTALIZING_PROFILE_RE.test(item)
-        && !TYPOLOGY_PROFILE_RE.test(item)
-    ));
-}
-
-function mergeProfilePattern(current, proposed, limit = 240) {
-    const oldValue = cleanText(current, limit);
-    const newValue = cleanText(proposed, limit);
-    if (!newValue) return oldValue;
-    if (!oldValue) return newValue;
-    const oldKey = evidenceLookupText(oldValue);
-    const newKey = evidenceLookupText(newValue);
-    if (oldKey === newKey || oldKey.includes(newKey)) return oldValue;
-    if (newKey.includes(oldKey)) return newValue;
-    return cleanText(`${oldValue}；${newValue}`, limit);
-}
-
-function evidenceLookupText(value) {
-    return cleanText(value, 240000)
-        .toLocaleLowerCase('zh-CN')
-        .replace(/[\s\p{P}\p{S}]+/gu, '');
-}
-
-function mergeProfileList(current, proposed, limit = 12, itemLimit = 240) {
-    return cleanList([...(current || []), ...(Array.isArray(proposed) ? proposed : [])], limit, itemLimit);
-}
-
-function actorProfileSnapshot(actor) {
-    return JSON.stringify({
-        identity: actor.identity,
-        longTermGoals: actor.longTermGoals,
-        currentGoals: actor.currentGoals,
-        plan: actor.plan,
-        capabilities: actor.capabilities,
-        hidden: actor.hidden,
-    });
-}
-
-function removeProjectedProfileHypotheses(actor) {
-    const next = clone(actor);
-    const profile = normalizeActorProfileV6(next?.profileV6, {
-        actorId: next?.id,
-        name: next?.name,
-    });
-    const clearProjected = (container, key, module, relativePath = key) => {
-        const path = `modules.${module}.data.${relativePath}`;
-        if (profile.fieldSources[path] !== 'hypothesis') return;
-        const projected = relativePath.split('.').reduce(
-            (value, part) => value && typeof value === 'object' ? value[part] : undefined,
-            profile.modules[module]?.data,
-        );
-        if (JSON.stringify(container?.[key]) !== JSON.stringify(projected)) return;
-        container[key] = Array.isArray(container[key]) ? [] : '';
-    };
-    for (const key of [
-        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
-        'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
-    ]) clearProjected(next.identity, key, 'identity');
-    for (const key of [
-        'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
-        'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
-        'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
-    ]) clearProjected(next.identity, key, 'personality');
-    clearProjected(next, 'longTermGoals', 'goals', 'longTerm');
-    clearProjected(next, 'currentGoals', 'goals', 'current');
-    next.plan = next.plan && typeof next.plan === 'object' ? next.plan : {};
-    clearProjected(next.plan, 'summary', 'goals', 'plan.summary');
-    clearProjected(next.plan, 'steps', 'goals', 'plan.steps');
-    clearProjected(next.plan, 'nextWindow', 'goals', 'nextWindow');
-    return next;
-}
-
+/**
+ * Retired compatibility export.
+ *
+ * P1 ProfileInsertCandidate -> atomic save/readback is the only production
+ * profile writer. This bounded adapter accounts for every legacy input without
+ * resolving names, changing profiles, or manufacturing receipts.
+ */
 export function mergeActorProfilePatches(value, patches, {
-    turn = null,
-    sourceRef = null,
     maxPatches = 8,
-    evidenceCorpus = '',
-    mergeMode = 'append',
 } = {}) {
     const ledger = normalizeActorLedger(value);
-    const currentTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
-    const ref = normalizeSourceRef(sourceRef);
-    const evidenceHaystack = evidenceLookupText(evidenceCorpus);
-    const accepted = [];
-    const rejected = [];
-    const candidates = (Array.isArray(patches) ? patches : []).slice(
-        0,
-        integer(maxPatches, 0, 24, 8),
-    );
-    const consolidate = mergeMode === 'consolidate';
-    const mergeStableText = (current, proposed, limit = 240) => {
-        const existing = consolidate ? profileValueText(current, limit) : cleanText(current, limit);
-        const next = consolidate
-            ? profileValueText(proposed, limit)
-            : stableProfileText(proposed, limit);
-        if (consolidate && existing) return existing;
-        if (consolidate && next) return next;
-        return mergeProfileText(current, next, limit);
-    };
-    const mergeStablePattern = (current, proposed, limit = 240) => {
-        const existing = consolidate ? profileValueText(current, limit) : cleanText(current, limit);
-        const next = consolidate
-            ? profileValueText(proposed, limit)
-            : stableProfileText(proposed, limit);
-        if (consolidate && existing) return existing;
-        if (consolidate && next) return next;
-        return mergeProfilePattern(current, next, limit);
-    };
-    const mergeStableList = (current, proposed, limit = 12, itemLimit = 240) => {
-        const next = consolidate
-            ? profileValueList(proposed, limit, itemLimit)
-            : stableProfileList(proposed, limit, itemLimit);
-        if (consolidate) return mergeProfileList(
-            profileValueList(current, limit, itemLimit),
-            next,
-            limit,
-            itemLimit,
-        );
-        return mergeProfileList(current, next, limit, itemLimit);
-    };
-    for (const raw of candidates) {
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-            rejected.push({ actorId: '', reason: 'profile-not-object' });
-            continue;
-        }
-        const requestedId = cleanText(raw.actorId, 120);
-        const requestedName = cleanText(raw.name, 160);
-        const actorIndex = ledger.actors.findIndex((actor) => (
-            (requestedId && actor.id === requestedId)
-            || (requestedName && (
-                actor.name === requestedName
-                || actor.identity.aliases.includes(requestedName)
-            ))
-        ));
-        if (actorIndex < 0) {
-            rejected.push({
-                actorId: requestedId,
-                name: requestedName,
-                reason: 'unknown-actor',
-            });
-            continue;
-        }
-        const evidence = cleanList(raw.evidence, 8, 300);
-        if (!evidence.length) {
-            rejected.push({
-                actorId: ledger.actors[actorIndex].id,
-                name: ledger.actors[actorIndex].name,
-                reason: 'evidence-missing',
-            });
-            continue;
-        }
-        const groundedEvidence = evidence.filter((item) => {
-            const needle = evidenceLookupText(item);
-            return needle.length >= 4 && evidenceHaystack.includes(needle);
+    const inputIsArray = Array.isArray(patches);
+    const inputCount = inputIsArray ? patches.length : 0;
+    const limit = integer(maxPatches, 0, 24, 8);
+    const processedCount = Math.min(inputCount, limit);
+    const overflowCount = Math.max(0, inputCount - processedCount);
+    const rejected = inputIsArray
+        ? patches.slice(0, limit).map((raw, inputIndex) => ({
+            actorId: cleanText(raw?.actorId, 120),
+            name: cleanText(raw?.name, 160),
+            inputIndex,
+            reason: 'actor_profile.legacy_patch_retired',
+        }))
+        : [{
+            actorId: '',
+            inputIndex: -1,
+            reason: 'actor_profile.legacy_patch_input_invalid',
+        }];
+    if (overflowCount > 0) {
+        rejected.push({
+            actorId: '',
+            inputIndex: processedCount,
+            startIndex: processedCount,
+            count: overflowCount,
+            total: inputCount,
+            reason: 'actor_profile.legacy_patch_overflow',
         });
-        if (!groundedEvidence.length) {
-            rejected.push({
-                actorId: ledger.actors[actorIndex].id,
-                name: ledger.actors[actorIndex].name,
-                reason: evidenceHaystack ? 'evidence-not-grounded' : 'evidence-corpus-missing',
-            });
-            continue;
-        }
-        const actor = consolidate
-            ? removeProjectedProfileHypotheses(ledger.actors[actorIndex])
-            : clone(ledger.actors[actorIndex]);
-        const before = actorProfileSnapshot(actor);
-        const identity = raw.identity && typeof raw.identity === 'object'
-            && !Array.isArray(raw.identity)
-            ? raw.identity
-            : {};
-        const hidden = raw.hidden && typeof raw.hidden === 'object'
-            && !Array.isArray(raw.hidden)
-            ? raw.hidden
-            : {};
-        actor.identity = {
-            ...actor.identity,
-            role: mergeStableText(actor.identity.role, identity.role, 180),
-            species: mergeStableText(actor.identity.species, identity.species, 160),
-            profileSummary: mergeStableText(
-                actor.identity.profileSummary,
-                identity.profileSummary || identity.summary,
-                700,
-            ),
-            gender: mergeStableText(actor.identity.gender, identity.gender, 80),
-            age: mergeStableText(actor.identity.age, identity.age, 80),
-            briefIntro: mergeStableText(actor.identity.briefIntro, identity.briefIntro, 240),
-            appearance: mergeStableText(actor.identity.appearance, identity.appearance, 1200),
-            identityText: mergeStableText(actor.identity.identityText, identity.identityText, 500),
-            relationState: mergeStableText(actor.identity.relationState, identity.relationState, 1200),
-            attitudeToProtagonist: mergeStableText(
-                actor.identity.attitudeToProtagonist,
-                identity.attitudeToProtagonist,
-                600,
-            ),
-            pastExperience: mergeStableText(
-                actor.identity.pastExperience,
-                identity.pastExperience,
-                2400,
-            ),
-            biography: mergeStableText(actor.identity.biography, identity.biography, 2400),
-            primaryColor: mergeStableText(
-                actor.identity.primaryColor,
-                identity.primaryColor,
-                200,
-            ),
-            primaryDerivatives: mergeStableList(
-                actor.identity.primaryDerivatives,
-                identity.primaryDerivatives,
-                3,
-                700,
-            ),
-            primarySentence: mergeStableText(
-                actor.identity.primarySentence,
-                identity.primarySentence,
-                700,
-            ),
-            baseColor: mergeStableText(actor.identity.baseColor, identity.baseColor, 200),
-            baseDerivatives: mergeStableList(
-                actor.identity.baseDerivatives,
-                identity.baseDerivatives,
-                3,
-                700,
-            ),
-            baseSentence: mergeStableText(
-                actor.identity.baseSentence,
-                identity.baseSentence,
-                700,
-            ),
-            accentColor: mergeStableText(actor.identity.accentColor, identity.accentColor, 200),
-            accentDerivatives: mergeStableList(
-                actor.identity.accentDerivatives,
-                identity.accentDerivatives,
-                3,
-                700,
-            ),
-            accentSentence: mergeStableText(
-                actor.identity.accentSentence,
-                identity.accentSentence,
-                700,
-            ),
-            othersVoices: mergeStableList(
-                actor.identity.othersVoices,
-                identity.othersVoices,
-                7,
-                700,
-            ),
-            authorVoice: mergeStableText(actor.identity.authorVoice, identity.authorVoice, 1400),
-            traits: mergeStableList(actor.identity.traits, identity.traits, 12, 180),
-            desires: mergeStableList(actor.identity.desires, identity.desires, 12, 240),
-            boundaries: mergeStableList(actor.identity.boundaries, identity.boundaries, 12, 240),
-            socialStyle: mergeStablePattern(actor.identity.socialStyle, identity.socialStyle),
-            decisionStyle: mergeStablePattern(actor.identity.decisionStyle, identity.decisionStyle),
-            speechStyle: mergeStablePattern(actor.identity.speechStyle, identity.speechStyle),
-            copingStyle: mergeStablePattern(actor.identity.copingStyle, identity.copingStyle),
-            informationStyle: mergeStablePattern(
-                actor.identity.informationStyle,
-                identity.informationStyle,
-            ),
-            typicalMisread: mergeStablePattern(
-                actor.identity.typicalMisread,
-                identity.typicalMisread,
-            ),
-            relationshipDistancePattern: mergeStablePattern(
-                actor.identity.relationshipDistancePattern,
-                identity.relationshipDistancePattern,
-            ),
-            selfImageGap: mergeStablePattern(
-                actor.identity.selfImageGap,
-                identity.selfImageGap,
-            ),
-            learnedCounterDisposition: mergeStablePattern(
-                actor.identity.learnedCounterDisposition,
-                identity.learnedCounterDisposition,
-            ),
-            pressureResponse: mergeStablePattern(
-                actor.identity.pressureResponse,
-                identity.pressureResponse,
-            ),
-            recoveryPath: mergeStablePattern(
-                actor.identity.recoveryPath,
-                identity.recoveryPath,
-            ),
-            everydayHabits: mergeStableList(
-                actor.identity.everydayHabits,
-                identity.everydayHabits,
-                8,
-                180,
-            ),
-            blindSpots: mergeStableList(actor.identity.blindSpots, identity.blindSpots, 8, 220),
-        };
-        actor.longTermGoals = mergeStableList(actor.longTermGoals, raw.longTermGoals, 12, 400);
-        actor.currentGoals = mergeStableList(actor.currentGoals, raw.currentGoals, 8, 400);
-        const proposedPlan = raw.plan && typeof raw.plan === 'object' && !Array.isArray(raw.plan)
-            ? raw.plan
-            : {};
-        actor.plan = {
-            ...actor.plan,
-            summary: mergeStableText(actor.plan?.summary, proposedPlan.summary, 500),
-            steps: mergeStableList(actor.plan?.steps, proposedPlan.steps, 12, 300),
-            nextWindow: mergeStableText(
-                actor.plan?.nextWindow,
-                proposedPlan.nextWindow,
-                180,
-            ),
-            obstacles: mergeStableList(
-                actor.plan?.obstacles,
-                proposedPlan.obstacles,
-                12,
-                300,
-            ),
-            costs: mergeStableList(actor.plan?.costs, proposedPlan.costs, 12, 300),
-            alternatives: mergeStableList(
-                actor.plan?.alternatives,
-                proposedPlan.alternatives,
-                12,
-                300,
-            ),
-            priority: ['low', 'normal', 'high', 'critical'].includes(proposedPlan.priority)
-                ? proposedPlan.priority
-                : actor.plan?.priority,
-            status: ['active', 'blocked', 'completed', 'abandoned'].includes(proposedPlan.status)
-                ? proposedPlan.status
-                : actor.plan?.status,
-        };
-        actor.capabilities = mergeStableList(actor.capabilities, raw.capabilities, 24, 160);
-        actor.hidden = {
-            emotionalInertia: mergeStableList(
-                actor.hidden.emotionalInertia,
-                hidden.emotionalInertia,
-                12,
-                240,
-            ),
-            innerConflicts: mergeStableList(
-                actor.hidden.innerConflicts,
-                hidden.innerConflicts,
-                12,
-                300,
-            ),
-            privateIntentions: mergeStableList(
-                actor.hidden.privateIntentions,
-                hidden.privateIntentions,
-                12,
-                300,
-            ),
-        };
-        if (actorProfileSnapshot(actor) === before) {
-            rejected.push({
-                actorId: actor.id,
-                name: actor.name,
-                reason: 'no-new-profile-facts',
-            });
-            continue;
-        }
-        actor.evidence = mergeEvidence(actor.evidence, [
-            ...groundedEvidence,
-            ref ? `${ref.messageId}:${ref.swipeId}:${ref.generation}:${ref.hash}` : '',
-        ]);
-        actor.updatedTurn = currentTurn;
-        actor.version += 1;
-        ledger.actors[actorIndex] = actor;
-        accepted.push({ actorId: actor.id, name: actor.name, evidence: groundedEvidence });
-    }
-    if (accepted.length) {
-        ledger.turn = Math.max(ledger.turn, currentTurn);
-        ledger.observationReceipts.push({
-            receiptId: `actor-profile:${fingerprint(JSON.stringify([
-                ref?.chatId || ledger.chatId,
-                ref?.messageId || '',
-                ref?.swipeId || 0,
-                ref?.generation || 0,
-                ref?.branchId || '',
-                ref?.hash || '',
-                accepted.map((item) => item.actorId),
-            ])).slice(0, 18)}`,
-            kind: 'profile-enrichment',
-            sourceRef: ref,
-            actorIds: accepted.map((item) => item.actorId),
-            settledAt: Date.now(),
-        });
-        ledger.observationReceipts = ledger.observationReceipts.slice(-120);
-        ledger.updatedAt = Date.now();
     }
     return {
-        ledger: normalizeActorLedger(ledger),
-        accepted,
+        ledger,
+        accepted: [],
         rejected,
+        inputCount,
+        processedCount,
+        overflowCount,
+        retired: true,
     };
 }
 
@@ -2430,51 +2443,71 @@ export function mergeActorIdentityReveal(value, {
     revealedName = '',
     aliases = [],
     evidence = [],
+    sourceRef = null,
     turn = null,
 } = {}) {
     const ledger = normalizeActorLedger(value);
     const id = cleanText(actorId, 120);
     const name = cleanText(revealedName, 160);
     if (!id || !isActorName(name)) return ledger;
-    let index = ledger.actors.findIndex((actor) => (
+    const index = ledger.actors.findIndex((actor) => (
         actor.id === id
         || actor.name === id
         || actor.identity.aliases.includes(id)
     ));
-    if (index < 0) {
-        const quarantinedIndex = (ledger.identityQuarantine || [])
-            .findIndex((entry) => entry.id === id || entry.actor?.id === id);
-        if (quarantinedIndex < 0) return ledger;
-        const restored = clone(ledger.identityQuarantine[quarantinedIndex].actor);
-        restored.name = name;
-        restored.identity.aliases = cleanList([
-            ...restored.identity.aliases.filter((item) => !isActorId(item)),
-            ...aliases,
-        ], 12, 160).filter((item) => item !== name);
-        if (isActorId(restored.lineage.currentForm)) restored.lineage.currentForm = name;
-        ledger.identityQuarantine.splice(quarantinedIndex, 1);
-        ledger.actors.push(restored);
-        index = ledger.actors.length - 1;
-    }
+    // A reveal may UPDATE an already registered row, but cannot create or
+    // restore a registered identity without the first_npc candidate path.
+    if (index < 0) return ledger;
     const actor = clone(ledger.actors[index]);
+    const registryEntry = Object.values(ledger.actorRegistry.registered)
+        .find((entry) => entry.actorRef.actorId === actor.id);
+    if (!registryEntry) return ledger;
     const previousName = actor.name;
-    actor.name = name;
-    actor.identity.aliases = cleanList([
+    const nextAliases = cleanList([
         ...actor.identity.aliases,
         previousName,
         ...aliases,
     ], 12, 160).filter((item) => item !== name);
+    const conflicts = exactRegistryRows(
+        ledger.actorRegistry.registered,
+        [name, ...nextAliases],
+    ).filter((entry) => entry.actorRef.actorId !== actor.id);
+    if (conflicts.length) {
+        const conflictingActorIds = [
+            actor.id,
+            ...conflicts.map((entry) => entry.actorRef.actorId),
+        ];
+        const conflict = {
+            id: `IQ-${fingerprint(`${name}|${conflictingActorIds.join('|')}`).slice(0, 18)}`,
+            name,
+            reason: 'actor_candidate.alias_conflict',
+            conflictingActorIds,
+            sourceRef: normalizeSourceRef(sourceRef),
+            evidence: cleanList(evidence, 12, 300),
+            quarantinedTurn: integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn),
+        };
+        if (!ledger.identityQuarantine.some((entry) => entry.id === conflict.id)) {
+            ledger.identityQuarantine.push(conflict);
+        }
+        ledger.updatedAt = Date.now();
+        return normalizeActorLedger(ledger, { chatId: ledger.chatId });
+    }
+    actor.name = name;
+    actor.identity.aliases = nextAliases;
     actor.evidence = mergeEvidence(actor.evidence, evidence);
     actor.updatedTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
     actor.version += 1;
     ledger.actors[index] = actor;
-    if (!ledger.actorRegistry.entries.some((entry) => entry.actorRef.actorId === actor.id)) {
-        const entry = registryEntryFromActor(actor, ledger.chatId, {
-            origin: 'identity_reveal_restore',
-            identityKeys: [`actor-id:${actor.id.toLocaleLowerCase()}`],
-            registeredTurn: actor.createdTurn,
-        });
-        if (entry) ledger.actorRegistry.entries.push(entry);
+    const previousRegistryName = registryEntry.actorRef.displayName;
+    registryEntry.actorRef = {
+        kind: 'actor_ref',
+        actorId: actor.id,
+        displayName: actor.name,
+        aliases: cleanList(actor.identity.aliases, 12, 160),
+    };
+    if (previousRegistryName !== actor.name) {
+        delete ledger.actorRegistry.registered[previousRegistryName];
+        ledger.actorRegistry.registered[actor.name] = registryEntry;
     }
     ledger.actorRegistry.updatedAt = Date.now();
     ledger.updatedAt = Date.now();
@@ -2534,6 +2567,7 @@ export function reconcileActorIdentityRevealsFromAcceptedContent(value, {
             actorId,
             revealedName,
             evidence: [`${ref.messageId}:${ref.swipeId}:${ref.generation}:${ref.hash}`],
+            sourceRef: ref,
             turn: ledger.turn,
         });
     }
@@ -2565,38 +2599,14 @@ export function reconcileActorIdentityRevealsFromAcceptedContent(value, {
             }
         }
         if (!isActorName(revealedName) || revealedName === current.name) continue;
-        const duplicate = ledger.actors.find((actor) => (
-            actor.id !== current.id
-            && (
-                actor.name === revealedName
-                || actor.identity.aliases.includes(revealedName)
-            )
-        ));
         ledger = mergeActorIdentityReveal(ledger, {
             actorId: current.id,
             revealedName,
             aliases: names,
             evidence: [`${ref.messageId}:${ref.swipeId}:${ref.generation}:${ref.hash}`],
+            sourceRef: ref,
             turn: ledger.turn,
         });
-        if (!duplicate) continue;
-        const stable = ledger.actors.find((actor) => actor.id === current.id);
-        stable.knowledge = [
-            ...stable.knowledge,
-            ...duplicate.knowledge.filter((item) => (
-                !stable.knowledge.some((known) => known.id === item.id)
-            )),
-        ].slice(-48);
-        stable.evidence = mergeEvidence(stable.evidence, duplicate.evidence);
-        stable.identity.aliases = cleanList([
-            ...stable.identity.aliases,
-            duplicate.name,
-            ...duplicate.identity.aliases,
-        ], 12, 160).filter((item) => item !== stable.name);
-        stable.resources = stable.resources.length ? stable.resources : clone(duplicate.resources);
-        stable.capabilities = mergeEvidence(stable.capabilities, duplicate.capabilities, 24);
-        stable.version += 1;
-        ledger.actors = ledger.actors.filter((actor) => actor.id !== duplicate.id);
     }
     ledger.updatedAt = Date.now();
     return normalizeActorLedger(ledger, { chatId: ledger.chatId });
@@ -2640,6 +2650,27 @@ export function reconcileActorMutationLineageFromAcceptedContent(value, {
         if (!isActorName(form)) continue;
         const stable = ledger.actors.find((item) => item.id === actor.id);
         const evidence = `${ref.messageId}:${ref.swipeId}:${ref.generation}:${ref.hash}`;
+        const conflicts = exactRegistryRows(ledger.actorRegistry.registered, [form])
+            .filter((entry) => entry.actorRef.actorId !== stable.id);
+        if (conflicts.length) {
+            const conflictingActorIds = [
+                stable.id,
+                ...conflicts.map((entry) => entry.actorRef.actorId),
+            ];
+            const conflict = {
+                id: `IQ-${fingerprint(`${form}|${conflictingActorIds.join('|')}`).slice(0, 18)}`,
+                name: form,
+                reason: 'actor_candidate.alias_conflict',
+                conflictingActorIds,
+                sourceRef: ref,
+                evidence: [evidence],
+                quarantinedTurn: ledger.turn,
+            };
+            if (!ledger.identityQuarantine.some((entry) => entry.id === conflict.id)) {
+                ledger.identityQuarantine.push(conflict);
+            }
+            continue;
+        }
         if (!stable.lineage.forms.some((item) => item.name === form)) {
             stable.lineage.forms.push({
                 name: form,
@@ -2655,23 +2686,6 @@ export function reconcileActorMutationLineageFromAcceptedContent(value, {
         ], 12, 160).filter((item) => item !== stable.name);
         stable.evidence = mergeEvidence(stable.evidence, [evidence]);
         stable.version += 1;
-        const duplicate = ledger.actors.find((item) => (
-            item.id !== stable.id
-            && (item.name === form || item.identity.aliases.includes(form))
-        ));
-        if (duplicate) {
-            stable.knowledge = [
-                ...stable.knowledge,
-                ...duplicate.knowledge.filter((item) => (
-                    !stable.knowledge.some((known) => known.id === item.id)
-                )),
-            ].slice(-48);
-            stable.resources = stable.resources.length
-                ? stable.resources
-                : clone(duplicate.resources);
-            stable.capabilities = mergeEvidence(stable.capabilities, duplicate.capabilities, 24);
-            ledger.actors = ledger.actors.filter((item) => item.id !== duplicate.id);
-        }
     }
     ledger.updatedAt = Date.now();
     return normalizeActorLedger(ledger, { chatId: ledger.chatId });
@@ -2890,10 +2904,8 @@ function actorActionEligibilityInLedger(ledger, actorId) {
     if (!actor || !isActorId(id)) {
         return { ready: false, reason: 'actor_action.actor_missing', actor: null, actorRef: null };
     }
-    const registryEntry = (ledger.actorRegistry?.entries || []).find((entry) => (
-        entry?.state === 'registered'
-        && entry?.actorRef?.actorId === id
-    ));
+    const registryEntry = Object.values(ledger.actorRegistry?.registered || {})
+        .find((entry) => entry?.actorRef?.actorId === id);
     if (!registryEntry) {
         return { ready: false, reason: 'actor_action.not_registered', actor, actorRef: null };
     }
@@ -2961,7 +2973,7 @@ export function scheduleActorTurns(value, {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = normalizeActorLedger(value, { excludedActorNames });
     const currentTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
-    const limit = integer(maxActors, 0, 5, 2);
+    const limit = integer(maxActors, 0, 6, 2);
     const explorationLimit = Math.min(
         limit,
         integer(explorationSlots, 0, 2, 1),
@@ -3178,10 +3190,8 @@ export function mergeActorWorldEventsIntoContinuity(continuity, worldEvents) {
 
 function registeredActorRef(ledger, actor) {
     const actorId = cleanText(actor?.id, 120);
-    const entry = ledger?.actorRegistry?.entries?.find((candidate) => (
-        candidate?.state === 'registered'
-        && cleanText(candidate?.actorRef?.actorId, 120) === actorId
-    ));
+    const entry = Object.values(ledger?.actorRegistry?.registered || {})
+        .find((candidate) => cleanText(candidate?.actorRef?.actorId, 120) === actorId);
     if (!entry || cleanText(entry.actorRef?.displayName, 160) !== cleanText(actor?.name, 160)) {
         return null;
     }
@@ -4052,8 +4062,7 @@ export function actorLedgerView(value) {
         turn: ledger.turn,
         actorCount: ledger.actors.length,
         registryVersion: ledger.actorRegistry.version,
-        registeredActorCount: ledger.actorRegistry.entries
-            .filter((entry) => entry.state === 'registered').length,
+        registeredActorCount: Object.keys(ledger.actorRegistry.registered).length,
         activeCount: ledger.actors.filter((item) => item.status === 'active').length,
         dormantCount: ledger.actors.filter((item) => item.status === 'dormant').length,
         semanticProgressCount: ledger.actors.reduce(

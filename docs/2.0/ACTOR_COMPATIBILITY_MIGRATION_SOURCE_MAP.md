@@ -1,8 +1,8 @@
-# 阶段6：兼容迁移、旧路径停用与来源映射
+# 旧路径与迁移收敛：兼容升级、唯一所有者与来源映射
 
-适用版本：`2.0.0-rc.14`，聊天 namespace `v13`，人物主权迁移 `v3`
+适用版本：`2.0.0-rc.14`，聊天 namespace `v13`，人物主权迁移 `v4`
 
-状态：阶段6实现说明；不构成真实模型、真实数据库、SillyTavern/Tauri 或正式发布证据。
+状态：当前“旧路径与迁移收敛”实现说明；不构成真实模型、真实数据库、SillyTavern/Tauri 或正式发布证据。历史 `phase6Runtime`、`legacy-narrative-barrier`、阶段6交接和旧 QC 名称仅为兼容旧名，不是本阶段编号。
 
 ## 1. 唯一生产边界
 
@@ -19,9 +19,17 @@
 
 `readChatNamespace()` 只是兼容读取边界。它可以返回 `migrated_pending_persist` 候选供界面查看，但不得把内存规范化当成迁移提交，也不得据此消费旧任务。
 
+当前生产所有权已经收敛为：
+
+- `migrateActorLedgerFromContinuity()` 的模块 export 仍供测试/兼容调用，但生产调用点只有 `compatibility-migration-core.mjs` 一处；`index.js/runContinuityTarget()` 为零调用。普通已接受 continuity 不能登记、补写或提升人物身份。
+- 只有 raw pre-Registry 证据（旧 ledger、缺失/非当前 Registry、未完成旧迁移）允许一次性从历史 continuity 重建 Registry。已有当前 Registry 时，即使 `continuityV5=false`，未登记 ledger actor 和 continuity 姓名也不得提升；原已登记 ActorRef 保留。
+- adapter 的 `migrationTimestamp` 只由 raw ledger/Registry/continuity 持久时间导出，不读取墙钟。`continuityV5=true` 在函数最前端纯 normalize/no-op；相同输入和 marker 失败重试的 actorLedger、payload digest、replayKey 不漂移。
+- `mergeActorProfilePatches()` 保留导出签名但已退役为 fail-closed 兼容壳：处理上限内逐项返回 `actor_profile.legacy_patch_retired`，溢出返回显式 count/total，`accepted=[]`，不改 profile、receipt、actor version 或 ledger 时间。P1 `ProfileInsertCandidate -> 本地修复 -> 原子保存/读回` 是唯一正式 profile 写入口。
+- 旧正则世界压力分类器已删除；当前唯一所有者为 `classifyWorldPressureCandidate()`。
+
 ## 2. 迁移与停用矩阵
 
-| 旧数据/入口 | 历史如何保留 | 新运行资格 | 阶段6处理 |
+| 旧数据/入口 | 历史如何保留 | 新运行资格 | 当前处理 |
 | --- | --- | --- | --- |
 | 无完整 chat/card/worldbook/runtime scope 的 namespace | 原对象进入 scope archive；已提交历史仍可读 | 无 | 活跃 task 全部 `migrationQuarantined`；checkpoint `compatibilityOnly/restorable=false` |
 | 有完整、逐项相等 scope 且 task/checkpoint 自带相同 `scopeDigest` | 原位规范化并内容寻址读回 | 可恢复 | 仅在两阶段迁移提交和 marker 读回成功后开放 |
@@ -33,6 +41,9 @@
 | 规范化无法接纳的 actor/task/checkpoint/blob/receipt/未知字段 | 原始片段逐字段存入内容寻址 compatibility archive | 无 | archive 全局 `actionReady=false/settlementEligible=false/restorable=false`，重复迁移按条目摘要去重 |
 | 迁移期间已接受正文 | 独立 Observation WAL（内存 + 可用的最小宿主持久层） | 仅 observation-only | 迁移成功后按 sourceKey 幂等补入；绝不补造人物或世界行动 |
 | Continuity 根级 `actorProfiles` | ProfileInsertCandidate 解析器的外层包装兼容另行保留 | Continuity 无档案写权 | 从正常/修复提示、根模板和生产 ignore 分支移除；解析时显式拒绝 |
+| 旧 continuity -> actor ledger | pre-Registry 数据一次性迁移；当前 Registry 下未登记 actor 原样进入只读 archive | 只有原已登记 ActorRef 可继续 | v4 adapter 仅由 compatibility core 生产调用；普通回合零调用；确定性时间、幂等 replay |
+| `mergeActorProfilePatches` | API 仍可调用并完整返回拒绝核账 | 无写资格 | 上限内逐项 retired，溢出显式 overflow；零 profile/receipt/ledger semantic write |
+| `actorRegistry.entries`、V6 名称、V1/V2/V3 ticket | 兼容读取和公共 API 名保留 | 不自动行动/重掷 | 只读投影；不写回旧结构、不伪造 readback/receipt |
 
 ## 3. 作用域与内容证据
 
@@ -41,6 +52,7 @@
 - 世界书优先宿主明确 revision/version。缺 revision 时，对已加载 entry 的完整可序列化语义做稳定 JSON 摘要；包括匹配概率、选择逻辑、组、深度、role、sticky、cooldown、delay、大小写/全词匹配、vectorized 以及未来宿主字段。
 - entry 顺序、对象键顺序和关键词集合顺序不改变摘要；同 ID 内容或语义变化、集合成员增删会改变 manifest。
 - 外部书内容不可读且没有完全同 ID 集合的最后确认 manifest 时，scope 为 `unresolved`，人物/行动/世界任务保持 blocked。
+- 显式 mismatch 时，`migrateActorSovereigntyNamespace()` 返回 `migration.scope_mismatch` 和空 namespace。生产 `readChatNamespace()` 随后由 `archivedActorSovereigntyScope()` 把旧 actor/profile/checkpoint/continuity/world/runtime/task 完整放入 `compatibilityScopeArchives`，再从 `emptyChatNamespace()` 建立新活动 scope。archive 可读但不进入 active ledger/runtime，也不能 action、settle、claim 或 restore；相同 digest 不重复归档。
 
 ## 4. Observation WAL 与收敛证明
 
@@ -78,7 +90,7 @@ Observation gap 只有收到 `current_chat_observation_convergence` proof 才能
 
 ## 6. World 风声衰减的独立重写
 
-阶段1审计发现旧四组参数及 `base + linear*n + quadratic*n² - strength*10` 与未发现许可证的 World 参考实现重合。阶段6没有复制或微调该实现，而是独立改为本项目的分段耐久模型：
+历史阶段1审计发现旧四组参数及 `base + linear*n + quadratic*n² - strength*10` 与未发现许可证的 World 参考实现重合；后续历史实现已经独立改为本项目的分段耐久模型。本次“旧路径与迁移收敛”不再修改该所有者：
 
 - 每类风声有自己的静默保护期；
 - strength 提供有限的“可承受沉寂回合”缓冲；
@@ -93,22 +105,19 @@ Observation gap 只有收到 `current_chat_observation_convergence` proof 才能
 | --- | --- |
 | 原样复用 | 阶段1—5已落地的 ActorRef/Registry、ProfileInsertCandidate 原子事务、strict action target、顶层 actionAttempts journal、world adjudication 分权、现有 namespace 写队列和内容读回能力 |
 | 最小适配 | 现有 runtime task/checkpoint 增加 scopeDigest、compatibility/restorable 标记；现有聊天/卡/世界书宿主读取只负责生成纯核心 manifest 输入；现有 namespace 写队列外包统一 migration guard；现有健康投影增加 migration/gap 红色诊断 |
-| 本阶段新写 | 迁移 v3 两阶段证据、scope manifest、坏状态隔离和原始片段 archive、Observation WAL、严格当前聊天 convergence proof、字段 revision/digest 并发守卫、只裁剪终结历史的容量策略、独立风声分段耐久模型 |
+| 本阶段新写 | 迁移 v4 的确定性 timestamp/replay、pre-Registry 身份边界、退役 profile API 的完整拒绝核账，以及唯一所有者静态/行为回归 |
 
 阶段4/5文档已记录糖糖公司、Izumi、PrismFox、caikis、World 和 Story Oracle 的实际读取与许可证边界。本阶段没有复制其源码或提示词；兼容层仅围绕本项目既有公开接口独立实现。
 
 ## 8. 验证边界
 
-阶段6测试覆盖迁移幂等、断电/写失败/读回不一致、旧版本和缺字段、跨聊天/卡/世界书/runtime scope、迟到和多人物恢复、容量、严格 observation proof、worldbook 真实内容摘要、Continuity 旧宏拒绝、风声确定性衰减，以及生产浏览器接线。
+“旧路径与迁移收敛”的受控测试覆盖：相同 raw 输入及 marker 失败重试的确定性、pre-Registry 身份重建边界、已有当前 Registry 的未登记 ledger/continuity actor 不得提升、V1/V2/V3 票据和旧 V6/V7/ledger/receipt/history 的兼容可读、fail-closed profile 旧 API 及 overflow 核账、scope mismatch 归档链、刷新/重启与 swipe/regenerate 精确目标隔离，以及 P0–P5 唯一所有者矩阵。
 
-2026-08-10 当前源码的本地受控结果：
+2026-08-11 当前源码的本地受控结果：
 
-- 阶段6定向（迁移/runtime/root invariant/frontend/QC/continuity）：72/72；
-- 阶段2—5人物档案、Registry、Ledger、Shard、票据和世界裁决核心：125/125；
-- 全部非浏览器测试：59 个文件，429/429；
-- 纯本地 headless 浏览器完整链：1/1，185.36 秒；
-- 关键模块 `node --check`：13/13；仓库可见 JSON 用 Node 实际解析：93/93；`git diff --check` 通过。
+- 本阶段定向（Ledger adapter、Registry、迁移 core、root ownership/static scope）：4 个文件，92/92；
+- P0–P5 关键矩阵（0/1/3/6/8 人物、耗尽仍完整建档、同票绑定、ActionAttempt 先持久化后世界裁决、P3 单次世界批、MVU/数据库独立）：11 个文件，136/136；
+- 排除 `browser-runtime.test.mjs` 与 `v2-surface-browser.test.mjs` 的非浏览器测试：62 个文件，506/506；相对 P5 的 501 条，新增用例逐文件为：`actor-ledger-core.test.mjs` 1 条 overflow 核账、`actor-registry-state-machine.test.mjs` 1 条当前 Registry 阻断、`compatibility-migration-stage6.test.mjs` 3 条确定性/pre-Registry/marker 重试；已有 root invariant 所有权用例扩展了墙钟和 scope 归档静态断言，不另增测试计数；
+- 本阶段改动的三个运行模块 `node --check`：3/3；仓库可见 JSON 实际解析：95/95；`git diff --check` 通过（仅报告既有 `.d.mts` LF→CRLF 工作区警告，未改写文件）。
 
-旧 `qc-evidence-integrity` 的源码变量名/正则形状断言已替换成 panel、floating orb、diagnostics、public API 共用语义投影的行为取证，本轮完整非浏览器回归为零失败。
-
-本阶段不运行真实外部模型、真实数据库、真实 SillyTavern/Tauri、构建、CI 或正式发布门；这些属于阶段7及正式发布流程。
+本阶段没有运行浏览器、真实外部模型、真实数据库、SillyTavern/Tauri、构建、CI、QC 生成/覆盖或正式发布门；本节只证明本地受控行为，不构成正式发布证据。

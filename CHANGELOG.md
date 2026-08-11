@@ -1,6 +1,11 @@
 # 更新日志
 
 ## 2.0.0-rc.14（2026-08-08）
+- **2026-08-11 测试通道同步**：原样同步已验收的 P0–P5 与“旧路径与迁移收敛”实现；P1 改为一回合多人完整档案单批生成，P2/P3 保持世界链与 MVU/数据库独立并收敛为单次世界批，P4 改为 ActionAttempt 单批提案且先持久化后裁决。
+- **人物票据升级为 V3**：保留 20 个独立轴；`coreDesire/relationshipDistance` 直接使用糖糖公司成熟池，`socialMethod/decisionMethod` 直接使用当前预设选项，其余 16 轴保留项目既有池。0/1/3/6/更多人物、权威人物保护、同票绑定和票池耗尽均有本地回归。
+- **旧入口收敛但历史不丢失**：普通 continuity 到 Registry 的生产写入口归零，旧 `mergeActorProfilePatches` 仅作有界零写拒绝壳；迁移 v4 确定性重试，只允许 pre-Registry 旧数据一次重建，当前 Registry、scope archive、checkpoint、receipt 与未知历史字段继续保留。
+- **新增可单独导入的 P5 候选预设**：`dist/01_主预设_人物万花筒_P5同票塑形候选版.json` 及 audit 随测试仓库交付；只修改既有人物万花筒 prompt，不自动覆盖用户当前预设。
+- **本轮只完成快速受控验证**：交付 JSON 3/3、同步运行模块语法 8/8、P0–P5 关键矩阵 144/144、迁移与唯一所有者矩阵 92/92；未运行浏览器、真实模型、真实数据库、SillyTavern/Tauri、构建、CI、QC 或正式发布门禁。
 - **七阶段人物主权重构测试候选**：人物链收敛为生成前 `characterCreationTicket` → 已接受正文 → ActorCandidate → 聊天隔离 ActorRegistry/ActorRef → 完整 ProfileInsertCandidate → 原子保存与内容读回 → ActionAttempt → WorldAdjudicationResult。数据库、MVU、预设、缝合怪、医生与世界裁决继续各自独立。
 - **完整档案才算生成成功**：新档案必须一次提交完整自然中文基线，并通过 schema、ActorRef、commitId、digest 与宿主持久层内容读回；旧 `legacy_persisted` 只读兼容，不能伪装新事务或行动就绪。人工锁、确认来源、历史版本和多人物独立提交继续保留。
 - **人物尝试与世界结果彻底分权**：人物只能提交带知识、资源、能力、时间、成本、风险与可观察后果的尝试；顶层 `actionAttempts` 是唯一权威日志，世界逐项裁决后才允许落账。缺项、重复、迟到、错误 generation/branch 或玩家自主权越界全部保持待裁决且零状态写入。

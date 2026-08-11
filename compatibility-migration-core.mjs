@@ -4,7 +4,7 @@ import {
 } from './actor-authority-core.mjs';
 import {
     emptyActorLedger,
-    normalizeActorLedger,
+    migrateActorLedgerFromContinuity,
 } from './actor-ledger-core.mjs';
 import {
     actorProfileActionReadiness,
@@ -21,8 +21,8 @@ import {
 } from './sovereignty-runtime-core.mjs';
 
 export const ACTOR_SOVEREIGNTY_SCOPE_VERSION = 1;
-export const ACTOR_SOVEREIGNTY_MIGRATION_VERSION = 3;
-export const ACTOR_SOVEREIGNTY_RETIRED_WRITE_PATHS_VERSION = 1;
+export const ACTOR_SOVEREIGNTY_MIGRATION_VERSION = 4;
+export const ACTOR_SOVEREIGNTY_RETIRED_WRITE_PATHS_VERSION = 2;
 export const ACTOR_SOVEREIGNTY_NAMESPACE_WRITE_PATH = 'chat_namespace.actor_sovereignty_v13';
 
 export const RETIRED_ACTOR_WRITE_PATHS = Object.freeze([
@@ -30,6 +30,9 @@ export const RETIRED_ACTOR_WRITE_PATHS = Object.freeze([
     'actionReceipts.actionAttempt',
     'settlement.candidate_reconstruction',
     'continuity.name_projection_registration',
+    'continuity.actor_ledger_enrichment',
+    'actorLedger.mergeActorProfilePatches',
+    'worldPressure.legacy_classifier',
     'legacy.targetIndex_action_target',
 ]);
 
@@ -42,6 +45,32 @@ function clone(value) {
 
 function cleanText(value, limit = 300) {
     return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, limit);
+}
+
+function persistedTimestamp(value) {
+    const number = Number(value);
+    return Number.isInteger(number) && number >= 0
+        ? Math.min(number, Number.MAX_SAFE_INTEGER)
+        : 0;
+}
+
+function plainRecord(value) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function rawActorRegistryIsCurrent(value) {
+    return plainRecord(value)
+        && Number(value.version) >= 1
+        && plainRecord(value.characters)
+        && plainRecord(value.registered);
+}
+
+function rawLedgerHasPreRegistryEvidence(value) {
+    const registryCurrent = rawActorRegistryIsCurrent(value?.actorRegistry);
+    if (registryCurrent) return false;
+    return Number(value?.version) < 8
+        || !plainRecord(value?.actorRegistry)
+        || value?.migrations?.actorRegistryV1 !== true;
 }
 
 function cleanList(value, limit = 32, itemLimit = 300) {
@@ -594,11 +623,20 @@ function buildCompatibilityArchive(
         identityOf: (entry) => entry?.id || contentAddressedJsonRef(entry ?? null),
     }));
     items.push(...collectArrayCompatibilityLosses({
-        raw: rawLedger?.actorRegistry?.entries,
-        normalized: actorLedger?.actorRegistry?.entries,
-        path: 'actorLedger.actorRegistry.entries',
+        raw: rawLedger?.actorRegistry?.registered
+            ? Object.values(rawLedger.actorRegistry.registered)
+            : rawLedger?.actorRegistry?.entries,
+        normalized: Object.values(actorLedger?.actorRegistry?.registered || {}),
+        path: 'actorLedger.actorRegistry.registered',
         kind: 'actor_registry_quarantine',
         identityOf: (entry) => entry?.actorRef?.actorId || entry?.actorId,
+    }));
+    items.push(...collectArrayCompatibilityLosses({
+        raw: Object.values(rawLedger?.actorRegistry?.characters || {}),
+        normalized: Object.values(actorLedger?.actorRegistry?.characters || {}),
+        path: 'actorLedger.actorRegistry.characters',
+        kind: 'actor_registry_candidate_quarantine',
+        identityOf: (entry) => entry?.candidateId || entry?.actorRef?.actorId,
     }));
     items.push(...collectArrayCompatibilityLosses({
         raw: rawRuntime?.backlog,
@@ -939,6 +977,10 @@ export function migrateActorSovereigntyNamespace(value, {
     const rawLedger = source.actorLedger && typeof source.actorLedger === 'object'
         ? source.actorLedger
         : emptyActorLedger(expectedScope.chatId);
+    const rawContinuity = source.continuity && typeof source.continuity === 'object'
+        && !Array.isArray(source.continuity)
+        ? source.continuity
+        : { chatId: expectedScope.chatId, turn: 0, threads: [], updatedAt: 0 };
     const rawRuntime = source.sovereigntyRuntime && typeof source.sovereigntyRuntime === 'object'
         ? source.sovereigntyRuntime
         : emptySovereigntyRuntime(expectedScope.chatId);
@@ -954,7 +996,23 @@ export function migrateActorSovereigntyNamespace(value, {
             : {},
     ).filter(([key, raw]) => checkpointBlobInvalid(raw, key)).length;
 
-    const actorLedger = normalizeActorLedger(rawLedger, { chatId: expectedScope.chatId });
+    // Migration payloads must be content-addressed and replayable. Derive the
+    // timestamp only from persisted input; a failed payload or marker readback
+    // therefore produces the exact same actor ledger and digest on retry.
+    const stableMigrationTimestamp = Math.max(
+        persistedTimestamp(rawLedger.updatedAt),
+        persistedTimestamp(rawLedger.actorRegistry?.updatedAt),
+        persistedTimestamp(rawContinuity.updatedAt),
+    );
+    const preRegistryEvidence = rawLedgerHasPreRegistryEvidence(rawLedger);
+    const actorLedger = migrateActorLedgerFromContinuity(rawLedger, rawContinuity, {
+        migrationTimestamp: stableMigrationTimestamp,
+        // Existing current Registry rows always win, even when an old marker
+        // is missing. Only raw pre-Registry evidence may reconstruct identity
+        // once from historical continuity.
+        allowLegacyRegistration: preRegistryEvidence,
+        currentRegistryAuthoritative: !preRegistryEvidence,
+    });
     let quarantinedAttemptCount = 0;
     actorLedger.actionAttempts = actorLedger.actionAttempts.map((attempt) => {
         const strictTarget = strictTargetForScope(attempt.target, expectedScope);
@@ -1116,8 +1174,22 @@ export function migrateActorSovereigntyNamespace(value, {
         ['profile', 'physiology'].includes(task.module)
         && !['committed', 'cancelled_stale'].includes(task.status)
     )).length;
-    const sourceDigest = contentAddressedJsonRef(migrationProjection(source, expectedScope));
     const contentDigest = actorSovereigntyMigrationDigest(namespace, expectedScope);
+    const previousReport = source.actorSovereigntyMigration;
+    const samePendingPayload = previousReport?.version === ACTOR_SOVEREIGNTY_MIGRATION_VERSION
+        && previousReport?.scopeDigest === expectedScopeDigest
+        && previousReport?.migratedPayloadDigest === contentDigest
+        && cleanText(previousReport?.replayKey, 180);
+    const sourceDigest = samePendingPayload
+        ? cleanText(previousReport?.sourceDigest, 180)
+        : contentAddressedJsonRef(migrationProjection(source, expectedScope));
+    const replayKey = samePendingPayload
+        ? cleanText(previousReport.replayKey, 180)
+        : contentAddressedJsonRef({
+            migrationVersion: ACTOR_SOVEREIGNTY_MIGRATION_VERSION,
+            sourceDigest,
+            scopeDigest: expectedScopeDigest,
+        });
     const sourceCurrent = actorSovereigntyMigrationIsCurrent(source, expectedScope);
     const writeRequired = Number(source.version) < Number(namespace.version)
         || !sourceScopeProven
@@ -1130,11 +1202,7 @@ export function migrateActorSovereigntyNamespace(value, {
         scopeDigest: expectedScopeDigest,
         sourceDigest,
         migratedPayloadDigest: contentDigest,
-        replayKey: contentAddressedJsonRef({
-            migrationVersion: ACTOR_SOVEREIGNTY_MIGRATION_VERSION,
-            sourceDigest,
-            scopeDigest: expectedScopeDigest,
-        }),
+        replayKey,
         readbackVerified: false,
         payloadReadbackVerified: false,
         markerReadbackVerified: false,

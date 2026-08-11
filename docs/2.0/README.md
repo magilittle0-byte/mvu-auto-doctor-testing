@@ -4,17 +4,18 @@
 
 适用范围：2.0 产品、数据协议、事务协议、真实故障回放与阶段交接
 
-本次参考架构重构状态：`阶段1—6已实施并完成本地受控验证／阶段7尚未实施`
+历史参考架构状态：`阶段1—6文档与旧证据保留／阶段7尚未实施`；当前维护阶段名称：`旧路径与迁移收敛`（不重新编号为阶段6）。
 
-最后更新：2026-08-10
+最后更新：2026-08-11
 
 本目录是 2.0 实施的权威入口。阶段0冻结产品边界、协议、不变量、回放基线与交接规则；阶段1至6依次实现领域、事务、导演、领域事务、双入口和持久运行时。阶段7新增 `v2/release/` 的1.x升级/回滚演练、性能/容量/隐私、安全/恢复硬化门。阶段8—9提供 Actor Shard 领域核和宿主接线；rc.4 新增持久 Actor Ledger，rc.5 加入稳定身份揭示/异变谱系、生命周期、实际观察回写、人物/势力/环境三通道和共享压力/注入预算；rc.6 增加独立偶发许可证与防刷，并移除全部本地计费估算和金额门；rc.7 把人物账本升至 v3，增加证据化人物 DNA、反脸谱语义路由和独立“人物万花筒”预设，并让严格/轻量独立 API 通道分别使用可调 1—8 并发池（默认2/4）。rc.8 将账本升至 v4，引入动态人格证据和群像覆盖规则。rc.9 将账本升至 v5并增加语义状态事实和多连接接管；rc.10 引入双游标、不死任务、人物档案 V6 与人物/世界分权；rc.11 补齐人物档案可见界面与一次结构修复；rc.12 取消医生对后台模型的固定倒计时，以用户主动取消和最新状态重排替代静默超时；rc.13 统一后台调度时钟，并以最新状态覆盖收敛替代逐条重演旧积压；rc.14 引入 typed ActorRef、真实档案覆盖、逐人物持久任务、模型世界裁决、内容寻址检查点、注入正文回执、解析感知槽位健康与真实三轮生产链门禁。每一版真实模型、数据库与宿主结论只引用本版独立报告，不沿用旧版本成功记录。
 
 ## 本轮参考架构来源映射
 
+- [`ACTOR_IDENTITY_REGISTRY_SOURCE_MAP.md`](ACTOR_IDENTITY_REGISTRY_SOURCE_MAP.md)：P0 身份 candidate/registered 双表、明确分隔符别名、accepted narrative 晋升触发与本地 Gate 的 A/T/X 来源映射。
 - [`CHARACTER_CREATION_TICKET_SOURCE_MAP.md`](CHARACTER_CREATION_TICKET_SOURCE_MAP.md)：阶段4生成前人物票据、权威来源占轴和同票绑定的实际来源映射。
 - [`ACTOR_ACTION_WORLD_ADJUDICATION_SOURCE_MAP.md`](ACTOR_ACTION_WORLD_ADJUDICATION_SOURCE_MAP.md)：阶段5人物行动就绪、尝试先持久化、世界裁决和双轨独立性的实际来源映射。
-- [`ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md`](ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md)：阶段6作用域迁移、坏状态隔离、Observation WAL、全部局部写入口的统一迁移守卫、旧入口停用和独立风声衰减实现的实际来源映射。
+- [`ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md`](ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md)：“旧路径与迁移收敛”的 v4 确定性兼容升级、pre-Registry 身份边界、作用域隔离、旧入口停用与来源映射；历史 `phase6Runtime`/阶段6文件名只作兼容旧名。
 
 ## 权威文件
 

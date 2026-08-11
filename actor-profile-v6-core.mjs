@@ -36,6 +36,29 @@ export const ACTOR_PROFILE_MODULES = Object.freeze([
     'actionHistory',
     'physiology',
 ]);
+export const CHARACTER_CREATION_TICKET_VERSION = 3;
+export const CHARACTER_CREATION_TICKET_AXIS_NAMES = Object.freeze([
+    'valuePriority',
+    'temperament',
+    'coreDesire',
+    'thinkingStyle',
+    'socialMotive',
+    'socialMethod',
+    'interestOrientation',
+    'decisionMethod',
+    'conflictStyle',
+    'moralBoundary',
+    'speechRhythm',
+    'actionHabit',
+    'humorMethod',
+    'authorityAttitude',
+    'relationshipDistance',
+    'ordinaryFriction',
+    'selfDeception',
+    'pressureAndRecovery',
+    'everydayTexture',
+    'independentLifeFocus',
+]);
 const PHYSIOLOGY_CONTENT_FIELDS = Object.freeze([
     'facialAppearance',
     'oralCavity',
@@ -97,6 +120,20 @@ function meaningfulProfileText(value, limit = 500) {
 
 function meaningfulProfileList(value, limit = 16, itemLimit = 300) {
     return cleanList(value, limit, itemLimit).filter((item) => meaningfulProfileText(item, itemLimit));
+}
+
+function meaningfulProfileEntries(value, limit = 24) {
+    if (!Array.isArray(value)) return [];
+    return value.filter((entry) => {
+        if (typeof entry === 'string') return Boolean(meaningfulProfileText(entry, 1000));
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+        const leaves = Object.values(entry).flatMap((item) => (
+            Array.isArray(item) ? item : [item]
+        ));
+        return leaves.some((item) => (
+            typeof item === 'string' && Boolean(meaningfulProfileText(item, 1000))
+        ));
+    }).slice(0, limit);
 }
 
 function cleanList(value, limit = 16, itemLimit = 300) {
@@ -363,26 +400,6 @@ export function normalizeActorProfileV6(value, {
     return output;
 }
 
-const SOCIAL_SEEDS = [
-    '先确认彼此边界，再用小而可撤回的承诺建立信任',
-    '对熟人直接，对陌生人保留礼貌距离，冲突后倾向给出可执行方案',
-    '用观察与提问校准关系，不把一次情绪当成永久立场',
-    '愿意合作但重视对价，通常先处理现实问题再讨论感受',
-    '通过日常互助维持关系，遇到压力会缩短表达而不是自动敌对',
-    '习惯用轻微幽默缓冲尴尬，同时保留明确拒绝的能力',
-    '面对权威会核对规则与后果，对弱势者更关注实际可行的支持',
-    '关系靠持续行动而非口号推进，亲近与警惕可以同时存在',
-];
-const DECISION_SEEDS = [
-    '在时间、成本、关系后果与可逆性之间做现实权衡',
-    '先寻找最低风险的试探步骤，再根据反馈扩大或撤回投入',
-    '信息不足时保留多个解释，不把最坏可能直接当作事实',
-    '优先履行明确承诺，同时为意外保留替代路线',
-    '会区分紧急与重要，不因场面压力放弃长期目标',
-    '倾向把大目标拆成能留下回执的小步骤',
-    '先检查自身资源和权限，再决定请求协助或独立处理',
-    '允许暂时观望，但需要具体条件与下一检查窗口',
-];
 const SPEECH_SEEDS = [
     '表达具体，少用绝对化判断，会说明自己能做与不能做的部分',
     '句式自然克制，熟悉后会增加玩笑和省略，不用同一种腔调对所有人',
@@ -478,20 +495,6 @@ const AUTHORITY_SEEDS = [
     '看重资历与传承，却允许新人用结果推翻旧做法',
     '更相信共同制定的规则，对单方面例外非常敏感',
     '对权力关系务实，知道何时让步，也记得自己让出了什么',
-];
-const RELATIONSHIP_SEEDS = [
-    '先通过共同做一件小事判断可靠度，再决定是否谈私事',
-    '容易主动熟络，但真正的承诺会拖到观察很久以后',
-    '很少主动靠近，却会稳定记住别人随口提过的需要',
-    '用互相帮忙维持关系，不擅长长篇表达感情',
-    '亲近时仍保留独处和各自做决定的空间',
-    '对冲突对象也能合作，但会把合作范围说得很窄',
-    '信任被打破后先拉开距离，不急着报复或彻底断绝',
-    '面对比自己弱势的人容易照顾过头，需要提醒自己先询问',
-    '喜欢定期联系而非高强度黏在一起，久别不自动等于疏远',
-    '会用调侃试探亲近程度，发现对方不舒服就立即换方式',
-    '对朋友偏袒但不替朋友否认事实，忠诚与判断可以并存',
-    '把共享秘密看得很重，却不要求对方交代全部生活',
 ];
 const PRESSURE_RECOVERY_SEEDS = [
     ['压力上升时先缩短说话、检查出口和可控步骤', '确认退路与同伴状态后，通过整理手边物品恢复节奏'],
@@ -595,6 +598,45 @@ const SELF_DECEPTION_SEEDS = [
     '把持续忙碌当成可靠，容易低估疲惫已经怎样影响判断和脾气',
     '认为自己很容易改变主意，但面对亲手建立的方法时会要求过高的新证据',
 ];
+// P5 mature-source replacements. The values are copied from the approved
+// Sugar/current-preset tables without carrying type labels or a hidden shared
+// type draw. Every consuming axis still receives its own deterministic salt.
+const SUGAR_CORE_DESIRE_SEEDS = Object.freeze([
+    '完整正确 vs 缺陷败坏',
+    '被爱被需 vs 不被爱/无用',
+    '价值钦佩 vs 毫无价值/失败',
+    '独特真我 vs 平庸/有缺陷',
+    '能力全知 vs 无能/被压倒',
+    '安全支持 vs 缺乏指引/孤立',
+    '快乐满足 vs 痛苦/匮乏',
+    '掌控独立 vs 被控/受伤害',
+    '和谐宁静 vs 冲突/分离',
+]);
+const PRESET_SOCIAL_METHOD_SEEDS = Object.freeze([
+    '直说',
+    '绕开',
+    '交易',
+    '观察',
+    '玩笑',
+    '礼貌疏离',
+    '照顾细节',
+]);
+const PRESET_DECISION_METHOD_SEEDS = Object.freeze([
+    '先核价',
+    '凭经验',
+    '问人',
+    '试错',
+    '留退路',
+    '服从程序',
+    '看心情',
+]);
+const SUGAR_RELATIONSHIP_DISTANCE_SEEDS = Object.freeze([
+    '自信且乐于建立亲密关系，能有效沟通需求与感受，在独处与陪伴中取得平衡。',
+    '渴望高度亲密，但缺乏自信，常担心被伴侣抛弃，对关系状态高度敏感且寻求过度肯定。',
+    '高度独立，倾向于压抑情感，视亲密关系为对自主性的威胁，并回避情感依赖。',
+    '对亲密关系既渴望又恐惧，因害怕被拒绝或受伤害而回避亲密，行为模式常表现为矛盾与不稳定。',
+]);
+
 const PERSONAL_GOAL_SEEDS = [
     {
         longTerm: '保持生活秩序与可支配时间，不让外部事件吞掉全部日常',
@@ -851,31 +893,31 @@ export function issueCharacterCreationTicket(actor, {
         name: cleanText(actor?.name, 160),
     };
     const issuanceTarget = normalizeCharacterCreationTarget(target);
-    const salted = (axis) => `character-creation-ticket-v2|${cleanText(entropy, 240)}|${axis}`;
+    const salted = (axis) => `character-creation-ticket-v3|${cleanText(entropy, 240)}|${axis}`;
     const axes = {
         valuePriority: diceEntry(roller, salted('value'), VALUE_SEEDS),
         temperament: diceEntry(roller, salted('temperament'), TEMPERAMENT_SEEDS),
-        coreDesire: diceEntry(
-            roller,
-            salted('core-desire'),
-            PERSONAL_GOAL_SEEDS.map((item) => item.longTerm),
-        ),
+        coreDesire: diceEntry(roller, salted('core-desire'), SUGAR_CORE_DESIRE_SEEDS),
         thinkingStyle: diceEntry(roller, salted('thinking-style'), THINKING_STYLE_SEEDS),
         socialMotive: diceEntry(roller, salted('social-motive'), SOCIAL_MOTIVE_SEEDS),
-        socialMethod: diceEntry(roller, salted('social'), SOCIAL_SEEDS),
+        socialMethod: diceEntry(roller, salted('social'), PRESET_SOCIAL_METHOD_SEEDS),
         interestOrientation: diceEntry(
             roller,
             salted('interest-orientation'),
             INTEREST_ORIENTATION_SEEDS,
         ),
-        decisionMethod: diceEntry(roller, salted('decision'), DECISION_SEEDS),
+        decisionMethod: diceEntry(roller, salted('decision'), PRESET_DECISION_METHOD_SEEDS),
         conflictStyle: diceEntry(roller, salted('conflict-style'), CONFLICT_STYLE_SEEDS),
         moralBoundary: diceEntry(roller, salted('moral-boundary'), MORAL_BOUNDARY_SEEDS),
         speechRhythm: diceEntry(roller, salted('speech'), SPEECH_SEEDS),
         actionHabit: diceEntry(roller, salted('action-habit'), ACTION_HABIT_SEEDS),
         humorMethod: diceEntry(roller, salted('humor'), HUMOR_SEEDS),
         authorityAttitude: diceEntry(roller, salted('authority'), AUTHORITY_SEEDS),
-        relationshipDistance: diceEntry(roller, salted('relationship'), RELATIONSHIP_SEEDS),
+        relationshipDistance: diceEntry(
+            roller,
+            salted('relationship'),
+            SUGAR_RELATIONSHIP_DISTANCE_SEEDS,
+        ),
         ordinaryFriction: diceEntry(roller, salted('friction'), FRICTION_SEEDS),
         selfDeception: diceEntry(roller, salted('self-deception'), SELF_DECEPTION_SEEDS),
         pressureAndRecovery: diceEntry(
@@ -892,7 +934,7 @@ export function issueCharacterCreationTicket(actor, {
     };
     const seed = fingerprint(`${roller.id}|${roller.name}|${cleanText(entropy, 240)}`);
     return {
-        version: 2,
+        version: CHARACTER_CREATION_TICKET_VERSION,
         kind: 'character_creation_ticket',
         seed,
         ticketId: `NPC-DICE-${fingerprint(`${seed}|${JSON.stringify(axes)}`).split(':').at(-1)}`,
@@ -918,7 +960,7 @@ export function normalizeActorProfileDesignRolls(value) {
         ? value
         : null;
     const version = integer(source?.version);
-    if (!source || ![1, 2].includes(version) || !source.axes) return null;
+    if (!source || ![1, 2, 3].includes(version) || !source.axes) return null;
     const axes = Object.fromEntries(Object.entries(source.axes)
         .map(([axis, entry]) => [cleanText(axis, 80), {
             die: cleanText(entry?.die, 20),
@@ -926,7 +968,13 @@ export function normalizeActorProfileDesignRolls(value) {
             result: clone(entry?.result),
         }])
         .filter(([axis, entry]) => axis && entry.die && hasText(entry.result)));
-    if (Object.keys(axes).length < (version === 1 ? 8 : 13)) return null;
+    if (version === 3) {
+        const axisNames = Object.keys(axes);
+        if (
+            axisNames.length !== CHARACTER_CREATION_TICKET_AXIS_NAMES.length
+            || CHARACTER_CREATION_TICKET_AXIS_NAMES.some((axis) => !Object.hasOwn(axes, axis))
+        ) return null;
+    } else if (Object.keys(axes).length < (version === 1 ? 8 : 13)) return null;
     const base = {
         version,
         seed: cleanText(source.seed, 120),
@@ -971,7 +1019,7 @@ export function bindCharacterCreationTicket(ticket, {
     discardedAxes = [],
 } = {}) {
     const normalized = normalizeActorProfileDesignRolls(ticket);
-    if (normalized?.version !== 2 || normalized.binding) return null;
+    if (![2, 3].includes(normalized?.version) || normalized.binding) return null;
     const targetIdentity = normalizeCharacterCreationTarget(target);
     if (!targetIdentityMatches(normalized.issuance, targetIdentity, [
         'chatId',
@@ -1782,12 +1830,15 @@ export function bindCharacterCreationTicketsToRegisteredActors(value, {
     }
     const tickets = (Array.isArray(batch?.tickets) ? batch.tickets : [])
         .map(normalizeActorProfileDesignRolls)
-        .filter((ticket) => ticket?.version === 2 && !ticket.binding);
+        .filter((ticket) => [2, 3].includes(ticket?.version) && !ticket.binding);
+    const ticketPoolCapacity = integer(batch?.capacity, 1, 64, 32);
     const promoted = Array.isArray(registration?.promoted) ? registration.promoted : [];
     const candidateById = new Map((Array.isArray(candidates) ? candidates : [])
         .map((candidate) => [cleanText(candidate?.candidateId, 120), candidate]));
     const bindings = [];
     const skipped = [];
+    const eligibleActorRefs = [];
+    const exhaustedActorRefs = [];
     let ticketIndex = 0;
     for (const promotedActor of promoted) {
         const actorId = cleanText(promotedActor?.actorRef?.actorId, 120);
@@ -1813,9 +1864,11 @@ export function bindCharacterCreationTicketsToRegisteredActors(value, {
             skipped.push(`${actorId}:ticket_already_bound`);
             continue;
         }
+        eligibleActorRefs.push(clone(promotedActor.actorRef));
         const ticket = tickets[ticketIndex];
         if (!ticket) {
             skipped.push(`${actorId}:ticket_pool_exhausted`);
+            exhaustedActorRefs.push(clone(promotedActor.actorRef));
             continue;
         }
         const explicitDiscardedAxes = discardedAxesByActor instanceof Map
@@ -1845,7 +1898,22 @@ export function bindCharacterCreationTicketsToRegisteredActors(value, {
         });
         ticketIndex += 1;
     }
-    return { ledger, matched: true, bindings, skipped };
+    return {
+        ledger,
+        matched: true,
+        bindings,
+        skipped,
+        ticketPool: {
+            capacity: ticketPoolCapacity,
+            issued: tickets.length,
+            eligible: eligibleActorRefs.length,
+            consumed: ticketIndex,
+            remaining: Math.max(0, tickets.length - ticketIndex),
+            exhausted: exhaustedActorRefs.length > 0,
+            eligibleActorRefs,
+            exhaustedActorRefs,
+        },
+    };
 }
 
 function removeProjectedDesignedSeeds(actor) {
@@ -1947,8 +2015,11 @@ export function actorProfileReadyForAction(actor) {
 export function selectActorProfileCompletionCandidates(value, {
     maxActors = 8,
     turn: _turn = null,
+    priorityActorIds = [],
 } = {}) {
     const actors = Array.isArray(value?.actors) ? value.actors : [];
+    const priority = new Map(cleanList(priorityActorIds, 24, 120)
+        .map((actorId, index) => [actorId, index]));
     const incomplete = actors
         .filter((actor) => {
             if (!actorProfileReadyForAction(actor)) return true;
@@ -1960,6 +2031,13 @@ export function selectActorProfileCompletionCandidates(value, {
                 && calculateOptionalCoverage(profile) < 100;
         })
         .sort((left, right) => {
+            const leftPriority = priority.has(cleanText(left?.id, 120))
+                ? priority.get(cleanText(left?.id, 120))
+                : Number.MAX_SAFE_INTEGER;
+            const rightPriority = priority.has(cleanText(right?.id, 120))
+                ? priority.get(cleanText(right?.id, 120))
+                : Number.MAX_SAFE_INTEGER;
+            if (leftPriority !== rightPriority) return leftPriority - rightPriority;
             const leftProfile = normalizeActorProfileV6(left?.profileV6, {
                 actorId: left?.id,
                 name: left?.name,
@@ -2010,18 +2088,22 @@ function actorProfilePromptContext(candidate) {
         candidate?.fieldSources?.[`modules.${module}.data.${field}`],
         'hypothesis',
     );
-    const pick = (source, fields, module, selectedSource, relativePrefix = '') => Object.fromEntries(fields
-        .map((field) => [field, clone(source?.[field])])
-        .filter(([field, value]) => (
-            hasText(value)
-            && sourceFor(
-                module,
-                relativePrefix && field !== 'nextWindow'
-                    ? `${relativePrefix}.${field}`
-                    : field,
-            )
-                === selectedSource
-        )));
+    const pick = (source, fields, module, selectedSource, relativePrefix = '') => {
+        const selectedSources = new Set(Array.isArray(selectedSource)
+            ? selectedSource
+            : [selectedSource]);
+        return Object.fromEntries(fields
+            .map((field) => [field, clone(source?.[field])])
+            .filter(([field, value]) => (
+                hasText(value)
+                && selectedSources.has(sourceFor(
+                    module,
+                    relativePrefix && field !== 'nextWindow'
+                        ? `${relativePrefix}.${field}`
+                        : field,
+                ))
+            )));
+    };
     const identityFields = [
         'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
         'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
@@ -2032,26 +2114,54 @@ function actorProfilePromptContext(candidate) {
         'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
     ];
     const baselineGoals = candidate?.previousProfile?.modules?.goals?.data || {};
-    const goalsFor = (selectedSource) => ({
-        longTerm: sourceFor('goals', 'longTerm') === selectedSource
-            ? cleanList(baselineGoals.longTerm, 12, 400)
-            : [],
-        pursuitPrinciples: sourceFor('goals', 'current') === selectedSource
-            ? cleanList(baselineGoals.current, 8, 400)
-            : [],
-        strategy: {
-            ...pick(
-                baselineGoals.plan,
-                ['summary', 'steps'],
-                'goals',
-                selectedSource,
-                'plan',
-            ),
-            ...(sourceFor('goals', 'nextWindow') === selectedSource
-                ? { reviewConditions: cleanText(baselineGoals.nextWindow, 400) }
-                : {}),
-        },
-    });
+    const goalsFor = (selectedSource) => {
+        const selectedSources = new Set(Array.isArray(selectedSource)
+            ? selectedSource
+            : [selectedSource]);
+        return ({
+            longTerm: selectedSources.has(sourceFor('goals', 'longTerm'))
+                ? cleanList(baselineGoals.longTerm, 12, 400)
+                : [],
+            pursuitPrinciples: selectedSources.has(sourceFor('goals', 'current'))
+                ? cleanList(baselineGoals.current, 8, 400)
+                : [],
+            strategy: {
+                ...pick(
+                    baselineGoals.plan,
+                    ['summary', 'steps'],
+                    'goals',
+                    selectedSource,
+                    'plan',
+                ),
+                ...(selectedSources.has(sourceFor('goals', 'nextWindow'))
+                    ? { reviewConditions: cleanText(baselineGoals.nextWindow, 400) }
+                    : {}),
+            },
+        });
+    };
+    const baselineModule = (module) => clone(
+        candidate?.previousProfile?.modules?.[module]?.data || {},
+    );
+    const splitModule = (module, field, fallback) => {
+        const value = baselineModule(module)?.[field] ?? clone(fallback);
+        const source = sourceFor(module, field);
+        return {
+            confirmed: source === 'confirmed' ? clone(value) : undefined,
+            editable: source === 'confirmed' ? undefined : clone(value),
+        };
+    };
+    const relationships = splitModule('relationships', 'entries', candidate.relationships || []);
+    const knowledge = splitModule('knowledge', 'entries', candidate.knowledge || []);
+    const resources = splitModule(
+        'resourcesCapabilities',
+        'resources',
+        candidate.resources || [],
+    );
+    const capabilities = splitModule(
+        'resourcesCapabilities',
+        'capabilities',
+        candidate.capabilities || [],
+    );
     return {
         actorRef: clone(candidate.actorRef || {
             actorId: candidate.actorId,
@@ -2061,17 +2171,27 @@ function actorProfilePromptContext(candidate) {
             identity: pick(candidate.identity, identityFields, 'identity', 'confirmed'),
             personality: pick(candidate.identity, personalityFields, 'personality', 'confirmed'),
             goals: goalsFor('confirmed'),
-            relationships: clone(candidate.relationships || []),
-            knowledge: clone(candidate.knowledge || []),
+            relationships: relationships.confirmed || [],
+            knowledge: knowledge.confirmed || [],
             resourcesCapabilities: {
-                resources: clone(candidate.resources || []),
-                capabilities: cleanList(candidate.capabilities, 24, 160),
+                resources: resources.confirmed || [],
+                capabilities: capabilities.confirmed || [],
             },
         },
         editableDraft: {
-            identity: pick(candidate.identity, identityFields, 'identity', 'hypothesis'),
-            personality: pick(candidate.identity, personalityFields, 'personality', 'hypothesis'),
-            goals: goalsFor('hypothesis'),
+            identity: pick(candidate.identity, identityFields, 'identity', [
+                'hypothesis', 'designed_seed',
+            ]),
+            personality: pick(candidate.identity, personalityFields, 'personality', [
+                'hypothesis', 'designed_seed',
+            ]),
+            goals: goalsFor(['hypothesis', 'designed_seed']),
+            relationships: relationships.editable || [],
+            knowledge: knowledge.editable || [],
+            resourcesCapabilities: {
+                resources: resources.editable || [],
+                capabilities: capabilities.editable || [],
+            },
         },
         characterCreationTicket: normalizeActorProfileDesignRolls(candidate.designRolls),
     };
@@ -2081,10 +2201,10 @@ function actorProfileFieldGuide(candidate) {
     const groups = [
         'identity: role, species, gender, age, briefIntro, appearance, identityText, relationState, attitudeToProtagonist, pastExperience',
         'personality: biography, primaryColor, primaryDerivatives, primarySentence, baseColor, baseDerivatives, baseSentence, accentColor, accentDerivatives, accentSentence, othersVoices, authorVoice',
-        'relationships: entries, patterns, coverageState',
+        'relationships: entries[{actorId,name,summary,evidence}], patterns, coverageState；只有已给注册ActorRef时填写actorId，否则保留name与自然完整summary，不得猜ActorId',
         'goals: longTerm, pursuitPrinciples, strategy(summary, steps, reviewConditions)',
-        'knowledge: entries, unknownRemainsUnknown, coverageState',
-        'resourcesCapabilities: resources, capabilities, noUnconfirmedAbilityGranted, coverageState',
+        'knowledge: entries[{claim,kind,confidence,learnedTurn,sourceRef,propagation}], unknownRemainsUnknown, coverageState；创意补全使用kind=inferred且sourceRef=null',
+        'resourcesCapabilities: resources[{name,amount,unit,description,evidence}], capabilities, noUnconfirmedAbilityGranted, coverageState',
         'sources: 为各字段路径标记 confirmed / designed_seed / hypothesis；AI补空不得标 confirmed',
     ];
     if (modeOf(candidate?.completionMode) === 'full_adult') {
@@ -2112,7 +2232,7 @@ export function buildActorProfileCompletionMessages(candidates, {
         '履历用角色第一人称写遇到主角之前也成立的普通完整人生，把身份、外貌、经历和人际关系写成人话。不要自动发明秘密组织、系统底层身份、漫长受难、隐藏虐杀癖、人格崩坏或与主角的命定关系；只有确认锚点明确提供时才沿用。',
         '他者声部写4-7句有视角差、落到具体轶事的旁人议论，允许互相矛盾和看不懂。作者声部用第一人称陈列“越写越不确定”的困惑，不替角色下最终结论，控制在200字以内。',
         '【长期行动基线】只写人物长期目标、稳定追求原则和通常采用的策略；本轮当前目标、即时计划、下一行动窗口、地点、情绪、伤势和执行进度属于动态状态，不得写进这张基线表。',
-        'relationships、knowledge、resourcesCapabilities 必须整段返回。已确认条目逐项保留；没有确认条目时返回空数组并使用对应 no_confirmed_* coverageState。不得凭空授予关系、秘密知识、物品或能力。',
+        'relationships、knowledge、resourcesCapabilities 必须整段返回且各自至少有一项可用内容。已确认条目逐项保留；没有确认条目时，结合世界观、身份、生活常识和同一张characterCreationTicket补成可修订的日常关系模式、常识、普通资源与实际能力，并使用对应 no_confirmed_* coverageState，sources 标为 hypothesis 或 designed_seed。不得凭空授予秘密知识、稀有物品或超常能力。',
         ...(includesPhysiology ? [
             '【追踪身体基线】按相貌、口腔、发型、肩颈腋窝、身高体重、身材与特异性征、肌肤、气味、三围、胸部、腰腹、外阴、阴道、菊穴、臀部、腿部、足码脚型、足部、泌乳与特殊体液、敏感部位填写长期稳定的客观身体特征。只写物理白描，不写性格、态度、衣物、性经历或本轮临时状态；材料未写的项目自行创作补全，但不能与已有数据库事实冲突。',
         ] : []),
@@ -2120,19 +2240,20 @@ export function buildActorProfileCompletionMessages(candidates, {
         customPrompt
             ? `【用户自定义人物档案/破限提示】\n${customPrompt}\n【用户自定义提示结束】`
             : '',
-        '只返回一个完整 ProfileInsertCandidate JSON 对象，不返回数组、不解释。顶层必须含 actorRef、identity、personality、relationships、goals、knowledge、resourcesCapabilities、sources；full_adult 还必须含 physiology。JSON 只是传输格式，内容仍需自然完整。',
+        `只返回一个 JSON array，不加 envelope、不解释；数组必须恰好包含 ${selected.length} 个完整 ProfileInsertCandidate 对象，每个对象只用输入中给出的 actorRef.actorId 与 actorRef.name。不得按姓名、顺序或猜测改配 ActorRef。顶层必须含 actorRef、identity、personality、relationships、goals、knowledge、resourcesCapabilities、sources；full_adult 还必须含 physiology。JSON 只是传输格式，内容仍需自然完整。`,
         ...(cleanList(validationFeedback, 64, 240).length ? [
-            `上一张候选没有通过本地验证：${cleanList(validationFeedback, 64, 240).join('；')}。本次必须重新返回整张完整替换候选；不得只补缺列，也不得引用或合并上一张输出。`,
+            `上一批中的这些候选没有通过本地验证：${cleanList(validationFeedback, 64, 240).join('；')}。本次数组只返回这些缺失人物的整张完整替换候选；不得只补缺列，也不得引用或合并上一张输出。`,
         ] : []),
     ].filter(Boolean).join('\n\n');
-    const user = selected.map((candidate) => [
+    const actorRows = selected.map((candidate) => [
         `人物与数据库锚点：${JSON.stringify(actorProfilePromptContext(candidate))}`,
-        `参考材料：\n${[
-            ...cleanList(candidate.evidence, 16, 300),
-            cleanText(evidenceText, 42000),
-        ].filter(Boolean).join('\n')}`,
+        `该人物专属证据：\n${cleanList(candidate.evidence, 16, 300).join('\n') || '无额外专属片段；按共享材料与锚点补全。'}`,
         `完整候选字段：\n${actorProfileFieldGuide(candidate)}`,
     ].join('\n\n')).join('\n\n');
+    const user = [
+        `本批共享正文、世界观与高优先级锚点（只提供一次，适用于全部目标）：\n${cleanText(evidenceText, 42000)}`,
+        actorRows,
+    ].filter(Boolean).join('\n\n');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
@@ -2554,6 +2675,10 @@ function normalizeJsonLikeText(output, repairs) {
             return `${prefix}"${key}":`;
         },
     );
+    normalized = normalized.replace(/\}\s*\{/gu, (_match) => {
+        repairs.push('missing_object_comma_added');
+        return '},{';
+    });
     normalized = normalized.replace(/,\s*([}\]])/gu, (_match, close) => {
         repairs.push('trailing_comma_removed');
         return close;
@@ -2833,7 +2958,7 @@ function existingProfileCandidateFactLayers(previousProfile) {
     ];
     for (const [module, modulePath, candidatePath] of mappings) {
         const value = getPath(profile, ['modules', module, 'data', ...modulePath.split('.')]);
-        const meaningful = Array.isArray(value)
+        const meaningful = (Array.isArray(value) && value.length > 0)
             || value === true
             || (typeof value === 'string' && Boolean(meaningfulProfileText(value, 4000)))
             || (isRecord(value) && Object.keys(value).length > 0);
@@ -2930,7 +3055,9 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
             missing.push(`personality.${field}`);
         }
     }
-    if (!Array.isArray(value.relationships?.entries)) missing.push('relationships.entries');
+    if (!meaningfulProfileEntries(value.relationships?.entries).length) {
+        missing.push('relationships.entries');
+    }
     if (!meaningfulProfileList(value.relationships?.patterns, 12, 500).length) {
         missing.push('relationships.patterns');
     }
@@ -2952,17 +3079,19 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
     if (!meaningfulProfileText(value.goals?.strategy?.reviewConditions, 400)) {
         missing.push('goals.strategy.reviewConditions');
     }
-    if (!Array.isArray(value.knowledge?.entries)) missing.push('knowledge.entries');
+    if (!meaningfulProfileEntries(value.knowledge?.entries).length) {
+        missing.push('knowledge.entries');
+    }
     if (value.knowledge?.unknownRemainsUnknown !== true) {
         missing.push('knowledge.unknownRemainsUnknown');
     }
     if (!['confirmed_entries', 'no_confirmed_knowledge'].includes(
         value.knowledge?.coverageState,
     )) missing.push('knowledge.coverageState');
-    if (!Array.isArray(value.resourcesCapabilities?.resources)) {
+    if (!meaningfulProfileEntries(value.resourcesCapabilities?.resources).length) {
         missing.push('resourcesCapabilities.resources');
     }
-    if (!Array.isArray(value.resourcesCapabilities?.capabilities)) {
+    if (!meaningfulProfileList(value.resourcesCapabilities?.capabilities, 24, 240).length) {
         missing.push('resourcesCapabilities.capabilities');
     }
     if (value.resourcesCapabilities?.noUnconfirmedAbilityGranted !== true) {
@@ -2982,12 +3111,16 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
         ...INSERT_IDENTITY_FIELDS.map((field) => `identity.${field}`),
         ...INSERT_PERSONALITY_TEXT_FIELDS.map((field) => `personality.${field}`),
         ...Object.keys(INSERT_PERSONALITY_LIST_FIELDS).map((field) => `personality.${field}`),
+        'relationships.entries',
         'relationships.patterns',
         'goals.longTerm',
         'goals.pursuitPrinciples',
         'goals.strategy.summary',
         'goals.strategy.steps',
         'goals.strategy.reviewConditions',
+        'knowledge.entries',
+        'resourcesCapabilities.resources',
+        'resourcesCapabilities.capabilities',
         ...(modeOf(context?.completionMode) === 'full_adult'
             ? PHYSIOLOGY_CONTENT_FIELDS.map((field) => `physiology.${field}`)
             : []),
@@ -3049,6 +3182,298 @@ export function parseActorProfileCompletionOutput(output, options = {}) {
     return repairActorProfileInsertLocally(output, options.candidates?.[0] || options);
 }
 
+function balancedJsonSegments(text) {
+    const source = String(text || '')
+        .replace(/```(?:json|javascript|js)?/giu, '')
+        .replace(/```/gu, '')
+        .replace(/[“”]/gu, '"')
+        .replace(/[‘’]/gu, "'");
+    const segments = [];
+    let start = -1;
+    let quoted = false;
+    let escaped = false;
+    const stack = [];
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === '"') quoted = false;
+            continue;
+        }
+        if (char === '"') {
+            quoted = true;
+            continue;
+        }
+        if (char === '{' || char === '[') {
+            if (start < 0) start = index;
+            stack.push(char);
+            continue;
+        }
+        if ((char === '}' || char === ']') && start >= 0) {
+            const expected = char === '}' ? '{' : '[';
+            if (stack.at(-1) !== expected) {
+                start = -1;
+                stack.length = 0;
+                continue;
+            }
+            stack.pop();
+            if (!stack.length) {
+                segments.push(source.slice(start, index + 1));
+                start = -1;
+            }
+        }
+    }
+    if (start >= 0) segments.push(source.slice(start));
+    return segments;
+}
+
+// Faithful local translation of shujuku's splitTopLevelSegments_ACU row
+// salvage: split only at a delimiter outside strings and nested structures,
+// then sanitize/parse each row independently so a bad row cannot erase peers.
+function splitTopLevelProfileSegments(text, delimiter = ',') {
+    const segments = [];
+    let current = '';
+    let quoted = false;
+    let escaped = false;
+    let braceDepth = 0;
+    let bracketDepth = 0;
+    let parenDepth = 0;
+    for (const char of String(text || '')) {
+        if (escaped) {
+            current += char;
+            escaped = false;
+            continue;
+        }
+        if (char === '\\') {
+            current += char;
+            if (quoted) escaped = true;
+            continue;
+        }
+        if (char === '"') {
+            current += char;
+            quoted = !quoted;
+            continue;
+        }
+        if (!quoted) {
+            if (char === '{') braceDepth += 1;
+            else if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
+            else if (char === '[') bracketDepth += 1;
+            else if (char === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+            else if (char === '(') parenDepth += 1;
+            else if (char === ')') parenDepth = Math.max(0, parenDepth - 1);
+            else if (
+                char === delimiter
+                && braceDepth === 0
+                && bracketDepth === 0
+                && parenDepth === 0
+            ) {
+                if (current.trim()) segments.push(current.trim());
+                current = '';
+                continue;
+            }
+        }
+        current += char;
+    }
+    if (current.trim()) segments.push(current.trim());
+    return segments;
+}
+
+function salvageProfileArrayRows(output, repairs) {
+    const source = String(output || '')
+        .replace(/```(?:json|javascript|js)?/giu, '')
+        .replace(/```/gu, '')
+        .replace(/[“”]/gu, '"')
+        .replace(/[‘’]/gu, "'");
+    const open = source.indexOf('[');
+    if (open < 0) return [];
+    const trimmedEnd = source.trimEnd();
+    const close = trimmedEnd.endsWith(']') ? source.lastIndexOf(']') : -1;
+    const body = source.slice(open + 1, close > open ? close : source.length);
+    const rows = splitTopLevelProfileSegments(body, ',');
+    if (rows.length < 2) return [];
+    const objects = [];
+    for (const row of rows) {
+        const rowRepairs = [];
+        let parsed = null;
+        try {
+            parsed = JSON.parse(row);
+        } catch {
+            const normalized = normalizeJsonLikeText(row, rowRepairs);
+            try {
+                parsed = normalized ? JSON.parse(normalized) : null;
+            } catch {
+                parsed = null;
+            }
+        }
+        if (!isRecord(parsed)) continue;
+        objects.push(parsed);
+        repairs.push('array_row_salvaged', ...rowRepairs);
+    }
+    return objects;
+}
+
+function parseProfileObjectsLocally(output) {
+    const repairs = [];
+    const source = String(output || '').trim();
+    const parsedValues = [];
+    const addParsed = (value) => {
+        for (const object of profileObjectsFromParsed(value)) {
+            if (isRecord(object)) parsedValues.push(object);
+        }
+    };
+    try {
+        addParsed(JSON.parse(source));
+    } catch {
+        const repaired = normalizeJsonLikeText(source, repairs);
+        if (repaired) {
+            try {
+                addParsed(JSON.parse(repaired));
+            } catch {
+                // Continue with independent balanced values / JSONL so one bad
+                // row cannot erase otherwise usable rows.
+            }
+        }
+    }
+    if (!parsedValues.length) {
+        for (const segment of balancedJsonSegments(source)) {
+            try {
+                addParsed(JSON.parse(segment));
+                continue;
+            } catch {
+                const segmentRepairs = [];
+                const repaired = normalizeJsonLikeText(segment, segmentRepairs);
+                try {
+                    if (repaired) {
+                        addParsed(JSON.parse(repaired));
+                        repairs.push(...segmentRepairs);
+                    }
+                } catch {
+                    // This row stays absent; expected ActorRefs are reported as
+                    // missing below and may receive the one subset replacement.
+                }
+            }
+        }
+    }
+    if (!parsedValues.length) {
+        parsedValues.push(...salvageProfileArrayRows(source, repairs));
+    }
+    if (!parsedValues.length) {
+        const loose = parseLooseProfileTable(source);
+        if (isRecord(loose)) {
+            parsedValues.push(loose);
+            repairs.push('loose_profile_table_parsed');
+        }
+    }
+    return { objects: parsedValues, repairs: [...new Set(repairs)] };
+}
+
+export function parseActorProfileCompletionBatchOutput(output, options = {}) {
+    const suppliedCandidates = (Array.isArray(options.candidates) ? options.candidates : [])
+        .filter((candidate) => cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120));
+    const candidateCounts = new Map();
+    for (const candidate of suppliedCandidates) {
+        const actorId = cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120);
+        candidateCounts.set(actorId, (candidateCounts.get(actorId) || 0) + 1);
+    }
+    const duplicateInputIds = new Set([...candidateCounts]
+        .filter(([, count]) => count > 1)
+        .map(([actorId]) => actorId));
+    const candidates = suppliedCandidates.filter((candidate) => !duplicateInputIds.has(
+        cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120),
+    ));
+    const expectedById = new Map(candidates.map((candidate) => [
+        cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120),
+        candidate,
+    ]));
+    const parsed = parseProfileObjectsLocally(output);
+    const acceptedById = new Map();
+    const failureById = new Map();
+    const unexpected = [];
+    const seen = new Set();
+    for (const raw of parsed.objects) {
+        const normalized = normalizeProfileInsertCandidate(raw);
+        const actorId = cleanText(normalized?.actorRef?.actorId, 120);
+        if (!actorId) {
+            unexpected.push({ reason: 'actor_profile.actor_ref_missing' });
+            continue;
+        }
+        const context = expectedById.get(actorId);
+        if (!context) {
+            unexpected.push({ actorId, reason: 'actor_profile.actor_ref_unknown' });
+            continue;
+        }
+        if (seen.has(actorId)) {
+            acceptedById.delete(actorId);
+            failureById.set(actorId, {
+                actorId,
+                name: cleanText(context?.actorRef?.name || context?.name, 160),
+                reason: 'actor_profile.actor_ref_duplicate',
+                missingFields: [],
+                retryable: true,
+            });
+            continue;
+        }
+        seen.add(actorId);
+        const validation = validateActorProfileInsertCandidate(normalized, context);
+        if (!validation.ok) {
+            failureById.set(actorId, {
+                actorId,
+                name: cleanText(context?.actorRef?.name || context?.name, 160),
+                reason: validation.errorCode || 'actor_profile.schema_incomplete',
+                missingFields: validation.missingFields || [],
+                retryable: validation.errorCode !== 'actor_profile.actor_ref_mismatch',
+            });
+            continue;
+        }
+        acceptedById.set(actorId, {
+            actorId,
+            name: cleanText(context?.actorRef?.name || context?.name, 160),
+            candidate: validation.candidate,
+            repairs: parsed.repairs,
+            resolutions: validation.resolutions || [],
+        });
+    }
+    for (const [actorId, context] of expectedById) {
+        if (acceptedById.has(actorId) || failureById.has(actorId)) continue;
+        failureById.set(actorId, {
+            actorId,
+            name: cleanText(context?.actorRef?.name || context?.name, 160),
+            reason: 'actor_profile.missing_candidate',
+            missingFields: [],
+            retryable: true,
+        });
+    }
+    const entries = candidates
+        .map((candidate) => acceptedById.get(cleanText(
+            candidate?.actorRef?.actorId || candidate?.actorId,
+            120,
+        )))
+        .filter(Boolean);
+    const failures = candidates
+        .map((candidate) => failureById.get(cleanText(
+            candidate?.actorRef?.actorId || candidate?.actorId,
+            120,
+        )))
+        .filter(Boolean);
+    const inputFailures = [...duplicateInputIds].map((actorId) => ({
+        actorId,
+        name: cleanText(suppliedCandidates.find((candidate) => (
+            cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120) === actorId
+        ))?.actorRef?.name, 160),
+        reason: 'actor_profile.input_actor_ref_duplicate',
+        missingFields: [],
+        retryable: false,
+    }));
+    return {
+        ok: failures.length === 0 && inputFailures.length === 0 && unexpected.length === 0,
+        entries,
+        failures: [...inputFailures, ...failures],
+        unexpected,
+        repairs: parsed.repairs,
+    };
+}
+
 export function actorProfileCompletionMissingFields(candidate, context = {}) {
     return validateActorProfileInsertCandidate(candidate, context).missingFields;
 }
@@ -3068,6 +3493,115 @@ function candidateModuleSources(candidate, section, relativePaths) {
     };
 }
 
+function normalizeProfileProjectionSourceRef(value) {
+    if (!isRecord(value)) return null;
+    const chatId = cleanText(value.chatId, 180);
+    const messageId = cleanText(value.messageId, 180);
+    const hash = cleanText(value.hash, 100);
+    if (!chatId || !messageId || !hash) return null;
+    return {
+        chatId,
+        messageId,
+        index: integer(value.index),
+        swipeId: integer(value.swipeId),
+        generation: integer(value.generation),
+        generationId: cleanText(value.generationId, 180),
+        generationType: cleanText(value.generationType, 80),
+        branchId: cleanText(value.branchId, 180),
+        identityScopeId: cleanText(value.identityScopeId, 300),
+        hash,
+    };
+}
+
+function canonicalProfileRelationshipEntries(value) {
+    if (!Array.isArray(value)) return [];
+    const output = [];
+    const seen = new Set();
+    for (const raw of value) {
+        const entry = typeof raw === 'string' ? { summary: raw, name: '关系背景' } : raw;
+        if (!isRecord(entry)) continue;
+        const actorId = cleanText(entry.actorId || entry.actor_id, 120);
+        const name = cleanText(
+            entry.name || entry.counterparty || entry.targetName || entry.relation,
+            160,
+        );
+        const summary = meaningfulProfileText(
+            entry.summary || entry.detail || entry.relation,
+            500,
+        );
+        if ((!actorId && !name) || !summary) continue;
+        const key = `${actorId}|${name}|${summary}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        output.push({
+            actorId,
+            name,
+            summary,
+            evidence: cleanList(entry.evidence, 6, 240),
+        });
+        if (output.length >= 24) break;
+    }
+    return output;
+}
+
+function canonicalProfileKnowledgeEntries(value, turn) {
+    if (!Array.isArray(value)) return [];
+    return value.map((raw, index) => {
+        const entry = typeof raw === 'string' ? { claim: raw } : raw;
+        if (!isRecord(entry)) return null;
+        const claim = meaningfulProfileText(entry.claim || entry.summary || entry.text, 700);
+        if (!claim) return null;
+        const sourceRef = normalizeProfileProjectionSourceRef(entry.sourceRef);
+        const kind = ['observed', 'reported', 'inferred'].includes(entry.kind)
+            ? entry.kind
+            : 'inferred';
+        const requestedConfidence = Number(entry.confidence);
+        return {
+            id: cleanText(entry.id, 100)
+                || `K-${fingerprint(`${claim}|${sourceRef?.hash || index}`).slice(0, 16)}`,
+            claim,
+            kind,
+            confidence: Math.min(1, Math.max(
+                0,
+                Number.isFinite(requestedConfidence) ? requestedConfidence : 0.6,
+            )),
+            learnedTurn: integer(entry.learnedTurn, 0, Number.MAX_SAFE_INTEGER, turn),
+            sourceRef,
+            propagation: cleanList(entry.propagation, 12, 160),
+        };
+    }).filter(Boolean).slice(0, 48);
+}
+
+function canonicalProfileResources(value) {
+    if (!Array.isArray(value)) return [];
+    const output = [];
+    const seen = new Set();
+    for (const raw of value) {
+        const entry = typeof raw === 'string' ? { name: raw } : raw;
+        if (!isRecord(entry)) continue;
+        const name = meaningfulProfileText(entry.name || entry.kind || entry.id, 120);
+        if (!name) continue;
+        const id = cleanText(entry.id, 100)
+            || `RES-${fingerprint(name.toLocaleLowerCase()).slice(0, 12)}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const requestedAmount = Number(entry.amount);
+        output.push({
+            id,
+            name,
+            amount: Math.min(1_000_000_000, Math.max(
+                0,
+                Number.isFinite(requestedAmount) ? requestedAmount : 0,
+            )),
+            unit: cleanText(entry.unit, 60),
+            description: cleanText(entry.description || entry.detail, 300),
+            evidence: cleanList(entry.evidence, 6, 240),
+        });
+        if (output.length >= 24) break;
+    }
+    return output;
+}
+
 export function materializeActorProfileBaseline(previousProfile, candidate, {
     turn = 0,
     now = Date.now(),
@@ -3082,6 +3616,14 @@ export function materializeActorProfileBaseline(previousProfile, candidate, {
     profile.actorId = cleanText(candidate?.actorRef?.actorId, 120);
     profile.name = cleanText(candidate?.actorRef?.name, 160);
     profile.completionMode = modeOf(completionMode || profile.completionMode);
+    // A ProfileInsertCandidate is a complete replacement row after fact-layer
+    // reconciliation. Empty scaffold sources from local preparation must not
+    // retain a stale "confirmed" lock over newly designed hypotheses.
+    for (const path of Object.keys(profile.fieldSources || {})) {
+        if (BASELINE_MODULES.some((module) => path.startsWith(
+            `modules.${module}.data`,
+        ))) delete profile.fieldSources[path];
+    }
     const evidence = cleanList(previousProfile?.modules?.identity?.evidence, 16, 300);
     const assignBaseline = (module, data, paths) => {
         const sourceInfo = candidateModuleSources(candidate, module, paths);
@@ -3105,7 +3647,10 @@ export function materializeActorProfileBaseline(previousProfile, candidate, {
         ...INSERT_PERSONALITY_TEXT_FIELDS,
         ...Object.keys(INSERT_PERSONALITY_LIST_FIELDS),
     ]);
-    assignBaseline('relationships', clone(candidate.relationships), [
+    assignBaseline('relationships', {
+        ...clone(candidate.relationships),
+        entries: canonicalProfileRelationshipEntries(candidate.relationships?.entries),
+    }, [
         'entries', 'patterns', 'coverageState',
     ]);
     assignBaseline('goals', {
@@ -3124,10 +3669,16 @@ export function materializeActorProfileBaseline(previousProfile, candidate, {
         costs: [],
         alternatives: [],
     }, ['longTerm', 'current', 'plan.summary', 'plan.steps', 'nextWindow']);
-    assignBaseline('knowledge', clone(candidate.knowledge), [
+    assignBaseline('knowledge', {
+        ...clone(candidate.knowledge),
+        entries: canonicalProfileKnowledgeEntries(candidate.knowledge?.entries, turn),
+    }, [
         'entries', 'unknownRemainsUnknown', 'coverageState',
     ]);
-    assignBaseline('resourcesCapabilities', clone(candidate.resourcesCapabilities), [
+    assignBaseline('resourcesCapabilities', {
+        ...clone(candidate.resourcesCapabilities),
+        resources: canonicalProfileResources(candidate.resourcesCapabilities?.resources),
+    }, [
         'resources', 'capabilities', 'noUnconfirmedAbilityGranted', 'coverageState',
     ]);
     if (profile.completionMode === 'full_adult') {

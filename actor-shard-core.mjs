@@ -9,9 +9,10 @@ import {
     actorProfileActionReadiness,
 } from './actor-profile-v6-core.mjs';
 import { actorRefsMatch } from './actor-authority-core.mjs';
+import { runRegisteredActorGate } from './actor-ledger-core.mjs';
 import { extractFirstBalancedJsonObject } from './sovereignty-runtime-core.mjs';
 
-export const ACTOR_SHARD_MAX_WORKERS = 5;
+export const ACTOR_SHARD_MAX_WORKERS = 6;
 export const ACTOR_SHARD_PROMPT_MAX_CHARS = 6000;
 
 const PROPOSAL_KEYS = Object.freeze([
@@ -237,9 +238,11 @@ export function selectActorShardCandidates({
     );
     const registryRequired = Number(actorLedger?.actorRegistry?.version) >= 1;
     if (!registryRequired) return [];
-    const registryEntries = Array.isArray(actorLedger?.actorRegistry?.entries)
-        ? actorLedger.actorRegistry.entries
-        : [];
+    const actorList = Array.isArray(actorLedger?.actors) ? actorLedger.actors : [];
+    const registryGate = runRegisteredActorGate(
+        actorLedger.actorRegistry,
+        actorList.map((actor) => cleanText(actor?.name, 120)),
+    );
     const quarantineIds = new Set(
         (Array.isArray(actorLedger?.identityQuarantine)
             ? actorLedger.identityQuarantine
@@ -248,10 +251,9 @@ export function selectActorShardCandidates({
             .map((entry) => cleanText(entry, 180))
             .filter(Boolean),
     );
-    const registeredActorIds = new Set(registryEntries
-        .filter((entry) => entry?.state === 'registered')
-        .map((entry) => cleanText(entry?.actorRef?.actorId, 180))
-        .filter(Boolean));
+    const registeredActorRefs = new Map(registryGate.actorRefs
+        .map((actorRef) => [cleanText(actorRef?.actorId, 180), actorRef]));
+    const registeredActorIds = new Set(registeredActorRefs.keys());
     const byActor = new Map();
     const scheduledIds = new Set(
         (Array.isArray(schedule?.selected) ? schedule.selected : [])
@@ -266,13 +268,10 @@ export function selectActorShardCandidates({
         (Array.isArray(schedule?.selected) ? schedule.selected : [])
             .map((item) => [cleanText(item?.actorId, 180), item]),
     );
-    for (const actor of Array.isArray(actorLedger?.actors) ? actorLedger.actors : []) {
+    for (const actor of actorList) {
         const id = cleanText(actor?.id, 180);
         const name = cleanText(actor?.name, 120);
-        const registryEntry = registryEntries.find((entry) => (
-            entry?.state === 'registered'
-            && cleanText(entry?.actorRef?.actorId, 180) === id
-        ));
+        const registeredActorRef = registeredActorRefs.get(id);
         const actorRef = {
             kind: 'actor_ref',
             actorId: id,
@@ -283,8 +282,8 @@ export function selectActorShardCandidates({
             !id
             || !name
             || !registeredActorIds.has(id)
-            || !registryEntry
-            || !actorRefsMatch(registryEntry.actorRef, actorRef)
+            || !registeredActorRef
+            || !actorRefsMatch(registeredActorRef, actorRef)
             || quarantineIds.has(id)
             || !actorProfileActionReadiness(actor).ready
             || excludedNames.has(normalizedKey(name))
@@ -323,7 +322,7 @@ export function selectActorShardCandidates({
         byActor.set(id, {
             id,
             name,
-            actorRef: clone(registryEntry.actorRef),
+            actorRef: clone(registeredActorRef),
             score: Number(scheduling?.score) || 0,
             slot: cleanText(scheduling?.slot, 40) || 'priority',
             scheduleReasons: cleanList(scheduling?.reasons, 8, 120),
@@ -557,6 +556,64 @@ export function buildActorShardMessages(candidate, {
         }),
         '=== 严格输出形状 ===',
         JSON.stringify(actorShardOutputShape(candidate)),
+    ].join('\n');
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+}
+
+export function buildActorShardBatchMessages(candidates, {
+    target = {},
+    customPrompt = '',
+} = {}) {
+    const selected = [...(Array.isArray(candidates) ? candidates : [])]
+        .sort((left, right) => (
+            (Number(right?.score) || 0) - (Number(left?.score) || 0)
+            || cleanText(left?.id, 180).localeCompare(cleanText(right?.id, 180))
+        ))
+        .slice(0, ACTOR_SHARD_MAX_WORKERS);
+    if (!selected.length) return [];
+    const single = buildActorShardMessages(selected[0], { target, customPrompt });
+    const system = single[0].content
+        .replace(
+            '只为一个角色生成一份结构化候选提案',
+            '为本批每个隔离角色各生成一份结构化候选提案',
+        )
+        .replace(
+            '只输出一个合法JSON对象；不得输出标签、代码围栏、解释或额外字段。',
+            '只输出一个合法JSON对象，顶层必须且只能是{"proposals":[...]}；数组中每个隔离角色恰好一项，不得输出标签、代码围栏、解释或额外字段。',
+        );
+    const user = [
+        '=== 完整目标身份（只读，整批共用）===',
+        JSON.stringify({
+            chatId: cleanText(target.chatId, 180),
+            logicalIndex: Number(target.logicalIndex) || 0,
+            messageId: cleanText(target.messageId, 180),
+            swipeId: Number(target.swipeId) || 0,
+            generation: Number(target.generation) || 0,
+            branchId: cleanText(target.branchId, 180),
+            contentHash: cleanText(target.contentHash, 180),
+        }),
+        '=== 隔离角色批次 ===',
+        '每项只能读取自己的isolatedContext；禁止把另一项的知识、位置、资源、能力、秘密或目标搬入本项。数组顺序不授予任何角色额外知识。',
+        JSON.stringify(selected.map((candidate) => ({
+            actorId: candidate?.id,
+            actorName: candidate?.name,
+            isolatedContext: {
+                schedulingSlot: candidate?.slot || 'priority',
+                schedulingReasons: candidate?.scheduleReasons || [],
+                persistentActorState: candidate?.actorState || null,
+                possibleLocations: candidate?.locations || [],
+                limitedKnowledgeBasis: candidate?.knowledgeBasis || [],
+                limitedKnowledgeRefs: candidate?.knowledgeRefs || [],
+                currentGoalHints: candidate?.goals || [],
+                worldStimuli: candidate?.stimuli || [],
+                sourceThreads: candidate?.sourceThreads || [],
+                evidence: candidate?.evidence || [],
+                causalChain: candidate?.causalChain || [],
+            },
+            strictOutputShape: actorShardOutputShape(candidate),
+        }))),
+        '=== 严格批次输出形状 ===',
+        JSON.stringify({ proposals: selected.map(actorShardOutputShape) }),
     ].join('\n');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
@@ -875,6 +932,181 @@ export function parseActorShardProposal(output, { candidate } = {}) {
     };
 }
 
+function batchObjectTexts(output) {
+    const text = String(output ?? '').trim();
+    let parsedValue = null;
+    try {
+        parsedValue = JSON.parse(text);
+    } catch {
+        const parsed = parseJsonObject(text);
+        if (!parsed.error) parsedValue = parsed.value;
+    }
+    if (Array.isArray(parsedValue)) {
+        return {
+            rows: parsedValue.map((value) => ({ value })),
+            repaired: false,
+            repairKinds: [],
+        };
+    }
+    if (objectRecord(parsedValue) && Array.isArray(parsedValue.proposals)) {
+        return {
+            rows: parsedValue.proposals.map((value) => ({ value })),
+            repaired: false,
+            repairKinds: [],
+        };
+    }
+
+    const wrapperMatch = /["']proposals["']\s*:/iu.exec(text);
+    const arrayStart = wrapperMatch
+        ? text.indexOf('[', wrapperMatch.index + wrapperMatch[0].length)
+        : text.indexOf('[');
+    if (arrayStart < 0) {
+        return {
+            rows: [],
+            repaired: false,
+            repairKinds: [],
+            error: 'actor_shard.batch_json_missing',
+        };
+    }
+    const rows = [];
+    let objectStart = -1;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = arrayStart + 1; index < text.length; index += 1) {
+        const char = text[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+        if (char === '{') {
+            if (depth === 0) objectStart = index;
+            depth += 1;
+            continue;
+        }
+        if (char === '}' && depth > 0) {
+            depth -= 1;
+            if (depth === 0 && objectStart >= 0) {
+                const raw = text.slice(objectStart, index + 1);
+                try {
+                    rows.push({ value: JSON.parse(raw) });
+                } catch {
+                    rows.push({ value: null, error: 'actor_shard.batch_item_json_invalid' });
+                }
+                objectStart = -1;
+            }
+            continue;
+        }
+        if (char === ']' && depth === 0) break;
+    }
+    return rows.length
+        ? {
+            rows,
+            repaired: true,
+            repairKinds: ['extract-balanced-batch-items'],
+        }
+        : {
+            rows: [],
+            repaired: false,
+            repairKinds: [],
+            error: 'actor_shard.batch_json_missing',
+        };
+}
+
+export function parseActorShardProposalBatch(output, { candidates = [] } = {}) {
+    const selected = [...(Array.isArray(candidates) ? candidates : [])]
+        .sort((left, right) => cleanText(left?.id, 180).localeCompare(cleanText(right?.id, 180)))
+        .slice(0, ACTOR_SHARD_MAX_WORKERS);
+    const candidateById = new Map(selected.map((candidate) => [candidate.id, candidate]));
+    const extracted = batchObjectTexts(output);
+    const failures = [];
+    const rowsByActorId = new Map();
+    for (const [index, row] of (extracted.rows || []).entries()) {
+        if (row.error || !objectRecord(row.value)) {
+            failures.push({
+                actorId: '',
+                itemIndex: index,
+                code: row.error || 'actor_shard.batch_item_invalid',
+            });
+            continue;
+        }
+        const unwrapped = unwrapProposal(row.value).value;
+        const actorId = cleanText(unwrapped?.actorId, 180);
+        if (!actorId || !candidateById.has(actorId)) {
+            failures.push({
+                actorId,
+                itemIndex: index,
+                code: actorId
+                    ? 'actor_shard.batch_actor_unknown'
+                    : 'actor_shard.batch_actor_missing',
+            });
+            continue;
+        }
+        if (!rowsByActorId.has(actorId)) rowsByActorId.set(actorId, []);
+        rowsByActorId.get(actorId).push({ value: row.value, itemIndex: index });
+    }
+
+    const proposals = [];
+    for (const candidate of selected) {
+        const rows = rowsByActorId.get(candidate.id) || [];
+        if (rows.length === 0) {
+            failures.push({
+                actorId: candidate.id,
+                code: 'actor_shard.batch_actor_output_missing',
+            });
+            continue;
+        }
+        if (rows.length > 1) {
+            failures.push({
+                actorId: candidate.id,
+                code: 'actor_shard.batch_actor_duplicate',
+            });
+            continue;
+        }
+        const parsed = parseActorShardProposal(JSON.stringify(rows[0].value), { candidate });
+        if (!parsed.proposal) {
+            failures.push({ actorId: candidate.id, code: parsed.error });
+            continue;
+        }
+        proposals.push({
+            ...parsed.proposal,
+            repairMetadata: parsed.repaired || extracted.repaired
+                ? {
+                    repaired: true,
+                    kinds: [
+                        ...(extracted.repairKinds || []),
+                        ...(parsed.repairKinds || []),
+                    ],
+                }
+                : null,
+        });
+    }
+    const semanticSuccess = selected.length === 0 || proposals.length > 0;
+    return {
+        proposals,
+        failures,
+        repaired: extracted.repaired === true,
+        repairKinds: extracted.repairKinds || [],
+        semanticSuccess,
+        error: semanticSuccess
+            ? ''
+            : extracted.error || 'actor_shard.batch_semantic_zero',
+        diagnostics: {
+            selected: selected.length,
+            completed: selected.length,
+            succeeded: proposals.length,
+            failed: selected.length - proposals.length,
+            semanticSuccess,
+        },
+    };
+}
+
 function intersection(left, right) {
     const rightKeys = new Set(right.map(normalizedKey));
     return left.filter((item) => rightKeys.has(normalizedKey(item)));
@@ -1142,5 +1374,124 @@ export async function runActorShardBatch({
             succeeded: ordered.length,
             failed: failures.length,
         },
+    };
+}
+
+export async function runActorShardProposalBatch({
+    candidates = [],
+    callBatch,
+    isCurrent = () => true,
+    onProgress = () => undefined,
+    signal = null,
+} = {}) {
+    if (typeof callBatch !== 'function') throw new TypeError('callBatch is required');
+    const selected = [...candidates]
+        .sort((left, right) => (
+            (Number(right.score) || 0) - (Number(left.score) || 0)
+            || left.id.localeCompare(right.id)
+        ))
+        .slice(0, ACTOR_SHARD_MAX_WORKERS);
+    const emptyConvergence = { jointEvents: [], independent: [] };
+    const notify = (diagnostics) => onProgress({
+        total: diagnostics.selected,
+        completed: diagnostics.completed,
+        succeeded: diagnostics.succeeded,
+        failed: diagnostics.failed,
+        modelCalls: diagnostics.modelCalls,
+        semanticSuccess: diagnostics.semanticSuccess,
+    });
+    const initialDiagnostics = {
+        selected: selected.length,
+        completed: 0,
+        succeeded: 0,
+        failed: 0,
+        modelCalls: 0,
+        semanticSuccess: selected.length === 0,
+    };
+    notify(initialDiagnostics);
+    if (!selected.length) {
+        return {
+            status: 'completed',
+            proposals: [],
+            failures: [],
+            convergence: emptyConvergence,
+            diagnostics: initialDiagnostics,
+        };
+    }
+    if (signal?.aborted || !isCurrent()) {
+        return {
+            status: 'stale',
+            proposals: [],
+            failures: [],
+            convergence: emptyConvergence,
+            diagnostics: initialDiagnostics,
+        };
+    }
+
+    let output;
+    try {
+        output = await callBatch(selected, { signal });
+    } catch (error) {
+        if (signal?.aborted || !isCurrent()) {
+            return {
+                status: 'stale',
+                proposals: [],
+                failures: [],
+                convergence: emptyConvergence,
+                diagnostics: { ...initialDiagnostics, modelCalls: 1 },
+            };
+        }
+        const technicalCode = cleanText(error?.code || error?.name, 80)
+            .replace(/[^a-zA-Z0-9_-]/gu, '_');
+        const failures = selected.map((candidate) => ({
+            actorId: candidate.id,
+            code: technicalCode
+                ? `actor_shard.batch_failed.${technicalCode}`
+                : 'actor_shard.batch_failed',
+        }));
+        const diagnostics = {
+            selected: selected.length,
+            completed: selected.length,
+            succeeded: 0,
+            failed: selected.length,
+            modelCalls: 1,
+            semanticSuccess: false,
+        };
+        notify(diagnostics);
+        return {
+            status: 'failed',
+            proposals: [],
+            failures,
+            convergence: emptyConvergence,
+            diagnostics,
+        };
+    }
+    if (signal?.aborted || !isCurrent()) {
+        return {
+            status: 'stale',
+            proposals: [],
+            failures: [],
+            convergence: emptyConvergence,
+            diagnostics: { ...initialDiagnostics, modelCalls: 1 },
+        };
+    }
+    const parsed = parseActorShardProposalBatch(output, { candidates: selected });
+    if (!isCurrent()) {
+        return {
+            status: 'stale',
+            proposals: [],
+            failures: [],
+            convergence: emptyConvergence,
+            diagnostics: { ...initialDiagnostics, modelCalls: 1 },
+        };
+    }
+    const diagnostics = { ...parsed.diagnostics, modelCalls: 1 };
+    notify(diagnostics);
+    return {
+        status: parsed.semanticSuccess ? 'completed' : 'semantic-failed',
+        proposals: parsed.proposals,
+        failures: parsed.failures,
+        convergence: convergeActorShardProposals(parsed.proposals),
+        diagnostics,
     };
 }

@@ -2242,28 +2242,135 @@ export function buildContinuityRepairMessages(output, error, {
     ];
 }
 
+// Directly adapted from World/world-engine-api.js parseJSON and
+// repairTruncatedJSON. The Doctor-specific additions are deliberately local:
+// full-width separators and trailing commas are repaired outside strings, and
+// the parsed root is still passed through the existing continuity validator.
+// No model call, retry state, queue, or persistence lives in this parser.
+function repairTruncatedContinuityJson(content) {
+    const rootStart = content.indexOf('{');
+    if (rootStart === -1) return null;
+    const stack = [];
+    const candidates = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = rootStart; index < content.length; index += 1) {
+        const char = content[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') inString = true;
+        else if (char === '{' || char === '[') stack.push(char);
+        else if (char === '}' || char === ']') stack.pop();
+        else if (char === ',' && stack.length > 0) {
+            candidates.push({
+                end: index,
+                suffix: stack.slice().reverse().map((open) => (
+                    open === '{' ? '}' : ']'
+                )).join(''),
+            });
+        }
+    }
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+        try {
+            return JSON.parse(
+                content.slice(rootStart, candidates[index].end)
+                    + candidates[index].suffix,
+            );
+        } catch {
+            // Try the previous complete member boundary.
+        }
+    }
+    return null;
+}
+
+function normalizeContinuityJsonPunctuation(content) {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+    for (const char of String(content || '')) {
+        if (inString) {
+            result += char;
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            result += char;
+        } else if (char === '：') result += ':';
+        else if (char === '，') result += ',';
+        else result += char;
+    }
+    return result.replace(/,\s*([}\]])/gu, '$1');
+}
+
+function parseContinuityJsonLocally(text) {
+    let content = String(text || '').replace(/^\uFEFF/u, '').trim();
+    content = content.replace(/^```json\s*/iu, '').replace(/\s*```\s*$/u, '').trim();
+    const attempts = [content, normalizeContinuityJsonPunctuation(content)];
+    for (const candidate of attempts) {
+        try {
+            return { value: JSON.parse(candidate), repaired: candidate !== content };
+        } catch {
+            // Fall through to bounded object extraction.
+        }
+        let depth = 0;
+        let start = -1;
+        let inString = false;
+        let escaped = false;
+        let lastValid = null;
+        for (let index = 0; index < candidate.length; index += 1) {
+            const char = candidate[index];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (char === '\\') escaped = true;
+                else if (char === '"') inString = false;
+                continue;
+            }
+            if (char === '"') inString = true;
+            else if (char === '{') {
+                if (depth === 0) start = index;
+                depth += 1;
+            } else if (char === '}' && depth > 0) {
+                depth -= 1;
+                if (depth === 0 && start !== -1) {
+                    try {
+                        lastValid = JSON.parse(candidate.slice(start, index + 1));
+                    } catch {
+                        // Keep scanning for the last valid top-level object.
+                    }
+                    start = -1;
+                }
+            }
+        }
+        if (lastValid) return { value: lastValid, repaired: true };
+        const repaired = repairTruncatedContinuityJson(candidate);
+        if (repaired) return { value: repaired, repaired: true };
+    }
+    return null;
+}
+
 export function parseContinuityOutput(output, options = {}) {
     const text = String(output || '');
     const tagged = text.match(/<ContinuityState>\s*([\s\S]*?)\s*<\/ContinuityState>/iu);
-    let body = tagged ? tagged[1] : text;
-    body = body.replace(/```(?:json)?/giu, '').trim();
-    const start = body.indexOf('{');
-    const end = body.lastIndexOf('}');
-    if (start < 0 || end <= start) {
-        return { error: '没有找到完整的 ContinuityState JSON' };
+    const parsedResult = parseContinuityJsonLocally(tagged ? tagged[1] : text);
+    if (!parsedResult || !parsedResult.value || typeof parsedResult.value !== 'object') {
+        return { error: 'ContinuityState JSON 无法在本地恢复' };
     }
-    try {
-        const parsed = JSON.parse(body.slice(start, end + 1));
-        if (Object.hasOwn(parsed, 'actorProfiles')) {
-            return { error: 'ContinuityState 包含已停用的人物档案写字段' };
-        }
-        return {
-            state: normalizeContinuityState(parsed, options),
-            raw: clone(parsed),
-        };
-    } catch (error) {
-        return { error: `ContinuityState JSON 解析失败：${error.message || error}` };
+    const parsed = parsedResult.value;
+    if (Object.hasOwn(parsed, 'actorProfiles')) {
+        return { error: 'ContinuityState 包含已停用的人物档案写字段' };
     }
+    return {
+        state: normalizeContinuityState(parsed, options),
+        raw: clone(parsed),
+        repairedLocally: parsedResult.repaired === true,
+    };
 }
 
 function stageFromChinese(value) {
