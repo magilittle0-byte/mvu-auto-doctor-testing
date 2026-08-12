@@ -1,9 +1,12 @@
 import {
     hashCanonical,
-} from '../transaction/index.mjs';
-import {
-    DUAL_SURFACE_VISIBILITY,
-} from './core.mjs';
+} from '../transaction/canonical.mjs';
+
+const DUAL_SURFACE_VISIBILITY = Object.freeze([
+    'immersive',
+    'audit',
+    'debug',
+]);
 
 function shortHash(value) {
     try {

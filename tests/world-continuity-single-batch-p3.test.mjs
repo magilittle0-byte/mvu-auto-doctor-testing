@@ -21,6 +21,106 @@ function sourceSection(start, end) {
     return source.slice(from, to);
 }
 
+function loadStage3AcceptedTargetHelpers(overrides = {}) {
+    const code = sourceSection(
+        'function stage3AcceptedTarget(captured) {',
+        'function stage3TaskOwnsCurrent(captured, token) {',
+    );
+    const sandbox = { ...overrides };
+    vm.runInNewContext(
+        `${code}\nthis.stage3AcceptedTarget = stage3AcceptedTarget;`
+        + 'this.stage3AcceptedTargetsMatch = stage3AcceptedTargetsMatch;'
+        + 'this.stage3AcceptedTargetKey = stage3AcceptedTargetKey;'
+        + 'this.stage3LegacyTargetNeedsManualReconciliation = stage3LegacyTargetNeedsManualReconciliation;',
+        sandbox,
+    );
+    return sandbox;
+}
+
+function loadStage3LegacyManualReconciliationRunner(state) {
+    const code = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    const sandbox = {
+        operationEpoch: 4,
+        stage3AcceptedTarget: (target) => target?.generationId && target?.generationType ? target : null,
+        operationToken: () => ({ epoch: 4 }),
+        stage3TaskOwnsCurrent: () => true,
+        stage3TargetIsCurrent: () => ({ ok: true }),
+        sovereigntyNarrativeEligible: () => true,
+        stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: {} }),
+        getSettings: () => ({}),
+        getContext: () => ({ chatId: state.captured.chatId, chat: [{ mes: 'natural narrative' }] }),
+        readChatNamespace: () => state.namespace,
+        stage3LegacyTargetNeedsManualReconciliation: (stored, captured) => (
+            stored === state.legacyTarget && captured === state.captured
+        ),
+        ...state.spies,
+    };
+    vm.runInNewContext(`${code}\nthis.run = runContinuityTarget;`, sandbox);
+    return sandbox.run;
+}
+
+function loadStage3PersistedPackageValidator() {
+    const code = sourceSection(
+        'function stage3ContinuityDigestWithoutInjection(state) {',
+        'function stage3NoActorPermitMatches(permit, captured) {',
+    );
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        continuityContentDigest: (value) => JSON.stringify(value),
+        normalizeContinuityState: (value) => value,
+        getSettings: () => ({ continuityMaxThreads: 4 }),
+        actorLedgerDigest: (ledger) => JSON.stringify(ledger),
+        fingerprint: (value) => `hash:${value}`,
+        actorActionTargetOf: (captured) => ({ ...captured }),
+        actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+        actorActionSettlementsMatchLedger: (ledger, { target, results }) => {
+            const settled = (ledger?.actionAttempts || [])
+                .filter((attempt) => (
+                    JSON.stringify(attempt?.target) === JSON.stringify(target)
+                    && attempt?.worldAdjudicationResult
+                ))
+                .map((attempt) => attempt.worldAdjudicationResult);
+            return { ok: JSON.stringify(settled) === JSON.stringify(results) };
+        },
+        pendingActorActionAttempts: (ledger, { target }) => ({
+            attempts: (ledger?.actionAttempts || []).filter((attempt) => (
+                JSON.stringify(attempt?.target) === JSON.stringify(target)
+                && !attempt?.worldAdjudicationResult
+            )),
+        }),
+    };
+    vm.runInNewContext(
+        `${sourceSection('function stage3AcceptedTarget(captured) {', 'function stage3ContinuityDigestWithoutInjection(state) {')}`
+        + `${code}\nthis.stage3CanonicalSettlementProof = stage3CanonicalSettlementProof;`
+        + 'this.stage3PersistedPackageForTarget = stage3PersistedPackageForTarget;'
+        + 'this.stage3ContinuityDigestWithoutInjection = stage3ContinuityDigestWithoutInjection;',
+        sandbox,
+    );
+    return sandbox;
+}
+
+function loadStage3NoActorPermitGate() {
+    const code = sourceSection(
+        'function stage3NoActorPermitMatches(permit, captured) {',
+        'async function runContinuityTarget(captured, {',
+    );
+    const sandbox = {
+        readChatNamespace: () => ({ actorLedger: {} }),
+        normalizeActorLedger: () => ({ actorRegistry: { registered: {} } }),
+        sourceRefOf: () => ({}),
+        acceptedActorSourceRefMatches: () => false,
+    };
+    vm.runInNewContext(
+        `${sourceSection('function stage3AcceptedTarget(captured) {', 'function stage3ContinuityDigestWithoutInjection(state) {')}`
+        + `${code}\nthis.stage3LedgerReadbackGate = stage3LedgerReadbackGate;`,
+        sandbox,
+    );
+    return sandbox.stage3LedgerReadbackGate;
+}
+
 function loadWorldGenerator(callModel) {
     const code = sourceSection(
         'async function generateWorldContinuitySingleBatch(messages, {',
@@ -521,6 +621,173 @@ test('an exact committed world target skips recovery generation and world-domain
         'an exact persisted package recovers without a second world call or write',
     );
     assert.doesNotMatch(run, /worldTaskAlreadyCommitted|applyContinuityInjection|maxAttempts/u);
+});
+
+test('P3 target, recovery key, and legacy reconciliation require generation ID and type', () => {
+    const stage3 = loadStage3AcceptedTargetHelpers();
+    const current = {
+        chatId: 'chat-stage3',
+        index: 4,
+        messageId: 'message-4',
+        swipeId: 1,
+        generationSerial: 12,
+        generationId: 'generation-12',
+        generationType: 'regenerate',
+        scopeDigest: 'scope-stage3',
+        contentFingerprint: 'fingerprint-stage3',
+    };
+    const target = stage3.stage3AcceptedTarget(current);
+    assert.equal(target.generationId, 'generation-12');
+    assert.equal(target.generationType, 'regenerate');
+    assert.equal(
+        stage3.stage3AcceptedTargetsMatch(target, stage3.stage3AcceptedTarget({
+            ...current,
+            generationId: 'generation-13',
+        })),
+        false,
+        'a generation ID drift must not reuse a persisted stage-3 package',
+    );
+    assert.equal(
+        stage3.stage3AcceptedTargetsMatch(target, stage3.stage3AcceptedTarget({
+            ...current,
+            generationType: 'swipe',
+        })),
+        false,
+        'a generation type drift must not reuse a persisted stage-3 package',
+    );
+    assert.equal(
+        stage3.stage3AcceptedTarget({ ...current, generationId: '' }),
+        null,
+        'new work without a generation ID is fail-closed',
+    );
+    assert.equal(
+        stage3.stage3AcceptedTarget({ ...current, generationType: '' }),
+        null,
+        'new work without a generation type is fail-closed',
+    );
+    assert.equal(
+        stage3.stage3LegacyTargetNeedsManualReconciliation({
+            ...target,
+            generationId: '',
+        }, current),
+        true,
+        'a matching old package without generation ID is compatibility-only',
+    );
+    assert.match(stage3.stage3AcceptedTargetKey(current), /generation-12:regenerate/u);
+
+    const settlement = sourceSection(
+        'function stage3CanonicalSettlementProof(ledger, results = [], captured) {',
+        'function stage3PersistedPackageForTarget(state, ledger, captured) {',
+    );
+    assert.match(settlement, /producerTarget,/u);
+    assert.match(settlement, /stage3AcceptedTargetsMatch\(proof\.producerTarget, producerTarget\)/u);
+});
+
+test('P3 current guard, permit gate, old package reconciliation, and settlement proof are all generation-bound', async () => {
+    const current = {
+        chatId: 'chat-stage3', index: 0, messageId: 'message-stage3', swipeId: 0,
+        generationSerial: 4, generationId: 'generation-4', generationType: 'normal',
+        scopeDigest: 'scope-stage3', contentFingerprint: 'fingerprint-stage3',
+    };
+    const currentGuard = loadStage3AcceptedTargetHelpers({
+        operationEpoch: 4,
+        targetIsCurrent: () => ({ ok: true }),
+        getContext: () => ({ chatId: current.chatId }),
+        captureTarget: () => ({ ...current, generationType: 'swipe' }),
+    });
+    const changedType = currentGuard.stage3TargetIsCurrent(current, { epoch: 4 });
+    assert.equal(changedType.ok, false, 'a same-ID type drift cannot bypass the generic current guard');
+    assert.equal(changedType.reason, 'stage3_generation_target_changed');
+
+    let modelCalls = 0;
+    let writes = 0;
+    const legacyTarget = { ...current, generationType: '' };
+    const run = loadStage3LegacyManualReconciliationRunner({
+        captured: current,
+        legacyTarget,
+        namespace: { continuity: { nextTurnInjection: { producerTarget: legacyTarget } } },
+        spies: {
+            generateWorldContinuitySingleBatch: () => { modelCalls += 1; },
+            writeChatNamespace: () => { writes += 1; },
+        },
+    });
+    const manual = await run(current);
+    assert.equal(manual.reason, 'world_target_generation_identity_manual_reconciliation');
+    assert.equal(manual.compatibilityOnly, true);
+    assert.equal(modelCalls, 0);
+    assert.equal(writes, 0);
+
+    const noActorGate = loadStage3NoActorPermitGate();
+    const permitTarget = {
+        ...current,
+        logicalIndex: current.index,
+        contentHash: current.contentFingerprint,
+    };
+    const permit = {
+        status: 'no_candidates', eligible: true,
+        profileBatch: { readbackVerified: true }, target: permitTarget,
+    };
+    assert.equal(noActorGate(current, permit).reason, 'no_candidates');
+    assert.equal(noActorGate(current, { ...permit, target: { ...permitTarget, generationType: 'swipe' } }).reason,
+        'actor_registry_awaiting_p2');
+    assert.equal(noActorGate(current, { ...permit, profileBatch: { readbackVerified: false } }).reason,
+        'actor_registry_awaiting_p2');
+
+    const persisted = loadStage3PersistedPackageValidator();
+    const actionTarget = { ...current };
+    const result = {
+        attemptId: 'attempt-stage3',
+        status: 'settled',
+        id: 'receipt-stage3',
+        actorRef: { actorId: 'actor-stage3', canonicalName: 'NPC' },
+        outcome: 'world-confirmed',
+    };
+    const ledger = {
+        actionAttempts: [{
+            id: 'attempt-stage3',
+            target: actionTarget,
+            worldAdjudicationResult: result,
+        }],
+    };
+    const proof = persisted.stage3CanonicalSettlementProof(ledger, [result], current);
+    const continuity = {
+        nextTurnInjection: {
+            producerTarget: { ...current },
+            sourceContinuityDigest: '',
+            settlementProof: proof,
+        },
+    };
+    continuity.nextTurnInjection.sourceContinuityDigest = persisted.stage3ContinuityDigestWithoutInjection(continuity);
+    assert.ok(persisted.stage3PersistedPackageForTarget(continuity, ledger, current));
+    assert.equal(
+        persisted.stage3PersistedPackageForTarget(continuity, ledger, { ...current, generationType: 'swipe' }),
+        null,
+    );
+    assert.equal(
+        persisted.stage3PersistedPackageForTarget(continuity, {
+            actionAttempts: [{ ...ledger.actionAttempts[0], worldAdjudicationResult: {
+                ...result,
+                id: 'receipt-tampered',
+            } }],
+        }, current),
+        null,
+        'a receipt/settlement mismatch cannot pass a persisted package readback',
+    );
+    const proofAttemptTampered = structuredClone(continuity);
+    proofAttemptTampered.nextTurnInjection.settlementProof.orderedResults[0].attemptId = 'attempt-tampered';
+    assert.equal(
+        persisted.stage3PersistedPackageForTarget(proofAttemptTampered, ledger, current),
+        null,
+        'a proof attempt ID mismatch cannot pass readback',
+    );
+    const proofActorTampered = structuredClone(continuity);
+    proofActorTampered.nextTurnInjection.settlementProof
+        .orderedResults[0].worldAdjudicationResult.actorRef.actorId = 'actor-tampered';
+    assert.equal(
+        persisted.stage3PersistedPackageForTarget(proofActorTampered, ledger, current),
+        null,
+        'a proof ActorRef mismatch cannot pass readback',
+    );
 });
 
 test('6.1 regression wiring keeps one world batch and removes world fields from actor/profile commit', () => {

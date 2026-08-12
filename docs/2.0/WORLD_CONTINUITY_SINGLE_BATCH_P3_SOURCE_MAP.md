@@ -51,7 +51,7 @@ fresh ledger readback
 
 ## 无 branch target、reservation 与双域恢复
 
-P3 target 仅为 `chatId/index/messageId/swipeId/generationSerial/scopeDigest/contentFingerprint`；不含 branch、generationId 或新身份。既有 ActionAttempt 内部 target 可继续用于其自己的 receipt matcher，但不是 P3 恢复身份。
+P3 target 严格为 `chatId/index/messageId/swipeId/generationSerial/generationId/generationType/scopeDigest/contentFingerprint`；不含 branch。任一 generation identity 缺失的旧 checkpoint、packet 或 settlement proof 仅能进入人工协调，不能恢复、复用或放行世界调用；既有 ActionAttempt 仍以同一完整 target 做 receipt matcher。
 
 世界调用前，既有 `continuityCheckpoint` 持久写入无 branch `stage3ProducerTarget + world_call_reserved`。该 reservation 未 readback 不调用世界；世界调用后最终提交失败则保留 reservation，同 target 后续 fail-closed/manual reconciliation，禁止重复世界调用。
 

@@ -1425,6 +1425,7 @@ function makeTarget(overrides = {}) {
         contentFingerprint: 'accepted-a',
         generationId: 'generation-a',
         generationSerial: 2,
+        generationType: 'normal',
         identityScopeId: 'chat-a|character:card-main',
         scopeDigest: 'scope:chat-a|character:card-main',
         epoch: 7,
@@ -1470,10 +1471,13 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
                 messageId: String(target.messageId || ''),
                 swipeId: Math.max(0, Number(target.swipeId) || 0),
                 generationSerial: Math.max(0, Number(target.generationSerial) || 0),
+                generationId: String(target.generationId || ''),
+                generationType: String(target.generationType || ''),
                 scopeDigest: String(target.scopeDigest || ''),
                 contentFingerprint: String(target.contentFingerprint || target.fingerprint || ''),
             };
-            return accepted.chatId && accepted.messageId && accepted.scopeDigest
+            return accepted.chatId && accepted.messageId && accepted.generationId
+                && accepted.generationType && accepted.scopeDigest
                 && accepted.contentFingerprint ? accepted : null;
         },
         stage3AcceptedTargetsMatch: (left, right) => !!(
@@ -1484,6 +1488,8 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
             && left.messageId === right.messageId
             && left.swipeId === right.swipeId
             && left.generationSerial === right.generationSerial
+            && left.generationId === right.generationId
+            && left.generationType === right.generationType
             && left.scopeDigest === right.scopeDigest
             && left.contentFingerprint === right.contentFingerprint
         ),
@@ -1496,6 +1502,8 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
                 target.messageId,
                 target.swipeId,
                 target.generationSerial,
+                target.generationId,
+                target.generationType,
                 target.scopeDigest,
                 target.contentFingerprint || target.fingerprint,
             ].join(':');

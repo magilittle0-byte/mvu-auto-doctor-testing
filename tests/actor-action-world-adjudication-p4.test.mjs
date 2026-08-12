@@ -55,6 +55,17 @@ test('P4 production uses one actor proposal batch, no per-actor or repair model 
     assert.ok(settle > world, 'settlement must occur only after the world batch');
 });
 
+test('manifest entry imports only current v2 leaf modules, not retired aggregate graphs', async () => {
+    const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const receipts = await readFile(new URL('../v2/runtime/continuity-receipts.mjs', import.meta.url), 'utf8');
+    const diagnostics = await readFile(new URL('../v2/surface/diagnostics.mjs', import.meta.url), 'utf8');
+    assert.match(source, /from '\.\/v2\/runtime\/continuity-receipts\.mjs'/u);
+    assert.match(source, /from '\.\/v2\/surface\/diagnostics\.mjs'/u);
+    assert.doesNotMatch(source, /from '\.\/v2\/(?:runtime|surface)\/index\.mjs'/u);
+    assert.doesNotMatch(receipts, /branchId|mvu_auto_doctor_branch_id|barrierHistory/u);
+    assert.doesNotMatch(diagnostics, /from '\.\.\/transaction\/index\.mjs'|from '\.\/core\.mjs'/u);
+});
+
 test('P4 has one strict next-turn consumer: verified world package plus ticket payload, provider or ST fallback', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const start = source.indexOf('async function precomposeNextTurnConsumer(session)');

@@ -190,10 +190,10 @@ import {
 import {
     createDoctorRuntimePresentation,
     createPrivacySafeDiagnosticProjection,
-} from './v2/surface/index.mjs';
+} from './v2/surface/diagnostics.mjs';
 import {
     buildContinuitySourcePlan,
-} from './v2/runtime/index.mjs';
+} from './v2/runtime/continuity-receipts.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
 const VERSION = '2.0.0-rc.14';
@@ -12785,10 +12785,13 @@ function stage3AcceptedTarget(captured) {
         messageId: String(captured.messageId || ''),
         swipeId: Math.max(0, Number(captured.swipeId) || 0),
         generationSerial: Math.max(0, Number(captured.generationSerial) || 0),
+        generationId: String(captured.generationId || ''),
+        generationType: String(captured.generationType || ''),
         scopeDigest: String(captured.scopeDigest || ''),
         contentFingerprint: String(captured.contentFingerprint || captured.fingerprint || ''),
     };
-    return target.chatId && target.messageId && target.scopeDigest && target.contentFingerprint
+    return target.chatId && target.messageId && target.generationId && target.generationType
+        && target.scopeDigest && target.contentFingerprint
         ? target
         : null;
 }
@@ -12802,6 +12805,8 @@ function stage3AcceptedTargetsMatch(left, right) {
         && left.messageId === right.messageId
         && left.swipeId === right.swipeId
         && left.generationSerial === right.generationSerial
+        && left.generationId === right.generationId
+        && left.generationType === right.generationType
         && left.scopeDigest === right.scopeDigest
         && left.contentFingerprint === right.contentFingerprint
     );
@@ -12815,20 +12820,40 @@ function stage3AcceptedTargetKey(captured) {
         target.messageId,
         target.swipeId,
         target.generationSerial,
+        target.generationId,
+        target.generationType,
         target.scopeDigest,
         target.contentFingerprint,
     ].join(':') : '';
 }
 
+function stage3LegacyTargetNeedsManualReconciliation(stored, captured) {
+    const current = stage3AcceptedTarget(captured);
+    if (!current || !stored || typeof stored !== 'object') return false;
+    const missingGenerationIdentity = !String(stored.generationId || '')
+        || !String(stored.generationType || '');
+    return missingGenerationIdentity
+        && String(stored.chatId || '') === current.chatId
+        && Math.max(0, Number(stored.index) || 0) === current.index
+        && String(stored.messageId || '') === current.messageId
+        && Math.max(0, Number(stored.swipeId) || 0) === current.swipeId
+        && Math.max(0, Number(stored.generationSerial) || 0) === current.generationSerial
+        && String(stored.scopeDigest || '') === current.scopeDigest
+        && String(stored.contentFingerprint || '') === current.contentFingerprint;
+}
+
 function stage3TargetIsCurrent(captured, token) {
     const strict = targetIsCurrent(captured, token);
-    if (strict.ok || token?.epoch !== operationEpoch) return strict;
+    if (token?.epoch !== operationEpoch) return strict;
     const fresh = captureTarget(getContext(), captured?.index, {
         frozenScope: captured?.actorSovereigntyScope,
         unscoped: !captured?.scopeDigest,
     });
-    return stage3AcceptedTargetsMatch(stage3AcceptedTarget(captured), stage3AcceptedTarget(fresh))
-        ? { ok: true }
+    if (stage3AcceptedTargetsMatch(stage3AcceptedTarget(captured), stage3AcceptedTarget(fresh))) {
+        return { ok: true };
+    }
+    return strict.ok
+        ? { ok: false, reason: 'stage3_generation_target_changed' }
         : strict;
 }
 
@@ -12842,7 +12867,9 @@ function stage3ContinuityDigestWithoutInjection(state) {
     return continuityContentDigest(copy);
 }
 
-function stage3CanonicalSettlementProof(ledger, results = []) {
+function stage3CanonicalSettlementProof(ledger, results = [], captured) {
+    const producerTarget = stage3AcceptedTarget(captured);
+    if (!producerTarget) return null;
     const orderedResults = results.map((result) => ({
         attemptId: String(result?.attemptId || ''),
         status: String(result?.status || ''),
@@ -12851,14 +12878,19 @@ function stage3CanonicalSettlementProof(ledger, results = []) {
         worldAdjudicationResult: deepClone(result),
     })).sort((left, right) => left.attemptId.localeCompare(right.attemptId));
     return {
+        producerTarget,
         actorLedgerDigest: actorLedgerDigest(ledger),
         orderedResults,
         digest: fingerprint(JSON.stringify(orderedResults)),
     };
 }
 
-function stage3SettlementProofMatchesLedger(proof, ledger, target) {
-    if (!proof || actorLedgerDigest(ledger) !== proof.actorLedgerDigest) return false;
+function stage3SettlementProofMatchesLedger(proof, ledger, captured) {
+    const producerTarget = stage3AcceptedTarget(captured);
+    const target = actorActionTargetOf(captured);
+    if (!proof || !producerTarget || !target
+        || !stage3AcceptedTargetsMatch(proof.producerTarget, producerTarget)
+        || actorLedgerDigest(ledger) !== proof.actorLedgerDigest) return false;
     const canonicalize = (attempt, result) => ({
         attemptId: String(attempt?.id || result?.attemptId || ''),
         status: String(result?.status || ''),
@@ -12896,7 +12928,7 @@ function stage3PersistedPackageForTarget(state, ledger, captured) {
         && stage3SettlementProofMatchesLedger(
             packet.settlementProof,
             ledger,
-            actorActionTargetOf(captured),
+            captured,
         )
         ? packet
         : null;
@@ -12913,6 +12945,8 @@ function stage3NoActorPermitMatches(permit, captured) {
             messageId: String(target.messageId || ''),
             swipeId: Math.max(0, Number(target.swipeId) || 0),
             generationSerial: Math.max(0, Number(target.generation ?? target.generationSerial) || 0),
+            generationId: String(target.generationId || ''),
+            generationType: String(target.generationType || ''),
             scopeDigest: String(target.scopeDigest || ''),
             contentFingerprint: String(target.contentHash || target.hash || ''),
         });
@@ -12946,6 +12980,14 @@ async function runContinuityTarget(captured, {
     force = false,
     noActorPermit = null,
 } = {}) {
+    const acceptedTarget = stage3AcceptedTarget(captured);
+    if (!acceptedTarget) {
+        return {
+            status: 'stale',
+            reason: 'world_target_generation_identity_missing',
+            module: 'world',
+        };
+    }
     const token = operationToken(captured);
     if (!stage3TaskOwnsCurrent(captured, token)) {
         return { status: 'stale', reason: 'world_task_owner_changed' };
@@ -12963,6 +13005,18 @@ async function runContinuityTarget(captured, {
     const context = getContext();
     const messageText = String(context?.chat?.[captured.index]?.mes || '');
     let namespace = readChatNamespace(context);
+    const legacyTarget = [
+        namespace?.continuityCheckpoint?.stage3ProducerTarget,
+        namespace?.continuity?.nextTurnInjection?.producerTarget,
+    ].find((target) => stage3LegacyTargetNeedsManualReconciliation(target, captured));
+    if (legacyTarget) {
+        return {
+            status: 'failed',
+            reason: 'world_target_generation_identity_manual_reconciliation',
+            module: 'world',
+            compatibilityOnly: true,
+        };
+    }
     if (
         namespace?.continuityCheckpoint?.stage3Phase === 'world_call_reserved'
         && stage3AcceptedTargetsMatch(
@@ -13257,6 +13311,7 @@ async function runContinuityTarget(captured, {
     const settlementProof = stage3CanonicalSettlementProof(
         settlementLedger,
         actionSettlement?.results || [],
+        captured,
     );
     const injectionText = buildContinuityInjection(next, {
         director,
