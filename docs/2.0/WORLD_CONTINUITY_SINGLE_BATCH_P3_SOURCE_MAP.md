@@ -57,6 +57,8 @@ P3 target 严格为 `chatId/index/messageId/swipeId/generationSerial/generationI
 
 `nextTurnInjection.settlementProof` 是 canonical ordered projection：
 
+`continuity-core` 的规范化与宿主读回必须逐项保留 packet `producerTarget` 和 proof `producerTarget` 的同一完整 P3 target；缺 `generationId` 或 `generationType` 的旧包被规范化为不可恢复，不能借兼容读取放松 readback matcher。
+
 ```js
 {
   actorLedgerDigest,

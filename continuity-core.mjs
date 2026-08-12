@@ -715,9 +715,14 @@ function normalizeNextTurnInjectionTarget(value) {
     const source = value && typeof value === 'object' ? value : {};
     const chatId = cleanText(source.chatId, 180);
     const messageId = cleanText(source.messageId, 180);
+    const generationId = cleanText(source.generationId, 180);
+    const generationType = cleanText(source.generationType, 80);
     const scopeDigest = cleanText(source.scopeDigest, 180);
     const contentFingerprint = cleanText(source.contentFingerprint, 180);
-    if (!chatId || !messageId || !scopeDigest || !contentFingerprint) return null;
+    if (
+        !chatId || !messageId || !generationId || !generationType
+        || !scopeDigest || !contentFingerprint
+    ) return null;
     return {
         chatId,
         index: boundedInteger(source.index, 0, Number.MAX_SAFE_INTEGER, 0),
@@ -729,6 +734,8 @@ function normalizeNextTurnInjectionTarget(value) {
             Number.MAX_SAFE_INTEGER,
             0,
         ),
+        generationId,
+        generationType,
         scopeDigest,
         contentFingerprint,
     };
@@ -835,9 +842,13 @@ function normalizeNextTurnInjectionConsumeProof(value) {
 
 function normalizeNextTurnSettlementProof(value) {
     const source = value && typeof value === 'object' ? value : {};
+    const producerTarget = normalizeNextTurnInjectionTarget(source.producerTarget);
     const actorLedgerDigest = cleanText(source.actorLedgerDigest, 240);
     const digest = cleanText(source.digest, 240);
-    if (!actorLedgerDigest || !digest || !Array.isArray(source.orderedResults)) return null;
+    if (
+        !producerTarget || !actorLedgerDigest || !digest
+        || !Array.isArray(source.orderedResults)
+    ) return null;
     const seen = new Set();
     const orderedResults = [];
     for (const raw of source.orderedResults.slice(0, 6)) {
@@ -866,7 +877,7 @@ function normalizeNextTurnSettlementProof(value) {
         });
     }
     orderedResults.sort((left, right) => left.attemptId.localeCompare(right.attemptId));
-    return { actorLedgerDigest, digest, orderedResults };
+    return { producerTarget, actorLedgerDigest, digest, orderedResults };
 }
 
 function normalizeNextTurnInjection(value) {

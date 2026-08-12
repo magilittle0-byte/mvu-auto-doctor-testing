@@ -62,7 +62,7 @@ function loadStage3LegacyManualReconciliationRunner(state) {
     return sandbox.run;
 }
 
-function loadStage3PersistedPackageValidator() {
+function loadStage3PersistedPackageValidator({ normalizer = (value) => value } = {}) {
     const code = sourceSection(
         'function stage3ContinuityDigestWithoutInjection(state) {',
         'function stage3NoActorPermitMatches(permit, captured) {',
@@ -70,10 +70,24 @@ function loadStage3PersistedPackageValidator() {
     const sandbox = {
         deepClone: (value) => structuredClone(value),
         continuityContentDigest: (value) => JSON.stringify(value),
-        normalizeContinuityState: (value) => value,
+        normalizeContinuityState: normalizer,
         getSettings: () => ({ continuityMaxThreads: 4 }),
-        actorLedgerDigest: (ledger) => JSON.stringify(ledger),
-        fingerprint: (value) => `hash:${value}`,
+        actorLedgerDigest: (ledger) => {
+            const result = ledger?.actionAttempts?.[0]?.worldAdjudicationResult || {};
+            return [
+                'actor-ledger',
+                String(result.attemptId || ''),
+                String(result.id || ''),
+                String(result.actorRef?.actorId || ''),
+                String(result.outcome || ''),
+            ].join(':');
+        },
+        fingerprint: (value) => {
+            const text = String(value);
+            let hash = 0;
+            for (const char of text) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+            return `hash:${text.length}:${hash}`;
+        },
         actorActionTargetOf: (captured) => ({ ...captured }),
         actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
         actorActionSettlementsMatchLedger: (ledger, { target, results }) => {
@@ -95,6 +109,7 @@ function loadStage3PersistedPackageValidator() {
     vm.runInNewContext(
         `${sourceSection('function stage3AcceptedTarget(captured) {', 'function stage3ContinuityDigestWithoutInjection(state) {')}`
         + `${code}\nthis.stage3CanonicalSettlementProof = stage3CanonicalSettlementProof;`
+        + 'this.stage3SettlementProofMatchesLedger = stage3SettlementProofMatchesLedger;'
         + 'this.stage3PersistedPackageForTarget = stage3PersistedPackageForTarget;'
         + 'this.stage3ContinuityDigestWithoutInjection = stage3ContinuityDigestWithoutInjection;',
         sandbox,
@@ -788,6 +803,122 @@ test('P3 current guard, permit gate, old package reconciliation, and settlement 
         null,
         'a proof ActorRef mismatch cannot pass readback',
     );
+});
+
+test('P3 normalize and durable readback retain the complete packet and settlement generation identity', async () => {
+    const current = {
+        chatId: 'chat-stage3-roundtrip', index: 3, messageId: 'message-roundtrip', swipeId: 1,
+        generationSerial: 9, generationId: 'generation-roundtrip', generationType: 'regenerate',
+        scopeDigest: 'scope-roundtrip', contentFingerprint: 'fingerprint-roundtrip',
+    };
+    const persisted = loadStage3PersistedPackageValidator({
+        normalizer: (value, options) => normalizeContinuityState(value, options),
+    });
+    const result = {
+        attemptId: 'attempt-roundtrip', status: 'settled', id: 'receipt-roundtrip',
+        actorRef: {
+            kind: 'actor_ref', actorId: 'actor-roundtrip', displayName: 'NPC', aliases: [],
+        },
+        outcome: 'confirmed',
+    };
+    const ledger = {
+        actionAttempts: [{
+            id: result.attemptId,
+            target: { ...current },
+            worldAdjudicationResult: result,
+        }],
+    };
+    const proof = persisted.stage3CanonicalSettlementProof(ledger, [result], current);
+    let continuity = normalizeContinuityState({
+        chatId: current.chatId,
+        nextTurnInjection: {
+            version: 1,
+            status: 'pending',
+            producerTarget: { ...current },
+            sourceContinuityDigest: '',
+            payload: { text: 'world package', visibleThreadIds: [] },
+            settlementProof: proof,
+            createdAt: 1,
+        },
+    }, { chatId: current.chatId });
+    continuity.nextTurnInjection.sourceContinuityDigest = persisted.stage3ContinuityDigestWithoutInjection(continuity);
+    continuity = normalizeContinuityState(continuity, { chatId: current.chatId });
+    const packet = continuity.nextTurnInjection;
+    assert.equal(packet.producerTarget.generationId, current.generationId);
+    assert.equal(packet.producerTarget.generationType, current.generationType);
+    assert.equal(packet.settlementProof.producerTarget.generationId, current.generationId);
+    assert.equal(packet.settlementProof.producerTarget.generationType, current.generationType);
+    assert.equal(
+        packet.sourceContinuityDigest,
+        persisted.stage3ContinuityDigestWithoutInjection(continuity),
+        'the normalized packet retains the exact source-state digest used for readback',
+    );
+    assert.equal(
+        persisted.stage3SettlementProofMatchesLedger(packet.settlementProof, ledger, current),
+        true,
+        'a normalized proof must remain bound to its exact ledger receipt',
+    );
+    assert.ok(persisted.stage3PersistedPackageForTarget(continuity, ledger, current));
+
+    const stored = { namespace: null };
+    const context = {
+        chatId: current.chatId,
+        chatMetadata: {
+            mvu_auto_doctor: {
+                version: 13,
+                chatId: current.chatId,
+                rev: 0,
+                fieldRevisions: {},
+                continuity: null,
+            },
+        },
+        updateChatMetadata(update) {
+            Object.assign(this.chatMetadata, structuredClone(update));
+        },
+        async saveMetadata() {
+            stored.namespace = structuredClone(this.chatMetadata.mvu_auto_doctor);
+            stored.namespace.continuity = normalizeContinuityState(
+                stored.namespace.continuity,
+                { chatId: current.chatId },
+            );
+        },
+        async readPersistedChatMetadata() {
+            return structuredClone(stored.namespace);
+        },
+    };
+    const writer = loadNamespaceWriter(() => context);
+    const success = {};
+    const saved = await writer.write({
+        ...context.chatMetadata.mvu_auto_doctor,
+        continuity,
+    }, current.chatId, {
+        fields: ['continuity'],
+        durable: true,
+        requireReadback: true,
+        successSink: success,
+        contentValidator: (readback) => !!persisted.stage3PersistedPackageForTarget(
+            readback.continuity,
+            ledger,
+            current,
+        ),
+    });
+    assert.equal(saved, true);
+    assert.equal(success.readbackNamespace.continuity.nextTurnInjection.producerTarget.generationId,
+        current.generationId);
+    assert.equal(success.readbackNamespace.continuity.nextTurnInjection.settlementProof
+        .producerTarget.generationType, current.generationType);
+
+    const tampered = structuredClone(success.readbackNamespace.continuity);
+    tampered.nextTurnInjection.settlementProof.producerTarget.generationType = 'swipe';
+    assert.equal(persisted.stage3PersistedPackageForTarget(tampered, ledger, current), null);
+    const legacy = normalizeContinuityState({
+        chatId: current.chatId,
+        nextTurnInjection: {
+            ...packet,
+            producerTarget: { ...packet.producerTarget, generationType: '' },
+        },
+    }, { chatId: current.chatId });
+    assert.equal(legacy.nextTurnInjection, null, 'legacy packet without generation type is non-restorable');
 });
 
 test('6.1 regression wiring keeps one world batch and removes world fields from actor/profile commit', () => {
