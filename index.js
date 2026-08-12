@@ -690,6 +690,12 @@ function recordGenerationLifecycleTrace(code, {
     epoch = currentGenerationEpoch,
     operation = operationEpoch,
     type = '',
+    typeKind = '',
+    normalizedType = '',
+    eventDryRun = false,
+    optionDryRun = false,
+    quiet = '',
+    imposter = '',
     allowed = null,
     oldOperation = null,
     newOperation = null,
@@ -708,7 +714,17 @@ function recordGenerationLifecycleTrace(code, {
         chatId: currentChatId,
         epoch: Number(currentGenerationEpoch),
         operationEpoch: Number(operationEpoch),
-        type: String(type || ''),
+        // Never project the raw host type.  A lifecycle category is enough
+        // for diagnostics and cannot carry arbitrary event data.
+        type: ['normal', 'regenerate', 'swipe', 'continue'].includes(type) ? type : '',
+        typeKind: ['undefined', 'null', 'string', 'non_string'].includes(typeKind) ? typeKind : '',
+        normalizedType: ['normal', 'regenerate', 'swipe', 'continue'].includes(normalizedType)
+            ? normalizedType
+            : '',
+        eventDryRun: eventDryRun === true,
+        optionDryRun: optionDryRun === true,
+        quiet: ['present', 'absent'].includes(quiet) ? quiet : '',
+        imposter: ['present', 'absent'].includes(imposter) ? imposter : '',
         allowed: allowed === true ? true : allowed === false ? false : null,
         oldOperationEpoch: Number.isFinite(oldOperation) ? Number(oldOperation) : null,
         newOperationEpoch: Number.isFinite(newOperation) ? Number(newOperation) : null,
@@ -4745,6 +4761,13 @@ function generationCandidateAllowed(type, params, dryRun) {
     // SillyTavern omits the lifecycle type for an ordinary first generation.
     // Only that absent value defaults to normal. An explicit null, malformed
     // value, empty string, or unknown type stays fail-closed.
+    const typeKind = type === undefined
+        ? 'undefined'
+        : type === null
+            ? 'null'
+            : typeof type === 'string'
+                ? 'string'
+                : 'non_string';
     const missingType = type === null || (typeof type === 'string' && !type.trim());
     const generationType = type === undefined
         ? 'normal'
@@ -4758,18 +4781,30 @@ function generationCandidateAllowed(type, params, dryRun) {
         : Array.isArray(quietPrompt)
             ? quietPrompt.length > 0
             : Boolean(quietPrompt);
+    const optionDryRun = params?.dryRun === true || params?.dry_run === true;
+    const eventDryRun = dryRun === true;
+    const hasImposter = params?.impersonate === true || params?.is_impersonate === true;
     let rejectionKind = '';
     if (missingType) rejectionKind = 'missing_type';
     else if (type !== undefined && (typeof type !== 'string' || !allowedTypes.has(generationType))) {
         rejectionKind = 'unknown_type';
-    } else if (dryRun === true || params?.dryRun === true || params?.dry_run === true) {
+    } else if (eventDryRun) {
         rejectionKind = 'dry_run';
     } else if (hasQuietPrompt) {
         rejectionKind = 'quiet_prompt';
-    } else if (params?.impersonate === true || params?.is_impersonate === true) {
+    } else if (hasImposter) {
         rejectionKind = 'impersonate';
     }
-    return { allowed: !rejectionKind, generationType, rejectionKind };
+    return {
+        allowed: !rejectionKind,
+        generationType,
+        rejectionKind,
+        typeKind,
+        eventDryRun,
+        optionDryRun,
+        quiet: hasQuietPrompt ? 'present' : 'absent',
+        imposter: hasImposter ? 'present' : 'absent',
+    };
 }
 
 function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {
@@ -19136,6 +19171,29 @@ function bindEvents() {
     context.eventSource.on(
         types.GENERATION_STARTED || 'generation_started',
         async (type, params = {}, dryRun) => {
+            const candidate = generationCandidateAllowed(type, params, dryRun);
+            // Host preflight and every other rejected lifecycle start are
+            // observational only.  They must not consume or replace a real
+            // generation session, cancel a timer, advance epochs, or enter
+            // P4.  In particular ST may emit normal/true before normal/false.
+            if (!candidate.allowed) {
+                const current = getContext();
+                recordGenerationLifecycleTrace('ignored_start', {
+                    chatId: String(current?.chatId || ''),
+                    epoch: currentGenerationEpoch,
+                    operation: operationEpoch,
+                    type: candidate.generationType,
+                    typeKind: candidate.typeKind,
+                    normalizedType: candidate.generationType,
+                    eventDryRun: candidate.eventDryRun,
+                    optionDryRun: candidate.optionDryRun,
+                    quiet: candidate.quiet,
+                    imposter: candidate.imposter,
+                    allowed: false,
+                    reason: candidate.rejectionKind,
+                });
+                return;
+            }
             if (activeGenerationSession) {
                 activeGenerationSession.observedNestedStart = true;
                 activeGenerationSession.startedCount = Math.min(
@@ -19153,7 +19211,6 @@ function bindEvents() {
             const epoch = currentGenerationEpoch;
             if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
             pendingAcceptedFinalTimer = null;
-            const candidate = generationCandidateAllowed(type, params, dryRun);
             const generationType = candidate.generationType;
             const oldOperationEpoch = operationEpoch;
             if (['swipe', 'regenerate'].includes(generationType)) {
@@ -19166,6 +19223,12 @@ function bindEvents() {
                 epoch,
                 operation: operationEpoch,
                 type: generationType,
+                typeKind: candidate.typeKind,
+                normalizedType: generationType,
+                eventDryRun: candidate.eventDryRun,
+                optionDryRun: candidate.optionDryRun,
+                quiet: candidate.quiet,
+                imposter: candidate.imposter,
                 allowed: candidate.allowed,
                 reason: candidate.rejectionKind,
                 oldOperation: oldOperationEpoch,
@@ -19205,11 +19268,6 @@ function bindEvents() {
                 serial: session.serial,
                 baselinePresent: !!baseline?.contentFingerprint,
             });
-            if (!candidate.allowed) {
-                session.acceptedFinalOutcome = candidate.rejectionKind;
-                recordAcceptedFinalRejection(session, candidate.rejectionKind);
-                return;
-            }
             lastInjectionInspection = {
                 status: 'disabled',
                 checkedAt: 0,

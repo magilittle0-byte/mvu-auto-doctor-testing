@@ -62,7 +62,7 @@ function loadGenerationCandidateAllowed() {
     return sandbox.generationCandidateAllowed;
 }
 
-test('R9 generation candidate rejection kinds remain precise and fail-closed', () => {
+test('R10 generation candidate rejection kinds remain precise and only host dry-run blocks', () => {
     const candidate = loadGenerationCandidateAllowed();
     const cases = [
         [null, {}, false, 'missing_type'],
@@ -90,9 +90,21 @@ test('R9 generation candidate rejection kinds remain precise and fail-closed', (
     assert.equal(missing.allowed, true);
     assert.equal(missing.rejectionKind, '');
     assert.equal(missing.generationType, 'normal');
+    for (const params of [{ dryRun: true }, { dry_run: true }, { dryRun: true, dry_run: true }]) {
+        const result = candidate('normal', params, false);
+        assert.equal(result.allowed, true);
+        assert.equal(result.rejectionKind, '');
+        assert.equal(result.eventDryRun, false);
+        assert.equal(result.optionDryRun, true);
+    }
+    const hostDryRun = candidate('normal', { dryRun: true }, true);
+    assert.equal(hostDryRun.allowed, false);
+    assert.equal(hostDryRun.rejectionKind, 'dry_run');
+    assert.equal(hostDryRun.eventDryRun, true);
+    assert.equal(hostDryRun.optionDryRun, true);
 });
 
-test('R9 explicit invalid lifecycle types stay diagnostic-only at the event gate', async () => {
+test('R10 rejected lifecycle starts remain ignored and create zero Doctor state', async () => {
     const candidate = sourceSection(
         'function generationCandidateAllowed(type, params, dryRun)',
         'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
@@ -115,7 +127,10 @@ test('R9 explicit invalid lifecycle types stay diagnostic-only at the event gate
         ['normal', { is_impersonate: true }, false, 'impersonate'],
     ];
     for (const [type, params, dryRun, reason] of cases) {
-        const state = { callbacks: new Map(), p4: 0, model: 0, identity: 0, tasks: 0, busy: 0, statuses: 0 };
+        const state = {
+            callbacks: new Map(), p4: 0, model: 0, identity: 0, tasks: 0, busy: 0,
+            statuses: 0, namespaceWrites: 0,
+        };
         const sandbox = {
             currentGenerationEpoch: 0, operationEpoch: 0, generationSerial: 0,
             activeGenerationSession: null, activeNextTurnConsumer: null,
@@ -134,6 +149,7 @@ test('R9 explicit invalid lifecycle types stay diagnostic-only at the event gate
             ensureAcceptedFinalTargetIdentity: () => { state.identity += 1; },
             enqueueActorProfiles: () => { state.tasks += 1; },
             enqueueContinuity: () => { state.tasks += 1; },
+            writeChatNamespace: () => { state.namespaceWrites += 1; },
             setStatus: () => { state.statuses += 1; },
             setBusy: () => { state.busy += 1; },
             setTimeout: () => 1, clearTimeout: () => undefined,
@@ -145,15 +161,23 @@ test('R9 explicit invalid lifecycle types stay diagnostic-only at the event gate
         );
         sandbox.bindEvents();
         await state.callbacks.get('generation_started')(type, params, dryRun);
-        assert.equal(sandbox.lastGeneration.acceptedFinalEligible, false, reason);
-        assert.equal(sandbox.lastGeneration.rejectionKind, reason, reason);
+        assert.equal(sandbox.activeGenerationSession, null, reason);
+        assert.equal(sandbox.lastGeneration.id, '', reason);
+        assert.equal(sandbox.currentGenerationEpoch, 0, reason);
         assert.equal(state.p4, 0, reason);
         assert.equal(state.model, 0, reason);
         assert.equal(state.identity, 0, reason);
         assert.equal(state.tasks, 0, reason);
         assert.equal(state.busy, 0, reason);
-        assert.equal(state.statuses, 1, reason);
+        assert.equal(state.statuses, 0, reason);
+        assert.equal(state.namespaceWrites, 0, reason);
     }
+});
+
+test('R10 host preflight cannot consume the following real generation session', async () => {
+    await runCleanupFailedAcceptedFinalLifecycle({
+        type: 'normal', useProductionCandidate: true, hostPreflight: true,
+    });
 });
 
 test('R9 default opening keeps Doctor inert and rejection traces stay diagnostic-only', () => {
@@ -684,7 +708,7 @@ test('a cleanup-failed P4 lease blocks placement only', async () => {
     assert.equal(runtime.state.injectionInspection.status, 'blocked');
 });
 
-async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandidate }) {
+async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandidate, hostPreflight = false }) {
     const candidate = useProductionCandidate
         ? sourceSection(
             'function generationCandidateAllowed(type, params, dryRun)',
@@ -714,6 +738,10 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
     const bind = sourceSection(
         'function bindEvents()',
         'function dualSurfaceRollbackSummary()',
+    );
+    const trace = sourceSection(
+        'const GENERATION_LIFECYCLE_TRACE_LIMIT = 12;',
+        'let pendingChatSaveTimer',
     );
     const state = {
         callbacks: new Map(),
@@ -813,11 +841,28 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
         Math,
     };
     vm.runInNewContext(
-        `${lifecycleVmStubs}\n${candidate}\n${identity}\n${support}\n${dispatch}\n${accept}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents;`,
+        `${trace}\n${candidate}\n${identity}\n${support}\n${dispatch}\n${accept}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents; this.readTrace = () => generationLifecycleTraceDiagnosticProjection(getContext());`,
         sandbox,
     );
     sandbox.bindEvents();
 
+    if (hostPreflight) {
+        const priorEpoch = sandbox.currentGenerationEpoch;
+        const priorOperationEpoch = sandbox.operationEpoch;
+        const priorGenerationId = sandbox.lastGeneration.id;
+        await state.callbacks.get('generation_started')('normal', {}, true);
+        assert.equal(sandbox.activeGenerationSession, null);
+        assert.equal(sandbox.currentGenerationEpoch, priorEpoch);
+        assert.equal(sandbox.operationEpoch, priorOperationEpoch);
+        assert.equal(sandbox.lastGeneration.id, priorGenerationId);
+        assert.equal(state.namespaceWrites, 0);
+        assert.equal(state.providerCleanup, 0);
+        assert.equal(state.releases, 0);
+        const preflightTrace = sandbox.readTrace().at(-1);
+        assert.equal(preflightTrace.code, 'ignored_start');
+        assert.equal(preflightTrace.reason, 'dry_run');
+        assert.equal(preflightTrace.eventDryRun, true);
+    }
     await state.callbacks.get('generation_started')(type, {}, false);
     const session = sandbox.lastGeneration;
     assert.equal(session.chatId, 'chat-a');
