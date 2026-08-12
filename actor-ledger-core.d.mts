@@ -230,6 +230,10 @@ export function emptyActorLedger(chatId?: string): ActorLedger;
 export function emptyActorRegistry(chatId?: string, identityScopeId?: string, scopeDigest?: string): ActorRegistry;
 export function explicitDelimitedActorAliases(value: unknown): string[];
 export function resolveActorRegistryTargetName(value: unknown): string;
+export function classifyActorRegistryTargetName(
+    value: unknown,
+    excludedActorNames?: string[] | Set<string>,
+): string;
 export function acceptedActorSourceRefMatches(
     value: unknown,
     expected: unknown,

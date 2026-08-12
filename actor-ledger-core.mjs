@@ -102,13 +102,20 @@ function normalizeExcludedActorNames(value) {
     return new Set(cleanList(value, 24, 160).map((item) => item.toLocaleLowerCase()));
 }
 
-function isActorName(value, excludedActorNames = new Set()) {
+export function classifyActorRegistryTargetName(value, excludedActorNames = []) {
     const name = cleanText(value, 160);
-    return !!name
-        && name.length >= 2
-        && !NON_ACTOR_NAME.test(name)
-        && !GROUP_NAME.test(name)
-        && !excludedActorNames.has(name.toLocaleLowerCase());
+    if (!name || name.length < 2) return 'actor_candidate.identity_missing_or_short';
+    if (NON_ACTOR_NAME.test(name)) return 'actor_candidate.identity_system';
+    if (GROUP_NAME.test(name)) return 'actor_candidate.identity_group';
+    const excluded = excludedActorNames instanceof Set
+        ? excludedActorNames
+        : normalizeExcludedActorNames(excludedActorNames);
+    if (excluded.has(name.toLocaleLowerCase())) return 'actor_candidate.identity_excluded';
+    return '';
+}
+
+function isActorName(value, excludedActorNames = new Set()) {
+    return !classifyActorRegistryTargetName(value, excludedActorNames);
 }
 
 function playerDependentGoal(value, excludedActorNames = new Set()) {
@@ -2682,10 +2689,23 @@ export function discoverActorsFromTurnSources(value, {
     ];
     const candidates = [];
     const acceptedProfiles = [];
+    const rejectedProfileIdentityReasons = new Map();
     const byKey = new Map();
     for (const [factIndex, fact] of facts.entries()) {
         const actorName = resolveActorRegistryTargetName(fact.name);
-        if (!isActorName(actorName, excluded)) continue;
+        const identityReason = Number.isInteger(fact.modelProfileDiscoveryIndex) && isActorId(actorName)
+            ? 'actor_candidate.identity_internal_id'
+            : classifyActorRegistryTargetName(actorName, excluded);
+        if (identityReason) {
+            if (Number.isInteger(fact.modelProfileDiscoveryIndex)) {
+                const profileDiscovery = modelDiscovery.accepted[fact.modelProfileDiscoveryIndex];
+                if (profileDiscovery) rejectedProfileIdentityReasons.set(
+                    profileDiscovery.inputIndex,
+                    identityReason,
+                );
+            }
+            continue;
+        }
         const sourceKind = ACTOR_CANDIDATE_SOURCES.has(fact.sourceKind)
             ? fact.sourceKind
             : 'accepted_narrative';
@@ -2757,7 +2777,8 @@ export function discoverActorsFromTurnSources(value, {
                 )))
                 .map((entry) => ({
                     candidateRef: clone(entry.candidateRef),
-                    reason: 'actor_candidate.identity_quarantined',
+                    reason: rejectedProfileIdentityReasons.get(entry.inputIndex)
+                        || 'actor_candidate.identity_quarantined',
                     inputIndex: entry.inputIndex,
                 })),
         ],
@@ -2904,8 +2925,11 @@ export function runActorRegistryUpsert(value, candidates, {
             reject('actor_candidate.source_ref_mismatch');
             continue;
         }
-        if (!isActorName(name, excluded) || isActorId(name)) {
-            reject('actor_candidate.identity_quarantined');
+        const identityReason = isActorId(name)
+            ? 'actor_candidate.identity_internal_id'
+            : classifyActorRegistryTargetName(name, excluded);
+        if (identityReason) {
+            reject(identityReason);
             continue;
         }
         const quarantineRevealEntries = explicitQuarantineRevealEntries(ledger, raw);

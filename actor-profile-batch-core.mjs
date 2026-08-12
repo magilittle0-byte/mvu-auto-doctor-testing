@@ -142,6 +142,7 @@ export async function completeActorProfileBatchTransaction({
     allowDiscovery = false,
     discoveryContext = null,
     requestBatch,
+    preflightDiscoveries,
     resolveDiscoveries,
     persistPendingBatch,
     persistFinalizedBatch,
@@ -186,6 +187,7 @@ export async function completeActorProfileBatchTransaction({
     if (!selected.length && !allowDiscovery) return base;
     if (
         typeof requestBatch !== 'function'
+        || (allowDiscovery && typeof preflightDiscoveries !== 'function')
         || typeof resolveDiscoveries !== 'function'
         || typeof persistPendingBatch !== 'function'
         || typeof persistFinalizedBatch !== 'function'
@@ -358,10 +360,82 @@ export async function completeActorProfileBatchTransaction({
             return structured.map((entry) => JSON.stringify({
             code: entry.reason || 'actor_profile.module_invalid',
             actorId: entry.actorId || '',
+            name: entry.name || entry.candidateRef?.name || '',
             moduleKey: entry.moduleKey || '',
             groupKey: entry.groupKey || group?.key || '',
             missingFields: entry.missingFields || [],
             }));
+        };
+        const preflightIdentityDiscoveries = async (preparedApply, group, groupAttempt) => {
+            if ((preparedApply?.failures || []).length) return {
+                stale: false,
+                failures: [],
+                allDiscoveriesDeterministicallyInvalid: false,
+                validCandidateCount: 0,
+            };
+            const discoveryRows = (preparedApply?.discoveryUpdates || []).map(({ value }) => ({
+                candidateRef: {
+                    name: cleanText(value?.name, 160),
+                    sourceAnchor: String(value?.sourceAnchor || '').trim().slice(0, 1200),
+                },
+                profileFormat: 'narrative-v1',
+            }));
+            if (!discoveryRows.length) return {
+                stale: false,
+                failures: [],
+                allDiscoveriesDeterministicallyInvalid: false,
+                validCandidateCount: 0,
+            };
+            if (!await current()) return { stale: true, failures: [] };
+            let result;
+            try {
+                result = await preflightDiscoveries({
+                    discoveries: clone(discoveryRows),
+                    groupKey: group.key,
+                    attempt: groupAttempt,
+                });
+            } catch (error) {
+                result = {
+                    ok: false,
+                    failures: [{
+                        reason: cleanText(error?.message || error, 240)
+                            || 'actor_profile.discovery_preflight_failed',
+                    }],
+                };
+            }
+            if (!await current()) return { stale: true, failures: [] };
+            const failures = (Array.isArray(result?.failures) ? result.failures : [])
+                .map((entry) => ({
+                    ...entry,
+                    name: cleanText(entry?.name || entry?.candidateRef?.name, 160),
+                    reason: cleanText(entry?.reason, 160)
+                        || 'actor_profile.discovery_preflight_failed',
+                    groupKey: group.key,
+                    moduleKey: 'person',
+                    missingFields: Array.isArray(entry?.missingFields)
+                        ? clone(entry.missingFields) : [],
+                }));
+            if (result?.ok !== true && !failures.length) failures.push({
+                reason: cleanText(result?.reason, 160)
+                    || 'actor_profile.discovery_preflight_failed',
+                groupKey: group.key,
+                moduleKey: 'person',
+                missingFields: [],
+            });
+            if (failures.length) groupDiagnostics.push({
+                groupKey: group.key,
+                moduleKeys: clone(group.modules),
+                targetCount: group.targetCount,
+                attempt: groupAttempt,
+                status: 'identity_preflight_failed',
+            });
+            return {
+                stale: false,
+                failures,
+                allDiscoveriesDeterministicallyInvalid:
+                    result?.allDiscoveriesDeterministicallyInvalid === true,
+                validCandidateCount: Math.max(0, Number(result?.validCandidateCount) || 0),
+            };
         };
         let plan = actorProfileCompletionGroupPlan(subset, { allowDiscovery: attemptDiscoveryContext?.discoveryEnabled !== false });
         const identity = plan.find((group) => group.key === 'identity_bootstrap');
@@ -369,6 +443,17 @@ export async function completeActorProfileBatchTransaction({
             let parsed = await callGroup(identity, 0);
             if (parsed.stale || parsed.requestFailure) return parsed;
             let preparedApply = prepareGroupApply(identity, parsed);
+            const firstIdentityHadProtocolFailure = parsed.formatUnrecoverable
+                || preparedApply.failures.length > 0;
+            let preflight = parsed.formatUnrecoverable
+                ? { stale: false, failures: [] }
+                : await preflightIdentityDiscoveries(preparedApply, identity, 0);
+            if (preflight.stale) return { stale: true };
+            const firstIdentityAllDeterministicFalsePositives =
+                !firstIdentityHadProtocolFailure
+                && preflight.allDiscoveriesDeterministicallyInvalid === true
+                && preflight.validCandidateCount === 0;
+            preparedApply.failures.push(...preflight.failures);
             if (parsed.explicitEmpty && identity.targetCount === 0 && !preparedApply.failures.length) {
                 return { entries: [], discoveries: [], unresolved: [], failures: [], unexpected: [], explicitEmpty: true, batchMeta: { moduleGroups: groupDiagnostics } };
             }
@@ -377,6 +462,23 @@ export async function completeActorProfileBatchTransaction({
                 parsed = await callGroup(identity, 1, retryFeedbackFor(preparedApply, parsed, identity));
                 if (parsed.stale || parsed.requestFailure) return parsed;
                 preparedApply = prepareGroupApply(identity, parsed);
+                preflight = parsed.formatUnrecoverable
+                    ? { stale: false, failures: [] }
+                    : await preflightIdentityDiscoveries(preparedApply, identity, 1);
+                if (preflight.stale) return { stale: true };
+                preparedApply.failures.push(...preflight.failures);
+                if (
+                    parsed.explicitEmpty
+                    && identity.targetCount === 0
+                    && preparedApply.failures.length === 0
+                    && firstIdentityAllDeterministicFalsePositives
+                ) {
+                    return {
+                        entries: [], discoveries: [], unresolved: [], failures: [], unexpected: [],
+                        explicitEmpty: true,
+                        batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
+                    };
+                }
                 if (parsed.explicitEmpty) {
                     preparedApply.failures.push(...(firstIdentityFailures.length
                         ? firstIdentityFailures

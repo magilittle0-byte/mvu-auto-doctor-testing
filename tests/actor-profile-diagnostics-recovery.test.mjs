@@ -203,7 +203,12 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
                 'actor_shard.json_missing',
                 'world.private_payload',
             ],
-            upstreamFailureCodes: ['actor_profile.host_save_readback_mismatch', 'private text'],
+            upstreamFailureCodes: [
+                'actor_profile.host_save_readback_mismatch',
+                'actor_candidate.identity_excluded',
+                'actor_candidate.private_runtime_text',
+                'private text',
+            ],
         },
     });
     assert.equal(projected.plugin.runtimeCriticalFingerprint, 'runtime-critical:12345:abcdef12');
@@ -219,8 +224,36 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
     assert.equal(projected.actorScheduling.failed, 0);
     assert.deepEqual(projected.actorScheduling.upstreamFailureCodes, [
         'actor_profile.host_save_readback_mismatch',
+        'actor_candidate.identity_excluded',
     ]);
     assert.deepEqual(projected.actorShards, { deprecated: true });
+});
+
+test('privacy projection admits only the bounded actor identity failure whitelist', () => {
+    const allowed = [
+        'actor_candidate.identity_missing_or_short',
+        'actor_candidate.identity_system',
+        'actor_candidate.identity_group',
+        'actor_candidate.identity_excluded',
+        'actor_candidate.identity_internal_id',
+        'actor_candidate.identity_registry_conflict',
+        'actor_candidate.identity_quarantined',
+    ];
+    const projected = createPrivacySafeDiagnosticProjection({
+        actorShards: {
+            upstreamFailureCodes: [
+                ...allowed,
+                'actor_candidate.identity_private_extension',
+                'actor_candidate.alias_conflict',
+                'actor_candidate.private_payload',
+            ],
+        },
+    });
+    assert.deepEqual(projected.actorScheduling.upstreamFailureCodes, allowed.slice(0, 4));
+    const second = createPrivacySafeDiagnosticProjection({
+        actorShards: { upstreamFailureCodes: allowed.slice(4) },
+    });
+    assert.deepEqual(second.actorScheduling.upstreamFailureCodes, allowed.slice(4));
 });
 
 test('opening greeting never becomes a Doctor target before a real player input', () => {

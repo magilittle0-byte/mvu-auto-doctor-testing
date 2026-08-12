@@ -65,6 +65,22 @@ function cleanRuntimeCode(value, fallback = '') {
     return /^[a-z0-9_.:-]{1,160}$/iu.test(text) ? text : fallback;
 }
 
+const SAFE_ACTOR_IDENTITY_FAILURE_CODES = new Set([
+    'actor_candidate.identity_missing_or_short',
+    'actor_candidate.identity_system',
+    'actor_candidate.identity_group',
+    'actor_candidate.identity_excluded',
+    'actor_candidate.identity_internal_id',
+    'actor_candidate.identity_registry_conflict',
+    'actor_candidate.identity_quarantined',
+]);
+
+function privacySafeProfileUpstreamCode(value) {
+    const code = cleanRuntimeCode(value);
+    if (/^actor_profile\.[a-z0-9_.-]+$/u.test(code)) return code;
+    return SAFE_ACTOR_IDENTITY_FAILURE_CODES.has(code) ? code : '';
+}
+
 function runtimeIdentity(value) {
     return String(value || '').trim().slice(0, 180);
 }
@@ -543,8 +559,8 @@ export function createPrivacySafeDiagnosticProjection({
             upstreamFailureCodes: (Array.isArray(actorShards?.upstreamFailureCodes)
                 ? actorShards.upstreamFailureCodes
                 : [])
-                .map((value) => cleanRuntimeCode(value))
-                .filter((value) => /^actor_profile\.[a-z0-9_.-]+$/u.test(value))
+                .map((value) => privacySafeProfileUpstreamCode(value))
+                .filter(Boolean)
                 .slice(0, 4),
         },
         // Deprecated read-only alias for older diagnostic consumers.

@@ -50,6 +50,49 @@ function narrativeDiscoverySourceRef(ref) {
     };
 }
 
+function registryPreflight(fixture, acceptedNarrative, {
+    excludedActorNames = [],
+} = {}) {
+    const source = narrativeDiscoverySourceRef(fixture.ref);
+    return async ({ discoveries }) => {
+        const discovered = discoverActorsFromTurnSources(fixture.ledger, {
+            acceptedContent: acceptedNarrative,
+            excludedActorNames,
+            sourceRef: source,
+            turn: fixture.ref.generation,
+            modelProfileDiscoveries: structuredClone(discoveries),
+        });
+        const upsert = runActorRegistryUpsert(discovered.ledger, discovered.candidates, {
+            chatId: fixture.ledger.chatId,
+            identityScopeId: fixture.ref.identityScopeId,
+            scopeDigest: fixture.ref.scopeDigest,
+            allowScopeDigestFill: true,
+            expectedSourceRef: fixture.ref,
+            turn: fixture.ref.generation,
+            excludedActorNames,
+        });
+        const failures = [...(discovered.unresolved || []), ...(upsert.quarantined || [])];
+        const deterministic = new Set([
+            'actor_candidate.identity_missing_or_short',
+            'actor_candidate.identity_system',
+            'actor_candidate.identity_group',
+            'actor_candidate.identity_excluded',
+            'actor_candidate.identity_internal_id',
+            'actor_candidate.identity_registry_conflict',
+        ]);
+        const validCandidateCount = (upsert.inserted || []).length + (upsert.updated || []).length;
+        return {
+            ok: failures.length === 0 && discovered.candidates.length === discoveries.length,
+            failures,
+            validCandidateCount,
+            allDiscoveriesDeterministicallyInvalid: discoveries.length > 0
+                && validCandidateCount === 0
+                && failures.length > 0
+                && failures.every((entry) => deterministic.has(entry.reason)),
+        };
+    };
+}
+
 const NARRATIVE_SECTION_TITLES = [
     '\u4eba\u7269\u4fe1\u606f', '\u751f\u7406\u7279\u5f81', '\u6027\u683c\u7279\u5f81', '\u8fc7\u5f80\u7ecf\u5386',
     '\u5f53\u524d\u72b6\u6001', '\u5173\u7cfb\u4e0e\u52a8\u673a', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90',
@@ -297,6 +340,7 @@ async function runBatch(fixture, {
     isTargetCurrent = () => true,
     allowDiscovery = false,
     discoveryContext = null,
+    preflightDiscoveries = async () => ({ ok: true, failures: [] }),
     resolveDiscoveries = null,
     moduleProtocol = false,
 } = {}) {
@@ -377,6 +421,7 @@ async function runBatch(fixture, {
         semanticRetry,
         allowDiscovery,
         discoveryContext,
+        preflightDiscoveries,
         requestBatch: moduleProtocol ? requestBatch : adaptedRequestBatch,
         resolveDiscoveries: resolveDiscoveries || (async () => ({
             ok: true,
@@ -1082,6 +1127,140 @@ test('module protocol carries working identity, ticket authority and targeted re
     assert.deepEqual(fixture.candidates[0].locks, { canonRole: true });
 });
 
+test('identity preflight retries only bootstrap with the exact safe local reason before later groups', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const invalidName = '系统';
+    const validName = '合成人物甲';
+    const acceptedNarrative = `${invalidName}广播后，${validName}走进大厅并报上姓名。`;
+    const calls = [];
+    const moduleText = (key) => `${key}：${'这是结构完整的合成中文档案内容，包含明确事实、限制与后续行动依据。'.repeat(5)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        requestBatch: ({ attempt, candidates, groupKey, moduleKeys, messages }) => {
+            calls.push({ attempt, groupKey, prompt: messages.map((entry) => entry.content).join('\n') });
+            if (groupKey === 'identity_bootstrap') {
+                const name = attempt === 0 ? invalidName : validName;
+                return [
+                    `<profile-target actor="new" name="${name}">`,
+                    `<module key="person">${moduleText('person')}</module>`,
+                    '</profile-target>',
+                ].join('\n');
+            }
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.deepEqual(calls.slice(0, 2).map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
+        { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
+    ]);
+    assert.match(calls[1].prompt, /actor_candidate\.identity_system/u);
+    assert.ok(calls.slice(2).every((entry) => entry.groupKey !== 'identity_bootstrap'));
+    assert.deepEqual(calls.slice(2).map((entry) => entry.groupKey), [
+        'character_core', 'operational_profile',
+    ]);
+    assert.ok(run.result.failures.some((failure) => (
+        failure.reason === 'actor_profile.discovery_promotion_mapping_missing'
+    )));
+});
+
+test('all deterministic identity false positives may retry to strict no-candidates without later groups', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const invalidName = '系统';
+    const acceptedNarrative = `${invalidName}广播出现在这段合成材料中。`;
+    const calls = [];
+    const moduleText = `${'这是长度充足但身份不合格的合成档案内容。'.repeat(8)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        requestBatch: ({ attempt, groupKey, messages }) => {
+            calls.push({ attempt, groupKey, prompt: messages.map((entry) => entry.content).join('\n') });
+            if (attempt === 1) return '无人物档案';
+            return [
+                `<profile-target actor="new" name="${invalidName}">`,
+                `<module key="person">${moduleText}</module>`,
+                '</profile-target>',
+            ].join('\n');
+        },
+    });
+    assert.deepEqual(calls.map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
+        { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
+    ]);
+    assert.match(calls[1].prompt, /actor_candidate\.identity_system/u);
+    assert.equal(run.result.persistenceStatus, 'no_candidates');
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.result.failures.length, 0);
+});
+
+test('mixed valid and deterministic-invalid identity candidates cannot be erased by retry empty', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const invalidName = '系统';
+    const validName = '合成人物乙';
+    const acceptedNarrative = `${invalidName}广播后，${validName}走进大厅。`;
+    const calls = [];
+    const moduleText = `${'这是长度充足的合成档案模块内容。'.repeat(10)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        requestBatch: ({ attempt, groupKey }) => {
+            calls.push({ attempt, groupKey });
+            if (attempt === 1) return '无人物档案';
+            return [invalidName, validName].map((name) => [
+                `<profile-target actor="new" name="${name}">`,
+                `<module key="person">${moduleText}</module>`,
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.deepEqual(calls, [
+        { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
+    ]);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
+    assert.ok(run.result.failures.some((failure) => (
+        failure.reason === 'actor_candidate.identity_system'
+    )));
+});
+
+test('identity module or format failure cannot be erased by retry empty', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const acceptedNarrative = '合成人物丙走进大厅。';
+    const calls = [];
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        requestBatch: ({ attempt, groupKey }) => {
+            calls.push({ attempt, groupKey });
+            return attempt === 0
+                ? '这是没有任何目标路由标签的格式错误合成输出。'
+                : '无人物档案';
+        },
+    });
+    assert.deepEqual(calls, [
+        { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
+    ]);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
+    assert.ok(run.result.failures.some((failure) => (
+        failure.reason === 'actor_profile.identity_retry_erased_failure'
+    )));
+});
+
 test('module protocol sorts reversed discoveries by accepted first offset before provisional and final ticket binding', async () => {
     const fixture = prepareRegisteredBatch(0);
     const names = ['\u7532\u660e', '\u4e59\u5b81'];
@@ -1100,6 +1279,7 @@ test('module protocol sorts reversed discoveries by accepted first offset before
             sourceRef: source,
             characterCreationTickets: structuredClone(batch.tickets),
         },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
         requestBatch: ({ candidates, groupKey, moduleKeys }) => {
             if (groupKey === 'identity_bootstrap') {
                 return [...names].reverse().map((name) => [

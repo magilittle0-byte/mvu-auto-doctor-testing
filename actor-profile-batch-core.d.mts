@@ -44,6 +44,7 @@ export function completeActorProfileBatchTransaction(options?: {
     persistPendingBatch?: ActorProfileBatchPersistenceCallback;
     persistFinalizedBatch?: ActorProfileBatchPersistenceCallback;
     requestBatch?: (context: object) => Promise<unknown>;
+    preflightDiscoveries?: (context: object) => Promise<object>;
     resolveDiscoveries?: (context: object) => Promise<object>;
     [key: string]: unknown;
 }): Promise<ActorProfileBatchTransactionResult>;

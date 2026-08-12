@@ -94,6 +94,7 @@ import {
     actorRegistryMatchesLedger,
     acceptedActorSourceRefMatches,
     applyAcceptedContentObservations,
+    classifyActorRegistryTargetName,
     discoverActorsFromTurnSources,
     emptyActorLedger,
     inferObserverActorIds,
@@ -577,8 +578,11 @@ function markActorSchedulingNotReachedByProfile(profileFailureCode = '') {
         scheduledWithoutSemanticAction: 0,
         failureCodes: ['actor_scheduling.not_reached_by_p1'],
         upstreamFailureCodes: [String(profileFailureCode || '')]
-            .filter((code) => /^actor_profile\.[a-z0-9_.-]+$/u.test(code))
-            .slice(0, 1),
+            .filter((code) => (
+                /^actor_profile\.[a-z0-9_.-]+$/u.test(code)
+                || /^actor_candidate\.identity_(?:missing_or_short|system|group|excluded|internal_id|registry_conflict|quarantined)$/u.test(code)
+            ))
+            .slice(0, 4),
     };
 }
 
@@ -622,6 +626,7 @@ let modelCallStats = {
     rateLimited: 0,
     byTask: {
         variable: 0,
+        profile: 0,
         social: 0,
         continuity: 0,
         forum: 0,
@@ -638,6 +643,7 @@ let modelCallStats = {
         rateLimited: 0,
         byTask: {
             variable: 0,
+            profile: 0,
             social: 0,
             continuity: 0,
             forum: 0,
@@ -1438,6 +1444,7 @@ function normalizedModelCallStats(value) {
         rateLimited: nonNegative(source.rateLimited),
         byTask: {
             variable: nonNegative(byTask.variable),
+            profile: nonNegative(byTask.profile),
             social: nonNegative(byTask.social),
             continuity: nonNegative(byTask.continuity),
             forum: nonNegative(byTask.forum),
@@ -1454,6 +1461,7 @@ function normalizedModelCallStats(value) {
             rateLimited: nonNegative(currentSource.rateLimited),
             byTask: {
                 variable: nonNegative(currentByTask.variable),
+                profile: nonNegative(currentByTask.profile),
                 social: nonNegative(currentByTask.social),
                 continuity: nonNegative(currentByTask.continuity),
                 forum: nonNegative(currentByTask.forum),
@@ -1585,6 +1593,7 @@ function recordModelDiagnostic(entry) {
 
 function modelCallTaskKey(task) {
     const text = String(task || '');
+    if (/人物档案/iu.test(text)) return 'profile';
     if (/人物|关系二审|社会语义/iu.test(text)) return 'social';
     if (/变量|MVU/iu.test(text)) return 'variable';
     if (/世界|连续|事件/iu.test(text)) return 'continuity';
@@ -1598,6 +1607,7 @@ function renderModelCallStats() {
     const text = [
         `本次生成 ${current.total} 次`,
         `变量 ${current.byTask.variable}`,
+        `人物档案 ${current.byTask.profile}`,
         `关系二审 ${current.byTask.social}`,
         `活世界 ${current.byTask.continuity}`,
         `论坛 ${current.byTask.forum}`,
@@ -2059,6 +2069,7 @@ function resetCurrentModelCallStats(type = 'normal') {
         rateLimited: 0,
         byTask: {
             variable: 0,
+            profile: 0,
             social: 0,
             continuity: 0,
             forum: 0,
@@ -12167,6 +12178,7 @@ async function completeActorProfilesForTurn(captured, {
     initialActorIds = [],
     includeMaintenance = false,
     discoveryContext = null,
+    preflightDiscoveries = null,
     resolveDiscoveries = null,
 } = {}) {
     const localBatchFailure = (category) => {
@@ -12247,6 +12259,7 @@ async function completeActorProfilesForTurn(captured, {
             ...(discoveryContext || {}),
             sourceRef: discoverySourceRef,
         },
+        preflightDiscoveries,
         resolveDiscoveries,
         isTargetCurrent: () => (
             !token || continuityTargetIsCurrent(captured, token).ok
@@ -12814,6 +12827,95 @@ async function runActorProfileTarget(captured, {
         context?.name2,
         context?.characterName,
     ].filter(Boolean);
+    const preflightProfileDiscoveries = async ({ discoveries = [] } = {}) => {
+        const deterministicIdentityCodes = new Set([
+            'actor_candidate.identity_missing_or_short',
+            'actor_candidate.identity_system',
+            'actor_candidate.identity_group',
+            'actor_candidate.identity_excluded',
+            'actor_candidate.identity_internal_id',
+            'actor_candidate.identity_registry_conflict',
+        ]);
+        const safeIdentityFailure = (entry) => {
+            const reason = String(entry?.reason || '');
+            if (deterministicIdentityCodes.has(reason)) return { ...entry, reason };
+            if (['actor_candidate.alias_conflict', 'actor_candidate.actor_ref_collision']
+                .includes(reason)) {
+                return { ...entry, reason: 'actor_candidate.identity_registry_conflict' };
+            }
+            return entry;
+        };
+        const beforeRegistryGuard = await freshFrozenScopeGuard(captured);
+        if (!beforeRegistryGuard.ok) {
+            return {
+                ok: false,
+                failures: [{ reason: beforeRegistryGuard.reason || 'actor_profile.target_stale' }],
+            };
+        }
+        const supplied = Array.isArray(discoveries) ? discoveries : [];
+        const localFailures = supplied
+            .map((entry) => ({
+                candidateRef: deepClone(entry?.candidateRef || null),
+                name: String(entry?.candidateRef?.name || '').trim().slice(0, 160),
+                reason: classifyActorRegistryTargetName(
+                    entry?.candidateRef?.name,
+                    excludedActorNames,
+                ),
+            }))
+            .filter((entry) => entry.reason);
+        const actorDiscovery = discoverActorsFromTurnSources(s0Ledger, {
+            acceptedContent: acceptedNarrative,
+            excludedActorNames,
+            sourceRef: discoverySourceRef,
+            turn,
+            modelProfileDiscoveries: supplied,
+        });
+        localFailures.push(...(actorDiscovery.unresolved || []));
+        const registeredNames = new Set(Object.values(
+            s0Ledger.actorRegistry?.registered || {},
+        ).flatMap((entry) => [
+            entry.actorRef?.displayName,
+            ...(entry.actorRef?.aliases || []),
+        ]).filter(Boolean));
+        const eligibleCandidates = actorDiscovery.candidates.filter((candidate) => {
+            if (!registeredNames.has(candidate.name)) return true;
+            localFailures.push({
+                candidateId: candidate.candidateId,
+                name: candidate.name,
+                reason: 'actor_candidate.identity_registry_conflict',
+            });
+            return false;
+        });
+        const dryRun = runActorRegistryUpsert(actorDiscovery.ledger, eligibleCandidates, {
+            chatId: captured.chatId,
+            identityScopeId: captured.identityScopeId,
+            scopeDigest: captured.scopeDigest,
+            allowScopeDigestFill: true,
+            expectedSourceRef: sourceRef,
+            turn,
+            excludedActorNames,
+        });
+        localFailures.push(...(dryRun.quarantined || []).map(safeIdentityFailure));
+        const uniqueFailures = [...new Map(localFailures.map(safeIdentityFailure).map((entry) => [
+            `${entry?.candidateRef?.name || entry?.name || ''}\u0000${entry?.reason || ''}`,
+            entry,
+        ])).values()];
+        const validCandidateCount = Math.max(
+            0,
+            (dryRun.inserted || []).length + (dryRun.updated || []).length,
+        );
+        return {
+            ok: uniqueFailures.length === 0
+                && actorDiscovery.modelProfileDiscoveries.length === supplied.length
+                && eligibleCandidates.length === supplied.length,
+            failures: uniqueFailures,
+            validCandidateCount,
+            allDiscoveriesDeterministicallyInvalid: supplied.length > 0
+                && validCandidateCount === 0
+                && uniqueFailures.length > 0
+                && uniqueFailures.every((entry) => deterministicIdentityCodes.has(entry.reason)),
+        };
+    };
     const resolveProfileDiscoveries = async ({ discoveries = [] } = {}) => {
         const beforeRegistryGuard = await freshFrozenScopeGuard(captured);
         if (!beforeRegistryGuard.ok) {
@@ -13036,6 +13138,7 @@ async function runActorProfileTarget(captured, {
             ),
             ticketProducer: 'stage4_required',
         },
+        preflightDiscoveries: preflightProfileDiscoveries,
         resolveDiscoveries: resolveProfileDiscoveries,
     });
     const actorLedger = profileCompletion.ledger;
@@ -13115,6 +13218,9 @@ async function runActorProfileTarget(captured, {
         missingModules: [...new Set(failures.flatMap((failure) => (
             Array.isArray(failure?.missingFields) ? failure.missingFields : []
         )).filter((path) => narrativeMissingKeys.has(path)))].slice(0, 7),
+        failingGroups: [...new Set(failures.map((failure) => (
+            String(failure?.groupKey || '')
+        )).filter(Boolean))].slice(0, 4),
         identityCodes: [...new Set(failures.map((failure) => compactActorProfileFailureCode(failure?.reason))
             .filter((reason) => reason.startsWith('actor_profile.actor_ref_')
                 || reason.startsWith('actor_profile.discovery_name_')))].slice(0, 4),
@@ -14378,6 +14484,7 @@ async function enqueueActorProfiles(targetId, {
             latestActorProfileDiagnostic = {
                 status: String(result?.status || 'not_completed'),
                 failingModules: [...new Set([
+                    ...(validation.failingGroups || []),
                     ...(validation.missingModules || []),
                     ...failed.flatMap((entry) => entry.missingModules || entry.missingSections || []),
                 ].map((path) => String(path).split('.').at(-1)).filter(Boolean))].slice(0, 8),
