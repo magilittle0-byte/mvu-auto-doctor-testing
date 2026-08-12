@@ -2,22 +2,22 @@
 
 ## 范围
 
-本文件记录阶段二的唯一生产链：最终接受正文 → 一次联合“发现 + 整档”填表 → candidateRef 严格原文锚定 → ActorCandidate/ActorRegistry promotion → 同一 characterCreationTicket 条件绑定 → ProfileInsertCandidate 本地修复与事实校验 → actorLedger pending/readback → finalize/readback。它不启动世界模型、人物行动、agent pool、正文注入、外部 TavernDB CRUD 或总 barrier。
+本文件记录阶段二的唯一生产链：最终接受正文 → identity bootstrap 建立已有/新发现行身份 → 按 missing/refresh module group 依赖顺序填表 → candidateRef 严格原文锚定 → ActorCandidate/ActorRegistry promotion → 同一 characterCreationTicket 条件绑定 → 全组 working clone 校验 → actorLedger pending/readback → finalize/readback。它不启动世界模型、人物行动、agent pool、正文注入、外部 TavernDB CRUD 或总 barrier。
 
-阶段二最终修改范围严格为 `index.js`、`actor-profile-v6-core.mjs`、`actor-profile-batch-core.mjs`、`actor-ledger-core.mjs`、`actor-ledger-core.d.mts`、本来源映射和 `USER_GUIDE_2.0_RC.md` 共 7 文件。`README.md` 是阶段一既有差异，本阶段不修改。
+本轮只修改测试仓中的人物档案编排、连续性 SourceRef 保真、P3 诊断/界面、对应测试和本来源映射；不修改正式仓、外部 TavernDB、MVU、预设或角色卡。
 
-阶段二仍在共享 dirty tree 中，未运行测试、语法、JSON、API、宿主、浏览器、构建或 CI，也未暂存、提交或推送。
+截至 2026-08-13，本轮修改仍在测试仓工作树中；自动测试、现役模块语法检查和差异格式检查已经执行，真实 API/TauriTavern、浏览器、构建与 CI 尚未执行，也尚未暂存、提交或推送。最终交付记录以提交时的现场结果为准。
 
 ## 成熟来源与移植分类
 
 | 来源 | 精确机制 | T/A/X 分类与本阶段处理 |
 |---|---|---|
-| `TavernDB_template_03_数据库表格模板_MVU一致性修正版.json` | 表说明/字段说明/历史/正文依次组合；模型负责语义填表，脚本负责格式；失败不以空值或删列伪造成功 | **T**：直接移植“短任务/权威规则 → 字段指南一次 → 各行材料 → 共享正文一次 → 简单数组”结构；**A**：INSERT 行改为 actorRef/candidateRef ProfileInsertCandidate |
+| `TavernDB_template_03_数据库表格模板_MVU一致性修正版.json` | 每个目标表有独立 Note/current rows，兼容目标按 group 调度；模型负责语义填表，脚本负责格式与 working clone；组失败不以空值或删列伪造成功 | **T**：直接复用“目标 Note/current rows → 兼容 group 调度 → 失败组反馈重试 → working clone → 统一提交”生命周期；**A**：sheetKey 映射为 `{ActorRef, profileModule}`，隐藏 targetRows 仅作人物与模块路由，人物内容保持自然中文 |
 | `shujuku-spv8.4-index.test-fixture.js` 及对应 sanitizer/parser/orchestrator 源码 | sanitize、平衡括号提取、splitTopLevelSegments_ACU、逐行 salvage、schema validate、working clone、commit/readback | **T**：围栏/废话/标点/引号/逗号/括号宽容修复与逐行 salvage；**A**：以 ActorRef/candidateRef 分流；SQL、tableEdit、CRUD 和外部数据库时序不复制 |
 | `数据库模板-super自定义7.12总版-caikis.json` 人物表 | first_npc → second_npc 晋升；同轮多人物完整填行；确认事实优先，缺项合理补全 | **T/A**：同一次填表决定 INSERT 行并填整行；candidateRef 经既有 ActorCandidate → characters → registered 严格 promotion 后才重键 ActorRef |
 | npc_tracker | registry gate、逐人物隔离、收集后串行 apply、最后 save | **A**：只移植既有 Registry 严格匹配、逐人物隔离和串行 apply；其“先 AI gate 再填表”的第二次调用不复制 |
 | `deliverables` 与知识档案 `original_sources/预设` 中的糖糖公司、Izumi、PrismFox；测试仓库 `dist/01_主预设_人物万花筒_P5同票塑形候选版.json` | 多轴人物差异、自然中文档案、生成前票据塑形、权威人物不重写 | **T/A**：只条件消费 Stage4 已存在的同 generation 票据；权威字段只补空缺；票池耗尽不事后重掷 |
-| 项目 P0/P1/P5 source maps 与现有 core | ActorRef、Registry、ticket binding、baseline commit/digest/readback/readiness | **T**：复用现有 promotion/ticket/namespace writer；**X**：宿主 fail-closed 所需 canonical actorLedgerDigest、writer-time CAS 和 pending → finalize 双 readback；不新增 store、barrier、receipt 或编排器 |
+| 项目 P0/P1/P5 source maps 与现有 core | ActorRef、Registry、ticket binding、baseline commit/digest/readback/readiness | **T**：复用现有 promotion/ticket/namespace writer；**X**：宿主 fail-closed 所需 canonical actorLedgerDigest、writer-time CAS 和 pending → finalize 双 readback；复用同一宿主 namespace 增加 `actorProfileRetryReceipt` 与同 generation 票据摘要以支持刷新后定向恢复，不新增第二档案 store、全局 barrier 或平行编排器 |
 
 原附件失效时读取的是项目内明确标注的副本，不把副本称作附件原件。私人诊断与跑团原文不进入源码、提示词、文档或外部系统。
 2026-08-11 的两份私人故障附件原临时路径当前不可读；本阶段只采用既有诊断摘要、P1/P5 source map 与旧任务中的调用链结论，
@@ -32,16 +32,27 @@
 - P13 最小移植：标准单引号的嵌套 object/array、对象内可明确识别的缺属性逗号、以及只在已知 ProfileInsertCandidate object/array 字段中对“完整且类型匹配”的字符串化 JSON 容器转换；顶层整体引号包装的结构不拆包，普通废话前缀的英文缩写 apostrophe 不会吞掉后续真实结构根；任意引号自然文本、带后缀或类型不匹配的内嵌 JSON 保留原字符串并交 schema 拒绝。仅机械恢复并记录有限 repair label，随后仍走既有 ActorRef/candidateRef、锚点、schema、authority 与 pending→final/readback 门。
 - 明确不移植：`tableEdit` 块提取、SQL/ORM、数据库 CRUD、表写入时序以及任意自由文本语义猜测；格式无法恢复时维持 fail-closed，才允许一次 discovery-only 联合 replacement。
 
-## P14 narrative dossier compatibility boundary
+## 2026-08-13 modular group lifecycle correction
+
+The former claim that “seven bounded Markdown-like sections” and a “single JSON array” were adapted from TavernDB was inaccurate. Production no longer uses either as its generation protocol. What is actually reused from TavernDB is the lifecycle: each target table owns a Note and current rows; the scheduler selects only missing/refresh targets and joins compatible targets into groups; each group receives one model response; every result is applied to one transaction-local working clone; only failed groups retry; any terminal group failure means zero commit for the complete actor batch.
+
+Doctor uses four explicit groups: `identity_bootstrap(person)`, `character_core(personality/history/relationshipsMotives)`, `operational_profile(currentState/knowledgeCapabilitiesResources)`, and conditional `physiology_optional(physiology)`. Person first creates the in-memory candidateRef/name row identity for discoveries. It is skipped when there is no discovery work and person is already ready. Later groups use determined ActorRef/candidateRef targets and are scheduled in dependency order so each receives the latest transaction-local working row; this prevents operational modules from missing the just-generated person/core material. Full mode therefore uses at most three group calls and full_adult at most four, rather than one call per person per module.
+
+For a discovery row, the same-generation ticket shown to later groups is explicitly provisional working authority. The prompt carries the precedence order (fixed authority and accepted narrative, confirmed profile, then non-conflicting ticket axes); prose cannot overwrite local `confirmed`, `locks`, or `designRolls`. Only the existing local Registry promotion plus ticket-binding routine determines the final binding and discards axes already established by authority. This is a minimal Doctor adaptation because TavernDB rows already have stable identity before fill, while Doctor must bootstrap a new ActorRef from accepted narrative without persisting a partial row.
+
+Each prompt contains independent module Notes, exact targets, fresh current module values, and authority material. Compact JSON in targetRows is hidden routing metadata only; authored values remain natural Chinese. The response uses only lightweight target/module routing tags, never user-visible fixed headings. The parser tolerates fences, surrounding prose, Chinese quotes, and minor tag variants, but never guesses a slot from Chinese semantic keywords. Duplicate, unexpected, or missing targets/modules fail closed. The old single-dossier/seven-heading parser is load-time compatibility only and is not a production generation fallback.
+
+Direct reuse: per-target Note, group scheduler, working clone, unified commit, and failed-group retry. Minimal adaptation: sheetKey maps to `{ActorRef, profileModule}`, a row maps to ActorRef, and history maps to full SourceRef/CAS. Natural module text is stored in the deterministic `narrativeSections[moduleKey]` slot. Existing confirmed/ticket-owned structured facts are retained; module prose is never reverse-parsed into relationships, knowledge, resources, goals, or world outcomes. P3 Recall already carries the complete `profileV6`, so it consumes these deterministic module slots directly.
+
+Doctor-specific necessary code: strict ActorRef/candidateRef identity, full SourceRef, transaction-local successful-group cache, same-source/fresh-revision guards, Registry/ticket binding, and pending -> host readback -> final -> host readback CAS. Successful group output is never persisted separately. A terminal generation failure returns S0; only a Phase2 failure after a verified Phase1 may retain non-ready S2. TavernDB, MVU, presets, and Doctor remain independent.
+
+## P14 legacy narrative dossier compatibility boundary
 
 - Reused unchanged: ActorRef/Registry promotion, exact accepted-text anchor,
   ticket binding, source/scope guards, one failed-subset replacement, and the
   pending -> host readback -> final -> host readback transaction.
-- Minimal adaptation: TavernDB/caikis' one-person complete natural-language
-  dossier is carried as seven bounded Markdown-like sections.  The transport
-  parser only accepts known headings, exact registered ActorRef, or a title
-  name with one exact accepted-text occurrence; it never performs fuzzy name
-  matching or edits the accepted narrative.
+- Legacy read-only compatibility: old persisted one-person dossiers may still
+  be loaded. Their seven-heading parser is never used for new model output.
 - New local compatibility layer: `profileFormat: narrative-v1` and ordered
   `narrativeSections` are canonical content.  They are digested with the
   baseline receipt.  Legacy V6 remains read-only and is never bulk-migrated.
@@ -60,7 +71,8 @@ accepted-final
             ├─ prepareActorLedgerProfilesV6（只生成模型输入草稿）
             └─ completeActorProfilesForTurn
                  └─ completeActorProfileBatchTransaction
-                      ├─ 合格正文一次正常联合模型调用（0 人也调用并明确返回 []）
+                      ├─ identity_bootstrap 明确返回“无人物档案”才可证明 0 人；非空/失败首答不能被 retry 空答抹除
+                      ├─ 对确定行按 missing/refresh 调度 character_core → operational_profile → 可选 physiology_optional
                       ├─ actorRef 完整行 + candidateRef{name,sourceAnchor} 完整行
                       ├─ candidateRef 原文唯一锚点/真实 offset 本地校验
                       ├─ discoverActorsFromTurnSources(modelProfileDiscoveries)
@@ -92,24 +104,24 @@ public runContinuity / enqueueContinuity / runContinuityTarget
 |---|---|
 | `index.js/enqueueActorProfiles` | 模块私有单串行链、pending Map、completed Set、独立 status；pending duplicate 不制造 busy；epoch/chat 过期任务只能清自己的 owner，不能回写新聊天状态或 completed |
 | `index.js/runActorProfileTarget` | 唯一人物档案模块入口；机制-only/纯补丁正文先被 eligibility 门拒绝；不进入世界/人物/action/pool |
-| `actor-ledger-core.mjs/acceptedActorSourceRefMatches`（只复用） | 精确比较 chat/message/index/swipe/generation/generationId/type/branch/identityScope/scope/content hash；Registry 已落而档案失败时，只有同 current source 且未 ready 的 ActorRef 重新进入 initial |
+| `actor-ledger-core.mjs/acceptedActorSourceRefMatches`（只复用） | 精确比较 chat/message/logicalIndex/index/swipe/generation/generationSerial/generationId/type/identityScope/scope/hash/contentHash/contentFingerprint；不使用 `branch`；Registry 已落而档案失败时，只有同 current source 且未 ready 的 ActorRef 重新进入 initial |
 | `actor-ledger-core.mjs/discoverActorsFromTurnSources(modelProfileDiscoveries)` | 不增加姓名扫描器：仅接受联合响应 candidateRef；name 必须逐字位于唯一原文 sourceAnchor，脚本从未改写正文计算 offset；无效/重复锚点进入 unresolved；全部 registered ActorRef 只以紧凑 identity/aliases 索引供模型精确去重，不自动升级为详细整档目标 |
 | `actor-ledger-core.mjs/actorLedgerDigest` 与 `actorProfilePendingWriteSetDigest` | canonical actorLedger CAS；pending write-set 投影包含 ActorRef/schema/commitId/profileDigest/pending/readback=false/not-ready/locks/manualOverrides 和 preparedFieldRevision |
 | `actor-ledger-core.mjs/actorProfileReadinessInLedger` | 单 actor helper 只作第一层快速否定；持久 ready 必须从 final ledger 重建整批 pending 投影并核对 verification、当前 ActorRef/schema/profile digest |
 | `actor-profile-v6-core.mjs/selectActorProfileCompletionCandidates` | current-source initialActorIds 不限人数、不受 8/24 截断；历史欠账只在显式 maintenance 下受 actorProfileBatchCapacity 预算 |
-| `actor-profile-v6-core.mjs/buildActorProfileCompletionMessages` | 任务 → 权威/同票合同 → 字段与质量说明 → 每人物锚点/票据/草稿/证据 → 共享正文世界观一次 → 单个 JSON array |
-| `actor-profile-v6-core.mjs/repairProfileCandidateMetadata` 与 parser | 去围栏/废话、修引号标点逗号括号、轻微字段别名、类型归一、coverage/布尔/source 元数据定向补齐；不创作语义事实 |
-| `actor-profile-batch-core.mjs/completeActorProfileBatchTransaction` | 运输、格式/语义、ActorRef、commit/readback 分开；失败人物不进入工作克隆；成功人物一起原子写；readback 后才 ready |
+| `actor-profile-v6-core.mjs/actorProfileCompletionGroupPlan + buildActorProfileModuleGroupMessages` | 从 fresh canonical profile 选择 missing/refresh module targets；每个兼容 group 的 Notes 只注入一次；隐藏 JSON 只作人物/module 路由，模块值保持自然中文；后续 group 读取同一 transaction working row 与权威投影 |
+| `actor-profile-v6-core.mjs/parseActorProfileModuleGroupOutput` | 去围栏/前后文、宽容标签引号/中文标点/alias；严格拒绝重复、越界、缺 target/module；不按中文语义关键词猜槽，不把旧整篇档案 parser 带回生产协议 |
+| `actor-profile-batch-core.mjs/completeActorProfileBatchTransaction` | identity bootstrap → dependency-ordered groups；每组先在 group-local clone 验完再并入 transaction working clone；失败只携真实安全反馈重试该组；任一终局失败整批 S0；全部成功才进入 pending/final 两阶段读回并 ready |
 | `actor-profile-v6-core.mjs/actorProfileActionReadiness` | 兼容用第一层快速否定，不能单独授予持久 ready；阶段二生产判定统一使用 ledger-level 重建验证 |
 | `index.js/runContinuityTarget`、`enqueueContinuity` | P3 单批世界入口；不含 discovery、Registry upsert/promotion、Registry readback 或 profile completion，且不恢复 combined pool、barrier 或旧注入 |
 
 ## 人数、预算与重试
 
-- 0 人：合格自然正文仍执行一次正常联合填表调用；只有该次成功解析并明确返回 `[]`，且 current-source incomplete、missing/unexpected/unresolved/quarantine/schema/ticket/commit/readback/maintenance failure 全为空，才返回 no_candidates。模块 off、机制-only、空正文才是 0 调用。
+- 0 人：合格自然正文只执行 identity bootstrap；只有首次响应成功解析并明确返回严格“无人物档案”，且 current-source incomplete、missing/unexpected/unresolved/quarantine/schema/ticket/commit/readback/maintenance failure 全为空，才返回 no_candidates。首次响应若包含任何非空输出、候选或 identity/schema failure，重试的空答不得把它改成 no_candidates。模块 off、机制-only、空正文才是 0 调用。
 - 1、3、6、超过 3、超过 24 个本回合新人物：全部 current-source initial 进入同一个正常批次，不设人物上限，不拆成人均调用。
 - Registry 已成功保存但档案批次失败：显式手动 retry 通过 Registry.sourceRefs 与 captured source 的全字段精确匹配找回未 ready ActorRef；不按姓名猜，不提升历史来源。
 - 历史欠账：自动 accepted-final 不处理；只有手动 includeMaintenance=true 时才按可配置预算加入同一批次。
-- 正常批次一次模型调用；只有本地仍不可恢复的失败子集允许一次完整候选替换。运输失败只由 route/failover 处理，不叠加语义重试。
+- 正常 full 批次最多三个兼容 group 调用，`full_adult` 最多四个；已 ready module 不重调。每个失败 group 仅允许携其真实解析/结构错误做一次定向重试，先前成功 group 只缓存在本次 transaction 内存；运输失败只由 route/failover 处理，不伪装成语义成功。
 
 ## 权威、同票与完整度
 

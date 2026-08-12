@@ -132,6 +132,7 @@ export function createDoctorRuntimePresentation({
     routeHealth = {},
     statusKinds = {},
     backgroundActive = false,
+    profileCanRetry = false,
     dueTaskCount = 0,
     currentTurn = 0,
     now = Date.now(),
@@ -262,7 +263,7 @@ export function createDoctorRuntimePresentation({
     addAlert('sovereignty.retryable_failed', 'red', retryableFailed);
     addAlert('sovereignty.deferred', 'orange', deferred);
     addAlert('continuity.stalled', 'orange', stalledReceipts.length);
-    addAlert('actor_shards.failed', 'orange', actorShards?.failed);
+    addAlert('actor_scheduling.failed', 'orange', actorShards?.failed);
     addAlert('routes.poisoned', 'orange', routePoisoned);
     addAlert('pressure.over_cap', 'orange', worldPressure?.external?.overCap === true ? 1 : 0);
     addAlert('identity.quarantine', 'red', identityQuarantine);
@@ -388,7 +389,8 @@ export function createDoctorRuntimePresentation({
         },
         controls: {
             canCancel: backgroundActive === true || running > 0,
-            canRetry: retryableFailed + deferred + cancelledIncomplete > 0,
+            canRetry: profileCanRetry === true
+                || retryableFailed + deferred + cancelledIncomplete > 0,
             canRestore: nonNegativeInteger(sovereignty?.checkpointCount) > 0,
         },
         alerts,
@@ -414,7 +416,13 @@ export function createPrivacySafeDiagnosticProjection({
     const statusKinds = Object.fromEntries(
         Object.entries(statuses).map(([key, value]) => [
             key,
-            { kind: String(value?.kind || '') },
+            key === 'profile' ? {
+                kind: String(value?.kind || ''),
+                status: cleanRuntimeCode(value?.status, 'waiting'),
+                failingModules: (value?.failingModules || []).map(cleanRuntimeCode).filter(Boolean).slice(0, 8),
+                lastFailureCodes: (value?.lastFailureCodes || []).map(cleanRuntimeCode).filter(Boolean).slice(0, 8),
+                canRetry: value?.canRetry === true,
+            } : { kind: String(value?.kind || '') },
         ]),
     );
     return {
@@ -509,7 +517,7 @@ export function createPrivacySafeDiagnosticProjection({
             },
             modelCalls: cloneModelCallStats(chat?.modelCalls),
         },
-        actorShards: {
+        actorScheduling: {
             status: String(actorShards?.status || 'disabled'),
             selected: Math.max(0, Number(actorShards?.selected) || 0),
             completed: Math.max(0, Number(actorShards?.completed) || 0),
@@ -521,16 +529,19 @@ export function createPrivacySafeDiagnosticProjection({
                 0,
                 Number(actorShards?.scheduledWithoutSemanticAction) || 0,
             ),
-            failureCodes: [
+            advanceFailureCodes: [
                 ...new Set(
                     (Array.isArray(actorShards?.failureCodes)
                         ? actorShards.failureCodes
                         : [])
                         .map((value) => String(value || ''))
-                        .filter((value) => /^actor_shard\.[a-z0-9_.-]+$/u.test(value)),
+                        .map((value) => value.replace(/^actor_shard\./u, 'actor_scheduling.'))
+                        .filter((value) => /^actor_scheduling\.[a-z0-9_.-]+$/u.test(value)),
                 ),
             ].slice(0, 8),
         },
+        // Deprecated read-only alias for older diagnostic consumers.
+        actorShards: { deprecated: true },
         sovereignty: {
             color: String(sovereignty?.color || ''),
             mode: String(sovereignty?.mode || ''),

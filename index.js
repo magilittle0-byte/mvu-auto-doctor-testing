@@ -136,12 +136,18 @@ import {
     nextModelRouteHealth,
 } from './model-queue.mjs';
 import {
+    actorProfileRecoverySourceMatches,
+    actorProfileRetryReceiptMatches,
+    actorProfileTicketBatchPersistenceDigest,
+    actorProfileTicketBatchPersistenceMatches,
     actorProfileV6View,
     applyActorProfileV6Override,
     bindCharacterCreationTicketsToRegisteredActors,
     issueCharacterCreationTicket,
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
+    createActorProfileRetryReceipt,
+    sealActorProfileTicketBatchForPersistence,
     selectActorProfileCompletionCandidates,
     setActorProfileV6Lock,
 } from './actor-profile-v6-core.mjs';
@@ -504,6 +510,30 @@ let latestContinuityStatus = '世界连续性：等待事件';
 let latestContinuityKind = '';
 let latestActorProfileStatus = '人物档案：等待最终正文';
 let latestActorProfileKind = '';
+let latestActorProfileDiagnostic = {
+    status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false,
+};
+
+function hydratedActorProfileDiagnostic(namespace = readChatNamespace()) {
+    if (latestActorProfileDiagnostic.status !== 'waiting') return latestActorProfileDiagnostic;
+    const receipt = namespace?.actorProfileRetryReceipt;
+    const latest = latestAiMessage(getContext());
+    const current = latest.index >= 0 ? captureTarget(getContext(), latest.index) : null;
+    const currentSourceRef = sourceRefOf(current);
+    const ticketBatch = (namespace?.characterCreationTicketBatches || [])
+        .find((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
+            acceptedTarget: currentSourceRef,
+            expectedDigest: receipt?.ticketBatchDigest || '',
+        })) || null;
+    return actorProfileRetryReceiptMatches(receipt, { currentSourceRef, ticketBatch })
+        ? {
+            status: 'not_completed',
+            failingModules: receipt.failingModules || [],
+            lastFailureCodes: receipt.failureCodes || [],
+            canRetry: true,
+        }
+        : latestActorProfileDiagnostic;
+}
 let latestActorShardDiagnostics = {
     status: 'disabled',
     selected: 0,
@@ -511,6 +541,47 @@ let latestActorShardDiagnostics = {
     succeeded: 0,
     failed: 0,
 };
+
+function markActorSchedulingFailure(code, {
+    selected = latestActorShardDiagnostics.selected,
+    completed = 0,
+    succeeded = 0,
+    pendingRecovery = false,
+} = {}) {
+    const selectedCount = Math.max(0, Number(selected) || 0);
+    const completedCount = Math.min(selectedCount, Math.max(0, Number(completed) || 0));
+    const succeededCount = Math.min(completedCount, Math.max(0, Number(succeeded) || 0));
+    latestActorShardDiagnostics = {
+        ...latestActorShardDiagnostics,
+        status: pendingRecovery ? 'recovery_pending' : 'failed',
+        selected: selectedCount,
+        completed: completedCount,
+        succeeded: succeededCount,
+        failed: Math.max(1, selectedCount - succeededCount),
+        failureCodes: [String(code || 'actor_scheduling.failed')],
+    };
+}
+
+function markActorSchedulingSettled(results = [], { recovered = false } = {}) {
+    const values = (Array.isArray(results) ? results : [])
+        .map((entry) => entry?.worldAdjudicationResult || entry)
+        .filter(Boolean);
+    if (!values.length) return;
+    const succeeded = values.filter((entry) => entry?.status === 'settled').length;
+    const partial = values.filter((entry) => entry?.status === 'partial').length;
+    latestActorShardDiagnostics = {
+        ...latestActorShardDiagnostics,
+        status: recovered ? 'applied_recovered' : 'settled',
+        selected: values.length,
+        completed: values.length,
+        succeeded,
+        failed: partial,
+        semanticActions: values.length,
+        heldActions: partial,
+        scheduledWithoutSemanticAction: 0,
+        failureCodes: partial ? ['actor_scheduling.world_partial'] : [],
+    };
+}
 let latestWorldLaneDiagnostics = {
     turn: 0,
     maxLanes: 0,
@@ -566,6 +637,9 @@ function resetChatScopedRuntimeDiagnostics() {
     modelRouteHealth.fast.clear();
     modelRouteSlotCursors.strict = 0;
     modelRouteSlotCursors.fast = 0;
+    latestActorProfileDiagnostic = {
+        status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false,
+    };
     latestActorShardDiagnostics = {
         status: 'disabled',
         selected: 0,
@@ -1600,6 +1674,7 @@ function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = nu
         getContext(),
     );
     const health = doctorSemanticHealthView(namespace, runtime);
+    const profileDiagnostic = hydratedActorProfileDiagnostic(namespace);
     const ledger = normalizeActorLedger(namespace.actorLedger, {
         chatId: getContext()?.chatId || '',
     });
@@ -1621,7 +1696,15 @@ function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = nu
         || forumPendingKeys.size
     );
     return {
-        sovereignty: health,
+        sovereignty: {
+            ...health,
+            failingModules: [...new Set([
+                ...(health.failingModules || []), ...(profileDiagnostic.failingModules || []),
+            ])],
+            lastFailureCodes: [...new Set([
+                ...(health.lastFailureCodes || []), ...(profileDiagnostic.lastFailureCodes || []),
+            ])],
+        },
         runtime,
         actorLedger: ledger,
         profileReadiness: {
@@ -1649,6 +1732,7 @@ function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = nu
             forum: latestForumKind,
         },
         backgroundActive,
+        profileCanRetry: profileDiagnostic.canRetry === true,
         dueTaskCount: schedulerState.dueTaskCount ?? dueSovereigntyTasks(runtime).length,
         currentTurn: Number(namespace.continuity?.turn || ledger.turn || 0),
     };
@@ -1669,6 +1753,7 @@ const RUNTIME_ALERT_LABELS = Object.freeze({
     'sovereignty.retryable_failed': '技术任务失败，可重试',
     'sovereignty.deferred': '技术任务已延后',
     'continuity.stalled': '正文回执已停滞',
+    'actor_scheduling.failed': '人物行动与世界裁决未完成',
     'actor_shards.failed': '人物行动分析输出失败',
     'routes.poisoned': '模型接口响应无法解析，已隔离',
     'pressure.over_cap': '外部叙事压力超过上限',
@@ -2867,6 +2952,7 @@ function diagnosticPayload() {
         externalWriteConsistency: 'unknown',
     };
     const sovereignty = sovereigntyHealthWithScheduler(namespace);
+    const profileDiagnostic = hydratedActorProfileDiagnostic(namespace);
     return {
         exportedAt: new Date().toISOString(),
         ...createPrivacySafeDiagnosticProjection({
@@ -2892,7 +2978,8 @@ function diagnosticPayload() {
             }, customInstructionInjectionRecords),
             userPrompts: {
                 continuity: userPromptSlotMetadata(settings.continuityPromptAddon),
-                actorShard: userPromptSlotMetadata(settings.actorShardPromptAddon),
+                actorActionAdvance: userPromptSlotMetadata(settings.actorShardPromptAddon),
+                actorShard: { deprecated: true },
             },
             chat: {
                 present: !!context?.chatId,
@@ -2941,6 +3028,13 @@ function diagnosticPayload() {
             statuses: {
                 variable: { kind: latestStatusKind },
                 social: { kind: latestSocialKind },
+                profile: {
+                    kind: latestActorProfileKind,
+                    status: profileDiagnostic.status,
+                    failingModules: deepClone(profileDiagnostic.failingModules),
+                    lastFailureCodes: deepClone(profileDiagnostic.lastFailureCodes),
+                    canRetry: profileDiagnostic.canRetry === true,
+                },
                 continuity: { kind: latestContinuityKind },
                 forum: { kind: latestForumKind },
             },
@@ -3228,6 +3322,8 @@ function emptyChatNamespace(context = getContext()) {
         actorLedger: emptyActorLedger(chatId),
         actorLedgerCheckpoint: null,
         actorLedgerCheckpointBlobs: {},
+        characterCreationTicketBatches: [],
+        actorProfileRetryReceipt: null,
         sovereigntyRuntime: emptySovereigntyRuntime(chatId, {
             mode: getSettings().sovereigntyMode,
             scopeDigest,
@@ -5232,12 +5328,17 @@ function sourceRefOf(captured) {
     return {
         chatId: captured.chatId,
         messageId: captured.messageId,
+        logicalIndex: captured.index,
         index: captured.index,
         swipeId: captured.swipeId,
         generation: captured.generationSerial,
+        generationSerial: captured.generationSerial,
         generationId: captured.generationId,
         generationType: captured.generationType,
+        type: captured.generationType,
+        identityScope: captured.identityScope || captured.actorSovereigntyScope || null,
         identityScopeId: captured.identityScopeId,
+        scope: captured.scope || captured.actorSovereigntyScope || null,
         scopeDigest: captured.scopeDigest,
         hash: captured.fingerprint,
         contentHash: captured.contentFingerprint || captured.fingerprint,
@@ -7120,6 +7221,8 @@ function safeRouteDiagnostic({
     inputLengthBucket,
     httpStatus,
     failureKind,
+    groupKey,
+    moduleKeys,
 } = {}) {
     const category = failureKind === 'cancelled' ? 'cancelled'
         : failureKind === 'timeout' ? 'timeout'
@@ -7131,7 +7234,7 @@ function safeRouteDiagnostic({
                 : Number(httpStatus) > 0 || failureKind === 'http' || failureKind === 'rate-limit'
                     ? 'http'
                     : 'transport';
-    return Object.freeze({
+    const diagnostic = {
         channel: channel === 'fast' ? 'fast' : 'strict',
         slot: Math.max(0, Math.floor(Number(slotIndex) || 0)),
         model: String(profile?.model || '').slice(0, 120),
@@ -7145,7 +7248,14 @@ function safeRouteDiagnostic({
             .includes(inputLengthBucket) ? inputLengthBucket : 'empty',
         httpStatus: Math.max(0, Math.floor(Number(httpStatus) || 0)),
         failureKind: category,
-    });
+    };
+    const safeGroupKey = String(groupKey || '').slice(0, 80);
+    const safeModuleKeys = Array.isArray(moduleKeys)
+        ? moduleKeys.map((entry) => String(entry || '').slice(0, 80)).filter(Boolean).slice(0, 7)
+        : [];
+    if (safeGroupKey) diagnostic.groupKey = safeGroupKey;
+    if (safeModuleKeys.length) diagnostic.moduleKeys = safeModuleKeys;
+    return Object.freeze(diagnostic);
 }
 
 function isRateLimitError(error) {
@@ -7956,6 +8066,7 @@ async function callModel(messages, options = {}) {
                                 ),
                         ),
                         failureKind,
+                        ...options.routeDiagnosticContext,
                     });
                 } catch {
                     // A foreign error may be non-extensible; diagnostics below
@@ -8028,6 +8139,7 @@ async function callModel(messages, options = {}) {
                         inputLengthBucket,
                         httpStatus: Math.max(0, Number(error?.status) || 0),
                         failureKind: outerFailureKind,
+                        ...options.routeDiagnosticContext,
                     });
                 }
             } catch {
@@ -8047,6 +8159,7 @@ async function callModel(messages, options = {}) {
                     inputLengthBucket,
                     httpStatus: Math.max(0, Number(error?.status) || 0),
                     failureKind: outerFailureKind,
+                    ...options.routeDiagnosticContext,
                 });
             }
             const attemptedRouteSlots = [
@@ -9994,14 +10107,55 @@ function npcDesignTicketPrompt(batch) {
 }
 
 function npcDesignTicketBatchForTarget(captured) {
-    const batch = npcDesignTicketBatches.get(captured?.generationId);
+    const acceptedTarget = sourceRefOf(captured);
+    const persisted = (readChatNamespace()?.characterCreationTicketBatches || [])
+        .find((entry) => actorProfileTicketBatchPersistenceMatches(entry, { acceptedTarget }));
+    const batch = npcDesignTicketBatches.get(captured?.generationId) || persisted;
     if (
         !batch
         || batch.chatId !== captured?.chatId
         || Number(batch.generationSerial) !== Number(captured?.generationSerial)
         || batch.generationType !== captured?.generationType
+        || (batch.acceptedTarget && !actorProfileTicketBatchPersistenceMatches(batch, {
+            acceptedTarget,
+        }))
     ) return null;
     return batch;
+}
+
+async function persistNpcDesignTicketBatch(batch, captured) {
+    if (!batch?.chatId || !batch?.generationId) return false;
+    const acceptedTarget = sourceRefOf(captured);
+    const sealed = sealActorProfileTicketBatchForPersistence(batch, acceptedTarget);
+    if (!sealed) return false;
+    const expectedDigest = actorProfileTicketBatchPersistenceDigest(sealed);
+    const namespace = readChatNamespace();
+    namespace.characterCreationTicketBatches = [
+        ...(Array.isArray(namespace.characterCreationTicketBatches)
+            ? namespace.characterCreationTicketBatches : [])
+            .filter((entry) => entry?.generationId !== batch.generationId),
+        deepClone(sealed),
+    ].slice(-12);
+    return writeChatNamespace(namespace, batch.chatId, {
+        fields: ['characterCreationTicketBatches'],
+        durable: true,
+        requireReadback: true,
+        readbackAttempts: 1,
+        precondition: () => actorProfileRecoverySourceMatches(
+            sourceRefOf(captureTarget(getContext(), captured?.index, {
+                frozenScope: captured?.actorSovereigntyScope,
+                unscoped: !captured?.scopeDigest,
+            })),
+            acceptedTarget,
+        ),
+        contentValidator: (persistedNamespace) => (
+            (persistedNamespace?.characterCreationTicketBatches || [])
+                .some((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
+                    acceptedTarget,
+                    expectedDigest,
+                }))
+        ),
+    });
 }
 
 function retireNpcDesignTicketInjection(captured) {
@@ -11268,6 +11422,12 @@ function buildContinuityMessages({
         '世界连续性',
         settings.continuityPromptAddon,
     );
+    const customActorAdvanceInstruction = actorShardCandidates
+        ? formatUserNarrativeInstruction(
+            'P3人物调度/Advance',
+            settings.actorShardPromptAddon,
+        )
+        : '';
     const system = [
         actorShardCandidates?.actionAttempts?.length
             ? 'For existing persisted actionAttempts, every adjudication must return that exact attemptId, actorRef, and target.'
@@ -11290,6 +11450,7 @@ function buildContinuityMessages({
         '- 行动推进、后果推进、恢复推进都合法。安静回合、调查、补给、关系变化、误判修正、战后处理和既有成功持续生效，均是实质推进；禁止用新怪、新机关或新倒计时填满长文或世界账本。',
         '- 同场首领碰撞、阶段总压力与精英/首领后的恢复债务由本地闸门控制。开局与探索期必须保留发育、调查、补给、关系和路线选择空间；最低可玩性不足时只能延迟、替换、互相牵制或转为远端。',
         ...(customContinuityInstruction ? [customContinuityInstruction] : []),
+        ...(customActorAdvanceInstruction ? [customActorAdvanceInstruction] : []),
         '- 调用模型前，本地事件时钟已为每条未结事件掷出success/hold/setback，并更新stageProgress；这是防止世界永久停摆的基线，不等于所有事件都要在正文显现。你可按真实能力、资源、信息、距离和阻力纠正阶段、进度与stalled，但不得为了热闹强推。',
         `- 每个账本轮次可让同一因果簇内最多${changeLimit}条旧事件产生新的实质叙事变化；优先选择共享人物、势力、地点、资源、传播链或causedBy关系的稀疏事件簇。其他事件只保留本地时钟结果。`,
         '- 每个完成的AI回复都必须运行一次世界调度，但“运行调度”不等于所有事件机械前进。通常让一个相关事件簇推进、显现、转入休眠或结束；若正文只过去片刻、trigger尚未满足或因果前提缺失，可原样保留线程，并在lastTick登记held、目标threadId和不少于8字的具体依据。',
@@ -11985,7 +12146,7 @@ async function completeActorProfilesForTurn(captured, {
         isTargetCurrent: () => (
             !token || continuityTargetIsCurrent(captured, token).ok
         ),
-        requestBatch: async ({ messages, attempt }) => {
+        requestBatch: async ({ messages, attempt, groupKey = '', moduleKeys = [] }) => {
             const freshScope = await freshFrozenScopeGuard(captured).catch(() => ({ ok: false }));
             if (!freshScope.ok) {
                 throw localBatchFailure('scope_stale');
@@ -11994,7 +12155,9 @@ async function completeActorProfilesForTurn(captured, {
                 // Zero delegates the output ceiling to the selected connection.
                 // Profile batches do not borrow the actor action worker token cap.
                 maxTokens: 0,
-                task: attempt === 0 ? '人物完整档案批量生成' : '缺失人物档案批量替换补填',
+                task: attempt === 0
+                    ? `人物档案模块组：${groupKey}`
+                    : `人物档案失败模块组定向补填：${groupKey}`,
                 channel: 'fast',
                 instructionModule: 'profile',
                 targetIndex: captured.index,
@@ -12004,6 +12167,7 @@ async function completeActorProfilesForTurn(captured, {
                 runUntilCancelled: false,
                 noTimeout: true,
                 requestKind: 'actor_profile_batch',
+                routeDiagnosticContext: { groupKey, moduleKeys },
             });
             const afterModelScope = await freshFrozenScopeGuard(captured)
                 .catch(() => ({ ok: false }));
@@ -12178,6 +12342,88 @@ function clearActorProfileReadShadow(captured = null) {
     actorProfileReadShadow = null;
 }
 
+async function persistActorProfileRecoveryState(captured, result) {
+    const namespace = readChatNamespace();
+    const generationId = String(captured?.generationId || '');
+    const acceptedTarget = sourceRefOf(captured);
+    const freshTarget = () => sourceRefOf(captureTarget(getContext(), captured?.index, {
+        frozenScope: captured?.actorSovereigntyScope,
+        unscoped: !captured?.scopeDigest,
+    }));
+    const sourceStillCurrent = () => actorProfileRecoverySourceMatches(
+        acceptedTarget,
+        freshTarget(),
+    );
+    const status = String(result?.status || 'not_completed');
+    const terminal = ['atomic_readback', 'no_candidates', 'disabled'].includes(status);
+    const retryable = status === 'not_completed' || (status === 'stale' && sourceStillCurrent());
+    const inMemoryBatch = npcDesignTicketBatches.get(generationId);
+    const existingBatch = (namespace.characterCreationTicketBatches || [])
+        .find((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
+            acceptedTarget,
+        })) || null;
+    const sealedBatch = existingBatch || sealActorProfileTicketBatchForPersistence(
+        inMemoryBatch,
+        acceptedTarget,
+    );
+    if (terminal) {
+        namespace.characterCreationTicketBatches = (namespace.characterCreationTicketBatches || [])
+            .filter((entry) => !actorProfileRecoverySourceMatches(
+                entry?.acceptedTarget,
+                acceptedTarget,
+            ));
+        namespace.actorProfileRetryReceipt = null;
+    } else if (retryable) {
+        if (sealedBatch && !existingBatch) {
+            namespace.characterCreationTicketBatches = [
+                ...(namespace.characterCreationTicketBatches || []), deepClone(sealedBatch),
+            ].slice(-12);
+        }
+        namespace.actorProfileRetryReceipt = createActorProfileRetryReceipt({
+            sourceRef: acceptedTarget,
+            ticketBatch: sealedBatch,
+            outcomeStatus: status,
+            failingModules: deepClone(
+                result?.profileBatch?.validationDiagnostic?.missingModules || [],
+            ).slice(0, 8),
+            failureCodes: (result?.profileBatch?.failed || [])
+                .map((entry) => compactActorProfileFailureCode(entry?.reason))
+                .filter(Boolean).slice(0, 8),
+            updatedAt: Date.now(),
+        });
+    } else {
+        // A stale result for a replaced swipe/generation must never create a
+        // usable retry receipt. Existing old receipts are harmless because
+        // hydration also requires the full current SourceRef and digests.
+        return true;
+    }
+    if (retryable && !namespace.actorProfileRetryReceipt) return false;
+    return writeChatNamespace(namespace, captured.chatId, {
+        fields: ['characterCreationTicketBatches', 'actorProfileRetryReceipt'],
+        durable: true,
+        requireReadback: true,
+        readbackAttempts: 1,
+        precondition: sourceStillCurrent,
+        contentValidator: (persisted) => {
+            if (terminal) {
+                return persisted?.actorProfileRetryReceipt == null
+                    && !(persisted?.characterCreationTicketBatches || []).some((entry) => (
+                        actorProfileRecoverySourceMatches(entry?.acceptedTarget, acceptedTarget)
+                    ));
+            }
+            const persistedBatch = (persisted?.characterCreationTicketBatches || [])
+                .find((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
+                    acceptedTarget,
+                    expectedDigest: namespace.actorProfileRetryReceipt?.ticketBatchDigest || '',
+                })) || null;
+            return actorProfileRetryReceiptMatches(persisted?.actorProfileRetryReceipt, {
+                currentSourceRef: acceptedTarget,
+                ticketBatch: persistedBatch,
+            });
+        },
+    });
+}
+
 function compactActorProfileFailureCode(value) {
     return String(value ?? '').trim().slice(0, 120);
 }
@@ -12186,6 +12432,19 @@ async function runActorProfileTarget(captured, {
     force = false,
     includeMaintenance = false,
 } = {}) {
+    const preGenerationTicket = npcDesignTicketBatches.get(captured?.generationId);
+    const acceptedTicketTarget = sourceRefOf(captured);
+    const persistedTicket = (readChatNamespace()?.characterCreationTicketBatches || [])
+        .some((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
+            acceptedTarget: acceptedTicketTarget,
+        }));
+    if (preGenerationTicket && !persistedTicket) {
+        const persisted = await persistNpcDesignTicketBatch(preGenerationTicket, captured);
+        if (!persisted) return actorProfileTransientResult('not_completed', {
+            reason: 'actor_profile.ticket_persistence_failed',
+            profileBatch: { failed: [{ reason: 'actor_profile.ticket_persistence_failed' }] },
+        });
+    }
     const scopeGuard = await freshFrozenScopeGuard(captured);
     if (!scopeGuard.ok) {
         return actorProfileTransientResult('stale', { reason: scopeGuard.reason });
@@ -12720,10 +12979,17 @@ async function runActorProfileTarget(captured, {
         'narrativeSections.knowledgeCapabilitiesResources',
     ]);
     const narrativeValidationDiagnostic = {
-        attempt: Math.min(2, Math.max(0, Number(profileCompletion.modelCalls) || 0)),
-        modelCalls: Math.min(2, Math.max(0, Number(profileCompletion.modelCalls) || 0)),
+        attempt: Math.min(16, Math.max(0, Number(profileCompletion.modelCalls) || 0)),
+        modelCalls: Math.min(16, Math.max(0, Number(profileCompletion.modelCalls) || 0)),
+        moduleGroups: (profileCompletion.batchMeta?.moduleGroups || []).slice(-16).map((entry) => ({
+            groupKey: String(entry?.groupKey || '').slice(0, 80),
+            moduleKeys: Array.isArray(entry?.moduleKeys) ? entry.moduleKeys.slice(0, 7) : [],
+            targetCount: Math.max(0, Number(entry?.targetCount) || 0),
+            attempt: Math.max(0, Number(entry?.attempt) || 0),
+            status: String(entry?.status || '').slice(0, 40),
+        })),
         parsedRowCount: Math.min(128, Math.max(0, Number(profileCompletion.batchMeta?.parsedRowCount) || 0)),
-        missingSections: [...new Set(failures.flatMap((failure) => (
+        missingModules: [...new Set(failures.flatMap((failure) => (
             Array.isArray(failure?.missingFields) ? failure.missingFields : []
         )).filter((path) => narrativeMissingKeys.has(path)))].slice(0, 7),
         identityCodes: [...new Set(failures.map((failure) => compactActorProfileFailureCode(failure?.reason))
@@ -12790,6 +13056,7 @@ async function runActorProfileTarget(captured, {
             })),
             validationDiagnostic: narrativeValidationDiagnostic,
             readbackVerified: profileCompletion.readbackVerified === true,
+            ticketBound: profileCompletion.registry?.ticketBound === true,
         },
         ticketPoolExhausted: deepClone(
             profileCompletion.registry?.ticketPoolExhausted || [],
@@ -13085,6 +13352,9 @@ async function runContinuityTarget(captured, {
         captured,
     );
     if (existingPacket) {
+        markActorSchedulingSettled(existingPacket?.settlementProof?.orderedResults || [], {
+            recovered: true,
+        });
         return {
             status: 'applied',
             recovered: true,
@@ -13151,6 +13421,14 @@ async function runContinuityTarget(captured, {
     let actionLedger = profileGate.actorLedger;
     let pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
     let scheduledActorIds = [];
+    if (pendingActions.attempts.length) {
+        latestActorShardDiagnostics = {
+            status: 'attempts_prepared', selected: pendingActions.attempts.length,
+            completed: pendingActions.attempts.length, succeeded: pendingActions.attempts.length,
+            failed: 0, semanticActions: pendingActions.attempts.length, heldActions: 0,
+            scheduledWithoutSemanticAction: 0, failureCodes: [],
+        };
+    }
     if (!profileGate.noActorPermit && !pendingActions.attempts.length) {
         const actorSchedule = scheduleActorTurns(actionLedger, {
             turn: nextTurn,
@@ -13165,6 +13443,12 @@ async function runContinuityTarget(captured, {
         // agent layer.  We still persist/verify the locally admitted attempts
         // before any returned outcome is applied below.
         scheduledActorIds = actorSchedule.selected.map((actor) => actor.actorId).filter(Boolean);
+        latestActorShardDiagnostics = {
+            status: scheduledActorIds.length ? 'scheduled' : 'idle',
+            selected: scheduledActorIds.length, completed: 0, succeeded: 0, failed: 0,
+            semanticActions: 0, heldActions: 0, scheduledWithoutSemanticAction: 0,
+            failureCodes: [],
+        };
     } else if (profileGate.noActorPermit && pendingActions.attempts.length) {
         return { status: 'blocked', reason: 'no_candidates_with_pending_attempts', module: 'world' };
     }
@@ -13311,6 +13595,11 @@ async function runContinuityTarget(captured, {
         if (error?.code === 'WORLD_TARGET_STALE') {
             return { status: 'stale', reason: String(error.message || error) };
         }
+        const selected = scheduledActorIds.length || pendingActions.attempts.length;
+        if (selected) markActorSchedulingFailure('actor_scheduling.advance_transport_failed', {
+            selected,
+            pendingRecovery: pendingActions.attempts.length > 0,
+        });
         return { status: 'failed', reason: String(error?.message || error), module: 'world' };
     }
     const parsed = parseContinuityOutput(output, {
@@ -13318,6 +13607,11 @@ async function runContinuityTarget(captured, {
         maxThreads: settings.continuityMaxThreads,
     });
     if (!parsed.state) {
+        const selected = scheduledActorIds.length || pendingActions.attempts.length;
+        if (selected) markActorSchedulingFailure('actor_scheduling.advance_parse_failed', {
+            selected,
+            pendingRecovery: pendingActions.attempts.length > 0,
+        });
         return { status: 'failed', reason: parsed.error || 'continuity_output_invalid', module: 'world' };
     }
     let phase1Persisted = null;
@@ -13331,6 +13625,10 @@ async function runContinuityTarget(captured, {
             || new Set(proposalIds).size !== proposals.length
             || proposalIds.some((actorId) => !scheduledActorIds.includes(actorId))
         ) {
+            latestActorShardDiagnostics = {
+                ...latestActorShardDiagnostics, status: 'failed', failed: scheduledActorIds.length,
+                failureCodes: ['actor_scheduling.advance_proposals_incomplete'],
+            };
             return { status: 'failed', reason: 'world_actor_proposals_incomplete', module: 'world' };
         }
         const candidates = actorActionCandidatesFromShard(actionLedger, proposals, {
@@ -13342,14 +13640,27 @@ async function runContinuityTarget(captured, {
             target: actionTarget,
         });
         if (prepared.rejected.length || prepared.attempts.length !== scheduledActorIds.length) {
+            latestActorShardDiagnostics = {
+                ...latestActorShardDiagnostics, status: 'failed', failed: scheduledActorIds.length,
+                failureCodes: ['actor_scheduling.attempt_prepare_incomplete'],
+            };
             return { status: 'failed', reason: 'actor_attempt_prepare_incomplete', module: 'world' };
         }
         const recorded = recordActorActionAttempts(prepared.ledger, prepared.attempts, {
             target: actionTarget,
         });
         if (recorded.rejected.length || recorded.recorded.length !== prepared.attempts.length) {
+            latestActorShardDiagnostics = {
+                ...latestActorShardDiagnostics, status: 'failed', failed: scheduledActorIds.length,
+                failureCodes: ['actor_scheduling.attempt_readback_incomplete'],
+            };
             return { status: 'failed', reason: 'actor_attempt_record_incomplete', module: 'world' };
         }
+        latestActorShardDiagnostics = {
+            ...latestActorShardDiagnostics, status: 'attempts_prepared',
+            completed: recorded.recorded.length, succeeded: recorded.recorded.length,
+            semanticActions: recorded.recorded.length,
+        };
         const rawAdjudications = Array.isArray(parsed.raw?.actionAdjudications)
             ? parsed.raw.actionAdjudications
             : [];
@@ -13359,6 +13670,10 @@ async function runContinuityTarget(captured, {
             || new Set(rawAdjudications.map((entry) => String(entry?.actorId || ''))).size !== rawAdjudications.length
             || rawAdjudications.some((entry) => !recordedByActor.has(String(entry?.actorId || '')))
         ) {
+            latestActorShardDiagnostics = {
+                ...latestActorShardDiagnostics, status: 'failed', failed: scheduledActorIds.length,
+                failureCodes: ['actor_scheduling.advance_adjudications_incomplete'],
+            };
             return { status: 'failed', reason: 'world_actor_adjudications_incomplete', module: 'world' };
         }
         parsed.raw.actionAdjudications = rawAdjudications.map((entry) => {
@@ -13384,6 +13699,9 @@ async function runContinuityTarget(captured, {
             phase1Expected,
         });
         if (!preparedCheckpoint) {
+            markActorSchedulingFailure('actor_scheduling.phase1_candidate_prepare_failed', {
+                selected: scheduledActorIds.length,
+            });
             return { status: 'failed', reason: 'world_candidate_prepare_failed', module: 'world' };
         }
         const persisted = await persistActorActionAttemptsForTurn(captured, {
@@ -13400,16 +13718,27 @@ async function runContinuityTarget(captured, {
             },
         });
         if (!persisted.ok) {
+            markActorSchedulingFailure('actor_scheduling.phase1_persistence_failed', {
+                selected: scheduledActorIds.length,
+            });
             return { status: 'failed', reason: persisted.reason, module: 'world' };
         }
         phase1Persisted = persisted;
         actionLedger = persisted.ledger;
         pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
         if (pendingActions.attempts.length !== recorded.recorded.length) {
+            markActorSchedulingFailure('actor_scheduling.phase1_attempt_readback_incomplete', {
+                selected: scheduledActorIds.length,
+                pendingRecovery: pendingActions.attempts.length > 0,
+            });
             return { status: 'failed', reason: 'actor_attempt_readback_incomplete', module: 'world' };
         }
         const attemptByActor = new Map(pendingActions.attempts.map((attempt) => [attempt.actorId, attempt]));
         if (!stage3PreparedWorldCheckpointMatches(persisted.checkpoint, actionLedger, captured)) {
+            markActorSchedulingFailure('actor_scheduling.phase1_checkpoint_readback_mismatch', {
+                selected: scheduledActorIds.length,
+                pendingRecovery: true,
+            });
             return { status: 'failed', reason: 'world_candidate_readback_mismatch', module: 'world' };
         }
     } else {
@@ -13417,6 +13746,10 @@ async function runContinuityTarget(captured, {
             ? validateWorldAdjudicationBatch(parsed.raw?.actionAdjudications, pendingActions.attempts)
             : { valid: true };
         if (!existingAdjudications.valid) {
+            markActorSchedulingFailure('actor_scheduling.advance_adjudications_incomplete', {
+                selected: pendingActions.attempts.length,
+                pendingRecovery: true,
+            });
             return { status: 'failed', reason: 'world_adjudication_invalid', module: 'world' };
         }
         const preparedCheckpoint = stage3PreparedWorldCheckpoint({
@@ -13446,6 +13779,12 @@ async function runContinuityTarget(captured, {
             },
         });
         if (!persisted?.ok || !stage3PreparedWorldCheckpointMatches(persisted.checkpoint, persisted.ledger, captured)) {
+            if (pendingActions.attempts.length) {
+                markActorSchedulingFailure('actor_scheduling.phase1_checkpoint_readback_mismatch', {
+                    selected: pendingActions.attempts.length,
+                    pendingRecovery: true,
+                });
+            }
             return { status: 'failed', reason: persisted?.reason || 'world_candidate_readback_mismatch', module: 'world' };
         }
         phase1Persisted = persisted;
@@ -13459,6 +13798,11 @@ async function runContinuityTarget(captured, {
         phase1Persisted.ledger,
         captured,
     )) {
+        const selected = pendingActions.attempts.length || scheduledActorIds.length;
+        if (selected) markActorSchedulingFailure('actor_scheduling.phase1_checkpoint_readback_mismatch', {
+            selected,
+            pendingRecovery: pendingActions.attempts.length > 0,
+        });
         return { status: 'failed', reason: 'world_candidate_readback_mismatch', module: 'world' };
     }
     // Phase 2 only consumes the durable Phase 1 readback.  A normal run and a
@@ -13702,7 +14046,21 @@ async function commitPreparedWorldCandidate(captured, {
     worldModelCalls = 0,
 } = {}) {
     const prepared = checkpoint?.preparedWorld;
+    const actionTarget = actorActionTargetOf(captured);
+    const pending = pendingActorActionAttempts(ledger, { target: actionTarget });
+    if (pending.attempts.length) {
+        latestActorShardDiagnostics = {
+            status: 'attempts_prepared', selected: pending.attempts.length,
+            completed: pending.attempts.length, succeeded: pending.attempts.length,
+            failed: 0, semanticActions: pending.attempts.length, heldActions: 0,
+            scheduledWithoutSemanticAction: 0, failureCodes: [],
+        };
+    }
     if (!stage3PreparedPhase1StatesMatch(checkpoint, namespace, ledger, captured)) {
+        if (pending.attempts.length) markActorSchedulingFailure(
+            'actor_scheduling.phase2_precondition_failed',
+            { selected: pending.attempts.length, pendingRecovery: true },
+        );
         return { status: 'failed', reason: 'world_candidate_manual_reconciliation', module: 'world' };
     }
     const phase2State = {
@@ -13710,12 +14068,14 @@ async function commitPreparedWorldCandidate(captured, {
         continuity: stage3FieldState(namespace, 'continuity'),
         continuityCheckpoint: stage3FieldState(namespace, 'continuityCheckpoint'),
     };
-    const actionTarget = actorActionTargetOf(captured);
-    const pending = pendingActorActionAttempts(ledger, { target: actionTarget });
     const adjudicationBatch = pending.attempts.length
         ? validateWorldAdjudicationBatch(prepared.actionAdjudications, pending.attempts)
         : { valid: true, decisions: [] };
     if (!adjudicationBatch.valid) {
+        markActorSchedulingFailure('actor_scheduling.phase2_adjudication_invalid', {
+            selected: pending.attempts.length,
+            pendingRecovery: true,
+        });
         return { status: 'failed', reason: 'world_candidate_adjudication_invalid', module: 'world' };
     }
     const settlement = pending.attempts.length
@@ -13731,7 +14091,13 @@ async function commitPreparedWorldCandidate(captured, {
         || !actorActionSettlementsMatchLedger(settlement.ledger, {
             chatId: captured.chatId, target: actionTarget, results: settlement.results,
         }).ok
-    )) return { status: 'failed', reason: 'world_candidate_settlement_failed', module: 'world' };
+    )) {
+        markActorSchedulingFailure('actor_scheduling.phase2_settlement_failed', {
+            selected: pending.attempts.length,
+            pendingRecovery: true,
+        });
+        return { status: 'failed', reason: 'world_candidate_settlement_failed', module: 'world' };
+    }
     const scheduledBase = normalizeContinuityState(prepared.scheduledState, {
         chatId: captured.chatId, maxThreads: settings.continuityMaxThreads,
     });
@@ -13747,7 +14113,13 @@ async function commitPreparedWorldCandidate(captured, {
     const progressed = lifecycle.changedExisting > 0 || lifecycle.added > 0
         || (lifecycle.schedulerAdvanced && lifecycle.tickAction === 'held')
         || continuityWorldDigest(scheduledBase) !== continuityWorldDigest(next);
-    if (!progressed) return { status: 'failed', reason: 'world_semantic_progress_missing', module: 'world' };
+    if (!progressed) {
+        if (pending.attempts.length) markActorSchedulingFailure(
+            'actor_scheduling.phase2_semantic_progress_missing',
+            { selected: pending.attempts.length, pendingRecovery: true },
+        );
+        return { status: 'failed', reason: 'world_semantic_progress_missing', module: 'world' };
+    }
     next.turn = prepared.nextTurn;
     next.updatedAt = Date.now();
     next = attachChangedSourceRefs(scheduledBase, next, sourceRefOf(captured));
@@ -13786,7 +14158,14 @@ async function commitPreparedWorldCandidate(captured, {
         }).ok),
         expectedFieldStates: phase2State,
     });
-    if (!saved) return { status: 'failed', reason: failureSink.code || 'world.persistence_readback_failed', module: 'world' };
+    if (!saved) {
+        if (pending.attempts.length) markActorSchedulingFailure(
+            'actor_scheduling.phase2_persistence_readback_failed',
+            { selected: pending.attempts.length, pendingRecovery: true },
+        );
+        return { status: 'failed', reason: failureSink.code || 'world.persistence_readback_failed', module: 'world' };
+    }
+    markActorSchedulingSettled(settlement?.results || [], { recovered: worldModelCalls === 0 });
     const active = next.threads.filter((thread) => thread.stage !== 'resolved').length;
     return { status: 'applied', active, director: prepared.director, worldModelCalls, worldWrites: 1,
         recovered: true, nextTurnInjection: deepClone(next.nextTurnInjection), readbackVerified: !!successSink.readbackNamespace };
@@ -13864,11 +14243,32 @@ async function enqueueActorProfiles(targetId, {
             }
             return runActorProfileTarget(current, { force, includeMaintenance });
         })
-        .then((result) => {
+        .then(async (result) => {
             if (!actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) return result;
+            const recoverySaved = await persistActorProfileRecoveryState(expected, result);
             if (['atomic_readback', 'no_candidates'].includes(result?.status)) {
                 actorProfileCompletedKeys.add(dedupeKey);
             }
+            const validation = result?.profileBatch?.validationDiagnostic || {};
+            const failed = Array.isArray(result?.profileBatch?.failed)
+                ? result.profileBatch.failed : [];
+            latestActorProfileDiagnostic = {
+                status: String(result?.status || 'not_completed'),
+                failingModules: [...new Set([
+                    ...(validation.missingModules || []),
+                    ...failed.flatMap((entry) => entry.missingModules || entry.missingSections || []),
+                ].map((path) => String(path).split('.').at(-1)).filter(Boolean))].slice(0, 8),
+                lastFailureCodes: [...new Set(failed
+                    .map((entry) => compactActorProfileFailureCode(entry.reason)).filter(Boolean))].slice(0, 8),
+                canRetry: result?.status === 'not_completed'
+                    || (result?.status === 'stale' && actorProfileRecoverySourceMatches(
+                        sourceRefOf(expected),
+                        sourceRefOf(captureTarget(getContext(), expected.index, {
+                            frozenScope: expected.actorSovereigntyScope,
+                            unscoped: !expected.scopeDigest,
+                        })),
+                    )),
+            };
             if (result?.status === 'atomic_readback') {
                 const committed = result.profileBatch?.committed?.length || 0;
                 setActorProfileStatus(
@@ -13882,9 +14282,9 @@ async function enqueueActorProfiles(targetId, {
             } else if (result?.status === 'stale') {
                 setActorProfileStatus('人物档案：目标已变化，本次未提交', '');
             } else {
-                const missing = result?.profileBatch?.validationDiagnostic?.missingSections || [];
+                const missing = result?.profileBatch?.validationDiagnostic?.missingModules || [];
                 setActorProfileStatus(
-                    `人物档案未完成：${safeDiagnosticReason(result?.reason || '批次未能原子回读')}${missing.length ? `（缺 ${missing.length} 个叙事区块）` : ''}`,
+                    `人物档案没有生成。影响：人物暂未行动就绪；${recoverySaved ? '医生已保留本回合恢复材料，可点击“重试人物档案”。' : '恢复材料保存失败，请保持当前聊天并立即点击“重试人物档案”。'}${missing.length ? ` 缺少 ${missing.length} 个档案模块。` : ''}`,
                     'error',
                 );
             }
@@ -13896,6 +14296,10 @@ async function enqueueActorProfiles(targetId, {
                 reason: String(error.message || error),
             });
             if (actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
+                latestActorProfileDiagnostic = {
+                    status: 'not_completed', failingModules: ['profile'],
+                    lastFailureCodes: ['actor_profile.unhandled_failure'], canRetry: true,
+                };
                 setActorProfileStatus(`人物档案未完成：${error.message || error}`, 'error');
             }
             return result;
@@ -17810,17 +18214,9 @@ function buildSettingsPanel() {
                                 或共享同一时间、地点、人物、势力、资源或因果簇时才可共同爆发，并继续受注入预算限制。
                                 人物行动与势力、环境、经济等结构世界过程分轨调度；关闭逐人物行动分析不会停止后者。
                             </div>
-                            <label class="mvuad-select">
-                                <span>人物行动分析</span>
-                                <select class="text_pole mvuad-actor-shard-mode">
-                                    <option value="off">关闭（0 次额外调用）</option>
-                                    <option value="auto">人物驱动·自动（推荐）</option>
-                                    <option value="on">开启</option>
-                                </select>
-                            </label>
                             <label class="mvuad-number">
-                                <span>后台行动人数</span>
-                                <input class="text_pole mvuad-actor-shard-workers" type="number" min="1" max="6" step="1">
+                                <span>P3人物调度探索预算</span>
+                                <input class="text_pole mvuad-actor-scheduling-budget" type="number" min="1" max="6" step="1">
                             </label>
                             <label class="mvuad-number">
                                 <span>次要人物探索槽</span>
@@ -17861,8 +18257,8 @@ function buildSettingsPanel() {
                             </label>
                             <div class="mvuad-description">
                                 人物会保留身份、有限认知、目标、位置、资源、承诺、计划与隐藏内心状态。
-                                到期行动、时限和承诺优先；探索槽让次要人物不会永久饿死。每名入选人物最多增加一次轻量调用，
-                                默认行动 2 人、探索 1 人。行动必须通过知识、时间、地点、资源、能力、因果与玩家主权校验；
+                                到期、逾期与饥饿人物全部进入调度，不受人数预算截断；此处人数只限制额外探索人物。所有入选人物由同一次 Advance 统一提出尝试并交给世界裁决，
+                                默认探索预算 2 人、探索槽 1 人。行动必须通过知识、时间、地点、资源、能力、因果与玩家主权校验；
                                 失败只保留人物账本并显示原因，不阻断正文、数据库、变量医生或世界时钟。
                                 以上人数、槽位、碰撞、恢复、压力与注入选项只控制自动医生自己的后台模拟，
                                 不改写、截断或重生成主模型已经完成的正文，也不修改角色卡、数据库或缝合怪。
@@ -17883,12 +18279,12 @@ function buildSettingsPanel() {
                                         rows="5" maxlength="6000"
                                         placeholder="留空使用内置连续性规则。"></textarea>
                                     <label class="mvuad-prompt-addon-label" for="mvuad-actor-shard-prompt-addon">
-                                        只影响 NPC 幕后行动的提示词
+                                        P3人物调度/Advance 行动附加提示
                                     </label>
                                     <textarea id="mvuad-actor-shard-prompt-addon"
                                         class="text_pole mvuad-actor-shard-prompt-addon"
                                         rows="5" maxlength="6000"
-                                        placeholder="留空使用内置隔离 worker 规则。"></textarea>
+                                        placeholder="留空使用内置人物行动与世界裁决规则。"></textarea>
                                     <div class="mvuad-actor-prompt-save-hint" aria-live="polite"></div>
                                     <div class="mvuad-actions">
                                         <button class="menu_button mvuad-actor-prompt-save" type="button">保存自定义提示词</button>
@@ -18196,26 +18592,19 @@ function buildSettingsPanel() {
     continuityMaxVisible.value = String(getSettings().continuityMaxVisible);
     continuityMaxVisible.disabled = true;
     continuityMaxVisible.title = '阶段一停用旧平行注入；当前值只兼容保留';
-    const actorShardMode = wrapper.querySelector('.mvuad-actor-shard-mode');
-    actorShardMode.value = getSettings().actorShardMode;
-    actorShardMode.addEventListener('change', () => {
-        getSettings().actorShardMode = actorShardMode.value;
-        saveSettings();
-    });
-    const actorShardWorkers = wrapper.querySelector('.mvuad-actor-shard-workers');
-    actorShardWorkers.value = String(getSettings().actorLedgerMaxActorsPerTurn);
-    actorShardWorkers.addEventListener('change', () => {
+    const actorSchedulingBudget = wrapper.querySelector('.mvuad-actor-scheduling-budget');
+    actorSchedulingBudget.value = String(getSettings().actorLedgerMaxActorsPerTurn);
+    actorSchedulingBudget.addEventListener('change', () => {
         const normalized = Math.min(
             5,
-            Math.max(1, Math.floor(Number(actorShardWorkers.value) || 2)),
+            Math.max(1, Math.floor(Number(actorSchedulingBudget.value) || 2)),
         );
-        getSettings().actorShardMaxWorkers = normalized;
         getSettings().actorLedgerMaxActorsPerTurn = normalized;
         getSettings().actorLedgerExplorationSlots = Math.min(
             normalized,
             getSettings().actorLedgerExplorationSlots,
         );
-        actorShardWorkers.value = String(normalized);
+        actorSchedulingBudget.value = String(normalized);
         saveSettings();
     });
     const actorExplorationSlots = wrapper.querySelector('.mvuad-actor-exploration-slots');

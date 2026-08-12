@@ -16,7 +16,7 @@ function sourceBetween(startNeedle, endNeedle) {
     return source.slice(start, end);
 }
 
-test('profile runtime delegates one batch and contains no per-actor model lane or repair model', () => {
+test('profile runtime delegates one grouped transaction and contains no per-actor model lane or repair model', () => {
     const completion = sourceBetween(
         'async function completeActorProfilesForTurn',
         'async function runContinuityTarget',
@@ -61,8 +61,21 @@ test('profile runtime delegates one batch and contains no per-actor model lane o
     assert.match(batchSource, /profileBatchRouteDiagnostic/u);
     assert.doesNotMatch(batchSource, /transportFailure/u);
     assert.match(batchSource, /const retryCandidates = semanticRetry/u);
-    assert.match(batchSource, /parseActorProfileCompletionBatchOutput/u);
-    assert.doesNotMatch(batchSource, /Promise\.all/u);
+    assert.match(batchSource, /actorProfileCompletionGroupPlan/u);
+    assert.match(batchSource, /buildActorProfileModuleGroupMessages/u);
+    assert.match(batchSource, /parseActorProfileModuleGroupOutput/u);
+    assert.match(batchSource, /for \(const scheduledGroup of plan\)/u);
+    assert.match(batchSource, /actorProfileCompletionGroupPlan\(workingCandidates\(\), \{ allowDiscovery: false \}\)/u);
+    assert.doesNotMatch(batchSource, /Promise\.all\(plan\.map/u);
+    assert.doesNotMatch(
+        batchSource,
+        /Promise\.all\((?:subset|candidates)\.map/u,
+        'dependency-ordered module groups and actors never get independent model lanes',
+    );
+    assert.match(batchSource, /groupCandidates.*?requestBatch\(\{/su);
+    assert.match(batchSource, /if \(parsed\.stale \|\| parsed\.requestFailure \|\| parsed\.formatUnrecoverable \|\| preparedApply\?\.failures\.length\) break;\s*commitGroupApply\(preparedApply\)/u);
+    assert.match(batchSource, /retryFeedbackFor\(preparedApply, parsed, group\)/u);
+    assert.match(batchSource, /actor_profile\.format_unrecoverable/u);
     assert.doesNotMatch(completion, /\bpatch(?:es)?\b/u);
     assert.match(source, /actor_registry_awaiting_p2/u);
     assert.match(source, /requestKind: 'connection_probe'/u);

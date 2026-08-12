@@ -104,8 +104,13 @@ test('旧路径与迁移收敛 leaves one production continuity migration owner 
         'P1 and continuity cannot call the retired partial profile writer',
     );
     assert.doesNotMatch(indexText, /legacyClassifyDoctorPressureCandidate/u);
-    assert.match(batchText, /buildActorProfileCompletionMessages/u);
-    assert.match(batchText, /parseActorProfileCompletionBatchOutput/u);
+    assert.match(batchText, /actorProfileCompletionGroupPlan/u);
+    assert.match(batchText, /buildActorProfileModuleGroupMessages/u);
+    assert.match(batchText, /parseActorProfileModuleGroupOutput/u);
+    assert.match(batchText, /for \(const scheduledGroup of plan\)/u);
+    assert.match(batchText, /actorProfileCompletionGroupPlan\(workingCandidates\(\), \{ allowDiscovery: false \}\)/u);
+    assert.doesNotMatch(batchText, /Promise\.all\(plan\.map/u);
+    assert.doesNotMatch(batchText, /Promise\.all\((?:subset|candidates)\.map/u);
     assert.match(batchText, /materializeActorProfileBaseline/u);
     assert.match(batchText, /replaceActorProfileBaselineInLedger/u);
     assert.match(batchText, /persistPendingBatch/u);

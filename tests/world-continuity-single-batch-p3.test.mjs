@@ -8,6 +8,7 @@ import {
     applyWorldUpdate,
     mergeMarkerRecords,
     normalizeContinuityState,
+    normalizeSourceRef,
     parseContinuityOutput,
 } from '../continuity-core.mjs';
 import { sovereigntySourceKey } from '../sovereignty-runtime-core.mjs';
@@ -972,6 +973,16 @@ test('P3 wiring uses Recall then one Advance call, with ATT plus prepared checkp
 });
 
 test('P3 keeps full persistent thread history while P4 remains a separate visible projection', () => {
+    const sourceRef = (index) => ({
+        chatId: 'chat-full-history', messageId: `message-${index}`,
+        logicalIndex: index, index, swipeId: index % 2,
+        generation: index + 10, generationSerial: index + 10,
+        generationId: `generation-${index}`, generationType: 'normal', type: 'normal',
+        identityScope: { cardId: 'card-a' }, identityScopeId: 'scope-a',
+        scope: { cardId: 'card-a' }, scopeDigest: 'scope-digest-a',
+        hash: `hash-${index}`, contentHash: `hash-${index}`,
+        contentFingerprint: `hash-${index}`,
+    });
     const threads = Array.from({ length: 72 }, (_, index) => ({
         id: `OFFSCREEN-${index + 1}`,
         title: `offscreen continuity ${index + 1}`,
@@ -982,7 +993,7 @@ test('P3 keeps full persistent thread history while P4 remains a separate visibl
         urgency: 1,
         createdTurn: index + 1,
         lastAdvancedTurn: index + 1,
-        sourceRefs: [],
+        sourceRefs: [sourceRef(index + 1)],
     }));
     const normalized = normalizeContinuityState({ chatId: 'chat-full-history', threads }, {
         chatId: 'chat-full-history', maxThreads: 12, maxResolved: 12,
@@ -993,17 +1004,28 @@ test('P3 keeps full persistent thread history while P4 remains a separate visibl
     assert.equal(normalized.threads.at(-1).id, 'OFFSCREEN-72');
     assert.equal(normalized.threads.filter((thread) => thread.stage === 'resolved').length, 30);
     assert.equal(normalized.threads.filter((thread) => thread.stage === 'advancing').length, 42);
+    const expectedSourceRefs = threads.map((thread) => normalizeSourceRef(thread.sourceRefs[0]));
+    assert.deepEqual(normalized.threads.map((thread) => thread.sourceRefs[0]), expectedSourceRefs);
+    assert.equal(JSON.stringify(normalized).includes('branch'), false);
     const clocked = advanceContinuityClocks(normalized, {
         chatId: 'chat-full-history', random: () => 0.9,
     }).state;
     assert.equal(clocked.threads.length, 72);
     assert.deepEqual(clocked.threads.map((thread) => thread.id), expectedIds);
+    assert.deepEqual(clocked.threads.map((thread) => thread.sourceRefs[0]), expectedSourceRefs);
     const merged = mergeMarkerRecords(clocked, [], { chatId: 'chat-full-history', maxThreads: 12 });
     assert.equal(merged.threads.length, 72);
     assert.deepEqual(merged.threads.map((thread) => thread.id), expectedIds);
+    assert.deepEqual(merged.threads.map((thread) => thread.sourceRefs[0]), expectedSourceRefs);
     const parsed = parseContinuityOutput(JSON.stringify(merged), { chatId: 'chat-full-history', maxThreads: 12 });
     assert.ok(parsed.state);
     assert.deepEqual(parsed.state.threads.map((thread) => thread.id), expectedIds);
+    assert.deepEqual(parsed.state.threads.map((thread) => thread.sourceRefs[0]), expectedSourceRefs);
+    const namespaceReadback = JSON.parse(JSON.stringify({ continuity: parsed.state }));
+    assert.deepEqual(
+        namespaceReadback.continuity.threads.map((thread) => thread.sourceRefs[0]),
+        expectedSourceRefs,
+    );
 });
 
 test('P3 source retains every scheduled ActorRef atomically and fails capacity before a model call', () => {

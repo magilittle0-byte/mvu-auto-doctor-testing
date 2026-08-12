@@ -918,15 +918,51 @@ export function normalizeSourceRef(value) {
     if (!value || typeof value !== 'object') return null;
     const chatId = cleanText(value.chatId, 180);
     const messageId = cleanText(value.messageId, 180);
-    const hash = cleanText(value.hash, 80);
+    const contentHash = cleanText(value.contentHash || value.contentFingerprint || value.hash, 180);
+    const contentFingerprint = cleanText(value.contentFingerprint || contentHash, 180);
+    const hash = cleanText(value.hash || contentHash, 180);
     if (!chatId || !messageId || !hash) return null;
     const target = normalizeActorActionTarget(value.target);
+    const logicalIndex = boundedInteger(
+        value.logicalIndex ?? value.index,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        0,
+    );
+    const generation = boundedInteger(
+        value.generation ?? value.generationSerial,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        0,
+    );
+    const generationSerial = boundedInteger(
+        value.generationSerial ?? value.generation,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        generation,
+    );
     return {
         chatId,
         messageId,
-        index: boundedInteger(value.index, 0, Number.MAX_SAFE_INTEGER, 0),
+        logicalIndex,
+        index: boundedInteger(value.index ?? value.logicalIndex, 0, Number.MAX_SAFE_INTEGER, logicalIndex),
         swipeId: boundedInteger(value.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
+        generation,
+        generationSerial,
+        generationId: cleanText(value.generationId, 180),
+        generationType: cleanText(value.generationType || value.type, 80),
+        type: cleanText(value.type || value.generationType, 80),
+        identityScope: value.identityScope && typeof value.identityScope === 'object'
+            ? structuredClone(value.identityScope)
+            : cleanText(value.identityScope, 500),
+        identityScopeId: cleanText(value.identityScopeId, 180),
+        scope: value.scope && typeof value.scope === 'object'
+            ? structuredClone(value.scope)
+            : cleanText(value.scope, 500),
+        scopeDigest: cleanText(value.scopeDigest, 180),
         hash,
+        contentHash,
+        contentFingerprint,
         ...(target ? { target } : {}),
     };
 }

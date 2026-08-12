@@ -1,9 +1,11 @@
 import { fingerprint } from './core.mjs';
 import {
     actorProfileBaselineDigest,
-    buildActorProfileCompletionMessages,
+    actorProfileCompletionGroupPlan,
+    buildActorProfileModuleGroupMessages,
     materializeActorProfileBaseline,
-    parseActorProfileCompletionBatchOutput,
+    parseActorProfileModuleGroupOutput,
+    validateActorProfileDiscoveryAnchor,
     validateActorProfileInsertCandidate,
 } from './actor-profile-v6-core.mjs';
 import {
@@ -71,7 +73,7 @@ function profileBatchRouteDiagnostic(value) {
         ? 'actor_profile_batch'
         : '';
     if (!channel && !requestKind) return null;
-    return {
+    const diagnostic = {
         channel,
         slot: Math.max(0, Math.floor(Number(value.slot) || 0)),
         model: cleanText(value.model, 120),
@@ -86,6 +88,13 @@ function profileBatchRouteDiagnostic(value) {
             ? value.failureKind
             : 'transport',
     };
+    const groupKey = cleanText(value.groupKey, 80);
+    const moduleKeys = Array.isArray(value.moduleKeys)
+        ? value.moduleKeys.map((entry) => cleanText(entry, 80)).filter(Boolean).slice(0, 7)
+        : [];
+    if (groupKey) diagnostic.groupKey = groupKey;
+    if (moduleKeys.length) diagnostic.moduleKeys = moduleKeys;
+    return diagnostic;
 }
 
 function profileBatchRequestFailure(error) {
@@ -224,34 +233,249 @@ export async function completeActorProfileBatchTransaction({
                 discoveryEnabled: discoveryRetryTargets.length > 0 || forceDiscoveryRetry,
                 discoveryRetryOnly: discoveryRetryTargets.length > 0,
             };
-        const messages = buildActorProfileCompletionMessages(subset, {
-            evidenceText,
-            customPrompt,
-            validationFeedback,
-            discoveryContext: attemptDiscoveryContext,
-            discoveryRetryTargets,
-        });
-        let output;
-        try {
-            output = await requestBatch({
-                candidates: clone(subset),
-                messages,
-                attempt,
+        const profileById = new Map(subset.map((candidate) => [candidateActorId(candidate), {
+            candidate,
+            sections: clone(candidate?.previousProfile?.narrativeSections || {}),
+        }]));
+        const discoveries = new Map();
+        const groupDiagnostics = [];
+        const callGroup = async (group, groupAttempt = 0, groupFeedback = validationFeedback) => {
+            // A retry may reuse successful sibling groups only inside this
+            // transaction. Revalidate the accepted source before every call;
+            // the existing Phase1 writer later enforces the exact fresh base
+            // revision/digest CAS before any cached group can become durable.
+            if (!await current()) return { stale: true };
+            const messages = buildActorProfileModuleGroupMessages(group, {
+                evidenceText, customPrompt, validationFeedback: groupFeedback,
+                discoveryContext: attemptDiscoveryContext,
             });
-            modelCalls += 1;
-        } catch (error) {
-            const failure = profileBatchRequestFailure(error);
-            if (failure.routeDiagnostic?.requestStarted === true) modelCalls += 1;
+            let output;
+            try {
+                const groupCandidates = [...new Map(Object.values(group.targets || {})
+                    .flat()
+                    .map((candidate) => [candidateActorId(candidate), candidate])).values()];
+                output = await requestBatch({
+                    candidates: clone(groupCandidates), messages, attempt: groupAttempt,
+                    groupKey: group.key, moduleKeys: clone(group.modules),
+                });
+                modelCalls += 1;
+            } catch (error) {
+                const failure = profileBatchRequestFailure(error);
+                if (failure.routeDiagnostic?.requestStarted === true) modelCalls += 1;
+                groupDiagnostics.push({ groupKey: group.key, attempt: groupAttempt, status: 'transport_failed', routeDiagnostic: failure.routeDiagnostic });
+                return { requestFailure: failure };
+            }
+            if (!await current()) return { stale: true };
+            let parsed = parseActorProfileModuleGroupOutput(output, group, {
+                acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
+            });
+            groupDiagnostics.push({ groupKey: group.key, moduleKeys: clone(group.modules), targetCount: group.targetCount, attempt: groupAttempt, status: parsed.formatUnrecoverable ? 'format_failed' : 'parsed' });
+            return parsed;
+        };
+        const prepareGroupApply = (group, parsed) => {
+            const failures = (parsed.failures || []).map((entry) => ({
+                ...entry,
+                groupKey: group.key,
+            }));
+            const sectionUpdates = [];
+            const discoveryUpdates = [];
+            const scheduledByActor = new Map();
+            for (const [moduleKey, targets] of Object.entries(group.targets || {})) {
+                for (const targetCandidate of targets) {
+                    const actorId = candidateActorId(targetCandidate);
+                    if (!scheduledByActor.has(actorId)) scheduledByActor.set(actorId, new Set());
+                    scheduledByActor.get(actorId).add(moduleKey);
+                }
+            }
+            for (const entry of parsed.entries || []) {
+                if (entry.actorId === 'new') {
+                    if (group.key !== 'identity_bootstrap') {
+                        failures.push({ actorId: '', name: entry.name, reason: 'actor_profile.discovery_outside_bootstrap' });
+                        continue;
+                    }
+                    const name = cleanText(entry.name, 160);
+                    if (!name) continue;
+                    const narrative = String(attemptDiscoveryContext?.acceptedNarrative || '');
+                    const offset = narrative.indexOf(name);
+                    const sourceAnchor = offset >= 0
+                        ? narrative.slice(Math.max(0, offset - 80), Math.min(narrative.length, offset + name.length + 120)).trim()
+                        : '';
+                    const key = `${name}\u0000${sourceAnchor}`;
+                    if (discoveries.has(key)) {
+                        failures.push({ name, reason: 'actor_profile.discovery_duplicate' });
+                        continue;
+                    }
+                    discoveryUpdates.push({ key, value: { name, sourceAnchor, sections: clone(entry.modules) } });
+                    continue;
+                }
+                const row = profileById.get(cleanText(entry.actorId, 120));
+                const scheduledModules = scheduledByActor.get(cleanText(entry.actorId, 120));
+                if (!row || !scheduledModules || (entry.name && cleanText(entry.name, 160) !== candidateName(row.candidate))) {
+                    failures.push({ actorId: entry.actorId, name: entry.name, reason: 'actor_profile.actor_ref_mismatch', groupKey: group.key });
+                    continue;
+                }
+                const unexpectedModule = Object.keys(entry.modules || {}).find((key) => !scheduledModules.has(key));
+                if (unexpectedModule) {
+                    failures.push({ actorId: entry.actorId, name: entry.name, reason: 'actor_profile.module_unexpected', moduleKey: unexpectedModule, groupKey: group.key });
+                    continue;
+                }
+                sectionUpdates.push({ row, modules: clone(entry.modules) });
+            }
+            for (const [moduleKey, targets] of Object.entries(group.targets || {})) {
+                for (const targetCandidate of targets) {
+                    const actorId = candidateActorId(targetCandidate);
+                    const update = sectionUpdates.find((entry) => candidateActorId(entry.row.candidate) === actorId);
+                    if (!cleanText(update?.modules?.[moduleKey], 4000)) {
+                        failures.push(failureFor(targetCandidate, 'actor_profile.module_missing', { groupKey: group.key, moduleKey, missingFields: [`narrativeSections.${moduleKey}`] }));
+                    }
+                }
+            }
+            return { failures, sectionUpdates, discoveryUpdates };
+        };
+        const commitGroupApply = (preparedApply) => {
+            for (const update of preparedApply.sectionUpdates) Object.assign(update.row.sections, update.modules);
+            for (const update of preparedApply.discoveryUpdates) discoveries.set(update.key, update.value);
+        };
+        const workingCandidates = () => [...profileById.values()].map(({ candidate, sections }) => ({
+            ...candidate,
+            previousProfile: {
+                ...(candidate?.previousProfile || {}),
+                profileFormat: 'narrative-v1',
+                narrativeSections: clone(sections),
+            },
+        }));
+        const retryFeedbackFor = (preparedApply, parsed, group = null) => {
+            const structured = [
+            ...(preparedApply?.failures || []),
+            ...(parsed?.failures || []),
+            ];
+            if (parsed?.formatUnrecoverable === true && !(parsed?.failures || []).length) {
+                structured.push({
+                    reason: 'actor_profile.format_unrecoverable',
+                    groupKey: group?.key || '',
+                });
+            }
+            return structured.map((entry) => JSON.stringify({
+            code: entry.reason || 'actor_profile.module_invalid',
+            actorId: entry.actorId || '',
+            moduleKey: entry.moduleKey || '',
+            groupKey: entry.groupKey || group?.key || '',
+            missingFields: entry.missingFields || [],
+            }));
+        };
+        let plan = actorProfileCompletionGroupPlan(subset, { allowDiscovery: attemptDiscoveryContext?.discoveryEnabled !== false });
+        const identity = plan.find((group) => group.key === 'identity_bootstrap');
+        if (identity) {
+            let parsed = await callGroup(identity, 0);
+            if (parsed.stale || parsed.requestFailure) return parsed;
+            let preparedApply = prepareGroupApply(identity, parsed);
+            if (parsed.explicitEmpty && identity.targetCount === 0 && !preparedApply.failures.length) {
+                return { entries: [], discoveries: [], unresolved: [], failures: [], unexpected: [], explicitEmpty: true, batchMeta: { moduleGroups: groupDiagnostics } };
+            }
+            const firstIdentityFailures = clone(preparedApply.failures);
+            if ((parsed.formatUnrecoverable || preparedApply.failures.length) && semanticRetry) {
+                parsed = await callGroup(identity, 1, retryFeedbackFor(preparedApply, parsed, identity));
+                if (parsed.stale || parsed.requestFailure) return parsed;
+                preparedApply = prepareGroupApply(identity, parsed);
+                if (parsed.explicitEmpty) {
+                    preparedApply.failures.push(...(firstIdentityFailures.length
+                        ? firstIdentityFailures
+                        : [{ actorId: '', reason: 'actor_profile.identity_retry_erased_failure' }]));
+                }
+            }
+            if (parsed.formatUnrecoverable || preparedApply.failures.length) return { entries: [], discoveries: [], unresolved: preparedApply.failures.map((entry) => ({ ...entry, retryable: false })), failures: preparedApply.failures.map((entry) => ({ ...entry, retryable: false })), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics } };
+            commitGroupApply(preparedApply);
+        }
+        const acceptedNarrative = String(attemptDiscoveryContext?.acceptedNarrative || '');
+        const orderedDiscoveries = [...discoveries.values()].map((entry) => ({
+            entry,
+            anchor: validateActorProfileDiscoveryAnchor({
+                name: entry.name,
+                sourceAnchor: entry.sourceAnchor,
+            }, acceptedNarrative),
+        }));
+        const discoveryOrderFailures = orderedDiscoveries
+            .filter(({ anchor }) => anchor.ok !== true)
+            .map(({ entry, anchor }) => ({
+                name: entry.name,
+                reason: anchor.reason || 'actor_profile.discovery_anchor_invalid',
+                retryable: false,
+            }));
+        const offsetCounts = new Map();
+        for (const { anchor } of orderedDiscoveries) {
+            if (!anchor.ok) continue;
+            offsetCounts.set(anchor.offset, (offsetCounts.get(anchor.offset) || 0) + 1);
+        }
+        for (const { entry, anchor } of orderedDiscoveries) {
+            if (anchor.ok && (offsetCounts.get(anchor.offset) || 0) > 1) {
+                discoveryOrderFailures.push({
+                    name: entry.name,
+                    reason: 'actor_profile.discovery_source_offset_duplicate',
+                    retryable: false,
+                });
+            }
+        }
+        if (discoveryOrderFailures.length) {
             return {
-                requestFailure: failure,
+                entries: [], discoveries: [], unresolved: discoveryOrderFailures,
+                failures: discoveryOrderFailures, unexpected: [], explicitEmpty: false,
+                batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
             };
         }
-        if (!await current()) return { stale: true };
-        const parsed = parseActorProfileCompletionBatchOutput(output, {
-            candidates: subset,
-            discoveryContext: attemptDiscoveryContext,
-        });
-        return parsed;
+        orderedDiscoveries.sort((left, right) => left.anchor.offset - right.anchor.offset);
+        const discoveryCandidates = orderedDiscoveries.map(({ entry, anchor }, index) => ({
+            actorRef: { actorId: `DISC-${fingerprint(entry.name).slice(0, 16)}`, name: entry.name },
+            name: entry.name,
+            completionMode: attemptDiscoveryContext?.completionMode || subset[0]?.completionMode || 'full',
+            previousProfile: { narrativeSections: Object.fromEntries(Object.entries(entry.sections).map(([key, text]) => [key, { text }])) },
+            characterCreationTicket: clone(attemptDiscoveryContext?.characterCreationTickets?.[index] || null),
+            __discoveryKey: `${entry.name}\u0000${entry.sourceAnchor}`,
+            __sourceOffset: anchor.offset,
+        }));
+        for (const candidate of discoveryCandidates) profileById.set(candidateActorId(candidate), { candidate, sections: clone(candidate.previousProfile.narrativeSections) });
+        plan = actorProfileCompletionGroupPlan(workingCandidates(), { allowDiscovery: false })
+            .filter((group) => group.key !== 'identity_bootstrap');
+        const results = [];
+        for (const scheduledGroup of plan) {
+            const group = actorProfileCompletionGroupPlan(workingCandidates(), { allowDiscovery: false })
+                .find((entry) => entry.key === scheduledGroup.key);
+            if (!group) continue;
+            let parsed = await callGroup(group, 0);
+            if (parsed.stale || parsed.requestFailure) {
+                results.push({ group, parsed, preparedApply: null });
+                break;
+            }
+            let preparedApply = prepareGroupApply(group, parsed);
+            if ((parsed.formatUnrecoverable || preparedApply.failures.length) && semanticRetry) {
+                parsed = await callGroup(group, 1, retryFeedbackFor(preparedApply, parsed, group));
+                if (!parsed.stale && !parsed.requestFailure) preparedApply = prepareGroupApply(group, parsed);
+            }
+            results.push({ group, parsed, preparedApply });
+            if (parsed.stale || parsed.requestFailure || parsed.formatUnrecoverable || preparedApply?.failures.length) break;
+            commitGroupApply(preparedApply);
+        }
+        const terminal = results.find(({ parsed, preparedApply }) => parsed.stale || parsed.requestFailure || parsed.formatUnrecoverable || preparedApply?.failures.length);
+        if (terminal?.parsed?.stale) return { stale: true };
+        if (terminal?.parsed?.requestFailure) return { requestFailure: terminal.parsed.requestFailure };
+        const failures = results.flatMap(({ preparedApply }) => preparedApply?.failures || []).map((entry) => ({ ...entry, retryable: false }));
+        const entries = [];
+        const discoveryRows = [];
+        for (const { candidate, sections } of profileById.values()) {
+            const profileCandidate = {
+                profileFormat: 'narrative-v1',
+                actorRef: clone(candidate.actorRef),
+                narrativeSections: Object.fromEntries(Object.entries(sections).map(([key, value]) => [key, { text: value?.text ?? value }])),
+                sources: {},
+            };
+            const validation = validateActorProfileInsertCandidate(profileCandidate, candidate);
+            if (!validation.ok) {
+                failures.push(failureFor(candidate, validation.errorCode, { missingFields: validation.missingFields, retryable: false }));
+            } else if (candidate.__discoveryKey) {
+                const [name, sourceAnchor] = candidate.__discoveryKey.split('\u0000');
+                discoveryRows.push({ candidateRef: { name, sourceAnchor }, candidate: validation.candidate, repairs: [], resolutions: [] });
+            } else entries.push({ actorId: candidateActorId(candidate), name: candidateName(candidate), candidate: validation.candidate, repairs: [], resolutions: [] });
+        }
+        return { entries, discoveries: discoveryRows, unresolved: failures.filter((entry) => !entry.actorId), failures: failures.filter((entry) => entry.actorId), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' } };
     };
 
     let batchMeta = null;
@@ -504,11 +728,29 @@ export async function completeActorProfileBatchTransaction({
     const resolvedCandidates = Array.isArray(resolved.candidates)
         ? resolved.candidates
         : [];
+    const resolvedPromotionEntries = Array.isArray(resolved.entries) ? resolved.entries : [];
+    const promotedDiscoveryNames = new Set(resolvedPromotionEntries.map((entry) => (
+        cleanText(entry?.candidate?.candidateRef?.name, 160)
+        || cleanText(entry?.candidateRef?.name, 160)
+        || cleanText(entry?.candidate?.actorRef?.name, 160)
+        || cleanText(entry?.actorRef?.name, 160)
+    )).filter(Boolean));
+    for (const discovery of discoveries) {
+        const discoveryName = cleanText(discovery?.candidateRef?.name, 160);
+        const explicitlyAccounted = [...(resolved?.rejected || []), ...(resolved?.failures || [])]
+            .some((entry) => cleanText(entry?.candidateRef?.name || entry?.name, 160) === discoveryName);
+        if (discoveryName && !promotedDiscoveryNames.has(discoveryName) && !explicitlyAccounted) {
+            discoveryFailures.push({
+                candidateRef: clone(discovery.candidateRef),
+                reason: 'actor_profile.discovery_promotion_mapping_missing',
+            });
+        }
+    }
     const resolvedCandidateById = new Map(resolvedCandidates.map((candidate) => [
         candidateActorId(candidate),
         candidate,
     ]));
-    for (const entry of Array.isArray(resolved.entries) ? resolved.entries : []) {
+    for (const entry of resolvedPromotionEntries) {
         const actorId = cleanText(entry?.actorRef?.actorId, 120);
         const context = resolvedCandidateById.get(actorId);
         const profileCandidate = clone(entry?.candidate);

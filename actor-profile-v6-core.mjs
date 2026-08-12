@@ -47,6 +47,12 @@ export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS = Object.freeze([
     'relationshipsMotives',
     'knowledgeCapabilitiesResources',
 ]);
+export const ACTOR_PROFILE_COMPLETION_GROUPS = Object.freeze([
+    { key: 'identity_bootstrap', modules: ['person'] },
+    { key: 'character_core', modules: ['personality', 'history', 'relationshipsMotives'] },
+    { key: 'operational_profile', modules: ['currentState', 'knowledgeCapabilitiesResources'] },
+    { key: 'physiology_optional', modules: ['physiology'], adultOnly: true },
+]);
 const ACTOR_PROFILE_NARRATIVE_TITLES = Object.freeze({
     person: '人物信息',
     physiology: '生理特征',
@@ -163,6 +169,185 @@ function normalizeNarrativeSections(value, options = {}) {
         key,
         narrativeSection(source[key], key, options),
     ]));
+}
+
+const PROFILE_MODULE_ALIASES = Object.freeze({
+    person: ['person', '\u4eba\u7269\u4fe1\u606f', '\u8eab\u4efd'],
+    personality: ['personality', '\u6027\u683c', '\u6027\u683c\u7279\u5f81'],
+    history: ['history', '\u7ecf\u5386', '\u8fc7\u5f80\u7ecf\u5386'],
+    currentState: ['currentstate', '\u5f53\u524d\u72b6\u6001', '\u73b0\u72b6'],
+    relationshipsMotives: ['relationshipsmotives', '\u5173\u7cfb\u4e0e\u52a8\u673a', '\u5173\u7cfb\u52a8\u673a'],
+    knowledgeCapabilitiesResources: ['knowledgecapabilitiesresources', '\u77e5\u8bc6\u80fd\u529b\u8d44\u6e90', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90'],
+    physiology: ['physiology', '\u751f\u7406', '\u751f\u7406\u7279\u5f81'],
+});
+
+function moduleAliasKey(value) {
+    return String(value || '').toLocaleLowerCase('zh-CN').replace(/[^a-z\p{Script=Han}]/gu, '');
+}
+
+export function actorProfileCompletionModuleKey(value) {
+    const wanted = moduleAliasKey(value);
+    return Object.entries(PROFILE_MODULE_ALIASES).find(([, aliases]) => (
+        aliases.some((alias) => moduleAliasKey(alias) === wanted)
+    ))?.[0] || '';
+}
+
+export function actorProfileCompletionGroupPlan(candidates, { allowDiscovery = false } = {}) {
+    const selected = Array.isArray(candidates) ? candidates : [];
+    const currentSectionText = (candidate, moduleKey) => {
+        const previous = candidate?.previousProfile || candidate?.profileV6 || null;
+        if (previous?.profileFormat === 'narrative-v1') {
+            return narrativeText(previous?.narrativeSections?.[moduleKey]?.text, 4000);
+        }
+        return narrativeText(candidate?.narrativeSections?.[moduleKey]?.text, 4000);
+    };
+    const missingTargets = (moduleKey) => selected.filter((candidate) => {
+        if (moduleKey === 'physiology' && modeOf(candidate?.completionMode) !== 'full_adult') return false;
+        const refresh = Array.isArray(candidate?.refreshProfileModules)
+            && candidate.refreshProfileModules.includes(moduleKey);
+        return refresh || !currentSectionText(candidate, moduleKey);
+    });
+    return ACTOR_PROFILE_COMPLETION_GROUPS.map((definition) => {
+        const targets = Object.fromEntries(definition.modules.map((moduleKey) => [
+            moduleKey,
+            missingTargets(moduleKey),
+        ]));
+        const targetCount = Object.values(targets).reduce((sum, rows) => sum + rows.length, 0);
+        const discoveryBootstrap = definition.key === 'identity_bootstrap' && allowDiscovery;
+        return { ...definition, targets, targetCount, discoveryBootstrap };
+    }).filter((group) => group.targetCount > 0 || group.discoveryBootstrap);
+}
+
+const PROFILE_MODULE_NOTES = Object.freeze({
+    person: '\u7528\u81ea\u7136\u4e2d\u6587\u5b8c\u6574\u8bf4\u660e\u8eab\u4efd\u3001\u7269\u79cd\u3001\u5e74\u9f84\u9636\u6bb5\u3001\u5916\u8c8c\u4e0e\u793e\u4f1a\u5b9a\u4f4d\u3002',
+    personality: '\u7528\u9009\u62e9\u3001\u4ef7\u503c\u504f\u597d\u3001\u8bf4\u8bdd\u4e0e\u538b\u529b\u53cd\u5e94\u5199\u51fa\u7a33\u5b9a\u800c\u4e0d\u6a21\u677f\u5316\u7684\u6027\u683c\u3002',
+    history: '\u5199\u51fa\u8db3\u4ee5\u652f\u6491\u73b0\u5728\u884c\u4e3a\u7684\u7ecf\u5386\u3001\u8f6c\u6298\u4e0e\u5f62\u6210\u539f\u56e0\u3002',
+    currentState: '\u8bf4\u660e\u5f53\u524d\u5904\u5883\u3001\u8eab\u5fc3\u72b6\u6001\u3001\u8fdb\u884c\u4e2d\u76ee\u6807\u3001\u538b\u529b\u548c\u672a\u5b8c\u4e8b\u9879\u3002',
+    relationshipsMotives: '\u8bf4\u660e\u5173\u952e\u5173\u7cfb\u3001\u5bf9\u4ed6\u4eba\u7684\u8ddd\u79bb\u548c\u5f53\u524d\u52a8\u673a\uff0c\u4e0d\u66ff\u73a9\u5bb6\u51b3\u5b9a\u6001\u5ea6\u3002',
+    knowledgeCapabilitiesResources: '\u5206\u6e05\u5df2\u77e5\u4e0e\u672a\u77e5\uff0c\u5199\u51fa\u53ef\u7528\u80fd\u529b\u3001\u5de5\u5177\u3001\u8d44\u6e90\u53ca\u9650\u5236\u3002',
+    physiology: '\u4ec5\u5728 full_adult \u542f\u7528\u65f6\uff0c\u4f9d\u7269\u79cd\u4e0e\u6743\u5a01\u8bbe\u5b9a\u5b8c\u6574\u586b\u5199\uff1b\u4e0d\u9002\u7528\u9879\u5199\u660e\u539f\u56e0\u3002',
+});
+
+export function buildActorProfileModuleGroupMessages(group, {
+    evidenceText = '', customPrompt = '', discoveryContext = null, validationFeedback = [],
+} = {}) {
+    const authorityProjection = (candidate) => ({
+        profileV6: candidate?.profileV6 || candidate?.previousProfile || null,
+        designRolls: candidate?.designRolls || candidate?.characterCreationTicket?.designRolls || null,
+        characterCreationTicket: candidate?.characterCreationTicket || null,
+        ticketPolicy: candidate?.__discoveryKey && candidate?.characterCreationTicket
+            ? {
+                status: 'provisional_working_context',
+                precedence: 'authority_then_accepted_narrative_then_existing_profile_then_ticket',
+                rule: 'conflicting ticket axes are ignored; local post-promotion binding is the only authority',
+            }
+            : { status: 'locally_bound_or_absent' },
+        confirmed: candidate?.confirmed || candidate?.previousProfile?.confirmed || null,
+        locks: candidate?.locks || candidate?.previousProfile?.locks || null,
+    });
+    const targetRows = Object.fromEntries(Object.entries(group?.targets || {}).map(([key, rows]) => [
+        key,
+        (rows || []).map((candidate) => ({
+            actorId: candidateActorIdForPrompt(candidate),
+            name: cleanText(candidate?.actorRef?.name || candidate?.name, 160),
+            identityContext: narrativeText(
+                candidate?.previousProfile?.narrativeSections?.person?.text
+                    ?? candidate?.profileV6?.narrativeSections?.person?.text
+                    ?? candidate?.narrativeSections?.person?.text,
+                4000,
+            ),
+            current: narrativeText(candidate?.previousProfile?.narrativeSections?.[key]?.text, 4000),
+            workingModules: candidate?.previousProfile?.narrativeSections || {},
+            authority: authorityProjection(candidate),
+        })),
+    ]));
+    const guides = (group?.modules || []).map((key) => `${key}: ${PROFILE_MODULE_NOTES[key]}`).join('\n');
+    return [{ role: 'system', content: [
+        '\u4f60\u53ea\u586b\u5199\u6307\u5b9a\u7684\u4eba\u7269\u6863\u6848\u6a21\u5757\uff0c\u4e0d\u7eed\u5199\u5267\u60c5\u3002',
+        '\u8f93\u51fa\u7528\u8f7b\u91cf\u8def\u7531\u8fb9\u754c <profile-target actor="\u7cbe\u786eActorRef" name="\u59d3\u540d"> \u548c <module key="\u7cbe\u786emodule key">\u81ea\u7136\u4e2d\u6587</module>\u3002\u65b0\u4eba\u7269\u4ec5 person \u7ec4\u53ef\u7528 actor="new"\uff0cname \u5fc5\u987b\u662f\u6b63\u6587\u9010\u5b57\u539f\u4e32\u3002',
+        '\u8def\u7531\u6807\u7b7e\u4e0d\u662f\u6863\u6848\u6807\u9898\uff1b\u6a21\u5757\u5185\u53ea\u5199\u53ef\u8bfb\u7684\u81ea\u7136\u4e2d\u6587\uff0c\u4e0d\u8981 JSON/SQL/\u5b57\u6bb5\u8868\u3002',
+        group?.key === 'identity_bootstrap'
+            ? '\u5fc5\u987b\u53d1\u73b0\u5df2\u63a5\u53d7\u6b63\u6587\u4e2d\u6240\u6709\u771f\u6b63\u51fa\u573a\u3001\u6709\u9010\u5b57\u660e\u786e\u59d3\u540d\u4e14\u5c1a\u672a\u767b\u8bb0\u7684\u4eba\u7269\uff1b\u4e0d\u5f97\u628a\u73a9\u5bb6\u3001\u6cdb\u79f0\u3001\u53ea\u88ab\u63d0\u53ca\u8005\u6216\u5df2\u767b\u8bb0\u522b\u540d\u5f53\u65b0\u4eba\u3002'
+            : '',
+        '\u65b0\u53d1\u73b0\u884c\u4e2d\u7684\u540c\u56de\u5408\u7968\u636e\u53ea\u662f\u4ea4\u6613\u5185\u7684 provisional working context\uff1a\u6743\u5a01\u8bbe\u5b9a\u3001\u5df2\u63a5\u53d7\u6b63\u6587\u548c\u5df2\u786e\u8ba4\u6863\u6848\u4f18\u5148\uff0c\u51b2\u7a81\u8f74\u5fc5\u987b\u4e22\u5f03\uff1b\u6700\u7ec8\u53ea\u6709\u672c\u5730 Registry promotion \u540e\u7684 ticket binding \u662f\u771f\u503c\u3002\u6a21\u5757\u6587\u672c\u4e0d\u5f97\u8986\u76d6 confirmed/locks/designRolls\u3002',
+        guides,
+        validationFeedback.length ? `\u4ec5\u4fee\u590d\u672c\u7ec4\uff1a${validationFeedback.join('; ')}` : '',
+    ].filter(Boolean).join('\n\n') }, { role: 'user', content: [
+        `\u76ee\u6807\u884c\u4e0e\u5f53\u524d\u503c\uff1a${JSON.stringify(targetRows)}`,
+        `\u5df2\u63a5\u53d7\u6b63\u6587\uff1a\n${String(discoveryContext?.acceptedNarrative || '').slice(0, 42000)}`,
+        group?.key === 'identity_bootstrap'
+            ? `\u5df2\u767b\u8bb0\u7d22\u5f15\uff1a${JSON.stringify(discoveryContext?.registeredActorIndex || [])}`
+            : '',
+        group?.key === 'identity_bootstrap'
+            ? `\u540c\u672c\u56de\u5408\u4eba\u7269\u521b\u5efa\u7968\u636e\uff1a${JSON.stringify(discoveryContext?.characterCreationTickets || [])}`
+            : '',
+        `\u6743\u5a01\u6750\u6599\uff1a\n${cleanText(evidenceText, 42000)}`,
+        customPrompt ? `\u5168\u5c40\u9644\u52a0\u63d0\u793a\uff1a\n${customPrompt}` : '',
+    ].filter(Boolean).join('\n\n') }];
+}
+
+function candidateActorIdForPrompt(candidate) {
+    return cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120);
+}
+
+function cleanModuleBody(value) {
+    return String(value || '').replace(/```(?:\w+)?/giu, '').replace(/```/gu, '')
+        .replace(/^\s*(?:\u4ee5\u4e0b\u662f|\u597d\u7684[\uff0c,:\uff1a]?|\u6a21\u5757\u5185\u5bb9[\uff1a:]?)\s*/u, '')
+        .replace(/\s*(?:\u4ee5\u4e0a\u662f\u6240\u9700\u5185\u5bb9[\u3002.]?|\u5b8c\u6210[\u3002.]?)\s*$/u, '').trim().slice(0, 4000);
+}
+
+export function parseActorProfileModuleGroupOutput(output, group, { acceptedNarrative = '' } = {}) {
+    const text = String(output || '').replace(/[“”]/gu, '"').replace(/[‘’]/gu, "'")
+        .replace(/```(?:xml|html|text|markdown)?/giu, '').replace(/```/gu, '').trim();
+    const entries = [];
+    const failures = [];
+    const explicitEmpty = /^\s*无人(?:物)?档案[。.!！]?\s*$/u.test(text);
+    if (explicitEmpty) return { entries, failures, formatUnrecoverable: false, explicitEmpty: true, raw: text };
+    const normalized = text
+        .replace(/\[\s*profile-target\s+([^\]]+)\]/giu, '<profile-target $1>')
+        .replace(/\[\s*\/\s*profile-target\s*\]/giu, '</profile-target>')
+        .replace(/\[\s*module\s*[:=]\s*([^\]]+)\]/giu, '<module key="$1">')
+        .replace(/\[\s*\/\s*module\s*\]/giu, '</module>');
+    const targetRe = /<profile-target\b([^>]*)>([\s\S]*?)(?:<\/profile-target>|(?=<profile-target\b)|$)/giu;
+    const seenTargets = new Set();
+    let targetMatch;
+    while ((targetMatch = targetRe.exec(normalized))) {
+        const attrs = targetMatch[1];
+        const attrValue = (key) => attrs.match(new RegExp(`\\b${key}\\s*=\\s*(?:["']([^"']+)["']|([^\\s>]+))`, 'iu'))?.slice(1).find(Boolean) || '';
+        const actorId = cleanText(attrValue('actor'), 120);
+        const name = cleanText(attrValue('name'), 160);
+        const targetKey = `${actorId}\u0000${name}`;
+        if (!actorId || seenTargets.has(targetKey)) {
+            failures.push({ actorId, name, reason: actorId ? 'actor_profile.module_target_duplicate' : 'actor_profile.module_target_missing', retryable: true });
+            continue;
+        }
+        seenTargets.add(targetKey);
+        const modules = {};
+        const moduleRe = /<module\b([^>]*)>([\s\S]*?)(?:<\/module>|(?=<module\b)|$)/giu;
+        let moduleMatch;
+        while ((moduleMatch = moduleRe.exec(targetMatch[2]))) {
+            const rawKey = moduleMatch[1].match(/\bkey\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/iu)?.slice(1).find(Boolean) || '';
+            const key = actorProfileCompletionModuleKey(rawKey);
+            if (!group?.modules?.includes(key)) {
+                failures.push({ actorId, name, reason: 'actor_profile.module_unexpected', moduleKey: rawKey, retryable: true });
+                continue;
+            }
+            if (modules[key]) {
+                failures.push({ actorId, name, reason: 'actor_profile.module_duplicate', moduleKey: key, retryable: true });
+                continue;
+            }
+            const body = cleanModuleBody(moduleMatch[2]);
+            const minimum = key === 'person' ? 40 : key === 'currentState' ? 50 : 70;
+            if (Array.from(body).length >= minimum && !/^(?:未知|待定|暂无|未登记|无|unknown|n\/?a)[。.!！]?$/iu.test(body)) modules[key] = body;
+            else failures.push({ actorId, name, reason: 'actor_profile.module_content_incomplete', moduleKey: key, retryable: true });
+        }
+        if (actorId === 'new' && (!name || !String(acceptedNarrative).includes(name))) {
+            failures.push({ actorId: '', name, reason: 'actor_profile.discovery_name_not_in_narrative', retryable: true });
+            continue;
+        }
+        entries.push({ actorId, name, modules });
+    }
+    return { entries, failures, formatUnrecoverable: entries.length === 0, explicitEmpty: false, raw: text };
 }
 
 function narrativeSectionsReady(profile) {
@@ -1407,6 +1592,170 @@ function canonicalProfileValue(value) {
         key,
         canonicalProfileValue(value[key]),
     ]));
+}
+
+function recoveryInteger(value, fallback = -1) {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) ? parsed : fallback;
+}
+
+export function normalizeActorProfileRecoverySourceRef(value) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const logicalIndex = recoveryInteger(source.logicalIndex ?? source.index);
+    const generationSerial = recoveryInteger(source.generationSerial ?? source.generation, 0);
+    return {
+        chatId: cleanText(source.chatId, 180),
+        messageId: cleanText(source.messageId, 180),
+        logicalIndex,
+        index: recoveryInteger(source.index ?? source.logicalIndex),
+        swipeId: recoveryInteger(source.swipeId, 0),
+        generation: generationSerial,
+        generationSerial,
+        generationId: cleanText(source.generationId, 180),
+        generationType: cleanText(source.generationType ?? source.type, 40),
+        type: cleanText(source.type ?? source.generationType, 40),
+        identityScope: clone(source.identityScope ?? null),
+        identityScopeId: cleanText(source.identityScopeId, 360),
+        scope: clone(source.scope ?? null),
+        scopeDigest: cleanText(source.scopeDigest, 180),
+        hash: cleanText(source.hash, 180),
+        contentHash: cleanText(source.contentHash ?? source.contentFingerprint, 180),
+        contentFingerprint: cleanText(source.contentFingerprint ?? source.contentHash, 180),
+    };
+}
+
+function actorProfileRecoverySourceDigest(value) {
+    return `profile-source:${fingerprint(JSON.stringify(canonicalProfileValue(
+        normalizeActorProfileRecoverySourceRef(value),
+    )))}`;
+}
+
+export function actorProfileRecoverySourceMatches(left, right) {
+    const normalizedLeft = normalizeActorProfileRecoverySourceRef(left);
+    const normalizedRight = normalizeActorProfileRecoverySourceRef(right);
+    if (
+        !normalizedLeft.chatId
+        || !normalizedLeft.messageId
+        || normalizedLeft.logicalIndex < 0
+        || !normalizedLeft.generationId
+        || !normalizedLeft.scopeDigest
+        || !normalizedLeft.contentFingerprint
+    ) return false;
+    return JSON.stringify(canonicalProfileValue(normalizedLeft))
+        === JSON.stringify(canonicalProfileValue(normalizedRight));
+}
+
+function actorProfileTicketBatchDigestPayload(value, acceptedTarget = null) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const batch = clone(source);
+    delete batch.persistenceDigest;
+    delete batch.acceptedTarget;
+    return {
+        acceptedTarget: normalizeActorProfileRecoverySourceRef(
+            acceptedTarget || source.acceptedTarget,
+        ),
+        batch,
+    };
+}
+
+function actorProfileTicketBatchShapeValid(value, acceptedTarget) {
+    const target = normalizeActorProfileRecoverySourceRef(acceptedTarget);
+    const batchGeneration = recoveryInteger(value?.generationSerial ?? value?.generation, 0);
+    const capacity = recoveryInteger(value?.capacity, 0);
+    const tickets = Array.isArray(value?.tickets) ? value.tickets : [];
+    return Boolean(
+        target.chatId
+        && value?.chatId === target.chatId
+        && cleanText(value?.generationId, 180) === target.generationId
+        && batchGeneration === target.generationSerial
+        && cleanText(value?.generationType, 40) === target.generationType
+        && capacity > 0
+        && tickets.length === capacity
+        && tickets.every((ticket) => {
+            const normalized = normalizeActorProfileDesignRolls(ticket);
+            return normalized
+                && normalized.ticketId
+                && normalized.issuance.chatId === target.chatId
+                && normalized.issuance.generation === target.generationSerial
+                && normalized.issuance.generationId === target.generationId
+                && normalized.issuance.generationType === target.generationType;
+        })
+    );
+}
+
+export function actorProfileTicketBatchPersistenceDigest(value, acceptedTarget = null) {
+    return `profile-ticket-batch:${fingerprint(JSON.stringify(canonicalProfileValue(
+        actorProfileTicketBatchDigestPayload(value, acceptedTarget),
+    )))}`;
+}
+
+export function sealActorProfileTicketBatchForPersistence(value, acceptedTarget) {
+    if (
+        !value
+        || !actorProfileRecoverySourceMatches(acceptedTarget, acceptedTarget)
+        || !actorProfileTicketBatchShapeValid(value, acceptedTarget)
+    ) return null;
+    const sealed = {
+        ...clone(value),
+        acceptedTarget: normalizeActorProfileRecoverySourceRef(acceptedTarget),
+    };
+    sealed.persistenceDigest = actorProfileTicketBatchPersistenceDigest(sealed);
+    return sealed;
+}
+
+export function actorProfileTicketBatchPersistenceMatches(value, {
+    acceptedTarget = null,
+    expectedDigest = '',
+} = {}) {
+    if (!value || !cleanText(value.persistenceDigest, 240)) return false;
+    const target = acceptedTarget || value.acceptedTarget;
+    return actorProfileTicketBatchShapeValid(value, target)
+        && actorProfileRecoverySourceMatches(value.acceptedTarget, target)
+        && value.persistenceDigest === actorProfileTicketBatchPersistenceDigest(value)
+        && (!expectedDigest || value.persistenceDigest === expectedDigest);
+}
+
+export function createActorProfileRetryReceipt({
+    sourceRef,
+    ticketBatch = null,
+    failingModules = [],
+    failureCodes = [],
+    outcomeStatus = 'not_completed',
+    updatedAt = 0,
+} = {}) {
+    if (!actorProfileRecoverySourceMatches(sourceRef, sourceRef)) return null;
+    const normalizedSource = normalizeActorProfileRecoverySourceRef(sourceRef);
+    return {
+        version: 2,
+        generationId: normalizedSource.generationId,
+        sourceRef: normalizedSource,
+        sourceDigest: actorProfileRecoverySourceDigest(normalizedSource),
+        ticketBatchDigest: actorProfileTicketBatchPersistenceMatches(ticketBatch, {
+            acceptedTarget: normalizedSource,
+        }) ? ticketBatch.persistenceDigest : '',
+        status: 'not_completed',
+        outcomeStatus: cleanText(outcomeStatus, 80) || 'not_completed',
+        failingModules: cleanList(failingModules, 8, 120),
+        failureCodes: cleanList(failureCodes, 8, 120),
+        updatedAt: Math.max(0, Number(updatedAt) || 0),
+    };
+}
+
+export function actorProfileRetryReceiptMatches(value, {
+    currentSourceRef = null,
+    ticketBatch = null,
+} = {}) {
+    if (
+        value?.version !== 2
+        || value?.status !== 'not_completed'
+        || !actorProfileRecoverySourceMatches(value.sourceRef, currentSourceRef)
+        || value.sourceDigest !== actorProfileRecoverySourceDigest(value.sourceRef)
+    ) return false;
+    if (!value.ticketBatchDigest) return ticketBatch == null;
+    return actorProfileTicketBatchPersistenceMatches(ticketBatch, {
+        acceptedTarget: currentSourceRef,
+        expectedDigest: value.ticketBatchDigest,
+    });
 }
 
 export function actorProfileBaselineDigest(value) {
