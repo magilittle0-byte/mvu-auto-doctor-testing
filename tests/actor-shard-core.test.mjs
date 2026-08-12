@@ -14,6 +14,13 @@ import {
     userPromptSlotMetadata,
 } from '../actor-shard-core.mjs';
 import { actorIdFromName } from '../actor-ref-core.mjs';
+import {
+    actorProfileReadinessInLedger,
+    finalizeActorProfileBaselinesInLedger,
+    replaceActorProfileBaselineInLedger,
+    sealActorProfilePendingTransactionInLedger,
+} from '../actor-ledger-core.mjs';
+import { actorProfileBaselineDigest, materializeActorProfileBaseline } from '../actor-profile-v6-core.mjs';
 import { makeActionReadyActor } from './helpers/actor-action-ready-fixture.mjs';
 
 const ACTOR_SHARD_CHAT_ID = 'actor-shard-test';
@@ -356,6 +363,66 @@ test('transport success with zero valid actor semantics is explicit and stale ta
     assert.equal(staleAfter.status, 'stale');
     assert.equal(calls, 1);
     assert.deepEqual(staleAfter.proposals, []);
+});
+
+test('P3 shard rejects a profile whose local receipt looks ready but final ledger verification is stale', () => {
+    const continuity = { threads: [thread('T1', '艾达')] };
+    const actorLedger = actionReadyLedgerForContinuity(continuity);
+    const actor = actorLedger.actors[0];
+    actor.profileV6.baselineCommit.verification.preparedLedgerDigest = 'tampered-final-receipt';
+    const candidates = selectActorShardCandidates({ continuity, actorLedger, maxWorkers: 1 });
+    assert.deepEqual(candidates, []);
+});
+
+test('P3 accepts only a final narrative receipt and rejects section or receipt tampering', () => {
+    const continuity = { threads: [thread('T-NARRATIVE', '\u53d9\u4e8b\u4eba\u7269')] };
+    const actorLedger = actionReadyLedgerForContinuity(continuity);
+    const actor = actorLedger.actors[0];
+    const sections = Object.fromEntries([
+        ['person', '\u4eba\u7269\u4fe1\u606f'], ['physiology', '\u751f\u7406\u7279\u5f81'],
+        ['personality', '\u6027\u683c\u7279\u5f81'], ['history', '\u8fc7\u5f80\u7ecf\u5386'],
+        ['currentState', '\u5f53\u524d\u72b6\u6001'], ['relationshipsMotives', '\u5173\u7cfb\u4e0e\u52a8\u673a'],
+        ['knowledgeCapabilitiesResources', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90'],
+    ].map(([key, title]) => [key, {
+        key, title, text: `${title}\u662f\u5b8c\u6574\u7684\u53d9\u4e8b\u6bb5\u843d\u3002`, source: 'hypothesis', evidence: [],
+    }]));
+    const base = materializeActorProfileBaseline(actor.profileV6, {
+        profileFormat: 'narrative-v1',
+        actorRef: { actorId: actor.id, name: actor.name },
+        narrativeSections: sections,
+    }, { turn: 1, completionMode: 'full' });
+    const digest = actorProfileBaselineDigest(base);
+    const sourceRef = actor.profileV6.baselineCommit.sourceRef;
+    const expected = [{
+        actorRef: { actorId: actor.id, name: actor.name }, schemaVersion: base.version,
+        commitId: `NARRATIVE-${actor.id}`, profileDigest: digest, sourceRef,
+        scopeDigest: sourceRef.scopeDigest, locks: {}, manualOverrides: {},
+    }];
+    const staged = replaceActorProfileBaselineInLedger(actorLedger, expected[0].actorRef, base, {
+        ...expected[0], digest, committedTurn: 1, phase: 'pending',
+    });
+    const sealed = sealActorProfilePendingTransactionInLedger(staged.ledger, expected, { preparedFieldRevision: 1 });
+    const finalized = finalizeActorProfileBaselinesInLedger(sealed.ledger, expected, {
+        transactionId: sealed.transactionId, writeSetDigest: sealed.writeSetDigest,
+        preparedLedgerDigest: sealed.preparedLedgerDigest, preparedFieldRevision: sealed.preparedFieldRevision,
+    });
+    const narrativeLedger = finalized.ledger;
+    assert.equal(actorProfileReadinessInLedger(actorLedger, actor.id).ready, true);
+    assert.equal(actorProfileReadinessInLedger(narrativeLedger, actor.id).ready, true);
+    assert.equal(selectActorShardCandidates({ continuity, actorLedger: narrativeLedger, maxWorkers: 1 }).length, 1);
+
+    const cases = [
+        (copy) => { copy.actors[0].profileV6.narrativeSections.history.text = ''; },
+        (copy) => { copy.actors[0].profileV6.baselineCommit.verification.profileDigest = 'tampered'; },
+        (copy) => { copy.actors[0].profileV6.baselineCommit.verification.writeSet[0].sourceRef.scopeDigest = 'wrong-scope'; },
+        (copy) => { copy.actors[0].pendingProfile = structuredClone(copy.actors[0].profileV6); copy.actors[0].profileV6.preparedForAction = false; },
+    ];
+    for (const mutate of cases) {
+        const copy = structuredClone(narrativeLedger);
+        mutate(copy);
+        assert.equal(actorProfileReadinessInLedger(copy, actor.id).ready, false);
+        assert.deepEqual(selectActorShardCandidates({ continuity, actorLedger: copy, maxWorkers: 1 }), []);
+    }
 });
 
 test('an explicitly empty actor schedule remains empty instead of bypassing readiness', () => {

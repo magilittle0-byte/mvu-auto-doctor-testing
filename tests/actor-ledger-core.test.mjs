@@ -1251,3 +1251,27 @@ test('an all-worker technical failure leaves character silence plans and failure
     );
     assert.equal(ledger.actors.every((item) => item.silenceTurns === 12), true);
 });
+
+test('diagnostic actor ledger projection excludes narrative dossier prose and pending dossier bodies', () => {
+    const actor = makeActionReadyActor({
+        id: 'NPC-NARRATIVE-DIAG',
+        name: '\u8bca\u65ad\u4eba\u7269',
+        status: 'active',
+    });
+    const canary = 'NARRATIVE_PRIVATE_CANARY_DO_NOT_EXPORT';
+    actor.profileV6.profileFormat = 'narrative-v1';
+    actor.profileV6.narrativeSections = {
+        person: { key: 'person', title: '\u4eba\u7269\u4fe1\u606f', text: canary, source: 'hypothesis', evidence: [] },
+    };
+    actor.pendingProfile = {
+        transactionId: 'pending-diagnostic', readbackVerified: false,
+        profileV6: { narrativeSections: { person: { text: canary } } },
+    };
+    const view = actorLedgerView({ chatId: 'diag-narrative', actors: [actor] });
+    const serialized = JSON.stringify(view);
+    assert.equal(serialized.includes(canary), false);
+    assert.deepEqual(view.actors[0].pendingProfile, {
+        transactionId: 'pending-diagnostic', readbackVerified: false,
+    });
+    assert.equal(view.actors[0].profileV6.narrativeSections, undefined);
+});

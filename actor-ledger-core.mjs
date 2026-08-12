@@ -1575,28 +1575,30 @@ export function replaceActorProfileBaselineInLedger(value, actorRef, baseline, c
     profile.backgroundPending = !profile.preparedForAction;
     actor.profileV6 = profile;
 
-    // Keep the established actor-ledger compatibility projection readable,
-    // but never write current goals, current plans, location, emotion or
-    // action history from the immutable baseline candidate.
-    const identity = profile.modules.identity.data || {};
-    const personality = profile.modules.personality.data || {};
-    actor.identity = {
-        ...actor.identity,
-        ...Object.fromEntries([
-            'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
-            'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
-        ].map((field) => [field, clone(identity[field])])),
-        ...Object.fromEntries([
-            'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
-            'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
-            'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
-        ].map((field) => [field, clone(personality[field])])),
-    };
-    actor.longTermGoals = clone(profile.modules.goals.data?.longTerm || []);
-    actor.relationships = clone(profile.modules.relationships.data?.entries || []);
-    actor.knowledge = clone(profile.modules.knowledge.data?.entries || []);
-    actor.resources = clone(profile.modules.resourcesCapabilities.data?.resources || []);
-    actor.capabilities = clone(profile.modules.resourcesCapabilities.data?.capabilities || []);
+    // Narrative v1 deliberately never re-parses prose into structured facts.
+    // Existing actor-ledger facts remain their independent authority.  Legacy
+    // module dossiers retain the established compatibility projection.
+    if (profile.profileFormat !== 'narrative-v1') {
+        const identity = profile.modules.identity.data || {};
+        const personality = profile.modules.personality.data || {};
+        actor.identity = {
+            ...actor.identity,
+            ...Object.fromEntries([
+                'role', 'species', 'gender', 'age', 'briefIntro', 'appearance',
+                'identityText', 'relationState', 'attitudeToProtagonist', 'pastExperience',
+            ].map((field) => [field, clone(identity[field])])),
+            ...Object.fromEntries([
+                'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
+                'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
+                'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
+            ].map((field) => [field, clone(personality[field])])),
+        };
+        actor.longTermGoals = clone(profile.modules.goals.data?.longTerm || []);
+        actor.relationships = clone(profile.modules.relationships.data?.entries || []);
+        actor.knowledge = clone(profile.modules.knowledge.data?.entries || []);
+        actor.resources = clone(profile.modules.resourcesCapabilities.data?.resources || []);
+        actor.capabilities = clone(profile.modules.resourcesCapabilities.data?.capabilities || []);
+    }
     actor.updatedTurn = Math.max(actor.updatedTurn, profile.baselineCommit.committedTurn);
     actor.version += 1;
     ledger.actors[actorIndex] = actor;
@@ -2570,7 +2572,11 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries) {
     const source = String(content || '');
     const supplied = Array.isArray(discoveries) ? discoveries : [];
     const prepared = supplied.map((entry, inputIndex) => {
-        const name = cleanText(entry?.candidateRef?.name, 160);
+        const narrativeName = entry?.candidate?.profileFormat === 'narrative-v1'
+            || entry?.profileFormat === 'narrative-v1';
+        const name = narrativeName
+            ? String(entry?.candidateRef?.name || '').trim().slice(0, 160)
+            : cleanText(entry?.candidateRef?.name, 160);
         const sourceAnchor = String(entry?.candidateRef?.sourceAnchor || '')
             .trim().slice(0, 1200);
         const anchorCheck = validateActorProfileDiscoveryAnchor(
@@ -2581,6 +2587,7 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries) {
             entry,
             inputIndex,
             name,
+            narrativeName,
             sourceAnchor,
             sourceOffset: anchorCheck.offset,
             reason: anchorCheck.ok ? '' : anchorCheck.reason,
@@ -2588,7 +2595,7 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries) {
     });
     const nameCounts = new Map();
     for (const item of prepared) {
-        const key = item.name.toLocaleLowerCase('zh-CN');
+        const key = item.narrativeName ? item.name : item.name.toLocaleLowerCase('zh-CN');
         if (!key || item.reason) continue;
         nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
     }
@@ -2596,7 +2603,9 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries) {
     const accepted = [];
     const unresolved = [];
     for (const item of prepared) {
-        const duplicateName = (nameCounts.get(item.name.toLocaleLowerCase('zh-CN')) || 0) > 1;
+        const duplicateName = (nameCounts.get(
+            item.narrativeName ? item.name : item.name.toLocaleLowerCase('zh-CN'),
+        ) || 0) > 1;
         const reason = item.reason || (duplicateName
             ? 'actor_profile.discovery_name_duplicate'
             : '');
@@ -2624,6 +2633,7 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries) {
             position: item.sourceOffset,
             ordinal: acceptedIndex,
             modelProfileDiscoveryIndex: acceptedIndex,
+            narrativeProfile: item.narrativeName === true,
         });
     }
     facts.sort((left, right) => left.position - right.position || left.ordinal - right.ordinal);
@@ -2691,15 +2701,16 @@ export function discoverActorsFromTurnSources(value, {
         const candidate = {
             kind: 'actor_candidate',
             state: 'discovered',
-            candidateId: `AC-${fingerprint(JSON.stringify([
-                ledger.chatId,
-                ref?.messageId || '',
-                ref?.swipeId || 0,
-                ref?.generation || 0,
-                ref?.hash || '',
-                identityKey,
-                factIndex,
-            ])).slice(0, 18)}`,
+            candidateId: `AC-${fingerprint(JSON.stringify(fact.narrativeProfile === true
+                ? [
+                    canonicalActorLedgerValue(ref),
+                    ref?.scopeDigest || '',
+                    Number(fact.position) || 0,
+                    String(fact.name || ''),
+                ]
+                : [ledger.chatId, ref?.messageId || '', ref?.swipeId || 0,
+                    ref?.generation || 0, ref?.hash || '', identityKey, factIndex,
+                ])).slice(0, 18)}`,
             chatId: ref?.chatId || ledger.chatId,
             name: actorName,
             explicitActorId: cleanText(fact.explicitActorId, 120),
@@ -4966,6 +4977,31 @@ export function actorLedgerView(value) {
         actors: ledger.actors.map((actor) => {
             const publicActor = clone(actor);
             delete publicActor.hidden;
+            // This is the diagnostic/export projection, not the dossier UI.
+            // Never export either narrative prose or an unfinalized pending
+            // profile; the detailed dossier remains inside the chat namespace.
+            if (publicActor.profileV6?.profileFormat === 'narrative-v1') {
+                publicActor.profileV6 = {
+                    version: publicActor.profileV6.version,
+                    profileFormat: 'narrative-v1',
+                    coverage: publicActor.profileV6.coverage,
+                    preparedForAction: publicActor.profileV6.preparedForAction === true,
+                    backgroundPending: publicActor.profileV6.backgroundPending === true,
+                    baselineCommit: publicActor.profileV6.baselineCommit
+                        ? {
+                            commitId: cleanText(publicActor.profileV6.baselineCommit.commitId, 180),
+                            readbackVerified: publicActor.profileV6.baselineCommit.readbackVerified === true,
+                            status: cleanText(publicActor.profileV6.baselineCommit.status, 80),
+                        }
+                        : null,
+                };
+            }
+            if (publicActor.pendingProfile) {
+                publicActor.pendingProfile = {
+                    transactionId: cleanText(publicActor.pendingProfile.transactionId, 180),
+                    readbackVerified: publicActor.pendingProfile.readbackVerified === true,
+                };
+            }
             return publicActor;
         }),
         attempts: clone(ledger.actionAttempts),

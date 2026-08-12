@@ -6,10 +6,9 @@ import {
 } from './actor-ref-core.mjs';
 import {
     ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT,
-    actorProfileActionReadiness,
 } from './actor-profile-v6-core.mjs';
 import { actorRefsMatch } from './actor-authority-core.mjs';
-import { runRegisteredActorGate } from './actor-ledger-core.mjs';
+import { actorProfileReadinessInLedger, runRegisteredActorGate } from './actor-ledger-core.mjs';
 import { extractFirstBalancedJsonObject } from './sovereignty-runtime-core.mjs';
 
 export const ACTOR_SHARD_MAX_WORKERS = 6;
@@ -285,7 +284,7 @@ export function selectActorShardCandidates({
             || !registeredActorRef
             || !actorRefsMatch(registeredActorRef, actorRef)
             || quarantineIds.has(id)
-            || !actorProfileActionReadiness(actor).ready
+            || !actorProfileReadinessInLedger(actorLedger, id).ready
             || excludedNames.has(normalizedKey(name))
             || GROUP_NAME.test(name)
             || (scheduleProvided && !scheduledIds.has(id))

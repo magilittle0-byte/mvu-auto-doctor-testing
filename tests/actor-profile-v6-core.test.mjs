@@ -14,6 +14,7 @@ import {
     materializeActorProfileBaseline,
     normalizeActorProfileV6,
     parseActorProfileCompletionOutput,
+    parseActorProfileCompletionBatchOutput,
     prepareActorLedgerProfilesV6,
     prepareActorProfileV6,
     regenerateActorProfileV6Module,
@@ -332,9 +333,10 @@ test('new original characters receive stable script-rolled multi-axis design tic
         fieldSources: {},
         designRolls: first,
     }]);
-    assert.match(messages[0].content, /confirmedAnchors 是角色卡、原著、数据库或已接受正文中的权威事实/u);
-    assert.match(messages[0].content, /characterCreationTicket 已在正文生成前由脚本锁定：只能使用输入中的同一票，不重掷、不换票/u);
-    assert.match(messages[1].content, new RegExp(first.ticketId, 'u'));
+    assert.match(messages[0].content, /不替玩家决定行动、感受、同意或世界结果/u);
+    assert.match(messages[0].content, /真实精确 actorId 值/u);
+    assert.doesNotMatch(messages[0].content, /characterCreationTicket|coverageState|relationships/u);
+    assert.equal(messages[1].content.includes(first.ticketId), false);
 });
 
 test('local preparation never invents dossiers or unlocks formal action with designed seeds', () => {
@@ -465,23 +467,18 @@ test('database-style profile generation accepts loose structure and completes th
     assert.equal(Object.hasOwn(candidates[0], 'location'), false);
     assert.equal(Object.hasOwn(candidates[0], 'stateFacts'), false);
     const messages = buildActorProfileCompletionMessages(candidates, { evidenceText });
-    assert.match(messages[0].content, /candidateRef\.name 必须逐字出现在 candidateRef\.sourceAnchor/u);
-    assert.match(messages[0].content, /confirmedAnchors 是角色卡、原著、数据库或已接受正文中的权威事实/u);
-    assert.match(messages[0].content, /identity: role, species, gender, age/u);
-    assert.match(messages[0].content, /characterCreationTicket 已在正文生成前由脚本锁定/u);
-    assert.match(messages[0].content, /质量下限：每组人格衍生写2-3条/u);
-    assert.match(messages[0].content, /relationships、knowledge、resourcesCapabilities 都必须完整返回/u);
-    assert.doesNotMatch(messages[0].content, /一时写不出可以省略/u);
-    assert.doesNotMatch(messages[0].content, /证据编号|来源标签|严格输出形状|全部键/u);
-    assert.doesNotMatch(messages[0].content, /未成年|年龄不明|非性化|safetyNote|ageClass/u);
-    assert.doesNotMatch(messages[1].content, /profileSummary|socialStyle|copingStyle|obstacles|costs|alternatives/u);
+    assert.match(messages[0].content, /【人物档案：姓名】/u);
+    assert.match(messages[0].content, /【人物信息】【生理特征】【性格特征】/u);
+    assert.match(messages[0].content, /不要 JSON、数组、技术标记或来源字段/u);
+    assert.doesNotMatch(messages[0].content, /candidateRef|sourceAnchor|characterCreationTicket|coverageState/u);
+    assert.doesNotMatch(messages[1].content, /profileSummary|socialStyle|copingStyle|obstacles|costs|alternatives|candidateRef/u);
     assert.match(messages[1].content, /NPC-CHEN/u);
     const customMessages = buildActorProfileCompletionMessages(candidates, {
         evidenceText,
         customPrompt: 'PROFILE-PROMPT-SLOT-CANARY',
     });
-    assert.match(customMessages[0].content, /用户自定义人物档案\/破限提示/u);
-    assert.match(customMessages[0].content, /PROFILE-PROMPT-SLOT-CANARY/u);
+    assert.match(customMessages[1].content, /用户自定义人物档案提示/u);
+    assert.match(customMessages[1].content, /PROFILE-PROMPT-SLOT-CANARY/u);
 
     const partial = parseActorProfileCompletionOutput(
         '这里是填表结果：```json\n[{"identity":{"role":"临时领头人"}}]\n```',
@@ -690,7 +687,8 @@ test('database-style profile generation accepts loose structure and completes th
     });
     assert.equal(adultCandidates.length, 1, 'a completed core dossier must still retry its empty body table');
     const adultMessages = buildActorProfileCompletionMessages(adultCandidates, { evidenceText });
-    assert.match(adultMessages[0].content, /生理档案已启用：逐字段填写长期稳定/u);
+    assert.match(adultMessages[0].content, /【生理特征】/u);
+    assert.match(adultMessages[0].content, /长期稳定/u);
     assert.doesNotMatch(adultMessages[0].content, /reproductiveAnatomy|secretionCycle|fertility/u);
     const adultPatch = structuredClone(patch);
     adultPatch.physiology = {
@@ -1283,6 +1281,178 @@ test('diagnostic view exposes source and counts without profile prose', () => {
     assert.equal('data' in view.moduleStatuses.personality, false);
     assert.equal(serialized.includes('socialStyle'), false);
     assert.equal(view.physiologyInfersPersonality, false);
+});
+
+test('narrative-v1 accepts seven natural sections while preserving exact identity and rejecting ambiguous discovery', () => {
+    const narrative = '陈锋站在门边，先确认出口。';
+    const output = `前言\n【人物档案：陈锋】\nActorRef: NPC-CHEN\n【人物信息】一名谨慎的临时领队。\n【生理特征】成年男性，步态稳定。\n【性格特征】说话直接但会先确认风险。\n【过往经历】曾在多次撤离中承担带队责任。\n【当前状态】正留意出口和同伴位置。\n【关系与动机】愿意合作，但不替他人决定。\n【知识、能力与资源】掌握路线观察常识，现有资源仍以账本为准。`;
+    const parsed = parseActorProfileCompletionBatchOutput(output, {
+        candidates: [{ actorRef: { actorId: 'NPC-CHEN', name: '陈锋' }, completionMode: 'full' }],
+        discoveryContext: { acceptedNarrative: narrative, completionMode: 'full' },
+    });
+    assert.equal(parsed.entries.length, 1);
+    assert.equal(parsed.entries[0].candidate.profileFormat, 'narrative-v1');
+    assert.equal(parsed.entries[0].candidate.narrativeSections.person.text.includes('谨慎'), true);
+    const profile = materializeActorProfileBaseline(null, parsed.entries[0].candidate, { completionMode: 'full' });
+    assert.equal(profile.profileFormat, 'narrative-v1');
+    assert.equal(profile.coverage, 100);
+    const lockedNarrative = setActorProfileV6Lock(profile, { path: 'actor', locked: true });
+    assert.deepEqual(lockedNarrative, profile, 'narrative dossiers are read-only through the old lock API');
+    assert.equal(
+        applyActorProfileV6Override(profile, { path: 'modules.identity.data.role', value: 'forbidden' }).reason,
+        'narrative_read_only',
+    );
+    assert.equal(
+        regenerateActorProfileV6Module(profile, { id: 'NPC-CHEN', name: '\u9648\u950b' }, { module: 'identity' }).reason,
+        'narrative_read_only',
+    );
+    const changed = structuredClone(profile);
+    changed.narrativeSections.history.text = '另一段完整经历。';
+    assert.notEqual(actorProfileBaselineDigest(profile), actorProfileBaselineDigest(changed));
+
+    const ambiguous = parseActorProfileCompletionBatchOutput(output.replace('ActorRef: NPC-CHEN\n', ''), {
+        candidates: [],
+        discoveryContext: { acceptedNarrative: `${narrative} 陈锋回头。`, completionMode: 'full' },
+    });
+    assert.equal(ambiguous.discoveries.length, 0);
+    assert.equal(ambiguous.unresolved[0].reason, 'actor_profile.discovery_name_ambiguous');
+});
+
+test('narrative-v1 rejects unknown or duplicate section headings and strips model-claimed provenance', () => {
+    const actorRef = { actorId: 'NPC-NARRATIVE-GATE', name: '\u6797\u5cb8' };
+    const seven = [
+        ['\u4eba\u7269\u4fe1\u606f', '\u4ed6\u662f\u4e00\u540d\u8d1f\u8d23\u770b\u5b88\u54e8\u4f4d\u7684\u4eba\u3002'],
+        ['\u751f\u7406\u7279\u5f81', '\u5176\u8eab\u4f53\u4e0e\u6240\u5c5e\u7269\u79cd\u7684\u8bbe\u5b9a\u4e00\u81f4\u3002'],
+        ['\u6027\u683c\u7279\u5f81', '\u4ed6\u4f1a\u5148\u542c\u53d6\u4ed6\u4eba\u7684\u7406\u7531\u518d\u53d1\u8868\u610f\u89c1\u3002'],
+        ['\u8fc7\u5f80\u7ecf\u5386', '\u4ed6\u66fe\u7ecf\u5728\u8fb9\u5883\u57ce\u9547\u4e2d\u62c5\u4efb\u591c\u73ed\u5de5\u4f5c\u3002'],
+        ['\u5f53\u524d\u72b6\u6001', '\u4ed6\u7ef4\u6301\u957f\u671f\u7a33\u5b9a\u7684\u54e8\u4f4d\u804c\u8d23\u3002'],
+        ['\u5173\u7cfb\u4e0e\u52a8\u673a', '\u4ed6\u613f\u610f\u5e2e\u52a9\u5408\u4f5c\u8005\uff0c\u4f46\u4e0d\u4f1a\u4ee3\u66ff\u4ed6\u4eba\u4f5c\u51b3\u5b9a\u3002'],
+        ['\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90', '\u4ed6\u7684\u65e5\u5e38\u7ecf\u9a8c\u4e0d\u7b49\u4e8e\u8d26\u672c\u6388\u6743\u7684\u80fd\u529b\u3002'],
+    ];
+    const block = (extra = '') => [
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a${actorRef.name}\u3011`,
+        `ActorRef: ${actorRef.actorId}`,
+        ...seven.map(([title, text]) => `\u3010${title}\u3011${text}`),
+        extra,
+    ].filter(Boolean).join('\n');
+    for (const [label, output] of [
+        ['unknown', block('\u3010\u5176\u4ed6\u5206\u7c7b\u3011\u4e0d\u5e94\u88ab\u9759\u9ed8\u541e\u6389\u3002')],
+        ['duplicate', block('\u3010\u4eba\u7269\u4fe1\u606f\u3011\u91cd\u590d\u6bb5\u843d\u4e0d\u80fd\u6210\u4e3a\u4fee\u590d\u3002')],
+    ]) {
+        const parsed = parseActorProfileCompletionBatchOutput(output, {
+            candidates: [{ actorRef, completionMode: 'full' }],
+        });
+        assert.equal(parsed.entries.length, 0, label);
+        assert.ok(parsed.failures[0].missingFields.some((field) => (
+            field === `actor_profile.narrative_section_${label}`
+        )), label);
+    }
+
+    const sectionKeys = [
+        'person', 'physiology', 'personality', 'history', 'currentState',
+        'relationshipsMotives', 'knowledgeCapabilitiesResources',
+    ];
+    const rawNarrative = {
+        profileFormat: 'narrative-v1',
+        actorRef,
+        narrativeSections: Object.fromEntries(sectionKeys.map((key) => [key, {
+            text: `${key} \u4e3a\u5b8c\u6574\u7684\u81ea\u7136\u4e2d\u6587\u6bb5\u843d\u3002`,
+            source: key === 'history' ? 'deprecated' : 'confirmed',
+            evidence: ['model-must-not-own-authority'],
+        }])),
+    };
+    const parsedJson = parseActorProfileCompletionBatchOutput(JSON.stringify(rawNarrative), {
+        candidates: [{ actorRef, completionMode: 'full' }],
+    });
+    assert.equal(parsedJson.entries.length, 1);
+    assert.equal(Object.values(parsedJson.entries[0].candidate.narrativeSections).every((section) => (
+        section.source === 'hypothesis' && section.evidence.length === 0
+    )), true, 'transport cannot claim confirmed or deprecated provenance');
+});
+
+test('narrative-v1 discovery derives a candidate only from one literal title-name occurrence', () => {
+    const name = '\u6797\u5cb8';
+    const acceptedNarrative = `\u96fe\u4e2d\u7684${name}\u8d70\u8fd1\u54e8\u4f4d\uff0c\u6ca1\u6709\u8bf4\u522b\u7684\u8bdd\u3002`;
+    const output = [
+        `# \u3010\u4eba\u7269\u6863\u6848\uff1a${name}\u3011`,
+        '\u3010\u4eba\u7269\u4fe1\u606f\u3011\u4ed6\u5728\u8fb9\u754c\u54e8\u5361\u8d1f\u8d23\u5f15\u8def\u3002',
+        '\u3010\u751f\u7406\u7279\u5f81\u3011\u4ed6\u7684\u8eab\u4f53\u7279\u5f81\u7b26\u5408\u6b64\u4e16\u754c\u7684\u4eba\u7c7b\u8bbe\u5b9a\u3002',
+        '\u3010\u6027\u683c\u7279\u5f81\u3011\u4ed6\u529e\u4e8b\u5ba1\u614e\uff0c\u4f1a\u7559\u610f\u5408\u4f5c\u8005\u7684\u754c\u7ebf\u3002',
+        '\u3010\u8fc7\u5f80\u7ecf\u5386\u3011\u4ed6\u6709\u591a\u5e74\u4e61\u95f4\u8def\u7ebf\u5de5\u4f5c\u7684\u7ecf\u9a8c\u3002',
+        '\u3010\u5f53\u524d\u72b6\u6001\u3011\u4ed6\u6b63\u4e0e\u5176\u4ed6\u54e8\u536b\u4fdd\u6301\u8f6e\u503c\u3002',
+        '\u3010\u5173\u7cfb\u4e0e\u52a8\u673a\u3011\u4ed6\u91cd\u89c6\u4e92\u52a9\uff0c\u4e0d\u8d8a\u6743\u66ff\u4ed6\u4eba\u9009\u62e9\u3002',
+        '\u3010\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90\u3011\u4ed6\u77e5\u9053\u7a33\u5b9a\u7684\u54e8\u5361\u89c4\u7a0b\uff0c\u5b9e\u9645\u8d44\u6e90\u4ecd\u4ee5\u8d26\u672c\u4e3a\u51c6\u3002',
+    ].join('\n');
+    const parsed = parseActorProfileCompletionBatchOutput(output, {
+        candidates: [],
+        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+    });
+    assert.equal(parsed.discoveries.length, 1);
+    assert.equal(parsed.discoveries[0].candidateRef.name, name);
+    assert.equal(parsed.discoveries[0].candidateRef.sourceAnchor, name);
+    assert.equal(parsed.discoveries[0].offset, acceptedNarrative.indexOf(name));
+    assert.match(parsed.discoveries[0].temporaryActorId, /^DISC-/u);
+});
+
+test('narrative transport accepts bounded heading forms and only the strict empty sentinel', () => {
+    const empty = parseActorProfileCompletionBatchOutput('\u65e0\u4eba\u7269\u6863\u6848\u3002', { candidates: [] });
+    assert.equal(empty.explicitEmpty, true);
+    assert.equal(empty.entries.length, 0);
+    const prose = parseActorProfileCompletionBatchOutput('\u6ca1\u6709\u65b0\u4eba\u7269\uff0c\u4eca\u65e5\u5e73\u9759\u3002', { candidates: [] });
+    assert.equal(prose.explicitEmpty, false, 'only the exact sentinel is no-candidates');
+    assert.equal(prose.batchMeta.formatUnrecoverable, true);
+    const multi = parseActorProfileCompletionBatchOutput([
+        '```markdown',
+        '## \u4eba\u7269\u6863\u6848\uff1a\u5357\u6865',
+        'ActorRef: NPC-HEADING',
+        '\u4eba\u7269\u4fe1\u606f\uff1a\u4ed6\u662f\u8d1f\u8d23\u5f15\u8def\u7684\u5b88\u536b\u3002',
+        '# \u751f\u7406\u7279\u5f81\uff1a\u5176\u4f53\u5f81\u7b26\u5408\u4eba\u7c7b\u8bbe\u5b9a\u3002',
+        '\u3010\u6027\u683c\u7279\u5f81\u3011\u4ed6\u4f1a\u5148\u542c\u53d6\u4ed6\u4eba\u7684\u9700\u6c42\u3002',
+        '\u8fc7\u5f80\u7ecf\u5386\uff1a\u4ed6\u66fe\u957f\u671f\u5728\u8fb9\u9547\u503c\u5b88\u3002',
+        '\u3010\u5f53\u524d\u72b6\u6001\u3011\u4ed6\u6b63\u5728\u5b88\u62a4\u56fa\u5b9a\u54e8\u4f4d\u3002',
+        '\u5173\u7cfb\u4e0e\u52a8\u673a\uff1a\u4ed6\u91cd\u89c6\u5408\u4f5c\u4e0e\u8fb9\u754c\u3002',
+        '\u3010\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90\u3011\u4ed6\u77e5\u9053\u54e8\u4f4d\u6d41\u7a0b\uff0c\u5176\u4ed6\u8d44\u6e90\u4ee5\u8d26\u672c\u4e3a\u51c6\u3002',
+        '```',
+    ].join('\n'), { candidates: [{ actorRef: { actorId: 'NPC-HEADING', name: '\u5357\u6865' } }] });
+    assert.equal(multi.entries.length, 1);
+
+    const dialogue = parseActorProfileCompletionBatchOutput([
+        '【人物档案：北桥】', 'ActorRef：NPC-DIALOGUE',
+        '人物信息：她是负责夜间引路的守卫。', '生理特征：其体征符合人类设定。',
+        '性格特征：她会耐心听取同伴的选择。', '过往经历：她长期在边境城镇值守。',
+        '【当前状态】她正维持固定的夜间职责。\n她说：先别替别人决定。\n原因是：每个人都要保留选择。',
+        '关系与动机：她愿意协作，但尊重每个人的边界。',
+        '知识、能力与资源：她熟悉值守流程，资源仍以账本为准。',
+    ].join('\n'), { candidates: [{ actorRef: { actorId: 'NPC-DIALOGUE', name: '\u5317\u6865' } }] });
+    assert.equal(dialogue.entries.length, 1);
+    assert.match(dialogue.entries[0].candidate.narrativeSections.currentState.text, /她说/u);
+
+    const bracketUnknown = parseActorProfileCompletionBatchOutput([
+        '【人物档案：北桥】', 'ActorRef：NPC-DIALOGUE',
+        '【人物信息】她是负责夜间引路的守卫。', '【生理特征】其体征符合人类设定。',
+        '【性格特征】她会耐心听取同伴的选择。', '【过往经历】她长期在边境城镇值守。',
+        '【当前状态】她正维持固定的夜间职责。', '【未知段】此段必须失败。',
+        '【关系与动机】她愿意协作，但尊重每个人的边界。',
+        '【知识、能力与资源】她熟悉值守流程，资源仍以账本为准。',
+    ].join('\n'), { candidates: [{ actorRef: { actorId: 'NPC-DIALOGUE', name: '\u5317\u6865' } }] });
+    assert.equal(bracketUnknown.entries.length, 0);
+    assert.ok(bracketUnknown.failures[0].missingFields.includes('actor_profile.narrative_section_unknown'));
+});
+
+test('legacy V6 normalizes and renders without adding narrative persistence fields', () => {
+    const legacy = prepareActorProfileV6(actor('NPC-LEGACY-SHAPE', '\u65e7\u6863\u6848'), { mode: 'full', turn: 1 });
+    delete legacy.profileFormat;
+    delete legacy.narrativeSections;
+    const normalized = normalizeActorProfileV6(legacy, {
+        actorId: 'NPC-LEGACY-SHAPE',
+        name: '\u65e7\u6863\u6848',
+        mode: 'full',
+    });
+    const view = actorProfileV6View({ id: 'NPC-LEGACY-SHAPE', name: '\u65e7\u6863\u6848', profileV6: legacy });
+    assert.equal(Object.hasOwn(normalized, 'profileFormat'), false);
+    assert.equal(Object.hasOwn(normalized, 'narrativeSections'), false);
+    assert.equal(view.profileFormat, undefined);
+    assert.equal(view.narrativeSections, null);
 });
 
 test('nine-actor long sessions never turn missing dossiers into generic plans', () => {

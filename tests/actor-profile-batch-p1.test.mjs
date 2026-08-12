@@ -540,8 +540,9 @@ test('discovery format replacement keeps discovery enabled while subset retries 
     const replacementSystem = replacement.find((message) => message.role === 'system').content;
     const replacementUser = replacement.find((message) => message.role === 'user').content;
     assert.equal(replacementSystem.includes('不得重新发现正文人物'), false);
-    assert.ok(replacementUser.includes('共享最终正文'));
-    assert.ok(replacementUser.includes('candidateRef.sourceAnchor'));
+    assert.ok(replacementUser.includes('最终正文'));
+    assert.ok(replacementSystem.includes('唯一精确出现'));
+    assert.equal(replacementUser.includes('candidateRef.sourceAnchor'), false);
 
     const subset = buildActorProfileCompletionMessages([], {
         discoveryContext: {
@@ -988,11 +989,11 @@ test('shared narrative and worldbook evidence appears once for an eight-actor ba
     });
     const userPrompt = messages.find((message) => message.role === 'user').content;
     assert.equal(userPrompt.split(sentinel).length - 1, 1);
-    assert.ok(userPrompt.includes('共享权威资料、世界观与状态锚点（仅一次）'));
+    assert.ok(userPrompt.includes('权威材料'));
     assert.ok(userPrompt.length < 70000, '公共证据不得按8个人物线性复制');
 });
 
-test('prompt keeps confirmed facts hard and routes hypotheses to editable draft', () => {
+test('narrative prompt keeps authority local and never requests legacy fact tables', () => {
     const fixture = prepareRegisteredBatch(1);
     const candidate = structuredClone(fixture.candidates[0]);
     candidate.previousProfile.modules.relationships.data.entries = [{
@@ -1010,10 +1011,10 @@ test('prompt keeps confirmed facts hard and routes hypotheses to editable draft'
     const userPrompt = buildActorProfileCompletionMessages([candidate], {
         evidenceText: 'WORLD_BOOK_HIGH_PRIORITY_SENTINEL',
     })[1].content;
-    assert.match(
-        userPrompt,
-        /"confirmedAnchors":\{.*CONFIRMED_RELATION_SENTINEL.*"editableDraft":\{.*HYPOTHESIS_KNOWLEDGE_SENTINEL/su,
-    );
+    assert.equal(userPrompt.includes('CONFIRMED_RELATION_SENTINEL'), false);
+    assert.equal(userPrompt.includes('HYPOTHESIS_KNOWLEDGE_SENTINEL'), false);
+    assert.equal(userPrompt.includes('relationships'), false);
+    assert.equal(userPrompt.includes('coverageState'), false);
     assert.equal(userPrompt.split('WORLD_BOOK_HIGH_PRIORITY_SENTINEL').length - 1, 1);
 });
 
@@ -1044,6 +1045,48 @@ test('legacy colon ActorId keeps its full identity in ticket exhaustion diagnost
     assert.deepEqual(result.skipped, [`${actorId}:ticket_pool_exhausted`]);
 });
 
+test('narrative-v1 batch keeps one complete dossier atomic and never projects prose into ledger facts', async () => {
+    const fixture = prepareRegisteredBatch(1);
+    const target = fixture.candidates[0];
+    const output = [
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a${target.actorRef.name}\u3011`,
+        `ActorRef: ${target.actorRef.actorId}`,
+        '\u3010\u4eba\u7269\u4fe1\u606f\u3011\u4e00\u540d\u6709\u81ea\u5df1\u65e5\u5e38\u804c\u8d23\u7684\u65b0\u4eba\u7269\u3002',
+        '\u3010\u751f\u7406\u7279\u5f81\u3011\u8eab\u4f53\u7279\u5f81\u4e0e\u7269\u79cd\u8bbe\u5b9a\u4fdd\u6301\u4e00\u81f4\u3002',
+        '\u3010\u6027\u683c\u7279\u5f81\u3011\u8bf4\u8bdd\u514b\u5236\uff0c\u4f1a\u5148\u786e\u8ba4\u98ce\u9669\u3002',
+        '\u3010\u8fc7\u5f80\u7ecf\u5386\u3011\u66fe\u5728\u65e5\u5e38\u5de5\u4f5c\u4e2d\u627f\u62c5\u7a33\u5b9a\u8d23\u4efb\u3002',
+        '\u3010\u5f53\u524d\u72b6\u6001\u3011\u5f53\u524d\u72b6\u6001\u53ea\u8bb0\u5f55\u957f\u671f\u6d3b\u52a8\u80cc\u666f\u3002',
+        '\u3010\u5173\u7cfb\u4e0e\u52a8\u673a\u3011\u613f\u610f\u5408\u4f5c\uff0c\u4e0d\u66ff\u4ed6\u4eba\u51b3\u5b9a\u3002',
+        '\u3010\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90\u3011\u53ef\u9605\u8bfb\u7684\u7ecf\u9a8c\u4e0d\u7b49\u4e8e\u8d26\u672c\u6388\u6743\u7684\u80fd\u529b\u3002',
+    ].join('\n');
+    const run = await runBatch(fixture, { requestBatch: () => output });
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.saveCount, 2);
+    const [pendingSave, finalSave] = run.persistencePayloads;
+    const pendingActor = pendingSave.ledger.actors.find((entry) => entry.id === target.actorRef.actorId);
+    const finalActor = finalSave.ledger.actors.find((entry) => entry.id === target.actorRef.actorId);
+    assert.equal(pendingActor.profileV6.profileFormat, undefined, 'pending readback never replaces live profile');
+    assert.equal(pendingActor.pendingProfile.profileV6.profileFormat, 'narrative-v1');
+    assert.equal(pendingActor.pendingProfile.profileV6.preparedForAction, false);
+    assert.equal(pendingActor.pendingProfile.readbackVerified, false);
+    assert.equal(Object.values(pendingActor.pendingProfile.profileV6.narrativeSections).every((section) => (
+        typeof section.text === 'string' && section.text.length > 0
+    )), true);
+    const verification = finalActor.profileV6.baselineCommit.verification;
+    assert.equal(finalActor.pendingProfile, null);
+    assert.equal(finalActor.profileV6.preparedForAction, true);
+    assert.equal(verification.transactionId, pendingActor.pendingProfile.transactionId);
+    assert.equal(verification.writeSetDigest, pendingActor.pendingProfile.writeSetDigest);
+    assert.equal(verification.preparedLedgerDigest, pendingActor.pendingProfile.preparedLedgerDigest);
+    assert.equal(verification.profileDigest, pendingActor.pendingProfile.profileDigest);
+    assert.deepEqual(verification.writeSet, pendingActor.pendingProfile.writeSet);
+    assert.deepEqual(verification.writeSet[0].sourceRef, fixture.ref);
+    assert.equal(verification.writeSet[0].scopeDigest, fixture.ref.scopeDigest);
+    const actor = run.result.ledger.actors.find((entry) => entry.id === target.actorRef.actorId);
+    assert.equal(actor.profileV6.profileFormat, 'narrative-v1');
+    assert.deepEqual(actor.capabilities, [], 'narrative prose never becomes a capability fact');
+});
+
 test('production path keeps current-source profiles untruncated and commits through pending plus final readbacks', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const entryFunction = source.slice(
@@ -1071,6 +1114,16 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /persistPendingBatch/u);
     assert.match(profileFunction, /persistFinalizedBatch/u);
     assert.doesNotMatch(profileFunction, /Promise\.all\(candidates\.map|parallelLane|actorShardMaxTokens/u);
+    const profileRender = source.slice(
+        source.indexOf('function renderActorProfiles'),
+        source.indexOf('function renderContinuityLedger'),
+    );
+    assert.match(profileRender, /if \(profile\.profileFormat !== 'narrative-v1'\) \{\s*const actorLock[\s\S]*?applyActorProfileUiMutation/u);
+    const narrativeRender = profileRender.slice(profileRender.indexOf("if (profile.profileFormat === 'narrative-v1')"));
+    assert.doesNotMatch(narrativeRender, /mvuad-profile-actor-lock|applyActorProfileUiMutation|regenerateActorProfileV6Module/u);
+    assert.match(profileRender, /const narrativeCount = actors\.filter/u);
+    assert.match(profileRender, /叙事档案 \$\{narrativeCount\} 人/u);
+    assert.match(profileRender, /平均覆盖 \$\{coverage\}%/u);
     const transaction = source.slice(source.indexOf('const promotedActorIds = actorRegistration.promoted'));
     assert.match(transaction, /actorRegistration\.promoted\s*\.map\(\(entry\) => entry\.actorRef\.actorId\)/u);
     assert.match(transaction, /initialActorIds: promotedActorIds/u);

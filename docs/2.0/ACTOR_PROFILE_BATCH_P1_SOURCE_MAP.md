@@ -32,6 +32,23 @@
 - P13 最小移植：标准单引号的嵌套 object/array、对象内可明确识别的缺属性逗号、以及只在已知 ProfileInsertCandidate object/array 字段中对“完整且类型匹配”的字符串化 JSON 容器转换；顶层整体引号包装的结构不拆包，普通废话前缀的英文缩写 apostrophe 不会吞掉后续真实结构根；任意引号自然文本、带后缀或类型不匹配的内嵌 JSON 保留原字符串并交 schema 拒绝。仅机械恢复并记录有限 repair label，随后仍走既有 ActorRef/candidateRef、锚点、schema、authority 与 pending→final/readback 门。
 - 明确不移植：`tableEdit` 块提取、SQL/ORM、数据库 CRUD、表写入时序以及任意自由文本语义猜测；格式无法恢复时维持 fail-closed，才允许一次 discovery-only 联合 replacement。
 
+## P14 narrative dossier compatibility boundary
+
+- Reused unchanged: ActorRef/Registry promotion, exact accepted-text anchor,
+  ticket binding, source/scope guards, one failed-subset replacement, and the
+  pending -> host readback -> final -> host readback transaction.
+- Minimal adaptation: TavernDB/caikis' one-person complete natural-language
+  dossier is carried as seven bounded Markdown-like sections.  The transport
+  parser only accepts known headings, exact registered ActorRef, or a title
+  name with one exact accepted-text occurrence; it never performs fuzzy name
+  matching or edits the accepted narrative.
+- New local compatibility layer: `profileFormat: narrative-v1` and ordered
+  `narrativeSections` are canonical content.  They are digested with the
+  baseline receipt.  Legacy V6 remains read-only and is never bulk-migrated.
+  Narrative prose is display context only: it is not parsed into knowledge,
+  resources, capabilities, locations, relations, player choices, or world
+  results.  Those structured ledger facts retain their existing owners.
+
 ```text
 accepted-final
   └─ enqueueActorProfiles(includeMaintenance=false)

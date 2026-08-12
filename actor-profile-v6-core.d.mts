@@ -3,6 +3,7 @@ export const ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT: string;
 export const ACTOR_PROFILE_COMPLETION_MODES: readonly string[];
 export const ACTOR_PROFILE_SOURCES: readonly string[];
 export const ACTOR_PROFILE_MODULES: readonly string[];
+export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS: readonly string[];
 export const CHARACTER_CREATION_TICKET_VERSION: number;
 export const CHARACTER_CREATION_TICKET_AXIS_NAMES: readonly string[];
 export function emptyActorProfileV6(actorId?: string, name?: string, options?: object): object;
@@ -39,7 +40,7 @@ export function validateActorProfileDiscoveryAnchor(candidateRef: unknown, accep
 };
 export function parseActorProfileCompletionOutput(output: string, options?: object): object;
 export interface ActorProfileBatchParseMeta {
-    rootType: 'array' | 'object' | 'other' | 'empty';
+    rootType: 'array' | 'object' | 'other' | 'empty' | 'narrative_blocks';
     parsedRowCount: number;
     explicitEmpty: boolean;
     emptyOutput: boolean;

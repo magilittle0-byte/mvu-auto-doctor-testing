@@ -13853,6 +13853,26 @@ async function runActorProfileTarget(captured, {
         ...(profileCompletion.failures || []),
         ...(profileCompletion.rejected || []),
     ];
+    const narrativeMissingKeys = new Set([
+        'narrativeSections.person',
+        'narrativeSections.physiology',
+        'narrativeSections.personality',
+        'narrativeSections.history',
+        'narrativeSections.currentState',
+        'narrativeSections.relationshipsMotives',
+        'narrativeSections.knowledgeCapabilitiesResources',
+    ]);
+    const narrativeValidationDiagnostic = {
+        attempt: Math.min(2, Math.max(0, Number(profileCompletion.modelCalls) || 0)),
+        modelCalls: Math.min(2, Math.max(0, Number(profileCompletion.modelCalls) || 0)),
+        parsedRowCount: Math.min(128, Math.max(0, Number(profileCompletion.batchMeta?.parsedRowCount) || 0)),
+        missingSections: [...new Set(failures.flatMap((failure) => (
+            Array.isArray(failure?.missingFields) ? failure.missingFields : []
+        )).filter((path) => narrativeMissingKeys.has(path)))].slice(0, 7),
+        identityCodes: [...new Set(failures.map((failure) => cleanText(failure?.reason, 120))
+            .filter((reason) => reason.startsWith('actor_profile.actor_ref_')
+                || reason.startsWith('actor_profile.discovery_name_')))].slice(0, 4),
+    };
     const quarantined = profileCompletion.registry?.quarantined || [];
     const unresolved = profileCompletion.registry?.unresolved || [];
     const hasCandidates = profileCompletion.candidates.length > 0;
@@ -13891,7 +13911,12 @@ async function runActorProfileTarget(captured, {
             maintenance: selectedMaintenance,
             modelCalls: profileCompletion.modelCalls,
             committed: profileCompletion.accepted.map((entry) => entry.actorId),
-            failed: failures,
+            failed: failures.map((failure) => ({
+                reason: cleanText(failure?.reason, 120),
+                missingSections: (Array.isArray(failure?.missingFields) ? failure.missingFields : [])
+                    .filter((path) => narrativeMissingKeys.has(path)).slice(0, 7),
+            })),
+            validationDiagnostic: narrativeValidationDiagnostic,
             readbackVerified: profileCompletion.readbackVerified === true,
         },
         ticketPoolExhausted: deepClone(
@@ -14704,8 +14729,9 @@ async function enqueueActorProfiles(targetId, {
             } else if (result?.status === 'stale') {
                 setActorProfileStatus('人物档案：目标已变化，本次未提交', '');
             } else {
+                const missing = result?.profileBatch?.validationDiagnostic?.missingSections || [];
                 setActorProfileStatus(
-                    `人物档案未完成：${safeDiagnosticReason(result?.reason || '批次未能原子回读')}`,
+                    `人物档案未完成：${safeDiagnosticReason(result?.reason || '批次未能原子回读')}${missing.length ? `（缺 ${missing.length} 个叙事区块）` : ''}`,
                     'error',
                 );
             }
@@ -16381,13 +16407,18 @@ function renderActorProfiles(namespace = null) {
         const ready = actors.filter((actor) => (
             actorProfileReadinessInLedger(ledger, actor.id).ready
         )).length;
+        const narrativeCount = actors.filter((actor) => (
+            actor?.profileV6?.profileFormat === 'narrative-v1'
+        )).length;
         const coverage = actors.length
             ? Math.round(actors.reduce((sum, actor) => (
                 sum + actorProfileV6View(actor).coverage
             ), 0) / actors.length)
             : 100;
         ui.floatingActorSummary.textContent = actors.length
-            ? `${actors.length} 人 · ${ready} 人真实行动就绪 · 平均覆盖 ${coverage}% · 身份隔离 ${ledger.identityQuarantine.length} · 账本第 ${ledger.turn} 轮`
+            ? (narrativeCount
+                ? `叙事档案 ${narrativeCount} 人 · 已登记 ${actors.length} 人 · ${ready} 人真实行动就绪 · 身份隔离 ${ledger.identityQuarantine.length} · 账本第 ${ledger.turn} 轮`
+                : `${actors.length} 人 · ${ready} 人真实行动就绪 · 平均覆盖 ${coverage}% · 身份隔离 ${ledger.identityQuarantine.length} · 账本第 ${ledger.turn} 轮`)
             : ledger.identityQuarantine.length
                 ? `当前没有可行动人物；${ledger.identityQuarantine.length} 项内部身份引用仍在隔离，不会补造人物历史。`
                 : '当前聊天还没有登记人物。人物被正文、角色卡或世界书识别后会出现在这里。';
@@ -16416,7 +16447,9 @@ function renderActorProfiles(namespace = null) {
         const ledgerReadiness = actorProfileReadinessInLedger(ledger, actor.id);
         const option = document.createElement('option');
         option.value = actor.id;
-        option.textContent = `${actor.name} · ${ACTOR_PROFILE_STATUS_LABELS[actor.status] || actor.status} · ${profileView.coverage}% · ${ledgerReadiness.ready ? '已就绪' : '未就绪'}`;
+        option.textContent = profileView.profileFormat === 'narrative-v1'
+            ? `${actor.name} · ${ACTOR_PROFILE_STATUS_LABELS[actor.status] || actor.status} · ${ledgerReadiness.ready ? '叙事档案已行动就绪' : '叙事档案等待原子读回'}`
+            : `${actor.name} · ${ACTOR_PROFILE_STATUS_LABELS[actor.status] || actor.status} · ${profileView.coverage}% · ${ledgerReadiness.ready ? '已就绪' : '未就绪'}`;
         select.appendChild(option);
     }
     const selectedActor = actors.find((actor) => actor.id === previousSelection) || actors[0] || null;
@@ -16473,7 +16506,7 @@ function renderActorProfiles(namespace = null) {
     badges.className = 'mvuad-profile-header-badges';
     for (const text of [
         ACTOR_PROFILE_STATUS_LABELS[selectedActor.status] || selectedActor.status,
-        `覆盖 ${profileView.coverage}%`,
+        profile.profileFormat === 'narrative-v1' ? '叙事档案' : `覆盖 ${profileView.coverage}%`,
         selectedReadiness.ready ? '行动前真实就绪' : '未达到行动就绪',
         `V${profile.version}`,
     ]) {
@@ -16485,17 +16518,24 @@ function renderActorProfiles(namespace = null) {
 
     const progress = document.createElement('div');
     progress.className = 'mvuad-profile-progress';
-    progress.setAttribute('role', 'progressbar');
-    progress.setAttribute('aria-valuemin', '0');
-    progress.setAttribute('aria-valuemax', '100');
-    progress.setAttribute('aria-valuenow', String(profileView.coverage));
+    if (profile.profileFormat !== 'narrative-v1') {
+        progress.setAttribute('role', 'progressbar');
+        progress.setAttribute('aria-valuemin', '0');
+        progress.setAttribute('aria-valuemax', '100');
+        progress.setAttribute('aria-valuenow', String(profileView.coverage));
+    }
     const progressBar = document.createElement('span');
-    progressBar.style.setProperty('--mvuad-profile-progress', `${profileView.coverage}%`);
+    if (profile.profileFormat !== 'narrative-v1') {
+        progressBar.style.setProperty('--mvuad-profile-progress', `${profileView.coverage}%`);
+    }
     const progressText = document.createElement('b');
-    progressText.textContent = selectedReadiness.ready
-        ? `档案覆盖 ${profileView.coverage}% · 可进入行动调度`
-        : `档案覆盖 ${profileView.coverage}% · 空值或 unknown 不算就绪`;
-    progress.append(progressBar, progressText);
+    progressText.textContent = profile.profileFormat === 'narrative-v1'
+        ? (selectedReadiness.ready ? '叙事档案已原子读回，可进入行动调度' : '叙事档案尚未完成原子读回')
+        : selectedReadiness.ready
+            ? `档案覆盖 ${profileView.coverage}% · 可进入行动调度`
+            : `档案覆盖 ${profileView.coverage}% · 空值或 unknown 不算就绪`;
+    if (profile.profileFormat !== 'narrative-v1') progress.append(progressBar);
+    progress.append(progressText);
 
     const overview = document.createElement('div');
     overview.className = 'mvuad-profile-overview';
@@ -16544,6 +16584,7 @@ function renderActorProfiles(namespace = null) {
 
     const actorToolbar = document.createElement('div');
     actorToolbar.className = 'mvuad-profile-actor-toolbar';
+    if (profile.profileFormat !== 'narrative-v1') {
     const actorLock = document.createElement('button');
     actorLock.type = 'button';
     actorLock.className = 'menu_button mvuad-profile-actor-lock';
@@ -16560,18 +16601,32 @@ function renderActorProfiles(namespace = null) {
             `${selectedActor.name}的整个人物档案已${locked ? '解锁' : '锁定'}`,
         );
     });
+    }
 
     const modules = document.createElement('div');
     modules.className = 'mvuad-profile-modules';
-    Object.entries(profile.modules).forEach(([moduleKey, module], index) => {
-        modules.appendChild(buildActorProfileModule(
-            selectedActor,
-            profile,
-            moduleKey,
-            module,
-            { open: index === 0 || moduleKey === 'personality' },
-        ));
-    });
+    if (profile.profileFormat === 'narrative-v1') {
+        Object.values(profile.narrativeSections || {}).forEach((section) => {
+            const block = document.createElement('section');
+            block.className = 'mvuad-profile-module';
+            const title = document.createElement('h4');
+            title.textContent = section.title;
+            const text = document.createElement('p');
+            text.textContent = section.text;
+            block.append(title, text);
+            modules.appendChild(block);
+        });
+    } else {
+        Object.entries(profile.modules).forEach(([moduleKey, module], index) => {
+            modules.appendChild(buildActorProfileModule(
+                selectedActor,
+                profile,
+                moduleKey,
+                module,
+                { open: index === 0 || moduleKey === 'personality' },
+            ));
+        });
+    }
 
     host.append(header, progress, overview, actorToolbar, modules, buildActorProfileHistory(profile));
 }

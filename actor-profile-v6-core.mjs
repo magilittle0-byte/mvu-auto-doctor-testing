@@ -36,6 +36,26 @@ export const ACTOR_PROFILE_MODULES = Object.freeze([
     'actionHistory',
     'physiology',
 ]);
+// Narrative v1 is deliberately a compact, human-readable baseline.  It is
+// stored beside V6 modules so old, read-only dossiers remain byte-compatible.
+export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS = Object.freeze([
+    'person',
+    'physiology',
+    'personality',
+    'history',
+    'currentState',
+    'relationshipsMotives',
+    'knowledgeCapabilitiesResources',
+]);
+const ACTOR_PROFILE_NARRATIVE_TITLES = Object.freeze({
+    person: '人物信息',
+    physiology: '生理特征',
+    personality: '性格特征',
+    history: '过往经历',
+    currentState: '当前状态',
+    relationshipsMotives: '关系与动机',
+    knowledgeCapabilitiesResources: '知识、能力与资源',
+});
 export const CHARACTER_CREATION_TICKET_VERSION = 3;
 export const CHARACTER_CREATION_TICKET_AXIS_NAMES = Object.freeze([
     'valuePriority',
@@ -101,6 +121,11 @@ const PROFILE_INSERT_SOURCE_LAYERS = Object.freeze([
 ]);
 
 const SOURCE_SET = new Set(ACTOR_PROFILE_SOURCES);
+const NARRATIVE_SECTION_SOURCE_SET = new Set([
+    'confirmed',
+    'designed_seed',
+    'hypothesis',
+]);
 const MODULE_SET = new Set(ACTOR_PROFILE_MODULES);
 
 function clone(value) {
@@ -109,6 +134,45 @@ function clone(value) {
 
 function cleanText(value, limit = 500) {
     return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, limit);
+}
+
+function narrativeText(value, limit = 4000) {
+    const text = cleanText(value, limit);
+    return text && !PROFILE_PLACEHOLDER_RE.test(text) ? text : '';
+}
+
+function narrativeSection(value, key, { modelAuthored = false } = {}) {
+    const source = isRecord(value) ? value : {};
+    const text = narrativeText(source.text ?? source.content ?? value, 4000);
+    return {
+        key,
+        title: ACTOR_PROFILE_NARRATIVE_TITLES[key] || key,
+        text,
+        // The model owns prose only. Provenance and evidence remain local
+        // authority data, so no transport shape can claim confirmed/ticket facts.
+        source: modelAuthored
+            ? 'hypothesis'
+            : (NARRATIVE_SECTION_SOURCE_SET.has(source.source) ? source.source : 'hypothesis'),
+        evidence: modelAuthored ? [] : cleanList(source.evidence, 8, 240),
+    };
+}
+
+function normalizeNarrativeSections(value, options = {}) {
+    const source = isRecord(value) ? value : {};
+    return Object.fromEntries(ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.map((key) => [
+        key,
+        narrativeSection(source[key], key, options),
+    ]));
+}
+
+function narrativeSectionsReady(profile) {
+    if (profile?.profileFormat !== 'narrative-v1') return false;
+    const sections = profile.narrativeSections || {};
+    return ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.every((key) => (
+        Boolean(narrativeText(sections[key]?.text, 4000))
+        && sections[key]?.title === ACTOR_PROFILE_NARRATIVE_TITLES[key]
+        && NARRATIVE_SECTION_SOURCE_SET.has(sections[key]?.source)
+    ));
 }
 
 const PROFILE_PLACEHOLDER_RE = /^(?:未设定|未登记|未填写|未生成|未知|待确认|暂无(?:资料|信息|设定)?|不详|无资料|无信息|unknown|unset|unregistered|pending|n\/?a|null|none|[-—]+)[。.!！]?$/iu;
@@ -298,6 +362,10 @@ export function normalizeActorProfileV6(value, {
     output.preparedForAction = source.preparedForAction === true;
     output.backgroundPending = source.backgroundPending === true;
     output.coverage = integer(source.coverage, 0, 100, 0);
+    if (source.profileFormat === 'narrative-v1') {
+        output.profileFormat = 'narrative-v1';
+        output.narrativeSections = normalizeNarrativeSections(source.narrativeSections);
+    }
     for (const module of ACTOR_PROFILE_MODULES) {
         output.modules[module] = normalizeModule(
             source.modules?.[module],
@@ -1316,6 +1384,9 @@ function moduleReady(profile, module) {
 }
 
 function calculateCoverage(profile) {
+    if (profile?.profileFormat === 'narrative-v1') {
+        return narrativeSectionsReady(profile) ? 100 : 0;
+    }
     // Adult physiology is an explicitly optional profile surface. Its unknown
     // details must stay visible, but they must not turn the core profile's
     // first-action readiness into an impossible 89% ceiling.
@@ -1356,10 +1427,15 @@ export function actorProfileBaselineDigest(value) {
         actorId: profile.actorId,
         name: profile.name,
         completionMode: profile.completionMode,
-        modules: Object.fromEntries(BASELINE_MODULES.map((module) => [
-            module,
-            profile.modules[module],
-        ])),
+        ...(profile.profileFormat === 'narrative-v1'
+            ? {
+                profileFormat: 'narrative-v1',
+                narrativeSections: profile.narrativeSections,
+            }
+            : { modules: Object.fromEntries(BASELINE_MODULES.map((module) => [
+                module,
+                profile.modules[module],
+            ])) }),
         fieldSources: baselineFieldSources,
         designRolls: profile.designRolls,
         locks: profile.locks,
@@ -2329,19 +2405,14 @@ function actorProfilePromptContext(candidate) {
 }
 
 function actorProfileFieldGuide(candidate) {
-    const groups = [
-        'identity: role, species, gender, age, briefIntro, appearance, identityText, relationState, attitudeToProtagonist, pastExperience',
-        'personality: biography, primaryColor, primaryDerivatives, primarySentence, baseColor, baseDerivatives, baseSentence, accentColor, accentDerivatives, accentSentence, othersVoices, authorVoice',
-        'relationships: entries[{actorId,name,summary,evidence}], patterns, coverageState；只有已给注册ActorRef时填写actorId，否则保留name与自然完整summary，不得猜ActorId',
-        'goals: longTerm, pursuitPrinciples, strategy(summary, steps, reviewConditions)',
-        'knowledge: entries[{claim,kind,confidence,learnedTurn,sourceRef,propagation}], unknownRemainsUnknown, coverageState；创意补全使用kind=inferred且sourceRef=null',
-        'resourcesCapabilities: resources[{name,amount,unit,description,evidence}], capabilities, noUnconfirmedAbilityGranted, coverageState',
-        'sources: 为各字段路径标记 confirmed / designed_seed / hypothesis；AI补空不得标 confirmed',
-    ];
-    if (modeOf(candidate?.completionMode) === 'full_adult') {
-        groups.push('physiology: facialAppearance, oralCavity, hairstyle, neckShoulderArmpit, heightWeight, bodySpecial, skinTexture, bodyScent, bodyMeasurements, breastAppearance, waistAbdomen, vulvaAppearance, vaginalProfile, anusAppearance, buttockAppearance, legAppearance, footSize, footAppearance, lactationBodyFluid, sensitiveParts');
-    }
-    return groups.join('\n');
+    return [
+        '每人一个自然中文档案块：标题为【人物档案：姓名】。已登记目标另写 ActorRef：精确 actorId；新人物只写标题姓名。',
+        '每块都必须有七个非空段落：【人物信息】【生理特征】【性格特征】【过往经历】【当前状态】【关系与动机】【知识、能力与资源】。',
+        '段落可以是数句自然中文，不要 JSON、数组、技术 flag、来源字段或字段表。标题顺序可变；不要替玩家写行动、感受、同意或世界结果。',
+        modeOf(candidate?.completionMode) === 'full_adult'
+            ? '生理特征仅写长期稳定且符合物种的客观身体信息；确实不适用时解释原因。'
+            : '生理特征写适用于当前物种的长期稳定描述。',
+    ].join('\n');
 }
 
 export function buildActorProfileCompletionMessages(candidates, {
@@ -2362,56 +2433,28 @@ export function buildActorProfileCompletionMessages(candidates, {
     const batchFieldGuide = actorProfileFieldGuide({
         completionMode: includesPhysiology ? 'full_adult' : 'full',
     });
-    const system = [
-        '你是只负责从最终自然正文决定新增人物行并填写完整NPC档案的表格填写器。一次响应同时完成“正文中有哪些尚未登记的新人物”与“这些人物的整张档案”，不续写剧情。',
-        discovery.discoveryEnabled === false || discovery.discoveryRetryOnly === true
-            ? '这是失败子集替换调用：不得重新发现正文人物。只返回输入中明确列出的 actorRef，或 discoveryRetryTargets 中明确列出的 candidateRef；不能新增其他行。'
-            : '输入中明确给出 actorRef 的目标，是本次获准整档的人物：返回 actorRef 完整档案行。正文里自然出现、且不在 registeredActorIndex 中的新人物：返回 candidateRef{name,sourceAnchor} 完整档案行。registeredActorIndex 覆盖当前作用域全部已登记 ActorRef，只用于精确去重，不代表本次要重写这些历史人物。不要把群体、系统、旁白、玩家或仅被提及但未作为人物出场的名称建档。',
-        'candidateRef.name 必须逐字出现在 candidateRef.sourceAnchor 内；sourceAnchor 必须是从“共享最终正文”原样复制、在该正文中只出现一次的短片段。不得改写、概括或拼接锚点，也不要输出偏移量；脚本会从未改写正文计算唯一真实偏移，并按偏移顺序完成 Registry promotion 与票据绑定。',
-        'confirmedAnchors 是角色卡、原著、数据库或已接受正文中的权威事实，只能补空缺，不能改写。editableDraft 可以在不冲突时润色或替换。characterCreationTicket 已在正文生成前由脚本锁定：只能使用输入中的同一票，不重掷、不换票；票据缺失或耗尽时依据权威事实、正文和世界观创作补全。',
-        '没有明说的内容要合理补全，并把来源标为 hypothesis；来自同票的创作标为 designed_seed。不要用“未知、待确认、暂无、不详”或空值逃避填写，也不要把推断伪称为正文事实。人物应有普通生活、欲望、偏见、弱点、关系距离和压力后的恢复方式，不默认冷酷、疯癫、绝望、敌对或命定关系。',
-        '质量下限：每组人格衍生写2-3条、每条30-100个中文字符；他者声部写4-7句有不同视角和具体轶事的话；作者声部不超过200字。履历、外貌、关系、目标、知识、资源与能力都用完整中文句子。只写长期基线，不把本轮衣着、伤势、情绪、即时计划或执行结果固化为终身设定。',
-        'relationships、knowledge、resourcesCapabilities 都必须完整返回。没有确认条目时，补成可修订的日常关系模式、生活常识、普通资源和实际能力，使用对应 no_confirmed_* coverageState；不得凭空授予秘密知识、稀有物品或超常能力。',
-        ...(includesPhysiology ? [
-            '生理档案已启用：逐字段填写长期稳定、符合物种与世界观的客观身体特征。确实不适用时写“本物种不适用：具体原因”，不能只写“不适用”，也不写性格、态度、衣物、经历或本轮临时状态。',
-        ] : []),
-        '格式只负责运输：按字段说明返回完整对象；脚本会处理围栏、轻微标点、引号、逗号、括号、字段别名和类型问题。不要输出SQL、审查说明、拒绝说明或额外包裹。',
-        customPrompt
-            ? `【用户自定义人物档案/破限提示】\n${customPrompt}\n【用户自定义提示结束】`
+    // Narrative-v1 has a deliberately separate transport contract. Keep the
+    // legacy V6 prompt below unreachable while legacy callers are retired;
+    // P2 must never ask a model for the former field table or provenance.
+    const narrativeSystem = [
+        '\u4f60\u53ea\u751f\u6210\u4eba\u7269\u6863\u6848\uff0c\u4e0d\u7ee7\u5199\u5267\u60c5\uff0c\u4e0d\u66ff\u73a9\u5bb6\u51b3\u5b9a\u884c\u52a8\u3001\u611f\u53d7\u3001\u540c\u610f\u6216\u4e16\u754c\u7ed3\u679c\u3002',
+        '\u6bcf\u4eba\u4e00\u4e2a\u5bbd\u677e\u4e2d\u6587\u6863\u6848\u5757\uff1a\u3010\u4eba\u7269\u6863\u6848\uff1a\u59d3\u540d\u3011\uff0c\u5fc5\u987b\u5177\u6709\u4e03\u6bb5\uff1a\u3010\u4eba\u7269\u4fe1\u606f\u3011\u3010\u751f\u7406\u7279\u5f81\u3011\u3010\u6027\u683c\u7279\u5f81\u3011\u3010\u8fc7\u5f80\u7ecf\u5386\u3011\u3010\u5f53\u524d\u72b6\u6001\u3011\u3010\u5173\u7cfb\u4e0e\u52a8\u673a\u3011\u3010\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90\u3011\u3002\u6bcf\u6bb5\u5199\u975e\u5360\u4f4d\u7684\u81ea\u7136\u4e2d\u6587\u6bb5\u843d\uff0c\u53ea\u5199\u957f\u671f\u7a33\u5b9a\u4fe1\u606f\uff0c\u4e0d\u8981 JSON\u3001\u6570\u7ec4\u3001\u6280\u672f\u6807\u8bb0\u6216\u6765\u6e90\u5b57\u6bb5\u3002',
+        '\u5df2\u767b\u8bb0\u4eba\u7269\u5728\u540d\u79f0\u4e0b\u4e00\u884c\u5199 ActorRef\uff1a\u540e\u9762\u5fc5\u987b\u662f\u8f93\u5165\u4e2d\u8be5\u4eba\u7269\u7684\u771f\u5b9e\u7cbe\u786e actorId \u503c\uff1b\u4e0d\u5f97\u5199 actorId \u5b57\u9762\u6a21\u677f\u3002\u65b0\u4eba\u7269\u4e0d\u5199 ActorRef \u6216\u951a\u70b9\uff1b\u811a\u672c\u53ea\u7528\u6807\u9898\u539f\u59d3\u540d\u5728\u5df2\u63a5\u53d7\u6b63\u6587\u7684\u552f\u4e00\u7cbe\u786e\u51fa\u73b0\u6765\u6784\u9020\u672c\u5730\u951a\u70b9\u3002',
+        discovery.discoveryRetryOnly === true
+            ? '\u8fd9\u662f\u5931\u8d25\u4eba\u7269\u5b50\u96c6\u66ff\u6362\uff1a\u4e0d\u5f97\u91cd\u65b0\u53d1\u73b0\u6b63\u6587\u4eba\u7269\u3002'
+            : '\u4ec5\u4e3a\u771f\u6b63\u5728\u6b63\u6587\u4e2d\u51fa\u573a\u7684\u4eba\u7269\u5199\u6863\u3002',
+        cleanList(validationFeedback, 16, 120).length
+            ? `\u4ec5\u91cd\u5199\u5931\u8d25\u4eba\u7269\u7684\u6574\u5f20\u4e03\u6bb5\u6863\u6848\uff1b\u56fa\u5b9a\u53cd\u9988\uff1a${cleanList(validationFeedback, 16, 120).join(', ')}`
             : '',
-        ...(cleanList(validationFeedback, 64, 240).length ? [
-            `上一批中的这些候选没有通过本地验证：${cleanList(validationFeedback, 64, 240).join('；')}。本次数组只返回这些失败子集的整张完整替换候选；不得只补缺列，也不得引用或合并上一张输出。`,
-        ] : []),
-        `【本批完整字段指南（只列一次）】\n${batchFieldGuide}`,
     ].filter(Boolean).join('\n\n');
-    const actorRows = selected.map((candidate) => [
-        `人物 ActorRef、权威锚点、可编辑草稿与同票：${JSON.stringify(actorProfilePromptContext(candidate))}`,
-        `该人物专属证据：\n${cleanList(candidate.evidence, 16, 300).join('\n') || '无额外专属片段；按共享材料与锚点补全。'}`,
-    ].join('\n\n')).join('\n\n');
-    const discoveryRows = retryDiscoveries.length
-        ? `本次仅重新填写以下 candidateRef 失败子集（name 与 sourceAnchor 原样返回）：\n${JSON.stringify(retryDiscoveries)}`
-        : discovery.discoveryEnabled === false
-            ? ''
-        : [
-            `当前作用域全部 registered ActorRef 紧凑去重索引（仅 identity/aliases；不要据此重写历史欠档）：\n${JSON.stringify(
-                Array.isArray(discovery.registeredActorIndex)
-                    ? discovery.registeredActorIndex
-                    : [],
-            )}`,
-            `当前 generation 已存在的生成前票据池（只供本正文新原创人物按 sourceAnchor 偏移顺序条件消费；没有票据或票据耗尽仍须完整 hypothesis 建档）：\n${JSON.stringify(
-                Array.isArray(discovery.characterCreationTickets)
-                    ? discovery.characterCreationTickets
-                    : [],
-            )}`,
-        ].join('\n\n');
-    const user = [
-        actorRows,
-        discoveryRows,
-        `共享最终正文（原样，仅一次；candidateRef.sourceAnchor 必须从这里逐字复制）：\n${String(discovery.acceptedNarrative || '').slice(0, 42000)}`,
-        `共享权威资料、世界观与状态锚点（仅一次）：\n${cleanText(evidenceText, 42000)}`,
-        '只返回一个简单 JSON array。每行必须是完整 ProfileInsertCandidate，并且二选一：已有目标原样返回 actorRef；正文新人物返回 candidateRef{name,sourceAnchor}。每行都必须含 identity、personality、relationships、goals、knowledge、resourcesCapabilities、sources；full_adult 另含 physiology。没有已有待填目标、也没有正文新人物时明确返回 []。不得按姓名或数组位置猜 ActorRef。',
+    const narrativeUser = [
+        `\u5df2\u767b\u8bb0\u76ee\u6807\uff08\u4ec5\u4f9b\u7cbe\u786e ActorRef \u5bf9\u4f4d\uff09\uff1a${JSON.stringify(selected.map((candidate) => ({ actorId: candidate?.actorRef?.actorId || candidate?.actorId, name: candidate?.actorRef?.name || candidate?.name })) )}`,
+        `\u6700\u7ec8\u6b63\u6587\uff1a\n${String(discovery.acceptedNarrative || '').slice(0, 42000)}`,
+        `\u6743\u5a01\u6750\u6599\uff1a\n${cleanText(evidenceText, 42000)}`,
+        customPrompt ? `\u7528\u6237\u81ea\u5b9a\u4e49\u4eba\u7269\u6863\u6848\u63d0\u793a\uff1a\n${customPrompt}` : '',
+        '\u5982\u679c\u7684\u786e\u6ca1\u6709\u5f85\u5199\u4eba\u7269\uff0c\u53ea\u8fd4\u56de\u4e25\u683c\u54e8\u5175\u201c\u65e0\u4eba\u7269\u6863\u6848\u201d\u3002',
     ].filter(Boolean).join('\n\n');
-    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+    return [{ role: 'system', content: narrativeSystem }, { role: 'user', content: narrativeUser }];
 }
 
 function firstJsonObject(text) {
@@ -3175,6 +3218,46 @@ function normalizeKnownProfileInsertContainers(raw, repairs = null) {
 function normalizeProfileInsertCandidate(raw, repairs = null) {
     if (!isRecord(raw)) return null;
     const normalizedRaw = normalizeKnownProfileInsertContainers(raw, repairs);
+    if (normalizedRaw.profileFormat === 'narrative-v1') {
+        const rawRef = isRecord(normalizedRaw.actorRef) ? normalizedRaw.actorRef : {};
+        const rawCandidateRef = isRecord(normalizedRaw.candidateRef)
+            ? normalizedRaw.candidateRef
+            : {};
+        const rawSections = isRecord(normalizedRaw.narrativeSections)
+            ? normalizedRaw.narrativeSections
+            : {};
+        const unexpectedSection = Object.keys(rawSections).find((key) => (
+            !ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.includes(key)
+        ));
+        const invalidTitle = ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.find((key) => {
+            const supplied = rawSections[key];
+            return isRecord(supplied)
+                && supplied.title !== undefined
+                && supplied.title !== ACTOR_PROFILE_NARRATIVE_TITLES[key];
+        });
+        return {
+            profileFormat: 'narrative-v1',
+            actorRef: {
+                actorId: cleanText(rawRef.actorId || rawRef.actor_id, 120),
+                name: cleanText(rawRef.name || rawCandidateRef.name, 160),
+            },
+            candidateRef: String(rawCandidateRef.name || '').trim().slice(0, 160)
+                ? {
+                    name: String(rawCandidateRef.name || '').trim().slice(0, 160),
+                    sourceAnchor: String(rawCandidateRef.sourceAnchor || '').trim().slice(0, 1200),
+                }
+                : null,
+            // A loose-object transport can carry prose, never authority. The
+            // local authority layer assigns any confirmed/ticket provenance.
+            narrativeSections: normalizeNarrativeSections(rawSections, { modelAuthored: true }),
+            sources: {},
+            __narrativeIdentityFailure: cleanText(normalizedRaw.__narrativeIdentityFailure, 120),
+            __narrativeParseFailure: cleanText(normalizedRaw.__narrativeParseFailure, 120)
+                || (unexpectedSection
+                    ? 'actor_profile.narrative_section_unknown'
+                    : (invalidTitle ? 'actor_profile.narrative_section_title_invalid' : '')),
+        };
+    }
     const rawRef = isRecord(normalizedRaw.actorRef) ? normalizedRaw.actorRef
         : isRecord(normalizedRaw.actor_ref) ? normalizedRaw.actor_ref
             : {};
@@ -3372,6 +3455,19 @@ function repairProfileCandidateMetadata(candidate, context = {}, {
 } = {}) {
     const repaired = clone(candidate);
     const repairs = [];
+    if (repaired?.profileFormat === 'narrative-v1') {
+        if (!isRecord(repaired.actorRef)) repaired.actorRef = {};
+        if (allowActorRefFill && !cleanText(repaired.actorRef.actorId, 120)) {
+            repaired.actorRef.actorId = cleanText(context?.actorRef?.actorId || context?.actorId, 120);
+            if (repaired.actorRef.actorId) repairs.push('actor_ref_id_filled_from_target');
+        }
+        if (allowActorRefFill && !cleanText(repaired.actorRef.name, 160)) {
+            repaired.actorRef.name = cleanText(context?.actorRef?.name || context?.name, 160);
+            if (repaired.actorRef.name) repairs.push('actor_ref_name_filled_from_target');
+        }
+        repaired.narrativeSections = normalizeNarrativeSections(repaired.narrativeSections);
+        return { candidate: repaired, repairs };
+    }
     if (!isRecord(repaired.actorRef)) repaired.actorRef = {};
     if (allowActorRefFill && !cleanText(repaired.actorRef.actorId, 120)) {
         repaired.actorRef.actorId = cleanText(
@@ -3558,6 +3654,33 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
             repairs: [],
             errorCode: 'actor_profile.actor_ref_mismatch',
             missingFields: [],
+            resolutions: [],
+        };
+    }
+    if (sourceCandidate.profileFormat === 'narrative-v1') {
+        const missingFields = [];
+        if (sourceCandidate.__narrativeParseFailure) {
+            missingFields.push(sourceCandidate.__narrativeParseFailure);
+        }
+        if (sourceCandidate.__narrativeIdentityFailure) {
+            missingFields.push(sourceCandidate.__narrativeIdentityFailure);
+        }
+        if (!actualActorId) missingFields.push('actorRef.actorId');
+        if (!actualName) missingFields.push('actorRef.name');
+        for (const key of ACTOR_PROFILE_NARRATIVE_SECTION_KEYS) {
+            if (!narrativeText(sourceCandidate.narrativeSections?.[key]?.text, 4000)) {
+                missingFields.push(`narrativeSections.${key}`);
+            }
+        }
+        return {
+            ok: missingFields.length === 0,
+            candidate: missingFields.length ? null : {
+                ...sourceCandidate,
+                narrativeSections: normalizeNarrativeSections(sourceCandidate.narrativeSections),
+            },
+            repairs: [],
+            errorCode: missingFields.length ? 'actor_profile.schema_incomplete' : '',
+            missingFields,
             resolutions: [],
         };
     }
@@ -4033,7 +4156,7 @@ function isVagueDiscoveryName(name) {
 }
 
 export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative) {
-    const name = cleanText(candidateRef?.name, 160);
+    const name = String(candidateRef?.name || '').trim().slice(0, 160);
     const sourceAnchor = String(candidateRef?.sourceAnchor || '').trim().slice(0, 1200);
     const narrative = String(acceptedNarrative || '');
     const failure = (reason) => ({
@@ -4065,6 +4188,85 @@ export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrat
     };
 }
 
+const NARRATIVE_SECTION_HEADER_KEYS = Object.freeze(Object.fromEntries(
+    ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.map((key) => [
+        ACTOR_PROFILE_NARRATIVE_TITLES[key],
+        key,
+    ]),
+));
+
+function narrativeHeaderKey(value) {
+    return NARRATIVE_SECTION_HEADER_KEYS[cleanText(value, 120)] || '';
+}
+
+function parseNarrativeProfileBlocks(output, discoveryContext = null) {
+    const source = String(output || '').replace(/```(?:markdown|text)?/giu, '').trim();
+    const starts = [...source.matchAll(/(?:^|\n)\s*(?:#+\s*)?(?:【\s*人物档案\s*[：:]\s*([^】\n]{1,160})\s*】|人物档案\s*[：:]\s*([^\n]{1,160}))/gu)];
+    const rows = [];
+    for (let index = 0; index < starts.length; index += 1) {
+        const match = starts[index];
+        // Identity matching is intentionally literal: no case folding, alias
+        // lookup or synonym normalization may turn a prose heading into an
+        // ActorRef or a discovery anchor.
+        const name = String(match[1] || match[2] || '').trim().slice(0, 160);
+        const bodyStart = match.index + match[0].length;
+        const bodyEnd = index + 1 < starts.length ? starts[index + 1].index : source.length;
+        const body = source.slice(bodyStart, bodyEnd);
+        const actorRefLine = body.match(/(?:^|\n)\s*(?:ActorRef|actor[_ ]?ref)\s*[：:]\s*([^\n]+)/iu);
+        const sections = {};
+        let parseFailure = '';
+        // Accept markdown decoration and either colon, but keep the seven
+        // canonical Chinese section titles exact. Unknown/duplicate sections
+        // are not a repairable synonym: they fail the whole candidate.
+        const headerMatches = [...body.matchAll(/(?:^|\n)\s*(?:#+\s*)?(?:【\s*([^】\n]+)\s*】\s*(?:[：:])?|([^\n：:]{2,80})\s*[：:])/gu)];
+        // Bracketed headings are explicit structure and therefore unknown
+        // labels fail closed. A bare colon is common natural prose, so it is a
+        // section boundary only when it is one of the fixed seven labels.
+        const headers = headerMatches.filter((header) => (
+            Boolean(header[1]) || Boolean(narrativeHeaderKey(header[2]))
+        ));
+        for (let headerIndex = 0; headerIndex < headers.length; headerIndex += 1) {
+            const header = headers[headerIndex];
+            const label = cleanText(header[1] || header[2], 120);
+            if (/^actor[_ ]?ref$/iu.test(label)) continue;
+            const section = narrativeHeaderKey(label);
+            if (!section) {
+                parseFailure = 'actor_profile.narrative_section_unknown';
+                break;
+            }
+            if (sections[section]) {
+                parseFailure = 'actor_profile.narrative_section_duplicate';
+                break;
+            }
+            const start = header.index + header[0].length;
+            const end = headerIndex + 1 < headers.length ? headers[headerIndex + 1].index : body.length;
+            const text = narrativeText(body.slice(start, end), 4000);
+            if (text) sections[section] = { text, source: 'hypothesis', evidence: [] };
+        }
+        const actorId = cleanText(actorRefLine?.[1], 120)
+            .replace(/^(?:actorId\s*[=:]\s*)/iu, '')
+            .split(/[，,\s]+/u)[0];
+        if (/^actorid$/iu.test(actorId)) parseFailure ||= 'actor_profile.actor_ref_literal_invalid';
+        const narrative = String(discoveryContext?.acceptedNarrative || '');
+        const first = name ? narrative.indexOf(name) : -1;
+        const unique = first >= 0 && narrative.indexOf(name, first + name.length) < 0;
+        rows.push({
+            profileFormat: 'narrative-v1',
+            actorRef: actorId ? { actorId, name } : {},
+            candidateRef: actorId ? null : {
+                name,
+                sourceAnchor: unique ? narrative.slice(first, first + name.length) : '',
+            },
+            narrativeSections: sections,
+            __narrativeParseFailure: parseFailure,
+            __narrativeIdentityFailure: actorId || unique ? '' : (first < 0
+                ? 'actor_profile.discovery_name_missing_from_narrative'
+                : 'actor_profile.discovery_name_ambiguous'),
+        });
+    }
+    return rows;
+}
+
 export function parseActorProfileCompletionBatchOutput(output, options = {}) {
     const requiredCandidates = (Array.isArray(options.candidates) ? options.candidates : [])
         .filter((candidate) => cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120));
@@ -4088,7 +4290,36 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
         cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120),
         candidate,
     ]));
-    const parsed = parseProfileObjectsLocally(output);
+    const narrativeTransport = String(output || '')
+        .replace(/```(?:markdown|text)?/giu, '')
+        .trim();
+    const narrativeExplicitEmpty = /^\u65e0\u4eba\u7269\u6863\u6848[\u3002.]?$/u.test(narrativeTransport);
+    const narrativeRows = narrativeExplicitEmpty
+        ? []
+        : parseNarrativeProfileBlocks(output, options.discoveryContext);
+    const parsed = narrativeRows.length
+        ? {
+            objects: narrativeRows,
+            repairs: ['narrative_blocks_parsed'],
+            explicitEmpty: false,
+            batchMeta: {
+                rootType: 'narrative_blocks',
+                parsedRowCount: Math.min(128, narrativeRows.length),
+                explicitEmpty: false,
+                emptyOutput: false,
+                formatUnrecoverable: false,
+                repairLabels: ['narrative_blocks_parsed'],
+            },
+        }
+        : (narrativeExplicitEmpty
+            ? {
+                objects: [], repairs: [], explicitEmpty: true,
+                batchMeta: {
+                    rootType: 'narrative_blocks', parsedRowCount: 0, explicitEmpty: true,
+                    emptyOutput: false, formatUnrecoverable: false, repairLabels: [],
+                },
+            }
+            : parseProfileObjectsLocally(output));
     const batchFormatUnrecoverable = parsed.objects.length === 0 && !parsed.explicitEmpty;
     const acceptedById = new Map();
     const failureById = new Map();
@@ -4100,6 +4331,15 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
     const duplicateDiscoveryKeys = new Set();
     for (const raw of parsed.objects) {
         const normalized = normalizeProfileInsertCandidate(raw, parsed.repairs);
+        if (normalized?.__narrativeIdentityFailure) {
+            unresolved.push({
+                candidateRef: { name: cleanText(raw?.candidateRef?.name || raw?.actorRef?.name, 160), sourceAnchor: '' },
+                reason: normalized.__narrativeIdentityFailure,
+                missingFields: [],
+                retryable: true,
+            });
+            continue;
+        }
         const actorId = cleanText(normalized?.actorRef?.actorId, 120);
         const candidateName = cleanText(normalized?.candidateRef?.name, 160);
         const sourceAnchor = String(normalized?.candidateRef?.sourceAnchor || '')
@@ -4414,6 +4654,22 @@ export function materializeActorProfileBaseline(previousProfile, candidate, {
     profile.actorId = cleanText(candidate?.actorRef?.actorId, 120);
     profile.name = cleanText(candidate?.actorRef?.name, 160);
     profile.completionMode = modeOf(completionMode || profile.completionMode);
+    if (candidate?.profileFormat === 'narrative-v1') {
+        profile.profileFormat = 'narrative-v1';
+        profile.narrativeSections = normalizeNarrativeSections(candidate.narrativeSections);
+        // Narrative sections are authored content; anchors, tickets, locks and
+        // all runtime facts stay on their existing local ownership paths.
+        profile.baselineCommit = null;
+        profile.coverage = calculateCoverage(profile);
+        profile.preparedForAction = false;
+        profile.backgroundPending = true;
+        profile.updatedTurn = integer(turn);
+        return profile;
+    }
+    // Preserve the old persisted shape exactly. Legacy V6 has no narrative
+    // marker or empty sections until it is explicitly replaced by narrative-v1.
+    delete profile.profileFormat;
+    delete profile.narrativeSections;
     // A ProfileInsertCandidate is a complete replacement row after fact-layer
     // reconciliation. Empty scaffold sources from local preparation must not
     // retain a stale "confirmed" lock over newly designed hypotheses.
@@ -4549,6 +4805,7 @@ export function setActorProfileV6Lock(value, {
     locked = true,
 } = {}) {
     const profile = normalizeActorProfileV6(value);
+    if (profile.profileFormat === 'narrative-v1') return clone(value);
     const key = pathParts(path).join('.');
     if (!key) return profile;
     profile.locks[key] = locked === true;
@@ -4562,6 +4819,9 @@ export function applyActorProfileV6Override(value, {
     now = Date.now(),
 } = {}) {
     const profile = normalizeActorProfileV6(value);
+    if (profile.profileFormat === 'narrative-v1') {
+        return { profile: clone(value), applied: false, reason: 'narrative_read_only' };
+    }
     const parts = pathParts(path);
     const module = parts[0] === 'modules' && MODULE_SET.has(parts[1]) ? parts[1] : '';
     if (
@@ -4599,6 +4859,9 @@ export function regenerateActorProfileV6Module(value, actor, {
         name: actor?.name,
         mode: mode || value?.completionMode,
     });
+    if (profile.profileFormat === 'narrative-v1') {
+        return { profile: clone(value), regenerated: false, reason: 'narrative_read_only' };
+    }
     if (!MODULE_SET.has(module)) return { profile, regenerated: false, reason: 'module_invalid' };
     if (moduleLocked(profile, module)) {
         return { profile, regenerated: false, reason: 'module_locked' };
@@ -4634,6 +4897,10 @@ export function actorProfileV6View(actor) {
         actorId: profile.actorId,
         name: profile.name,
         completionMode: profile.completionMode,
+        profileFormat: profile.profileFormat,
+        narrativeSections: profile.profileFormat === 'narrative-v1'
+            ? clone(profile.narrativeSections)
+            : null,
         preparedForAction,
         backgroundPending: !preparedForAction || optionalCoverage < 100,
         coverage,
