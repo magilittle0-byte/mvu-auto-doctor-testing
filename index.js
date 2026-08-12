@@ -19895,6 +19895,13 @@ async function mutateActorProfileV6(actorId, mutate) {
     const preflightLedger = normalizeActorLedger(readChatNamespace(context).actorLedger, { chatId });
     const preflightActor = preflightLedger.actors
         .find((actor) => actor.id === String(actorId || ''));
+    if (preflightActor?.profileV6?.profileFormat === 'narrative-v1') {
+        return {
+            applied: false,
+            saved: false,
+            reason: 'narrative_read_only',
+        };
+    }
     if (preflightActor?.pendingProfile) {
         return {
             applied: false,
@@ -19924,6 +19931,14 @@ async function mutateActorProfileV6(actorId, mutate) {
         };
     }
     const result = mutate(actor.profileV6, actor, ledger);
+    if (result?.applied !== true) {
+        return {
+            ...(result || {}),
+            applied: false,
+            saved: false,
+            reason: result?.reason || 'profile_not_applied',
+        };
+    }
     if (!result?.profile) return { applied: false, reason: result?.reason || 'profile_invalid' };
     ledger.actors[index] = { ...actor, profileV6: result.profile };
     namespace.actorLedger = ledger;
@@ -20004,10 +20019,19 @@ async function initialize() {
         },
         setActorProfileV6Lock: (actorId, path, locked = true) => mutateActorProfileV6(
             actorId,
-            (profile) => ({
-                profile: setActorProfileV6Lock(profile, { path, locked }),
-                applied: true,
-            }),
+            (profile) => {
+                const nextProfile = setActorProfileV6Lock(profile, { path, locked });
+                return nextProfile?.profileFormat === 'narrative-v1'
+                    ? {
+                        profile: nextProfile,
+                        applied: false,
+                        reason: 'narrative_read_only',
+                    }
+                    : {
+                        profile: nextProfile,
+                        applied: true,
+                    };
+            },
         ),
         overrideActorProfileV6: (actorId, path, value) => mutateActorProfileV6(
             actorId,

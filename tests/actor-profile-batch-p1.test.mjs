@@ -1087,8 +1087,125 @@ test('narrative-v1 batch keeps one complete dossier atomic and never projects pr
     assert.deepEqual(actor.capabilities, [], 'narrative prose never becomes a capability fact');
 });
 
+test('public narrative profile mutations are read-only before migration or namespace persistence', async () => {
+    const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const publicMutation = source.slice(
+        source.indexOf('async function mutateActorProfileV6'),
+        source.indexOf('async function initialize'),
+    );
+    const buildMutation = new Function(
+        'getContext',
+        'normalizeActorLedger',
+        'readChatNamespace',
+        'ensureActorSovereigntyMigrationPersisted',
+        'writeChatNamespace',
+        'renderActorProfiles',
+        `${publicMutation}\nreturn mutateActorProfileV6;`,
+    );
+    const publicProfileApi = source.slice(
+        source.indexOf('setActorProfileV6Lock: (actorId, path, locked = true)'),
+        source.indexOf('getActorActionReceipts:'),
+    );
+    const buildPublicProfileApi = new Function(
+        'mutateActorProfileV6',
+        'setActorProfileV6Lock',
+        'applyActorProfileV6Override',
+        'regenerateActorProfileV6Module',
+        'getSettings',
+        `return ({${publicProfileApi}});`,
+    );
+    const narrativeLedger = {
+        actors: [{
+            id: 'actor-narrative',
+            profileV6: { profileFormat: 'narrative-v1' },
+        }],
+    };
+    let migrationCalls = 0;
+    let namespaceWrites = 0;
+    const mutateNarrative = buildMutation(
+        () => ({ chatId: 'chat-narrative' }),
+        (ledger) => ledger,
+        () => ({ actorLedger: narrativeLedger }),
+        async () => {
+            migrationCalls += 1;
+            return { ok: true, namespace: { actorLedger: narrativeLedger } };
+        },
+        async () => {
+            namespaceWrites += 1;
+            return true;
+        },
+        () => assert.fail('read-only narrative mutation must not render a saved result'),
+    );
+    const unexpectedCoreMutation = () => assert.fail('narrative public API must not invoke its core mutation');
+    const api = buildPublicProfileApi(
+        mutateNarrative,
+        unexpectedCoreMutation,
+        unexpectedCoreMutation,
+        unexpectedCoreMutation,
+        () => assert.fail('narrative public API must not read mutation settings'),
+    );
+    for (const [operation, args] of [
+        ['overrideActorProfileV6', ['actor-narrative', 'modules.identity.role', 'ignored']],
+        ['regenerateActorProfileV6Module', ['actor-narrative', 'identity']],
+        ['setActorProfileV6Lock', ['actor-narrative', 'modules.identity', true]],
+    ]) {
+        const result = await api[operation](...args);
+        assert.deepEqual(result, {
+            applied: false,
+            saved: false,
+            reason: 'narrative_read_only',
+        }, `${operation} must reject before calling its core mutation`);
+    }
+    assert.equal(migrationCalls, 0);
+    assert.equal(namespaceWrites, 0);
+
+    const legacyLedger = { actors: [{ id: 'actor-legacy', profileV6: { profileFormat: 'v6' } }] };
+    let legacyWrites = 0;
+    const mutateLegacy = buildMutation(
+        () => ({ chatId: 'chat-legacy' }),
+        (ledger) => ledger,
+        () => ({ actorLedger: legacyLedger }),
+        async () => ({ ok: true, namespace: { actorLedger: legacyLedger } }),
+        async () => {
+            legacyWrites += 1;
+            return true;
+        },
+        () => {},
+    );
+    const legacyResult = await mutateLegacy('actor-legacy', () => ({
+        profile: { profileFormat: 'v6', legacy: true },
+        applied: true,
+    }));
+    assert.equal(legacyResult.applied, true);
+    assert.equal(legacyResult.saved, true);
+    assert.equal(legacyWrites, 1, 'legacy V6 mutation still reaches its existing writer');
+});
+
 test('production path keeps current-source profiles untruncated and commits through pending plus final readbacks', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const publicMutation = source.slice(
+        source.indexOf('async function mutateActorProfileV6'),
+        source.indexOf('async function initialize'),
+    );
+    const publicProfileApi = source.slice(
+        source.indexOf('setActorProfileV6Lock: (actorId, path, locked = true)'),
+        source.indexOf('getActorActionReceipts:'),
+    );
+    const narrativeReadOnly = "preflightActor?.profileV6?.profileFormat === 'narrative-v1'";
+    assert.ok(publicMutation.indexOf(narrativeReadOnly) > publicMutation.indexOf('const preflightActor'));
+    assert.ok(publicMutation.indexOf(narrativeReadOnly) < publicMutation.indexOf('ensureActorSovereigntyMigrationPersisted'));
+    assert.match(publicMutation, /reason: 'narrative_read_only'/u);
+    assert.match(publicMutation, /if \(result\?\.applied !== true\) \{[\s\S]*?saved: false,[\s\S]*?reason: result\?\.reason \|\| 'profile_not_applied'/u);
+    assert.ok(publicMutation.indexOf('if (result?.applied !== true)') < publicMutation.indexOf('writeChatNamespace(namespace'));
+    for (const api of ['setActorProfileV6Lock:', 'overrideActorProfileV6:', 'regenerateActorProfileV6Module:']) {
+        assert.match(publicProfileApi, new RegExp(api, 'u'));
+    }
+    const publicLock = publicProfileApi.slice(
+        publicProfileApi.indexOf('setActorProfileV6Lock: (actorId, path, locked = true)'),
+        publicProfileApi.indexOf('overrideActorProfileV6:'),
+    );
+    assert.match(publicLock, /nextProfile\?\.profileFormat === 'narrative-v1'[\s\S]*?applied: false,[\s\S]*?reason: 'narrative_read_only'/u);
+    assert.doesNotMatch(publicLock, /profile: setActorProfileV6Lock\(profile, \{ path, locked \}\),\s*applied: true/u);
     const entryFunction = source.slice(
         source.indexOf('async function runActorProfileTarget'),
         source.indexOf('async function runContinuityTarget'),
