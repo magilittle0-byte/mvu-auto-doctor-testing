@@ -52,7 +52,6 @@ function target(overrides = {}) {
         generationSerial: 11,
         generationId: 'generation-11',
         generationType: 'normal',
-        branchId: 'branch-main',
         identityScopeId: `${CHAT_ID}|character:stage5`,
         contentHash: 'content-hash-11',
         contentFingerprint: 'content-hash-11',
@@ -470,7 +469,7 @@ test('attempt is a complete stable proposal and persistence does not apply its d
     assert.ok(actorRefsMatch(attempt.actorRef, actorRefOf(actor)));
     assert.ok(actorActionTargetMatches(attempt.target, target()));
     assert.deepEqual(Object.keys(attempt.target).sort(), [
-        'branchId', 'chatId', 'compatibilityOnly', 'contentHash', 'generation',
+        'chatId', 'compatibilityOnly', 'contentHash', 'generation',
         'generationId', 'generationType', 'hash', 'index', 'logicalIndex', 'messageId',
         'scopeDigest', 'swipeId',
     ].sort());
@@ -611,7 +610,7 @@ test('player-targeted attempts never settle player action, consent, feeling or r
     assert.equal(settled.results[0].playerFeelingSettled, false);
 });
 
-test('strict target and full Registry ActorRef fail closed across chat, swipe, generation, branch and hash', () => {
+test('strict target and full Registry ActorRef ignore legacy branch while failing closed across chat, swipe, generation and hash', () => {
     const actor = readyActor();
     const { recorded } = prepareAndRecord(ledgerFor(actor), actor);
     const attempt = recorded.recorded[0];
@@ -634,9 +633,13 @@ test('strict target and full Registry ActorRef fail closed across chat, swipe, g
         { generation: 12 },
         { generationId: 'generation-12' },
         { generationType: 'swipe' },
-        { branchId: 'another-branch' },
         { contentHash: 'another-hash', hash: 'another-hash' },
     ];
+    assert.equal(
+        actorActionTargetMatches(attempt.target, { ...target(), branchId: 'legacy-branch' }),
+        true,
+        'legacy branch data is ignored when the canonical target still matches exactly',
+    );
     for (const change of targetMismatches) {
         const changed = target(change);
         assert.equal(actorActionTargetMatches(attempt.target, changed), false);

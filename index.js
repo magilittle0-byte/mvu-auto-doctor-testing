@@ -50,7 +50,6 @@ import {
     continuityContentDigest,
     continuityLifecycleStats,
     continuityLedgerView,
-    continuityScenarioDigest,
     continuityWorldDigest,
     CONTINUITY_TICK_LABELS,
     emptyContinuityState,
@@ -62,8 +61,6 @@ import {
     normalizeContinuityState,
     parseContinuityOutput,
     scheduleWorldLanes,
-    selectContinuityInjectionCandidates,
-    settleContinuityNarrativeReceipts,
     WORLD_ECONOMY_LABELS,
     WORLD_FACTION_CONDITION_LABELS,
     WORLD_FACTION_RELATION_LABELS,
@@ -119,19 +116,14 @@ import {
     scheduleActorTurns,
 } from './actor-ledger-core.mjs';
 import {
-    admitDoctorWorldCandidates,
-    classifyWorldPressureCandidate,
     emptyWorldPressureState,
     normalizeWorldPressureState,
     observeAcceptedContentPressure,
 } from './world-pressure-core.mjs';
 import {
-    bindAndSettleSerendipityLicense,
-    drawSerendipityLicense,
     emptySerendipityLedger,
     normalizeSerendipityLedger,
     normalizeSerendipitySettings,
-    serendipityLicensePrompt,
 } from './serendipity-core.mjs';
 import {
     applyForumUpdate,
@@ -198,16 +190,9 @@ import {
 import {
     createDoctorRuntimePresentation,
     createPrivacySafeDiagnosticProjection,
-    installDualSurfaceUI,
 } from './v2/surface/index.mjs';
 import {
     buildContinuitySourcePlan,
-    DownstreamBarrierProtocol,
-    MemoryVersionedAdapter,
-    NarrativeBarrierCoordinator,
-    PersistentIdempotencyStore,
-    PersistentRecoveryStore,
-    TaskLeaseManager,
 } from './v2/runtime/index.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
@@ -352,7 +337,6 @@ let runChain = Promise.resolve();
 let mvuWriteChain = Promise.resolve();
 let actorProfileChain = Promise.resolve();
 let forumChain = Promise.resolve();
-let runtimePersistenceChain = Promise.resolve();
 const chatNamespaceWriteChains = new Map();
 const actorSovereigntyMigrationPromises = new Map();
 let lastChatNamespaceWriteFailureCode = '';
@@ -500,10 +484,6 @@ async function verifyPersistedChatNamespace(
     return { supported, verified: false, namespace: null };
 }
 const modelConnectionScheduler = new ConnectionTaskScheduler();
-const actorShardLeaseManager = new TaskLeaseManager(new MemoryVersionedAdapter(), {
-    namespace: 'actor-shard-leases',
-    heartbeatTimeoutMs: 15000,
-});
 const automaticPendingKeys = new Set();
 const automaticCompletedKeys = new Set();
 const openingSyncPendingKeys = new Set();
@@ -523,7 +503,6 @@ let latestStatus = '等待新的 AI 回复';
 let latestStatusKind = '';
 let latestSocialStatus = '人物关系：等待检查';
 let latestSocialKind = '';
-let dualSurfaceController = null;
 let latestSocialAudit = null;
 let latestContinuityStatus = '世界连续性：等待事件';
 let latestContinuityKind = '';
@@ -626,10 +605,6 @@ let lastInjectionInspection = {
     generationSerial: 0,
 };
 let lastRegisteredContinuityContent = '';
-let lastRegisteredSocialContent = '';
-let lastRegisteredSerendipityContent = '';
-let pendingSerendipityDraft = null;
-let pendingSerendipityBaseline = null;
 let pendingNpcDesignTicketBatch = null;
 const npcDesignTicketBatches = new Map();
 const nextTurnConsumerProviders = new Map();
@@ -639,7 +614,6 @@ let activeNextTurnConsumer = null;
 // allowed to occupy that chat's runtime slot.  This is a bounded in-memory
 // tombstone only; it is not a lease store and never writes host data.
 const retiredNextTurnConsumerTombstones = new Map();
-const pendingSerendipityOpportunities = new Map();
 let lastSocialPromptSanitization = {
     checkedAt: 0,
     assistantMessagesSanitized: 0,
@@ -758,8 +732,6 @@ let continuityWorldContextCache = {
     expiresAt: 0,
     promise: null,
 };
-let downstreamBarrierProtocol = null;
-let downstreamBarrierProtocolChatId = '';
 
 function getContext() {
     return window.SillyTavern?.getContext?.() || null;
@@ -2574,15 +2546,14 @@ function inspectContinuityInjectionEvent(eventData) {
             checkedAt: Date.now(),
             registered,
             landed: payload.landed,
-            socialRegistered: !!lastRegisteredSocialContent,
+            socialRegistered: false,
             socialLanded: payload.socialLanded,
-            serendipityRegistered: !!lastRegisteredSerendipityContent,
+            serendipityRegistered: false,
             serendipityLanded: payload.serendipityLanded,
             apiType: payload.apiType,
             generationId: lastGeneration.id,
             generationSerial,
         };
-        markContinuityInjectionLanded(payload.landed);
         renderEnvironmentReport();
     } catch {
         // 注入自检只读且绝不能影响生成。
@@ -3079,40 +3050,12 @@ function currentSwipeInfo(message) {
         : null;
 }
 
-function previousRuntimeBranchId(context, index) {
-    for (let cursor = Number(index) - 1; cursor >= 0; cursor -= 1) {
-        const previous = context?.chat?.[cursor];
-        if (!previous || previous.is_user || previous.is_system) continue;
-        const swipeInfo = currentSwipeInfo(previous);
-        const value = swipeInfo?.extra?.mvu_auto_doctor_branch_id
-            || previous.extra?.mvu_auto_doctor_branch_id;
-        if (value) return String(value);
-    }
-    return '';
-}
-
 function ensureRuntimeTargetIdentity(context, message, index, messageId) {
     const swipeId = Number(message?.swipe_id) || 0;
     const swipeInfo = currentSwipeInfo(message);
     const holders = [message, swipeInfo].filter(Boolean);
     for (const holder of holders) {
         if (!isPlainObject(holder.extra)) holder.extra = {};
-    }
-    let branchId = String(
-        swipeInfo?.extra?.mvu_auto_doctor_branch_id
-        || message?.extra?.mvu_auto_doctor_branch_id
-        || '',
-    );
-    if (!branchId) {
-        const inherited = !['swipe', 'regenerate'].includes(lastGeneration.type)
-            ? previousRuntimeBranchId(context, index)
-            : '';
-        branchId = inherited || ['branch', fingerprint(JSON.stringify([
-            context?.chatId || '',
-            lastGeneration.id || messageId,
-            messageId,
-            swipeId,
-        ]))].join(':');
     }
     let generationId = String(
         swipeInfo?.extra?.mvu_auto_doctor_generation_id
@@ -3155,10 +3098,6 @@ function ensureRuntimeTargetIdentity(context, message, index, messageId) {
     if (!stableGenerationType) stableGenerationType = 'normal';
     let changed = false;
     for (const holder of holders) {
-        if (holder.extra.mvu_auto_doctor_branch_id !== branchId) {
-            holder.extra.mvu_auto_doctor_branch_id = branchId;
-            changed = true;
-        }
         if (holder.extra.mvu_auto_doctor_generation_id !== generationId) {
             holder.extra.mvu_auto_doctor_generation_id = generationId;
             changed = true;
@@ -3174,7 +3113,6 @@ function ensureRuntimeTargetIdentity(context, message, index, messageId) {
     }
     if (changed) scheduleSafeChatSave(context, context?.chatId);
     return {
-        branchId,
         generationId,
         generationSerial: stableGenerationSerial,
         generationType: stableGenerationType,
@@ -3304,10 +3242,6 @@ function emptyChatNamespace(context = getContext()) {
         serendipity: emptySerendipityLedger(chatId),
         forum: emptyForumState(chatId),
         forumCheckpoint: null,
-        phase6Runtime: {
-            version: 1,
-            records: {},
-        },
     };
 }
 
@@ -3338,7 +3272,6 @@ function archivedActorSovereigntyScope(value, report) {
         continuityCheckpoint: deepClone(value?.continuityCheckpoint || null),
         sovereigntyRuntime: deepClone(value?.sovereigntyRuntime || null),
         worldPressure: deepClone(value?.worldPressure || null),
-        phase6Runtime: deepClone(value?.phase6Runtime || null),
         repairJournal: deepClone(value?.repairJournal || []),
         openingResourceSync: deepClone(value?.openingResourceSync || null),
         forum: deepClone(value?.forum || null),
@@ -4014,103 +3947,6 @@ async function ensureActorSovereigntyMigrationPersisted(
             actorSovereigntyMigrationPromises.delete(key);
         }
     }
-}
-
-function phase6RuntimeState(namespace = readChatNamespace()) {
-    const value = namespace?.phase6Runtime;
-    return {
-        version: 1,
-        records: isPlainObject(value?.records) ? deepClone(value.records) : {},
-    };
-}
-
-function createChatRuntimeAdapter(expectedChatId) {
-    return {
-        async read(key) {
-            const context = getContext();
-            if (!context || context.chatId !== expectedChatId) return null;
-            const record = phase6RuntimeState(readChatNamespace(context))
-                .records[String(key)];
-            return record ? deepClone(record) : null;
-        },
-        async compareAndSwap(key, expectedRevision, value) {
-            const task = runtimePersistenceChain
-                .catch(() => undefined)
-                .then(async () => {
-                    const context = getContext();
-                    if (!context || context.chatId !== expectedChatId) return false;
-                    const namespace = readChatNamespace(context);
-                    const runtime = phase6RuntimeState(namespace);
-                    const storageKey = String(key);
-                    const current = runtime.records[storageKey] ?? null;
-                    if ((current?.revision ?? null) !== expectedRevision) return false;
-                    runtime.records[storageKey] = {
-                        revision: expectedRevision === null ? 1 : expectedRevision + 1,
-                        value: deepClone(value),
-                    };
-                    namespace.phase6Runtime = runtime;
-                    return writeChatNamespace(namespace, expectedChatId, {
-                        fields: ['phase6Runtime'],
-                        durable: true,
-                    });
-                });
-            runtimePersistenceChain = task.then(() => undefined, () => undefined);
-            return task;
-        },
-        async merge(key, value) {
-            const task = runtimePersistenceChain
-                .catch(() => undefined)
-                .then(async () => {
-                    const context = getContext();
-                    if (!context || context.chatId !== expectedChatId) {
-                        return { value: null, failureCode: 'chat_context_changed' };
-                    }
-                    const namespace = readChatNamespace(context);
-                    const runtime = phase6RuntimeState(namespace);
-                    const storageKey = String(key);
-                    const current = runtime.records[storageKey] ?? null;
-                    const mergedValue = {
-                        ...(current?.value || {}),
-                        ...deepClone(value),
-                    };
-                    runtime.records[storageKey] = {
-                        revision: Math.max(0, Number(current?.revision) || 0) + 1,
-                        value: mergedValue,
-                    };
-                    namespace.phase6Runtime = runtime;
-                    const failure = { code: '' };
-                    const saved = await writeChatNamespace(
-                        namespace,
-                        expectedChatId,
-                        {
-                            fields: ['phase6Runtime'],
-                            durable: true,
-                            failureSink: failure,
-                        },
-                    );
-                    return saved
-                        ? { value: deepClone(mergedValue), failureCode: '' }
-                        : { value: null, failureCode: failure.code || 'unknown' };
-                });
-            runtimePersistenceChain = task.then(() => undefined, () => undefined);
-            return task;
-        },
-    };
-}
-
-function currentDownstreamBarrierProtocol() {
-    const chatId = String(getContext()?.chatId || '');
-    if (!chatId) return null;
-    if (
-        !downstreamBarrierProtocol
-        || downstreamBarrierProtocolChatId !== chatId
-    ) {
-        downstreamBarrierProtocol = new DownstreamBarrierProtocol(
-            createChatRuntimeAdapter(chatId),
-        );
-        downstreamBarrierProtocolChatId = chatId;
-    }
-    return downstreamBarrierProtocol;
 }
 
 function activeTavernHelperScriptNames() {
@@ -5210,7 +5046,6 @@ function captureTarget(context, index, { frozenScope = null, unscoped = false } 
         swipeId: Number(message.swipe_id) || 0,
         fingerprint: fingerprint(message.mes),
         contentFingerprint: acceptedContentFingerprint(message.mes),
-        branchId: runtimeIdentity.branchId,
         generationId: runtimeIdentity.generationId,
         epoch: operationEpoch,
         generationSerial: runtimeIdentity.generationSerial,
@@ -5274,10 +5109,9 @@ function targetIsCurrent(captured, token = null, { requireLatest = true } = {}) 
         ensureMessageStableId(context, message, captured.index),
     );
     if (
-        identity.branchId !== captured.branchId
-        || identity.generationId !== captured.generationId
+        identity.generationId !== captured.generationId
     ) {
-        return { ok: false, reason: '目标回复 generation 或 branch 身份已经变化' };
+        return { ok: false, reason: '目标回复 generation 身份已经变化' };
     }
     if (fingerprint(message.mes) !== captured.fingerprint) {
         return { ok: false, reason: '目标回复正文已经变化' };
@@ -5285,7 +5119,7 @@ function targetIsCurrent(captured, token = null, { requireLatest = true } = {}) 
     return { ok: true, reason: '' };
 }
 
-function targetBranchIsCurrent(captured, { requireLatest = true } = {}) {
+function targetSnapshotIsCurrent(captured, { requireLatest = true } = {}) {
     const context = getContext();
     if (!captured || captured.epoch !== operationEpoch) {
         return { ok: false, reason: '任务已被新的生成或聊天切换作废' };
@@ -5334,7 +5168,7 @@ async function waitAutomaticTargetSettled(initialCaptured) {
         'busy',
     );
     while (Date.now() - started < timeoutMs) {
-        let branch = targetBranchIsCurrent(initialCaptured);
+        let branch = targetSnapshotIsCurrent(initialCaptured);
         if (!branch.ok) return { status: 'stale', reason: branch.reason };
 
         let busy = false;
@@ -5356,7 +5190,7 @@ async function waitAutomaticTargetSettled(initialCaptured) {
             }
         }
 
-        branch = targetBranchIsCurrent(initialCaptured);
+        branch = targetSnapshotIsCurrent(initialCaptured);
         if (!branch.ok) return { status: 'stale', reason: branch.reason };
         const signature = `${branch.captured.contentFingerprint}:${mvuFingerprint}`;
         if (signature !== previousSignature) {
@@ -5421,7 +5255,6 @@ function sourceRefOf(captured) {
         generation: captured.generationSerial,
         generationId: captured.generationId,
         generationType: captured.generationType,
-        branchId: captured.branchId,
         identityScopeId: captured.identityScopeId,
         scopeDigest: captured.scopeDigest,
         hash: captured.fingerprint,
@@ -5441,7 +5274,6 @@ function actorActionTargetOf(captured) {
         generation: captured.generationSerial,
         generationId: captured.generationId,
         generationType: captured.generationType,
-        branchId: captured.branchId,
         scopeDigest: captured.scopeDigest,
         contentHash,
         hash: contentHash,
@@ -5458,7 +5290,6 @@ function observationConvergenceTargetOf(value) {
         generation: target.generation,
         generationId: target.generationId,
         generationType: target.generationType,
-        branchId: target.branchId,
         scopeDigest: target.scopeDigest,
         contentHash: target.contentHash,
     } : null;
@@ -5474,7 +5305,6 @@ function sovereigntySourceRefOf(captured) {
         generation: captured.generationSerial,
         generationId: captured.generationId,
         generationType: captured.generationType,
-        branchId: captured.branchId,
         contentHash: captured.contentFingerprint || captured.fingerprint,
         scopeDigest: captured.scopeDigest,
     };
@@ -9763,21 +9593,20 @@ function capturedTargetKey(captured) {
         captured.messageId,
         captured.swipeId,
         captured.generationId,
-        captured.branchId,
         captured.scopeDigest,
         captured.contentFingerprint,
         captured.scopeDigest,
     ].join(':');
 }
 
-function capturedBranchKey(captured) {
+function capturedForumKey(captured) {
     if (!captured) return '';
     return [
         captured.chatId,
         captured.index,
         captured.messageId,
         captured.swipeId,
-        captured.branchId,
+        captured.generationId,
         captured.scopeDigest,
     ].join(':');
 }
@@ -10093,62 +9922,6 @@ async function activePresetHasContinuityPrompt() {
     }
     presetContinuityCache = { checkedAt: Date.now(), active };
     return active;
-}
-
-function registerSocialInjection(content) {
-    const context = getContext();
-    const registeredContent = String(content || '').trim()
-        ? `${SOCIAL_INJECTION_SENTINEL}\n${String(content).trim()}`
-        : '';
-    try {
-        if (typeof context?.setExtensionPrompt === 'function') {
-            context.setExtensionPrompt(
-                SOCIAL_INJECTION_NAME,
-                registeredContent,
-                IN_CHAT_POSITION,
-                IN_CHAT_DEPTH,
-                false,
-                0,
-            );
-            lastRegisteredSocialContent = registeredContent;
-            lastInjectionInspection.socialRegistered = !!registeredContent;
-            return true;
-        }
-        if (typeof context?.registerInjection === 'function') {
-            context.unregisterInjection?.(SOCIAL_INJECTION_NAME);
-            if (registeredContent) {
-                context.registerInjection(SOCIAL_INJECTION_NAME, registeredContent, {
-                    position: IN_CHAT_POSITION,
-                    depth: IN_CHAT_DEPTH,
-                    role: 'system',
-                });
-            }
-            lastRegisteredSocialContent = registeredContent;
-            lastInjectionInspection.socialRegistered = !!registeredContent;
-            return true;
-        }
-        if (Array.isArray(context?.extensionPrompts)) {
-            context.extensionPrompts = context.extensionPrompts
-                .filter((item) => item?.name !== SOCIAL_INJECTION_NAME);
-            if (registeredContent) {
-                context.extensionPrompts.push({
-                    name: SOCIAL_INJECTION_NAME,
-                    content: registeredContent,
-                    role: 'system',
-                    position: IN_CHAT_POSITION,
-                    depth: IN_CHAT_DEPTH,
-                });
-            }
-            lastRegisteredSocialContent = registeredContent;
-            lastInjectionInspection.socialRegistered = !!registeredContent;
-            return true;
-        }
-    } catch (error) {
-        console.warn('[MVU Auto Doctor] 人物动机合同注入失败：', error);
-    }
-    lastRegisteredSocialContent = '';
-    lastInjectionInspection.socialRegistered = false;
-    return false;
 }
 
 function prepareNpcDesignTicketBatch() {
@@ -11150,339 +10923,6 @@ async function commitNextTurnConsumer(session, envelope) {
     return true;
 }
 
-function applySocialInjection() {
-    const settings = getSettings();
-    return registerSocialInjection([
-        settings.socialNarrativeGuardEnabled ? buildSocialNarrativeContract() : '',
-        npcDesignTicketPrompt(pendingNpcDesignTicketBatch),
-    ].filter(Boolean).join('\n\n'));
-}
-
-function registerSerendipityInjection(content) {
-    const context = getContext();
-    const registeredContent = String(content || '').trim()
-        ? `${SERENDIPITY_INJECTION_SENTINEL}\n${String(content).trim()}`
-        : '';
-    try {
-        if (typeof context?.setExtensionPrompt === 'function') {
-            context.setExtensionPrompt(
-                SERENDIPITY_INJECTION_NAME,
-                registeredContent,
-                IN_CHAT_POSITION,
-                IN_CHAT_DEPTH,
-                false,
-                0,
-            );
-        } else if (typeof context?.registerInjection === 'function') {
-            context.unregisterInjection?.(SERENDIPITY_INJECTION_NAME);
-            if (registeredContent) {
-                context.registerInjection(SERENDIPITY_INJECTION_NAME, registeredContent, {
-                    position: IN_CHAT_POSITION,
-                    depth: IN_CHAT_DEPTH,
-                    role: 'system',
-                });
-            }
-        } else if (Array.isArray(context?.extensionPrompts)) {
-            context.extensionPrompts = context.extensionPrompts
-                .filter((item) => item?.name !== SERENDIPITY_INJECTION_NAME);
-            if (registeredContent) {
-                context.extensionPrompts.push({
-                    name: SERENDIPITY_INJECTION_NAME,
-                    content: registeredContent,
-                    role: 'system',
-                    position: IN_CHAT_POSITION,
-                    depth: IN_CHAT_DEPTH,
-                });
-            }
-        } else {
-            lastRegisteredSerendipityContent = '';
-            lastInjectionInspection.serendipityRegistered = false;
-            return false;
-        }
-        lastRegisteredSerendipityContent = registeredContent;
-        lastInjectionInspection.serendipityRegistered = !!registeredContent;
-        return true;
-    } catch (error) {
-        console.warn('[MVU Auto Doctor] 偶发许可证注入失败：', error);
-        lastRegisteredSerendipityContent = '';
-        lastInjectionInspection.serendipityRegistered = false;
-        return false;
-    }
-}
-
-function latestUserGenerationText(context = getContext()) {
-    const chat = Array.isArray(context?.chat) ? context.chat : [];
-    for (let index = chat.length - 1; index >= 0; index -= 1) {
-        const message = chat[index];
-        if (message?.is_user && typeof message.mes === 'string' && message.mes.trim()) {
-            return message.mes.trim();
-        }
-    }
-    return '';
-}
-
-function serendipityGenerationBaseline(context = getContext()) {
-    const latest = latestAiMessage(context);
-    if (!latest.message) return null;
-    return {
-        chatId: String(context?.chatId || ''),
-        index: latest.index,
-        messageId: ensureMessageStableId(context, latest.message, latest.index),
-        swipeId: Number(latest.message.swipe_id) || 0,
-        fingerprint: fingerprint(latest.message.mes || ''),
-        contentFingerprint: acceptedContentFingerprint(latest.message.mes || ''),
-    };
-}
-
-function serendipityTargetAdvancedFromBaseline(captured, baseline) {
-    if (!baseline || !['swipe', 'regenerate'].includes(baseline.generationType)) return true;
-    return !(
-        captured.chatId === baseline.chatId
-        && captured.index === baseline.index
-        && captured.messageId === baseline.messageId
-        && captured.swipeId === baseline.swipeId
-        && captured.fingerprint === baseline.fingerprint
-        && captured.contentFingerprint === baseline.contentFingerprint
-    );
-}
-
-function serendipityEntropy() {
-    try {
-        const bytes = new Uint32Array(4);
-        globalThis.crypto?.getRandomValues?.(bytes);
-        if (bytes.some((value) => value !== 0)) return [...bytes].join('-');
-    } catch {
-        // Browser entropy is best-effort; this fallback remains doctor-private
-        // and never reads a character-card dice pool.
-    }
-    return `${Date.now()}-${Math.random()}-${Math.random()}`;
-}
-
-function serendipitySourceState(text) {
-    const source = String(text || '');
-    if (/来源(?:与此)?无关|无需解释来源|不重要的来源/iu.test(source)) return 'irrelevant';
-    if (/来源(?:已经)?(?:揭示|确认|查明)|已知来源/iu.test(source)) return 'revealed';
-    if (/来源可能|也许来自|疑似来自|或许来自/iu.test(source)) return 'possible';
-    return 'unknown';
-}
-
-function serendipityContradictionFlags(text) {
-    const source = String(text || '');
-    return {
-        explicitEmpty: /(?:明确|已经确认|确定|证实)(?:这里|其中|内部|它)?(?:是空的|为空|什么都没有|没有任何东西)|空无一物/iu.test(source),
-        explicitContradiction: /(?:明确事实|角色卡|原作)(?:已经)?(?:禁止|确认不可能|明确不存在)/iu.test(source),
-        minimumPlayability: !/(?:唯一选择是死|无法响应|立即不可逆失败)/iu.test(source),
-    };
-}
-
-function pendingSerendipityLedger(namespace, chatId) {
-    const ledger = normalizeSerendipityLedger(namespace?.serendipity, { chatId });
-    return {
-        ...ledger,
-        receipts: [
-            ...ledger.receipts,
-            ...pendingSerendipityOpportunities.values(),
-        ],
-    };
-}
-
-function prepareSerendipityGeneration(generationType = 'normal') {
-    const context = getContext();
-    const settings = getSettings();
-    pendingSerendipityDraft = null;
-    pendingSerendipityBaseline = null;
-    if (
-        !context?.chatId
-        || generationType === 'continue'
-        || settings.serendipityFrequency === 'off'
-    ) {
-        registerSerendipityInjection('');
-        return { status: 'disabled' };
-    }
-    const namespace = readChatNamespace(context);
-    pendingSerendipityBaseline = {
-        ...serendipityGenerationBaseline(context),
-        generationType,
-    };
-    const userText = latestUserGenerationText(context);
-    const latest = latestAiMessage(context);
-    const previousContent = latest.message?.mes || '';
-    const worldStateDigest = fingerprint([
-        continuityWorldDigest(continuityStateForInjection(namespace, {
-            isReroll: ['swipe', 'regenerate'].includes(generationType),
-        })),
-        continuityScenarioDigest(namespace.continuity),
-    ].join('|'));
-    const target = {
-        chatId: context.chatId,
-        generation: generationSerial,
-        generationId: lastGeneration.id,
-    };
-    const draw = drawSerendipityLicense({
-        ledger: pendingSerendipityLedger(namespace, context.chatId),
-        settings: {
-            frequency: settings.serendipityFrequency,
-            maxAmplitude: settings.serendipityMaxAmplitude,
-            bias: settings.serendipityBias,
-            explanationSpeed: settings.serendipityExplanationSpeed,
-        },
-        chatId: context.chatId,
-        objectKey: userText || `turn-${normalizeContinuityState(namespace.continuity).turn + 1}`,
-        worldStateDigest,
-        sourceState: serendipitySourceState(`${previousContent}\n${userText}`),
-        constraints: serendipityContradictionFlags(`${previousContent}\n${userText}`),
-        pressure: {
-            cap: settings.worldPressureCap,
-            used: normalizeWorldPressureState(namespace.worldPressure).doctorPressure,
-            recoveryDebt: normalizeWorldPressureState(namespace.worldPressure).recoveryDebt,
-        },
-        target,
-        entropy: serendipityEntropy(),
-    });
-    if (draw.status === 'disabled') {
-        registerSerendipityInjection('');
-        return draw;
-    }
-    if (draw.status === 'duplicate') {
-        const pending = [...pendingSerendipityOpportunities.values()].find(
-            (license) => license.licenseId === draw.license?.licenseId,
-        );
-        if (!pending) {
-            registerSerendipityInjection('');
-            return draw;
-        }
-        pendingSerendipityDraft = {
-            ...pending,
-            target: { ...pending.target, ...target },
-        };
-    } else {
-        pendingSerendipityDraft = draw.license;
-        pendingSerendipityOpportunities.set(draw.license.opportunityKey, draw.license);
-    }
-    registerSerendipityInjection(serendipityLicensePrompt(pendingSerendipityDraft));
-    return { ...draw, license: deepClone(pendingSerendipityDraft) };
-}
-
-async function settlePendingSerendipity(captured) {
-    const draft = pendingSerendipityDraft;
-    if (!draft) return { status: 'none' };
-    const guard = targetIsCurrent(captured);
-    if (!guard.ok) return { status: 'stale', reason: guard.reason };
-    if (!serendipityTargetAdvancedFromBaseline(captured, pendingSerendipityBaseline)) {
-        return {
-            status: 'stale',
-            reason: '重生成或 swipe 的新回复尚未替换旧目标',
-        };
-    }
-    const context = getContext();
-    const namespace = readChatNamespace(context);
-    const settled = bindAndSettleSerendipityLicense(
-        namespace.serendipity,
-        draft,
-        {
-            chatId: captured.chatId,
-            messageId: captured.messageId,
-            swipeId: captured.swipeId,
-            generation: captured.generationSerial,
-            generationId: captured.generationId,
-            branchId: captured.branchId,
-            contentFingerprint: captured.contentFingerprint,
-        },
-    );
-    if (!settled.ok || settled.status !== 'settled') return settled;
-    namespace.serendipity = settled.ledger;
-    const fields = ['serendipity'];
-    if (settled.license.triggered && settled.license.direction === 'adverse') {
-        const pressure = normalizeWorldPressureState(namespace.worldPressure);
-        pressure.doctorPressure += settled.license.pressureCost;
-        pressure.receipts = [...pressure.receipts, {
-            receiptId: `serendipity-pressure:${settled.license.licenseId}`,
-            turn: normalizeContinuityState(namespace.continuity).turn + 1,
-            candidateId: settled.license.licenseId,
-            channel: settled.license.channel,
-            decision: 'admitted',
-            reason: 'serendipity-adverse-within-budget',
-            status: 'planned',
-        }].slice(-160);
-        namespace.worldPressure = pressure;
-        fields.push('worldPressure');
-    }
-    const saved = await writeChatNamespace(namespace, captured.chatId, { fields });
-    if (!saved || !targetIsCurrent(captured).ok) return { status: 'stale' };
-    for (const [key, value] of pendingSerendipityOpportunities.entries()) {
-        if (value.licenseId === settled.license.licenseId) {
-            pendingSerendipityOpportunities.delete(key);
-        }
-    }
-    pendingSerendipityDraft = null;
-    pendingSerendipityBaseline = null;
-    registerSerendipityInjection('');
-    recordOperation(
-        '偶发许可证',
-        settled.license.triggered
-            ? `已结算 ${settled.license.direction}/${settled.license.magnitude} 许可证；正文由主模型自然实现`
-            : `本轮${settled.license.decision === 'rejected-explicit-contradiction' ? '因明确事实拒绝偶发' : '未触发偶发'}`,
-        settled.license.triggered ? 'ok' : '',
-    );
-    return settled;
-}
-
-function registerContinuityInjection(content) {
-    const context = getContext();
-    const registeredContent = String(content || '').trim()
-        ? `${CONTINUITY_INJECTION_SENTINEL}\n${String(content).trim()}`
-        : '';
-    try {
-        if (typeof context?.setExtensionPrompt === 'function') {
-            context.setExtensionPrompt(
-                CONTINUITY_INJECTION_NAME,
-                registeredContent,
-                IN_CHAT_POSITION,
-                IN_CHAT_DEPTH,
-                false,
-                0,
-            );
-            lastRegisteredContinuityContent = registeredContent;
-            lastInjectionInspection.registered = !!registeredContent;
-            return true;
-        }
-        if (typeof context?.registerInjection === 'function') {
-            context.unregisterInjection?.(CONTINUITY_INJECTION_NAME);
-            if (registeredContent) {
-                context.registerInjection(CONTINUITY_INJECTION_NAME, registeredContent, {
-                    position: IN_CHAT_POSITION,
-                    depth: IN_CHAT_DEPTH,
-                    role: 'system',
-                });
-            }
-            lastRegisteredContinuityContent = registeredContent;
-            lastInjectionInspection.registered = !!registeredContent;
-            return true;
-        }
-        if (Array.isArray(context?.extensionPrompts)) {
-            context.extensionPrompts = context.extensionPrompts
-                .filter((item) => item?.name !== CONTINUITY_INJECTION_NAME);
-            if (registeredContent) {
-                context.extensionPrompts.push({
-                    name: CONTINUITY_INJECTION_NAME,
-                    content: registeredContent,
-                    role: 'system',
-                    position: IN_CHAT_POSITION,
-                    depth: IN_CHAT_DEPTH,
-                });
-            }
-            lastRegisteredContinuityContent = registeredContent;
-            lastInjectionInspection.registered = !!registeredContent;
-            return true;
-        }
-    } catch (error) {
-        console.warn('[MVU Auto Doctor] 支线账本注入失败：', error);
-    }
-    lastRegisteredContinuityContent = '';
-    lastInjectionInspection.registered = false;
-    return false;
-}
-
 function continuityStateForInjection(namespace, { isReroll = false } = {}) {
     const context = getContext();
     const latest = latestAiMessage(context);
@@ -11499,454 +10939,6 @@ function continuityStateForInjection(namespace, { isReroll = false } = {}) {
         return namespace.continuityCheckpoint.state;
     }
     return namespace?.continuity;
-}
-
-function continuityInjectionCandidates(state) {
-    const canReachMain = (thread) => (
-        thread?.origin === 'main_derivative'
-        || ['linked', 'converging'].includes(thread?.relation)
-    );
-    const threadCandidates = (state?.threads || [])
-        .filter((thread) => (
-            canReachMain(thread)
-            && thread.stage !== 'dormant'
-            && (
-                thread.stage !== 'resolved'
-                || state.turn - Number(thread.resolvedTurn || 0) <= 6
-            )
-        ))
-        .map((thread) => {
-            const actionKind = thread.kind === 'enemy'
-                || ['threat', 'escalation'].includes(thread.eventType)
-                ? 'threat'
-                : thread.kind === 'personal'
-                    ? 'relationship'
-                    : 'information';
-            const threatLevel = actionKind === 'threat' && Number(thread.level || 0) >= 3
-                ? 'elite'
-                : 'ordinary';
-            const priority = (
-                (thread.relation === 'converging' ? 100 : 0)
-                + (thread.relation === 'linked' ? 70 : 0)
-                + (thread.origin === 'main_derivative' ? 40 : 0)
-                + Number(thread.convergence?.score || 0) * 10
-                + Number(thread.urgency || 0) * 5
-                + (thread.stage === 'manifested' ? 15 : 0)
-            );
-            const impactTargets = [
-                ...(thread.actors || []).map((value) => `actor:${value}`),
-                ...(thread.locations || []).map((value) => `location:${value}`),
-                ...(thread.propagation || []).map((value) => `world:${value}`),
-            ].slice(0, 12);
-            const evidenceTerms = [
-                thread.title,
-                thread.convergence?.entryBeat,
-                ...(thread.actors || []),
-                ...(thread.locations || []),
-                ...(thread.effects || []),
-                ...(thread.rumors || []),
-            ]
-                .map((value) => String(value || '').trim())
-                .filter((value) => value.length >= 2)
-                .slice(0, 16);
-            const semanticEvidenceTerms = [
-                thread.title,
-                thread.convergence?.entryBeat,
-                thread.offscreenBeat,
-                ...(thread.effects || []),
-                ...(thread.rumors || []),
-            ]
-                .map((value) => String(value || '').trim())
-                .filter((value) => value.length >= 4)
-                .slice(0, 12);
-            return {
-                threadId: thread.id,
-                priority,
-                impactTargets,
-                triggerCondition: thread.convergence?.entryBeat
-                    || thread.trigger
-                    || thread.intersection
-                    || '仅在当前人物、地点、资源或行动自然接触时采用',
-                expiresTurn: Math.max(
-                    Number(state.turn || 0) + 1,
-                    Number(state.turn || 0) + (thread.stage === 'resolved' ? 2 : 4),
-                ),
-                evidenceTerms,
-                semanticEvidenceTerms,
-                actionKind,
-                threatLevel,
-                pressureCost: actionKind === 'threat'
-                    ? threatLevel === 'elite' ? 2 : 1
-                    : 0,
-                sameScene: impactTargets.some((item) => (
-                    item.startsWith('actor:') || item.startsWith('location:')
-                )),
-            };
-        });
-    const visibleWorld = [
-        ...(state?.world?.trends || [])
-            .filter((item) => item.status === 'active' && item.knowledge !== 'hidden')
-            .map((item) => ({
-                threadId: `world:trend:${item.id}`,
-                priority: 55,
-                impactTargets: [`scope:${item.scope || 'world'}`],
-                triggerCondition: `当前行动接触趋势范围：${item.scope || item.name}`,
-                expiresTurn: Number(item.expiresTurn || state.turn + 4),
-                evidenceTerms: [item.name, item.summary, item.scope].filter(Boolean),
-                semanticEvidenceTerms: [item.summary, item.lastChange].filter(Boolean),
-                actionKind: 'information',
-                threatLevel: 'ordinary',
-                pressureCost: 0,
-                sameScene: false,
-            })),
-        ...(state?.world?.factions || [])
-            .filter((item) => item.knowledge !== 'hidden')
-            .map((item) => ({
-                threadId: `world:faction:${item.id}`,
-                priority: 60 + Number(item.pressure || 0) * 5,
-                impactTargets: [`faction:${item.name}`, `scope:${item.scope || 'world'}`],
-                triggerCondition: item.goal || item.lastChange || '当前人物或地点接触该势力',
-                expiresTurn: Number(state.turn || 0) + 4,
-                evidenceTerms: [item.name, item.summary, item.lastChange].filter(Boolean),
-                semanticEvidenceTerms: [item.summary, item.lastChange, item.goal].filter(Boolean),
-                actionKind: 'relationship',
-                threatLevel: 'ordinary',
-                pressureCost: 0,
-                sameScene: false,
-            })),
-        ...(state?.world?.winds || [])
-            .filter((item) => item.knowledge !== 'hidden')
-            .map((item) => ({
-                threadId: `world:wind:${item.id}`,
-                priority: 50 + Number(item.strength || 0) * 8,
-                impactTargets: [`topic:${item.topic}`, `scope:${item.scope || 'world'}`],
-                triggerCondition: `当前人物位于传播范围或主动询问：${item.scope || item.topic}`,
-                expiresTurn: Number(item.expiresTurn || state.turn + 3),
-                evidenceTerms: [item.topic, item.content, item.scope].filter(Boolean),
-                semanticEvidenceTerms: [item.content, item.lastChange].filter(Boolean),
-                actionKind: 'information',
-                threatLevel: 'ordinary',
-                pressureCost: 0,
-                sameScene: false,
-            })),
-        ...(state?.world?.environment?.incidents || [])
-            .filter((item) => item.knowledge !== 'hidden' && item.status !== 'resolved')
-            .map((item) => ({
-                threadId: `world:incident:${item.id}`,
-                priority: 65 + Number(item.severity || 0) * 8,
-                impactTargets: [`location:${item.location || item.scope || 'world'}`],
-                triggerCondition: item.trigger || '当前场景进入事件影响范围',
-                expiresTurn: Number(item.expiresTurn || state.turn + 3),
-                evidenceTerms: [item.title, item.summary, item.lastChange].filter(Boolean),
-                semanticEvidenceTerms: [item.summary, item.lastChange, item.trigger].filter(Boolean),
-                actionKind: Number(item.severity || 0) > 0 ? 'threat' : 'information',
-                threatLevel: Number(item.severity || 0) >= 3 ? 'elite' : 'ordinary',
-                pressureCost: Math.min(3, Math.max(0, Number(item.severity || 0))),
-                sameScene: true,
-            })),
-    ];
-    return [...threadCandidates, ...visibleWorld]
-        .sort((left, right) => (
-            right.priority - left.priority
-            || left.threadId.localeCompare(right.threadId)
-        ));
-}
-
-function worldPressurePhase(state, pressureState) {
-    if (Number(pressureState?.recoveryDebt || 0) > 0) return 'recovery';
-    const phase = state?.scenarioPlan?.current?.phase;
-    if (phase === 'setup') {
-        return Number(state?.turn || 0) <= 3 ? 'opening' : 'exploration';
-    }
-    if (['exploration', 'escalation', 'climax'].includes(phase)) return phase;
-    if (['aftermath', 'closing', 'completed', 'failed'].includes(phase)) return 'recovery';
-    return Number(state?.turn || 0) <= 3 ? 'opening' : 'exploration';
-}
-
-function classifyDoctorPressureCandidate(candidate, options = {}) {
-    return classifyWorldPressureCandidate(candidate, options);
-}
-
-function currentCompiledTurnAnchor(context = getContext()) {
-    const raw = previousUserMessageText(context, context?.chat?.length || 0);
-    const blocks = (tag) => [...String(raw || '').matchAll(new RegExp(
-        `<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,
-        'giu',
-    ))].map((match) => String(match[1] || '').trim()).filter(Boolean);
-    const scenes = blocks('scene');
-    const acts = blocks('act');
-    const location = scenes.map((scene) => (
-        scene.match(/(?:地点|位置|location|place)\s*[：:=]\s*([^\n|]+)/iu)?.[1] || ''
-    )).map((value) => String(value).trim()).find(Boolean) || '';
-    return {
-        location,
-        content: [
-            ...scenes.slice(-1).map((scene) => `<scene>${scene}</scene>`),
-            ...acts.slice(-1).map((act) => `<act>${act}</act>`),
-        ].join('\n'),
-    };
-}
-
-function locationsCompatible(left, right) {
-    const normalize = (value) => String(value || '')
-        .toLocaleLowerCase('zh-CN')
-        .replace(/[\s\p{P}\p{S}]+/gu, '');
-    const a = normalize(left);
-    const b = normalize(right);
-    return !a || !b || a.includes(b) || b.includes(a);
-}
-
-function prepareContinuityInjectionBatch(namespace, state, {
-    maxVisible = 2,
-    budgetChars = 6000,
-    isReroll = false,
-    pressureSettings = null,
-} = {}) {
-    const now = Date.now();
-    const generationId = String(lastGeneration.id || '');
-    const targetTurn = Number(state.turn || 0) + 1;
-    const queue = (Array.isArray(namespace.continuityInjectionQueue)
-        ? namespace.continuityInjectionQueue
-        : []).map((receipt) => {
-        if (
-            ['injected', 'landed', 'missing', 'retained'].includes(receipt?.status)
-            && Number(receipt.expiresTurn || 0) < targetTurn
-        ) {
-            return { ...receipt, status: 'expired', expiredAt: now };
-        }
-        if (
-            generationId
-            && ['injected', 'landed', 'missing'].includes(receipt?.status)
-            && receipt.generationId !== generationId
-        ) {
-            return { ...receipt, status: 'retained', retainedAt: now };
-        }
-        return receipt;
-    });
-    if (!generationId) {
-        namespace.continuityInjectionQueue = queue.slice(-80);
-        return { generationId: '', receipts: [], budgetChars, targetTurn };
-    }
-    const limit = Math.min(4, Math.max(0, Number(maxVisible) || 0));
-    const pressureBase = normalizeWorldPressureState(namespace.worldPressure);
-    const turnAnchor = currentCompiledTurnAnchor();
-    const eligibleCandidates = selectContinuityInjectionCandidates(
-        continuityInjectionCandidates(state),
-        queue,
-        { targetTurn },
-    ).filter((candidate) => {
-        if (!turnAnchor.location) return true;
-        const candidateLocations = (candidate.impactTargets || [])
-            .filter((item) => String(item).startsWith('location:'))
-            .map((item) => String(item).slice('location:'.length));
-        return !candidateLocations.length || candidateLocations.some((location) => (
-            locationsCompatible(location, turnAnchor.location)
-        ));
-    });
-    const pressureDecision = admitDoctorWorldCandidates(
-        pressureBase,
-        eligibleCandidates.map((candidate) => (
-            classifyDoctorPressureCandidate(candidate)
-        )),
-        {
-            turn: targetTurn,
-            phase: worldPressurePhase(state, pressureBase),
-            pressureCap: pressureSettings?.pressureCap,
-            sameSceneBossCap: pressureSettings?.sameSceneBossCap,
-            recoveryCadence: pressureSettings?.recoveryCadence,
-            injectionLimit: limit,
-        },
-    );
-    namespace.worldPressure = pressureDecision.state;
-    const selected = pressureDecision.admitted.map((item) => ({
-        ...item.source,
-        pressure: {
-            channel: item.channel,
-            actionKind: item.actionKind,
-            threatLevel: item.threatLevel,
-            pressureCost: item.pressureCost,
-            sameScene: item.sameScene,
-        },
-    }));
-    const receipts = selected.map((candidate, index) => ({
-        receiptId: `world-injection:${generationSerial}:${generationId}:${candidate.threadId}`,
-        generationId,
-        generationSerial,
-        chatId: getContext()?.chatId || '',
-        targetTurn,
-        threadId: candidate.threadId,
-        priority: candidate.priority,
-        rank: index + 1,
-        impactTargets: candidate.impactTargets,
-        triggerCondition: candidate.triggerCondition,
-        expiresTurn: candidate.expiresTurn,
-        evidenceTerms: candidate.evidenceTerms,
-        semanticEvidenceTerms: candidate.semanticEvidenceTerms,
-        pressure: deepClone(candidate.pressure),
-        status: 'injected',
-        stages: [
-            { stage: 'planned', status: 'ready', at: now },
-            { stage: 'world_available', status: 'ready', at: now },
-            { stage: 'injected', status: 'pending', at: now },
-        ],
-        isReroll: isReroll === true,
-        budgetChars,
-        injectedAt: now,
-    }));
-    const actorWorldEventIds = new Set(
-        selected
-            .map((candidate) => String(candidate.threadId || ''))
-            .filter((id) => id.startsWith('ACTOR-'))
-            .map((id) => id.slice('ACTOR-'.length)),
-    );
-    if (actorWorldEventIds.size) {
-        const context = getContext();
-        const latest = latestAiMessage(context);
-        const latestTarget = latest.message ? captureTarget(context, latest.index) : null;
-        const actorLedger = normalizeActorLedger(namespace.actorLedger, {
-            chatId: context?.chatId || '',
-        });
-        actorLedger.actionReceipts = actorLedger.actionReceipts.map((receipt) => (
-            receipt.stage === 'injected'
-            && receipt.status === 'pending'
-            && actorWorldEventIds.has(String(receipt.worldEventId || ''))
-                ? {
-                    ...receipt,
-                    target: {
-                        chatId: context?.chatId || '',
-                        messageId: '',
-                        swipeId: 0,
-                        generation: generationSerial,
-                        branchId: latestTarget?.branchId || '',
-                        hash: '',
-                    },
-                }
-                : receipt
-        ));
-        namespace.actorLedger = actorLedger;
-    }
-    const ids = new Set(receipts.map((receipt) => receipt.receiptId));
-    namespace.continuityInjectionQueue = [
-        ...queue.filter((receipt) => !ids.has(receipt?.receiptId)),
-        ...receipts,
-    ].slice(-80);
-    namespace.continuityInjectionBatches = [
-        ...(Array.isArray(namespace.continuityInjectionBatches)
-            ? namespace.continuityInjectionBatches
-            : []),
-        {
-            generationId,
-            generationSerial,
-            targetTurn,
-            receiptIds: receipts.map((receipt) => receipt.receiptId),
-            budgetChars,
-            selectedCount: receipts.length,
-            status: 'registered',
-            pressureReceiptIds: pressureDecision.receipts.map((item) => item.receiptId),
-            registeredAt: now,
-        },
-    ].slice(-30);
-    return {
-        generationId,
-        receipts,
-        budgetChars,
-        targetTurn,
-        pressureDecision,
-    };
-}
-
-function capContinuityInjectionContent(content, budgetChars) {
-    const source = String(content || '');
-    const cap = Math.max(1200, Number(budgetChars) || 6000);
-    if (source.length <= cap) return source;
-    const suffix = '\n[注入预算已满；其余世界记录保留到后续回合]\n</Parallel_Continuity_Bridge>';
-    return `${source.slice(0, Math.max(0, cap - suffix.length))}${suffix}`;
-}
-
-function persistContinuityInjectionMetadata(namespace) {
-    return writeChatNamespace(namespace, getContext()?.chatId || '', {
-        fields: [
-            'continuityInjectionQueue',
-            'continuityInjectionBatches',
-            'worldPressure',
-            'actorLedger',
-        ],
-    }).catch((error) => {
-        console.warn('[MVU Auto Doctor] 世界注入收据保存失败：', error);
-        return false;
-    });
-}
-
-function markContinuityInjectionLanded(landed) {
-    const generationId = String(lastGeneration.id || '');
-    if (!generationId) return;
-    const namespace = readChatNamespace();
-    const now = Date.now();
-    let changed = false;
-    namespace.continuityInjectionQueue = (
-        Array.isArray(namespace.continuityInjectionQueue)
-            ? namespace.continuityInjectionQueue
-            : []
-    ).map((receipt) => {
-        if (
-            receipt?.generationId !== generationId
-            || Number(receipt?.generationSerial || 0) !== Number(generationSerial || 0)
-            || receipt.status !== 'injected'
-        ) return receipt;
-        changed = true;
-        return {
-            ...receipt,
-            status: landed ? 'landed' : 'missing',
-            stages: (receipt.stages || []).map((stage) => (
-                stage.stage === 'injected'
-                    ? {
-                        ...stage,
-                        status: landed ? 'landed' : 'missing',
-                        at: now,
-                    }
-                    : stage
-            )),
-            promptInspectedAt: now,
-        };
-    });
-    namespace.continuityInjectionBatches = (
-        Array.isArray(namespace.continuityInjectionBatches)
-            ? namespace.continuityInjectionBatches
-            : []
-    ).map((batch) => (
-        batch?.generationId === generationId
-            && Number(batch?.generationSerial || 0) === Number(generationSerial || 0)
-            ? {
-                ...batch,
-                status: landed ? 'landed' : 'missing',
-                promptInspectedAt: now,
-            }
-            : batch
-    ));
-    if (changed) void persistContinuityInjectionMetadata(namespace);
-}
-
-async function settleContinuityInjectionReceipts(captured) {
-    if (!captured?.generationId) return;
-    const namespace = readChatNamespace();
-    const content = acceptedContentText(
-        getContext()?.chat?.[captured.index]?.mes || '',
-    );
-    const settled = settleContinuityNarrativeReceipts(
-        namespace.continuityInjectionQueue,
-        namespace.continuityInjectionBatches,
-        { captured, content },
-    );
-    namespace.continuityInjectionQueue = settled.queue;
-    namespace.continuityInjectionBatches = settled.batches;
-    if (!settled.changed) return;
-    const saved = await persistContinuityInjectionMetadata(namespace);
-    if (!saved) return;
-    recordOperation(
-        '世界注入',
-        `生成 ${captured.generationId}：正文消费 ${settled.consumed} 条，保留 ${settled.retained} 条`,
-        settled.consumed ? 'ok' : '',
-    );
 }
 
 async function settleActorLedgerInjectionReceipts(captured) {
@@ -11981,108 +10973,6 @@ async function settleActorLedgerInjectionReceipts(captured) {
             consumed ? 'ok' : '',
         );
     }
-}
-
-async function applyContinuityInjection({ isReroll = false } = {}) {
-    const settings = getSettings();
-    if (settings.continuityMode === 'off') {
-        registerContinuityInjection('');
-        return false;
-    }
-    const context = getContext();
-    const migration = await ensureActorSovereigntyMigrationPersisted(context);
-    if (!migration.ok || !migration.current || !migration.namespace) {
-        registerContinuityInjection('');
-        setContinuityStatus(
-            '世界连续性：作用域迁移尚未完成，旧账本不会进入本次生成。',
-            'error',
-        );
-        return false;
-    }
-    const namespace = deepClone(migration.namespace);
-    const state = normalizeContinuityState(
-        continuityStateForInjection(namespace, { isReroll }),
-        {
-            chatId: getContext()?.chatId || '',
-            maxThreads: settings.continuityMaxThreads,
-        },
-    );
-    const batch = prepareContinuityInjectionBatch(namespace, state, {
-        maxVisible: settings.continuityMaxVisible,
-        budgetChars: settings.continuityInjectionBudgetChars,
-        isReroll,
-        pressureSettings: {
-            pressureCap: settings.worldPressureCap,
-            sameSceneBossCap: settings.worldSameSceneBossCap,
-            recoveryCadence: settings.worldRecoveryCadence,
-        },
-    });
-    let content = buildContinuityInjection(state, {
-        director: namespace.continuityDirector || 'standalone',
-        maxVisible: Math.min(
-            Number(settings.continuityMaxVisible) || 0,
-            batch.receipts.length,
-        ),
-        selectedThreadIds: batch.receipts.map((receipt) => receipt.threadId),
-    });
-    if (
-        !content
-        && (
-            settings.continuityMode === 'on'
-            || settings.continuityAutonomy !== 'conservative'
-            || namespace.continuityDetected === true
-        )
-    ) {
-        content = [
-            '<Parallel_Continuity_Bridge>',
-            '当前没有登记中的未结事件。不要为了完成指标在正文硬造伏笔。',
-            '活世界账本可以在回复落地后依据角色卡与当前世界书，另行建立主线衍生、暗中相关、当前独立或世界脉动事件；此处不要求主回复立即展示。',
-            '只能推动NPC与世界；禁止替玩家角色行动、回答、移动、消费资源或追加检定。',
-            '</Parallel_Continuity_Bridge>',
-        ].join('\n');
-    }
-    if (content && batch.generationId) {
-        const trace = `注入批次=${batch.generationId}；目标轮=${batch.targetTurn}；`
-            + `收据=${batch.receipts.map((item) => item.receiptId).join('、') || '无事件'}；`
-            + `预算=${batch.budgetChars}字符`;
-        content = content.replace(
-            '<Parallel_Continuity_Bridge>',
-            `<Parallel_Continuity_Bridge>\n${trace}`,
-        );
-    }
-    const turnAnchor = currentCompiledTurnAnchor();
-    if (turnAnchor.content) {
-        const anchor = [
-            '<Current_Turn_Anchor>',
-            '这是最新用户消息内的数据库场景与NPC行动方向，比旧世界账本更新。正文必须从该场景继续，不得倒退到旧地点、旧时间或重演已经写入的新状态；act不能替玩家追加未选择的行动。',
-            cropText(turnAnchor.content, 2400, '当前回合锚点'),
-            '</Current_Turn_Anchor>',
-        ].join('\n');
-        content = content ? `${anchor}\n${content}` : anchor;
-    }
-    content = capContinuityInjectionContent(
-        content,
-        settings.continuityInjectionBudgetChars,
-    );
-    registerContinuityInjection(content);
-    if (batch.generationId) {
-        const persisted = await persistContinuityInjectionMetadata(namespace);
-        if (!persisted) {
-            setContinuityStatus(
-                '世界连续性：本次注入收据未持久化，当前不会宣称注入流程完整成功。',
-                'error',
-            );
-            return false;
-        }
-    }
-    const active = state.threads.filter((thread) => thread.stage !== 'resolved').length;
-    setContinuityStatus(
-        active
-            ? `世界连续性：${active} 条未结${isReroll ? '（已使用重抽前存档点）' : ''}`
-            : '世界连续性：等待事件',
-        active ? 'ok' : '',
-    );
-    return !!content;
 }
 
 function continuityBase(namespace, captured) {
@@ -12203,15 +11093,6 @@ function preserveMissingThreadClockFields(previous, next, rawThreads) {
     return next;
 }
 
-function phase6BarrierHistory(namespace = readChatNamespace()) {
-    return Object.entries(phase6RuntimeState(namespace).records)
-        .filter(([key, record]) => (
-            key.startsWith('legacy-narrative-barrier:')
-            && isPlainObject(record?.value)
-        ))
-        .map(([, record]) => deepClone(record.value));
-}
-
 function continuityTickPlan(context, base, captured, namespace = readChatNamespace(context)) {
     const lastIndex = Number(base?.lastSource?.index);
     const start = Number.isInteger(lastIndex) && lastIndex >= 0 ? lastIndex + 1 : 1;
@@ -12219,7 +11100,6 @@ function continuityTickPlan(context, base, captured, namespace = readChatNamespa
         messages: context?.chat || [],
         fromIndex: start,
         toIndex: captured.index,
-        barrierHistory: phase6BarrierHistory(namespace),
     });
     // Rerolls and legacy ledgers may already point at this floor. They still
     // need exactly one recomputation from the branch checkpoint.
@@ -12542,7 +11422,7 @@ function buildContinuityMessages({
         '输出格式：',
         jsonOnly ? '' : '<ContinuityState>',
         '{"turn":本轮整数,"lastTick":{"turn":本轮整数,"action":"created|advanced|manifested|resolved|dormant|held","threadId":"稳定ID或WORLD","reason":"不少于8字的具体依据"},',
-        '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","actorRef":{"kind":"actor_ref","actorId":"输入原值","displayName":"输入原值","aliases":[]},"target":{"chatId":"输入原值","logicalIndex":0,"index":0,"messageId":"输入原值","swipeId":0,"generation":0,"generationId":"输入原值","generationType":"输入原值","branchId":"输入原值","scopeDigest":"输入原值","contentHash":"输入原值","hash":"输入原值"},"status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],',
+        '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","actorRef":{"kind":"actor_ref","actorId":"输入原值","displayName":"输入原值","aliases":[]},"target":{"chatId":"输入原值","logicalIndex":0,"index":0,"messageId":"输入原值","swipeId":0,"generation":0,"generationId":"输入原值","generationType":"输入原值","scopeDigest":"输入原值","contentHash":"输入原值","hash":"输入原值"},"status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],',
         '"threads":[{"id":"旧ID或null","title":"短标题","kind":"parallel|personal|promise|enemy|mystery","eventType":"conflict|progress","level":2,"origin":"main_derivative|setting_linked|setting_independent|ambient","relation":"linked|latent|independent|converging","stage":"seeded|advancing|manifested|resolved|dormant","stageProgress":3,"evolveResult":"success|hold|setback","stalled":false,"outcome":"","summary":"已成立事实","offscreenBeat":"本轮实际变化或空","nextBeat":"未来可能的一拍","trigger":"可验证条件","intersection":"交联复核","convergence": {"score": 0,"channels":[],"evidence":[],"entryBeat":"","lastCheckedTurn":1},"seedBasis":"依据","causedBy":[],"effects":[],"rumors":[],"resolution":"","actors":[],"locations":[],"knowledge":"hidden|rumor|observed","urgency":1,"createdTurn":1,"lastAdvancedTurn":1}],',
         '"scenarioPlan":{"baselineEvidence":[],"amendments":[]},',
         '"world":{"digest":"本轮变化或空","trends":[{"id":null,"sourceThreads": ["来源事件ID"]}],"factions":[],"winds":[],"reputation":{},"environment":{},"shadows":{"enemies":[],"secrets":[]},"influences":[]}}',
@@ -12632,9 +11512,7 @@ function actorShardLeaseFingerprint(captured) {
         generation: Math.max(0, Number(captured?.generationSerial) || 0),
         generationId: String(captured?.generationId || ''),
         generationType: String(captured?.generationType || ''),
-        branchId: String(captured?.branchId || ''),
         scopeDigest: String(captured?.scopeDigest || ''),
-        parentHash: fingerprint(String(captured?.generationId || captured?.branchId || 'root')),
         contentHash: String(captured?.contentFingerprint || ''),
     };
 }
@@ -12696,27 +11574,6 @@ async function collectActorShardProposals(captured, {
     }
 
     const target = actorShardLeaseFingerprint(captured);
-    const leaseId = `actor-shard:${fingerprint([
-        captured.chatId,
-        captured.messageId,
-        captured.swipeId,
-        captured.generationId,
-        captured.branchId,
-        captured.contentFingerprint,
-    ].join(':'))}:${Date.now().toString(36)}`;
-    await actorShardLeaseManager.create({
-        id: leaseId,
-        branchId: captured.branchId,
-        target,
-        phase: 'selecting',
-        softDeadlineAt: runUntilCancelled
-            ? Number.MAX_SAFE_INTEGER
-            : Date.now() + settings.actorShardTimeoutMs,
-        hardDeadlineAt: runUntilCancelled
-            ? Number.MAX_SAFE_INTEGER
-            : Date.now() + settings.actorShardTimeoutMs + 5000,
-    });
-    await actorShardLeaseManager.start(leaseId, 'single-batch-proposals');
     if (current()) {
         setContinuityStatus(
             `世界连续性：人物行动提案 0/${candidates.length}（一次隔离批处理）`,
@@ -12783,34 +11640,19 @@ async function collectActorShardProposals(captured, {
         };
     }
     if (result.status === 'stale') {
-        await actorShardLeaseManager.markStale(leaseId, 'target identity changed');
         return { status: 'stale', candidates: null };
     }
-    await actorShardLeaseManager.heartbeat(leaseId, {
-        phase: 'converged',
-        progress: {
-            current: result.diagnostics.completed,
-            total: result.diagnostics.selected,
-            label: 'actor proposals',
-        },
-    });
     const fresh = captureTarget(getContext(), captured.index, {
         frozenScope: captured.actorSovereigntyScope,
         unscoped: !captured.scopeDigest,
     });
-    const accepted = fresh && await actorShardLeaseManager.acceptsResult(leaseId, {
-        fingerprint: actorShardLeaseFingerprint(fresh),
-        branch: { id: fresh.branchId, status: 'active' },
-    });
+    const accepted = fresh && actorActionTargetMatches(
+        target,
+        actorShardLeaseFingerprint(fresh),
+    );
     if (!accepted || !current()) {
-        await actorShardLeaseManager.markStale(leaseId, 'final target identity changed');
         latestActorShardDiagnostics.status = 'stale';
         return { status: 'stale', candidates: null };
-    }
-    if (result.status === 'semantic-failed' || result.status === 'failed') {
-        await actorShardLeaseManager.fail(leaseId, result.status);
-    } else {
-        await actorShardLeaseManager.complete(leaseId);
     }
     return {
         status: result.status,
@@ -14527,7 +13369,6 @@ function sameAcceptedNarrativeTarget(left, right) {
     return !!(
         sameTargetExceptContent(left, right)
         && left.generationId === right.generationId
-        && left.branchId === right.branchId
         && left.contentFingerprint === right.contentFingerprint
     );
 }
@@ -14831,7 +13672,6 @@ async function clearContinuityState() {
         setContinuityStatus('世界连续性：迁移或持久化尚未完成，未清空当前账本。', 'error');
         return false;
     }
-    registerContinuityInjection('');
     setContinuityStatus('世界连续性：当前聊天账本已清空');
     return true;
 }
@@ -15197,7 +14037,7 @@ async function enqueueForum(targetId, {
     // the optional forum twice for one floor wastes a second model call and can
     // leak an intermediate branch, so share the same branch-level key as the
     // continuity ledger.
-    const dedupeKey = capturedBranchKey(expected);
+    const dedupeKey = capturedForumKey(expected);
     if (!force && dedupeKey && forumPendingKeys.has(dedupeKey)) {
         return Promise.resolve({ status: 'duplicate' });
     }
@@ -17729,7 +16569,6 @@ function buildFloatingUi() {
         repair.then(() => enqueueOpeningResourceSync(null, { manual: true }));
     });
     panel.querySelector('.mvuad-floating-director').addEventListener('click', (event) => {
-        openDualSurfacePanel(event.currentTarget);
     });
     panel.querySelector('.mvuad-floating-world').addEventListener('click', () => {
         enqueueActorProfiles(null, { force: true, includeMaintenance: true });
@@ -18966,7 +17805,6 @@ function buildSettingsPanel() {
     wrapper.querySelector('.mvuad-undo').addEventListener('click', undoLast);
     wrapper.querySelector('.mvuad-cancel-task').addEventListener('click', cancelCurrentOperations);
     wrapper.querySelector('.mvuad-surface-open').addEventListener('click', (event) => {
-        openDualSurfacePanel(event.currentTarget);
     });
     const sovereigntyMode = wrapper.querySelector('.mvuad-sovereignty-mode');
     sovereigntyMode.value = getSettings().sovereigntyMode;
@@ -19680,13 +18518,8 @@ function bindEvents() {
             forumPendingKeys.clear();
             forumCompletedKeys.clear();
             currentPendingSovereigntyObservationRecords(getContext());
-            pendingSerendipityDraft = null;
-            pendingSerendipityBaseline = null;
             pendingNpcDesignTicketBatch = null;
             npcDesignTicketBatches.clear();
-            pendingSerendipityOpportunities.clear();
-            downstreamBarrierProtocol = null;
-            downstreamBarrierProtocolChatId = '';
             lastGeneration = {
                 serial: generationSerial,
                 id: '',
@@ -19728,162 +18561,6 @@ function bindEvents() {
     context.eventSource.on('global_Mvu_initialized', () => {
         mvuPromise = null;
     });
-}
-
-function dualSurfaceRollbackSummary() {
-    const record = lastUndo || latestUndoRecord(readChatNamespace());
-    const paths = record?.touchedPaths
-        || record?.paths
-        || record?.touchedRefs
-        || [];
-    return {
-        available: Boolean(record),
-        status: record?.status || (record ? 'available' : 'none'),
-        pathCount: Array.isArray(paths) ? paths.length : 0,
-        recordId: record?.id || record?.targetKey || '',
-    };
-}
-
-async function captureDualSurfaceSession() {
-    const provider = window.MvuAutoDoctorV2Host;
-    if (typeof provider?.captureSession !== 'function') {
-        return {
-            catalog: [],
-            migrations: [],
-            rollback: dualSurfaceRollbackSummary(),
-        };
-    }
-    const captured = await provider.captureSession();
-    if (!captured || typeof captured !== 'object') {
-        return {
-            catalog: [],
-            migrations: [],
-            rollback: dualSurfaceRollbackSummary(),
-        };
-    }
-    return {
-        ...deepClone(captured),
-        rollback: captured.rollback
-            ? deepClone(captured.rollback)
-            : dualSurfaceRollbackSummary(),
-    };
-}
-
-async function executeDualSurfacePlan(planResult) {
-    const provider = window.MvuAutoDoctorV2Host;
-    if (typeof provider?.executeBarrieredDomainTransaction === 'function') {
-        return provider.executeBarrieredDomainTransaction(planResult);
-    }
-    if (typeof provider?.executePlannedDomainTransaction !== 'function') {
-        return {
-            ok: false,
-            status: 'unresolved',
-            transaction: planResult?.value?.transaction ?? null,
-            issues: [{
-                code: 'surface.transaction_kernel_missing',
-                path: '$.host',
-                severity: 'unresolved',
-                message: '宿主尚未提供阶段2 TransactionKernel执行桥；计划保持只读。',
-            }],
-        };
-    }
-    const expectedChatId = getContext()?.chatId;
-    if (!expectedChatId) {
-        return {
-            ok: false,
-            status: 'unresolved',
-            transaction: planResult?.value?.transaction ?? null,
-            issues: [{
-                code: 'surface.runtime_chat_missing',
-                path: '$.host',
-                severity: 'unresolved',
-                message: '无法绑定持久阶段6屏障到当前聊天。',
-            }],
-        };
-    }
-    const captureCurrent = async () => {
-        const captured = typeof provider.captureCurrent === 'function'
-            ? await provider.captureCurrent()
-            : await provider.captureSession();
-        return {
-            fingerprint: captured?.fingerprint
-                || captured?.currentFingerprint
-                || captured?.target,
-            branch: captured?.branch || captured?.activeBranch,
-        };
-    };
-    const adapter = createChatRuntimeAdapter(expectedChatId);
-    const idempotencyStore = new PersistentIdempotencyStore(adapter, {
-        namespace: 'production-idempotency',
-    });
-    const recoveryStore = new PersistentRecoveryStore(adapter, {
-        namespace: 'production-recovery',
-    });
-    const durableRuntime = Object.freeze({
-        idempotencyStore,
-        recoveryStore,
-        persistRecovery: (record) => recoveryStore.persist(record),
-        persistTransaction: (transaction) => recoveryStore.persist({
-            id: `transaction:${transaction.id}`,
-            kind: 'transaction-audit',
-            transaction,
-            status: transaction.status,
-        }),
-    });
-    const runtime = new NarrativeBarrierCoordinator({
-        adapter,
-        host: {
-            captureCurrent,
-            executePlannedDomainTransaction: (confirmedPlan, execution = {}) => (
-                provider.executePlannedDomainTransaction(
-                    confirmedPlan,
-                    Object.freeze({
-                        ...durableRuntime,
-                        signal: execution.signal,
-                    }),
-                )
-            ),
-            readFinalNarrative: typeof provider.readFinalNarrative === 'function'
-                ? (target) => provider.readFinalNarrative(target)
-                : undefined,
-            publishBarrier: (barrier) => {
-                try {
-                    window.dispatchEvent(new CustomEvent('mvu-auto-doctor-v2-barrier', {
-                        detail: {
-                            id: barrier.id,
-                            state: barrier.state,
-                            branchId: barrier.branchId,
-                            transactionId: barrier.transactionId,
-                        },
-                    }));
-                } catch {}
-            },
-        },
-    });
-    return runtime.execute(planResult);
-}
-
-function installDualSurface() {
-    if (dualSurfaceController) return dualSurfaceController;
-    dualSurfaceController = installDualSurfaceUI({
-        host: {
-            captureSession: captureDualSurfaceSession,
-            executePlan: executeDualSurfacePlan,
-            undo: async () => {
-                const provider = window.MvuAutoDoctorV2Host;
-                if (typeof provider?.rollbackDomainTransaction === 'function') {
-                    return provider.rollbackDomainTransaction();
-                }
-                return undoLast();
-            },
-        },
-        mount: document.body,
-    });
-    return dualSurfaceController;
-}
-
-function openDualSurfacePanel(trigger) {
-    return installDualSurface().open(trigger);
 }
 
 async function mutateActorProfileV6(actorId, mutate) {
@@ -19961,7 +18638,6 @@ async function initialize() {
     buildFloatingUi();
     buildForumUi();
     buildSettingsPanel();
-    installDualSurface();
     bindEvents();
     lastUndo = latestUndoRecord(readChatNamespace());
     window.MvuAutoDoctorAPI = Object.freeze({
@@ -19973,7 +18649,6 @@ async function initialize() {
         registerBarrierProtocolClient,
         getBarrierProtocolStatus: barrierProtocolStatus,
         acknowledgeBarrierReceipt,
-        executeBarrieredDomainTransaction: executeDualSurfacePlan,
         runLatest: () => enqueue(null, { manual: true }),
         auditSocialRelations: () => {
             const context = getContext();
@@ -19989,7 +18664,6 @@ async function initialize() {
             readChatNamespace().serendipity,
             { chatId: getContext()?.chatId || '' },
         )),
-        getPendingSerendipityLicense: () => deepClone(pendingSerendipityDraft),
         syncOpeningResources: () => enqueueOpeningResourceSync(null, { manual: true }),
         runContinuity: () => enqueueContinuity(null, { force: true }),
         runActorProfiles: () => enqueueActorProfiles(null, {
@@ -20087,14 +18761,6 @@ async function initialize() {
         getForumState: () => deepClone(readChatNamespace().forum),
         clearForumState,
         openForum: showForumPanel,
-        openDirectorSurface: openDualSurfacePanel,
-        previewNaturalLanguageAction: (text, options) => (
-            installDualSurface().previewNaturalLanguage(text, options)
-        ),
-        previewUiAction: (actionId) => (
-            installDualSurface().previewUiAction(actionId)
-        ),
-        getDirectorSurfaceView: () => installDualSurface().getView(),
         undoLast,
         getStatus: () => latestStatus,
         cancelCurrent: cancelCurrentOperations,
@@ -20122,19 +18788,6 @@ async function initialize() {
             : null,
         exportDiagnosticPackage,
     });
-    try {
-        window.dispatchEvent(new CustomEvent('mvu-auto-doctor-barrier-protocol-ready', {
-            detail: {
-                protocolVersion: 1,
-                apiVersion: 5,
-                status: 'unmanaged',
-                reason: 'independent_modules_no_global_settlement',
-                independentModules: true,
-                settledOnly: false,
-                terminalReceipts: false,
-            },
-        }));
-    } catch {}
     console.info(`[MVU Auto Doctor] v${VERSION} initialized`);
 }
 

@@ -22,7 +22,7 @@
 GENERATION_STARTED（非 dryRun）
   -> 现有 prepareNpcDesignTicketBatch()
   -> 现有 issueCharacterCreationTicket() 的确定性有序票池
-  -> 现有 applySocialInjection() 注入 <Original_NPC_Dice_Tickets>
+  -> P4 唯一 NEXT_TURN_CONSUMER 组合 <Original_NPC_Dice_Tickets>
   -> 预设在正文第一次落笔前按首次出现顺序塑形
   -> 最终接受正文
   -> P0 ActorRegistry UPSERT / promotion
@@ -85,7 +85,7 @@ GENERATION_STARTED（非 dryRun）
 |---|---|---|
 | 性格锚点只引导表现，锚点词绝不能直接出现在正文 | 原样采用；票据不得作为属性表输出 | 现有预设人物万花筒 prompt |
 | 未明确性格不事后猜成强结论；角色只按自己知道的信息行动 | 原样采用；医生的推断仍标 `hypothesis/designed_seed` | 档案 fact layer 与正文约束 |
-| 用 `setvar/getvar` 接入既有提示链 | 机制等价使用当前已有 extension injection，不另建调度器/状态机 | `applySocialInjection()` |
+| 用 `setvar/getvar` 接入既有提示链 | 机制等价使用 P4 单消费者的唯一宿主 prompt slot，不另建调度器/状态机 | `precomposeNextTurnConsumer()` |
 
 ### 3.4 PrismFox
 
@@ -194,13 +194,13 @@ index = fingerprint(匿名票槽身份 + generation entropy + 目标轴自己的
 | 新写 | 原因 | 边界 |
 |---|---|---|
 | 独立的 `characterCreationTicketPoolCapacity` 配置（默认 `32`，允许 `1–64`） | 当前 `actorProfileBatchCapacity` 同时承担生成前票池与正文后档案批量，两个所有者和时序不同；扩大票池不应把一次档案模型批次同步扩大 | 唯一生产入口仍是 `prepareNpcDesignTicketBatch()`；它只把 capacity 来源改成 `getSettings().characterCreationTicketPoolCapacity`，继续调用同一个 `issueCharacterCreationTicket()`/同一个 batch map，不创建第二编排器。`actorProfileBatchCapacity` 继续独立控制 P1 一次档案模型批次 |
-| 票池摘要/耗尽收据 | 成熟来源不认识本项目 `chat/message/swipe/generation/branch/hash/ActorRef` 身份约束；必须在既有绑定 API 上表达耗尽人物 | 只报告 `capacity/eligible/consumed/exhaustedActorRefs`；人物仍登记，不合并、不删除、不延迟、不事后发票 |
+| 票池摘要/耗尽收据 | 成熟来源不认识本项目 `chat/message/swipe/generation/content hash/ActorRef` 身份约束；必须在既有绑定 API 上表达耗尽人物 | 只报告 `capacity/eligible/consumed/exhaustedActorRefs`；人物仍登记，不合并、不删除、不延迟、不事后发票 |
 | `pool_exhausted` 档案标记与提示 | 医生必须知道该人物没有生成前票，才能 fail-closed 地禁止事后随机人格 | P1 仍从权威事实、已接受正文和不冲突的创意补全生成全字段非空、原子提交、可读回的完整档案；禁止调用任何出票函数，创意补全不得伪称来自生成前票 |
 
 ## 7. 身份、消费与恢复合同
 
 1. 票池在 `GENERATION_STARTED` 且非 dryRun 时一次生成；不知道最终人数，不调用第二 AI。
-2. 每张票的发行身份继续包含 `chatId/generation/generationId/generationType/order`；绑定时补齐 `messageId/index/swipeId/branchId/hash/ActorRef/firstAppearanceOrder`。
+2. 每张票的发行身份继续包含 `chatId/generation/generationId/generationType/order`；绑定时补齐 `messageId/index/swipeId/hash/ActorRef/firstAppearanceOrder`。
 3. 只有 P0 promotion 返回 `created=true`、来源为当前 accepted narrative、且不属于权威保护人物的 Actor 才消费。
 4. 既有人物、玩家、角色卡/世界书/原著/数据库/MVU 已有人物均不消费；部分轴已知时绑定同票但把精确轴写入 `discardedAxes`，其余票轴只填充真正空缺的轴，不覆盖已知轴，也不留下必填空值。
 5. 多人按 P0 promotion 的首次出现顺序消费，不按姓名排序。

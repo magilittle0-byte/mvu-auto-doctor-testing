@@ -6,7 +6,6 @@ export interface ActorLedgerSourceRef {
     generation: number;
     generationId: string;
     generationType: string;
-    branchId: string;
     identityScopeId: string;
     scopeDigest: string;
     hash: string;

@@ -115,7 +115,7 @@ test('R10 rejected lifecycle starts remain ignored and create zero Doctor state'
     );
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const cases = [
         [null, {}, false, 'missing_type'],
@@ -183,7 +183,7 @@ test('R10 host preflight cannot consume the following real generation session', 
 test('R9 default opening keeps Doctor inert and rejection traces stay diagnostic-only', () => {
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const trace = sourceSection(
         'function recordGenerationLifecycleTrace(code, {',
@@ -235,7 +235,7 @@ test('R9 rejection status and trace expose the exact fixed rejection kind', () =
 test('R9 default opening without a generation lifecycle does zero Doctor work', () => {
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const state = {
         callbacks: new Map(), p4: 0, accepted: 0, writes: 0, operations: 0, statuses: 0, modelStats: 0,
@@ -737,7 +737,7 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
     );
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const trace = sourceSection(
         'const GENERATION_LIFECYCLE_TRACE_LIMIT = 12;',
@@ -911,7 +911,7 @@ test('R9 undefined lifecycle type defaults normal and still performs real accept
 test('R8 keeps the P0 session when P4 precompose throws', async () => {
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const state = { callbacks: new Map(), traces: [], writes: 0 };
     const sandbox = {
@@ -946,7 +946,7 @@ test('R8 keeps the P0 session when P4 precompose throws', async () => {
 test('R8 chat switch isolates a late deferred P4 rejection from chat B', async () => {
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const lateP4 = deferred();
     const state = { chatId: 'chat-a', callbacks: new Map(), statuses: [], writes: 0, cleanup: 0 };
@@ -1022,7 +1022,7 @@ test('R8 lifecycle trace is bounded, privacy-safe, and diagnostic-only', () => {
     );
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     assert.match(trace, /slice\(-GENERATION_LIFECYCLE_TRACE_LIMIT\)/u);
     assert.doesNotMatch(trace, /writeChatNamespace|recordOperation|scheduleOperationLogSave|\.mes|secret|credential/iu);
@@ -1038,7 +1038,7 @@ test('R8 lifecycle trace is bounded, privacy-safe, and diagnostic-only', () => {
 test('R7 ENDED without a session is an ephemeral diagnostic with zero release or persistence', () => {
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const state = { callbacks: new Map(), statuses: [], releases: 0, writes: 0 };
     const sandbox = {
@@ -1074,7 +1074,7 @@ test('R7 ENDED without a session is an ephemeral diagnostic with zero release or
 test('actual chat-change handler isolates old provider state so the new chat can start and accept normally', async () => {
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const state = {
         writes: 0, releases: 0, invalidates: 0, callbacks: new Map(), status: [], precomposed: [], accepted: [],
@@ -1188,7 +1188,7 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
     );
     const bind = sourceSection(
         'function bindEvents()',
-        'function dualSurfaceRollbackSummary()',
+        'async function mutateActorProfileV6',
     );
     const state = {
         chatId: 'chat-b', callbacks: new Map(), timers: [], precomposed: 0,
@@ -1396,7 +1396,7 @@ function loadAutomaticWaitHarness() {
         statDataOf: (value) => value.stat_data,
         safeJson: (value) => JSON.stringify(value),
         fingerprint: (value) => String(value),
-        targetBranchIsCurrent: (captured) => ({ ok: true, captured }),
+        targetSnapshotIsCurrent: (captured) => ({ ok: true, captured }),
         setStatus: (message) => state.statuses.push(message),
         recordOperation: () => undefined,
         sleep: async (ms) => {
@@ -1425,7 +1425,6 @@ function makeTarget(overrides = {}) {
         contentFingerprint: 'accepted-a',
         generationId: 'generation-a',
         generationSerial: 2,
-        branchId: 'branch-a',
         identityScopeId: 'chat-a|character:card-main',
         scopeDigest: 'scope:chat-a|character:card-main',
         epoch: 7,
@@ -1461,7 +1460,6 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
             target?.messageId,
             target?.swipeId,
             target?.generationId,
-            target?.branchId,
             target?.contentFingerprint,
         ].join(':'),
         stage3AcceptedTarget: (target) => {
@@ -1777,10 +1775,14 @@ test('accepted target matcher allows mechanism refresh but fails closed on narra
     const matches = loadAcceptedTargetMatcher();
     const target = makeTarget();
     assert.equal(matches(target, makeTarget({ fingerprint: 'whole-message-b' })), true);
+    assert.equal(
+        matches(target, makeTarget({ branchId: 'legacy-branch-only' })),
+        true,
+        'a persisted legacy branch marker does not become a canonical identity field',
+    );
     for (const changed of [
         { contentFingerprint: 'accepted-b' },
         { generationId: 'generation-b' },
-        { branchId: 'branch-b' },
         { chatId: 'chat-b' },
         { messageId: 'message-b' },
         { swipeId: 1 },

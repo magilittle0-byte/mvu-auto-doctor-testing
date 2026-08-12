@@ -138,7 +138,6 @@ function normalizeSourceRef(value) {
         generation: integer(value.generation, 0, Number.MAX_SAFE_INTEGER, 0),
         generationId: cleanText(value.generationId, 180),
         generationType: cleanText(value.generationType, 80),
-        branchId: cleanText(value.branchId, 180),
         identityScopeId: cleanText(value.identityScopeId, 300),
         scopeDigest,
         hash,
@@ -170,7 +169,7 @@ export function acceptedActorSourceRefMatches(value, expected) {
     if (Boolean(actual.scopeDigest) !== Boolean(target.scopeDigest)) return false;
     return [
         'chatId', 'messageId', 'index', 'swipeId', 'generation',
-        'generationId', 'generationType', 'branchId', 'identityScopeId', 'scopeDigest', 'hash',
+        'generationId', 'generationType', 'identityScopeId', 'scopeDigest', 'hash',
     ].every((field) => actual[field] === target[field]);
 }
 
@@ -199,7 +198,6 @@ function registrySourceRefs(value, chatId) {
             ref.generation,
             ref.generationId,
             ref.generationType,
-            ref.branchId,
             ref.identityScopeId,
             ref.scopeDigest,
             ref.hash,
@@ -851,7 +849,6 @@ function normalizeReceipt(value) {
                 generation: integer(value.target.generation, 0, Number.MAX_SAFE_INTEGER, 0),
                 generationId: cleanText(value.target.generationId, 180),
                 generationType: cleanText(value.target.generationType, 80),
-                branchId: cleanText(value.target.branchId, 180),
                 scopeDigest: cleanText(value.target.scopeDigest, 180),
                 contentHash: cleanText(value.target.contentHash || value.target.hash, 120),
                 hash: cleanText(value.target.contentHash || value.target.hash, 120),
@@ -3587,7 +3584,6 @@ export function applyAcceptedContentObservations(value, {
         ref.messageId,
         ref.swipeId,
         ref.generation,
-        ref.branchId,
         ref.scopeDigest,
         ref.hash,
     ])).slice(0, 18)}`;
@@ -3717,7 +3713,6 @@ export function reconcileActorLifecycleFromAcceptedContent(value, {
             ref.messageId,
             ref.swipeId,
             ref.generation,
-            ref.branchId,
             ref.hash,
         ])).slice(0, 18)}`,
         sourceRef: ref,
@@ -4925,7 +4920,6 @@ export function settleActorInjectionReceipts(value, {
             || (target.messageId && target.messageId !== ref.messageId)
             || (target.swipeId && target.swipeId !== ref.swipeId)
             || (target.generation && target.generation !== ref.generation)
-            || (target.branchId && target.branchId !== ref.branchId)
             || (target.scopeDigest && target.scopeDigest !== ref.scopeDigest)
             || (target.hash && target.hash !== ref.hash)
         ) return receipt;

@@ -10,7 +10,7 @@ P4 只把人物提案入口从“每人一次模型调用，失败后还可再�
 | 格式与隔离 | 单人解析失败后可转模型修复 | `parseActorShardProposalBatch()` 只做本地批提取，再逐 ActorRef 绑定复用 `parseActorShardProposal()`；缺项、重复、未知身份和单项坏 JSON 只隔离该项 |
 | 语义健康 | 运输返回可掩盖整批无可用动作 | 非空批次零有效提案返回 `semantic-failed`；收集状态、lease、agent pool、诊断和 sovereignty task 都保持失败，不回写为 completed |
 | 尝试与裁决 | 尝试已先持久化，但上游是逐人模型调用 | 一次人物批提案后仍沿原链：本地准入 → `ActionAttempt` 原子写入与内容读回 → P3 一次世界批裁决 → 逐 `attemptId` 验证 → settlement |
-| 恢复与过期 | exact-target pending attempt 可恢复 | 原样保留：精确恢复不创建人物提案 job，人物模型调用为 0；不重复 attempt、成本、receipt 或游标；过期 target/swipe/generation/branch 输出为零且不能进入写入 |
+| 恢复与过期 | exact-target pending attempt 可恢复 | 原样保留：精确恢复不创建人物提案 job，人物模型调用为 0；不重复 attempt、成本、receipt 或游标；过期 target/swipe/generation/content 输出为零且不能进入写入 |
 
 ## P4 逐项来源契约
 
@@ -20,8 +20,8 @@ P4 只把人物提案入口从“每人一次模型调用，失败后还可再�
 | 单人物提示合同与 `parseActorShardProposal()` | 项目既有 `actor-shard-core.mjs` 的有限知识、地点、资源、能力、刺激决策、玩家主权、本地白名单和语义增量检查 | 原样复用 | P4 对批内每项重新调用同一解析器，没有另写人物语义审查器，也没有降低字段要求 |
 | `buildActorShardBatchMessages()` | 既有 `buildActorShardMessages()` 完整系统合同；P1 一次档案批输入/稳定身份模式 | 等价最小改写 | 照 P1 的单批数组和稳定身份绑定组织输入；把 P1 的 `ProfileInsertCandidate`/档案字段替换为 `ActorRef`、有限知识、地点、资源、能力、行动窗口和预期成本/耗时/风险，保持“一次输入覆盖全批、每项上下文隔离”不变 |
 | `parseActorShardProposalBatch()` | P1 candidate-local validation、部分坏项隔离、全批零语义失败；既有单项 parser | 等价最小改写 + 接口适配 | 保持“先解批包装、再按稳定身份逐项验证、坏项不吞好项”的解析顺序；把 P1 的 profile candidate key/schema/digest 检查替换为 actorId/ActorRef、行动白名单、知识/地点/资源/能力和语义增量检查 |
-| `runActorShardProposalBatch()` | P1 一次模型批调用；npc_tracker `gate.js` 的一次 gate、逐人物隔离、汇总后统一应用；P2/P3 stale target fail-closed | 等价最小改写 | 保持“一次 gate/一次批调用/逐项隔离/汇总后提交”的调用时序；把 npc_tracker 的 profile/name 键和 host state 换成稳定 ActorRef 与 Actor Ledger，把 P2/P3 的 target stamp 换成完整 chat/swipe/generation/branch/hash 复核 |
-| `collectActorShardProposals()` | P2 已接受正文目标；P3 `generateWorldContinuitySingleBatch()` 的单调用、无 failover、无第二修复模型 | 最小改写 | 替换人物提案入口，保留 lease、诊断和结构世界轨；人物批和世界批各最多一次，不为每个人再调世界 AI |
+| `runActorShardProposalBatch()` | P1 一次模型批调用；npc_tracker `gate.js` 的一次 gate、逐人物隔离、汇总后统一应用；P2/P3 stale target fail-closed | 等价最小改写 | 保持“一次 gate/一次批调用/逐项隔离/汇总后提交”的调用时序；把 npc_tracker 的 profile/name 键和 host state 换成稳定 ActorRef 与 Actor Ledger，把 P2/P3 的 target stamp 换成完整 chat/swipe/generation/content 复核 |
+| `collectActorShardProposals()` | P2 已接受正文目标；P3 `generateWorldContinuitySingleBatch()` 的单调用、无 failover、无第二修复模型 | 最小改写 | 替换人物提案入口，保留本地 current-target 去重、诊断和结构世界轨；人物批和世界批各最多一次，不为每个人再调世界 AI |
 | `prepareActorActionAttempts()`、`recordActorActionAttempts()`、`persistActorActionAttemptsForTurn()` | 既有 Actor Ledger v8、P1 namespace 原子写入/内容读回、P3 exact-target 事务 | 原样复用 | attemptId、ActorRef、目标、知识、地点、资源/能力、预期成本/耗时/风险、可见性/揭示路径仍先完整落账并读回；P4 没有新动作账本 |
 | `validateWorldAdjudicationBatch()`、`settleActorActionCandidates()` | 既有 actor authority/ledger；World typed ID/checkpoint/失败回滚；Story Oracle waypoint 证据门与成本后果状态机 | 等价改写并接入既有接口 | 把 World 对象 ID/phase/checkpoint 替换为 attemptId/ActorRef/status/pending journal，把 Story Oracle waypoint ID、yes/unsure/no 和 cost/consequence 替换为 attemptId、success/partial/failure/delayed/blocked、actual cost/duration/risk/observable consequence；验证顺序和“无证据不推进”状态机保持一致 |
 | 本地坏 JSON 的平衡对象扫描 | P1“格式优先本地修复、语义逐项隔离”合同 | 接口层补充 | 保持 P1 的本地修复顺序；因行动批包装是 `proposals[]`，用平衡对象提取替换 P1 的 profile 批提取器，只恢复结构、不补写语义、不调用第二模型 |
@@ -40,7 +40,7 @@ P4 只把人物提案入口从“每人一次模型调用，失败后还可再�
 | 来源 | 实际读取的成熟实现 | 等价改写到 P4 | 接口字段替换 |
 | --- | --- | --- | --- |
 | World `world-engine-core.js` / `world-engine-evolution.js` | stable typed ID、重复修复、forward/redo/reroll 基线隔离、阶段推进、失败恢复旧 checkpoint | `createActorActionAttempt()` 先建立稳定 attempt，`validateWorldAdjudicationBatch()` 再推进终态；失败保留原 pending attempt，恢复不重新生成 | World object ID → `attemptId`；entity ref → `ActorRef`；phase → attempted/pending_world/settled/held/rejected；checkpoint stamp → 完整 generation target |
-| World `world-engine-ledger.js` / `world-engine-store.js` / `world-engine-chatcache.js` | 差异账本、同轮覆盖、持久镜像、聊天级 live mirror、写后读回与目标冲突防护 | `recordActorActionAttempts()` 先写唯一 journal 与引用 receipt，`persistActorActionAttemptsForTurn()` 单次 namespace 保存并内容读回；裁决后再次 settlement readback | World ledger/store/cache → `actorLedger.actionAttempts`/`actionReceipts`/chat namespace；chat cache key → chatId + branchId；revision/checkpoint → namespace revision + target digest |
+| World `world-engine-ledger.js` / `world-engine-store.js` / `world-engine-chatcache.js` | 差异账本、同轮覆盖、持久镜像、聊天级 live mirror、写后读回与目标冲突防护 | `recordActorActionAttempts()` 先写唯一 journal 与引用 receipt，`persistActorActionAttemptsForTurn()` 单次 namespace 保存并内容读回；裁决后再次 settlement readback | World ledger/store/cache → `actorLedger.actionAttempts`/`actionReceipts`/chat namespace；chat cache key → canonical chat/message/swipe/generation/content target；revision/checkpoint → namespace revision + target digest |
 | World `world-engine-inject.js` / `world-engine-worldbook.js` | 条件满足才注入、可见性过滤、受限预算、触发与存储分离 | 私密离屏结果保持 pending disclosure；只有 public 或被观察的结果生成 world event，并通过既有 injection receipt 进入叙事 | visibility filter → visibility/observerActorIds/publicSummary/privateSummary；trigger → `revealPath`；worldbook injection → continuity world event/injection receipt |
 | World `world-engine-api.js` / `world-engine-rules-loader.js` | 运输、解析、规则和语义失败分层；有限知识、时间与规则约束 | 人物批运输失败、格式失败、单项准入拒绝和世界裁决拒绝分别记录；本地完成知识/地点/资源/能力准入 | rules context → actor candidate 的 limitedKnowledge/location/resources/capabilities；API retry/fallback → P4 单调用、无 failover、由 durable task 跨轮恢复 |
 | Story Oracle `index.js` waypoint / arc / transition | stable waypoint ID、目标—障碍—选择—后果、yes/unsure/no 证据门、成本与难度、stale stamp、无证据不推进 | attempt 保存目标、依据和预期成本/耗时/风险；world result 保存实际成本/耗时/风险/可观察后果；缺项、重复、错 target 均保持 pending | waypoint ID → `attemptId`；goal/obstacle/choice → goal/knowledgeBoundary/action；yes/unsure/no → success/partial/failure/delayed/blocked；stamp →完整 target；consequence → appliedStateChanges/observableConsequence/revealPath |
@@ -61,7 +61,7 @@ P4 只把人物提案入口从“每人一次模型调用，失败后还可再�
 
 1. 只有已进入既有 `ActorRegistry`、拥有稳定 `ActorRef`，且 P1 完整档案已原子提交并通过 digest/commit/readback 校验的人物，才能提出 `ActionAttempt`。
 2. `ActionAttempt` 只描述人物的目标、障碍、选择、知识/资源依据和预期时间、成本、风险、可观察后果；它必须先写入既有 Actor Ledger 并完成持久化读回，才可交给世界裁决。
-3. `WorldAdjudicationResult` 必须逐项绑定同一 `attemptId`、`ActorRef`、chat、logicalIndex、message、swipe、generation serial/id/type、branch 和 content hash，并返回成功、部分、失败、延后或阻断的实际结果。
+3. `WorldAdjudicationResult` 必须逐项绑定同一 `attemptId`、`ActorRef`、chat、logicalIndex、message、swipe、generation serial/id/type 和 content hash，并返回成功、部分、失败、延后或阻断的实际结果。
 4. 未裁决、裁决无效、批次缺项/重复、目标错配或迟到结果均保持 `pending_world`；不得写入状态事实、资源消耗、地点、计划或已成功历史。
 5. NPC 可以提出邀请或尝试影响玩家，但世界裁决只能确认“邀请已经提出”等 NPC 自身事实，不能替玩家行动、同意、付费、移动、产生感受或形成关系结论。
 6. 人物轨和势力/环境/经济等结构世界轨独立调度；任一人物失败或无人行动不能吞掉结构世界进程，结构世界事件也不得伪造一个代言 NPC。
@@ -83,7 +83,7 @@ P4 只把人物提案入口从“每人一次模型调用，失败后还可再�
 | 既有 `ActorRegistry`、typed `ActorRef`、身份隔离和聊天域注册 | `actorActionEligibility()`、人物调度、shard 候选和尝试持久化都读取同一注册项；隔离人物、未注册人物和 ActorRef 不一致均拒绝行动 |
 | 既有 Actor Ledger、action receipt、actor shard 与 sovereignty task/lease/retry | `ActionAttempt` 作为 Actor Ledger v8 内的有界 pending journal 和 `attempted/pending_world` receipt 保存；没有新建第二套动作账本或任务系统 |
 | 既有 continuity/world lane、世界压力、公平调度和注入收据 | 结构世界轨继续独立调度；人物结果仅在有效世界裁决后生成 world event，并继续沿既有可见性与注入收据路径进入正文 |
-| P2/P3 generation 事务目标 | 同一 chat/message/index/swipe/generation/branch/hash 绑定扩展到人物尝试和世界裁决；旧 swipe、换 chat、重生成和迟到回包一律失配 |
+| P2/P3 generation 事务目标 | 同一 chat/message/index/swipe/generation/content hash 绑定扩展到人物尝试和世界裁决；旧 swipe、换 chat、重生成和迟到回包一律失配 |
 
 ## 最小适配
 
@@ -95,7 +95,7 @@ P4 只把人物提案入口从“每人一次模型调用，失败后还可再�
 
 ## 接口替换层：成熟机制在本项目宿主上的等价落地
 
-- 完整 action target 规范化与逐字段匹配：照 Story Oracle stale stamp 与 World checkpoint identity 的比较顺序实现；字段替换为 SillyTavern chat/message/swipe/generation/branch/content-hash。
+- 完整 action target 规范化与逐字段匹配：照 Story Oracle stale stamp 与 World checkpoint identity 的比较顺序实现；字段替换为 SillyTavern chat/message/swipe/generation/content-hash。
 - 尝试先行持久化及内容读回：照 World ledger/store/chatcache 的“先提交、再读回、失败恢复旧状态”实现；存储接口替换为 Actor Ledger、namespace、host save/readback 和事务 revision。
 - 世界裁决批次完整性校验：照 World typed ID/重复修复与 Story Oracle 证据门实现；实体键替换为 attemptId + ActorRef + full target，并补入玩家主权、资源和状态变化白名单。
 - `pending_world` 恢复：照 World checkpoint 继承和 forward/redo/reroll 基线隔离实现；checkpoint payload 替换为 Actor Ledger 中同一 exact-target attempt/candidate，恢复时不重写人物意图。
@@ -106,7 +106,7 @@ P4 只把人物提案入口从“每人一次模型调用，失败后还可再�
 - settlement 不再从 candidate 临时重建 attempt；没有已持久化 journal 与 attempted receipt 就拒绝。
 - success/partial 之外不应用 proposed state changes，不扣资源、不移动地点、不推进计划，也不把 desired effect 写成状态事实。
 - 模型返回先过完整批次校验；一项重复、缺失或绑定错误使本批次 fail closed，所有尝试继续等待有效裁决。
-- pending attempt 的恢复必须匹配当前完整 target；旧 chat、swipe、generation、branch、hash 或迟到结果不能复用。
+- pending attempt 的恢复必须匹配当前完整 target；旧 chat、swipe、generation、hash 或迟到结果不能复用。
 - 人物 worker/持久化失败只记录人物技术失败，后续 `scheduleWorldLanes()` 仍运行；独立世界事件 `actorId` 为空，不生成代言人物。
 
 ## 所有权保持不变

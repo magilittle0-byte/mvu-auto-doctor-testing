@@ -224,7 +224,6 @@ function canonicalFixtureSourceRef(chatId = 'chat-profile-v6', turn = 1) {
         generation: turn,
         generationId: `profile-generation-${turn}`,
         generationType: 'normal',
-        branchId: 'branch-main',
         identityScopeId: `${chatId}|character:profile-v6`,
         scopeDigest: `${chatId}|scope:profile-v6`,
         hash: `profile-content-${turn}`,

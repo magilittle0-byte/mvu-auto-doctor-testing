@@ -48,7 +48,6 @@ function sourceRef(valueScope = scope(), overrides = {}) {
         generation: 2,
         generationId: 'generation-2',
         generationType: 'normal',
-        branchId: 'branch-4',
         contentHash: 'hash-4',
         scopeDigest: actorSovereigntyScopeDigest(valueScope),
         ...overrides,
@@ -64,7 +63,6 @@ function strictTarget(overrides = {}) {
         generation: 2,
         generationId: 'generation-2',
         generationType: 'normal',
-        branchId: 'branch-4',
         contentHash: 'hash-4',
         ...overrides,
     };
@@ -729,7 +727,6 @@ test('current marker is not invalidated by valid dynamic receipts, tasks or chec
         sourceRef: sourceRef(valueScope, {
             logicalIndex: 5,
             messageId: 'message-5',
-            branchId: 'branch-5',
             contentHash: 'hash-5',
         }),
         modules: ['world'],
@@ -997,7 +994,6 @@ test('generation identity is part of strict source keys, replacement and restart
                     'generation',
                     'generationId',
                     'generationType',
-                    'branchId',
                     'contentHash',
                 ].map((field) => [field, ref[field]])),
                 Object.fromEntries([
@@ -1008,7 +1004,6 @@ test('generation identity is part of strict source keys, replacement and restart
                     'generation',
                     'generationId',
                     'generationType',
-                    'branchId',
                     'contentHash',
                 ].map((field) => [field, expected[field]])),
             );
@@ -1044,7 +1039,6 @@ test('verified source replacements are terminal history and obey normal capacity
             logicalIndex: index + 1,
             messageId: `old-message-${index}`,
             generation: 1,
-            branchId: `branch-${index}`,
             contentHash: `old-hash-${index}`,
         });
         const oldSourceKey = sovereigntySourceKey(oldSource);
@@ -1083,7 +1077,6 @@ test('unconverged observation gaps survive the normal backlog and observation hi
         logicalIndex: 1,
         messageId: 'message-gap',
         generation: 1,
-        branchId: 'branch-gap',
         contentHash: 'hash-gap',
     });
     let runtime = observeSovereigntyTurn(
@@ -1104,7 +1097,6 @@ test('unconverged observation gaps survive the normal backlog and observation hi
                 logicalIndex: index,
                 messageId: `message-${index}`,
                 generation: index,
-                branchId: `branch-${index}`,
                 contentHash: `hash-${index}`,
             }),
             modules: [],

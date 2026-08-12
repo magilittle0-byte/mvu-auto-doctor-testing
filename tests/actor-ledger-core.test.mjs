@@ -90,7 +90,6 @@ function sourceRef(index = 4, chatId = 'chat-actor-ledger') {
         generationSerial: index,
         generationId: `generation-${index}`,
         generationType: 'normal',
-        branchId: 'branch-main',
         identityScopeId: `${chatId}|character:synthetic`,
         scopeDigest: `scope:${chatId}|character:synthetic`,
         hash: `hash-${index}`,

@@ -76,4 +76,4 @@ threads
 - stop、dry、quiet、chat switch、scope 变化、未接受正文、swipe/regenerate 替代均清空唯一 ST key 并释放未绑定 ticket batch；刷新不恢复内存 ticket。
 - accepted final 后仅在 scope、final target 与 digest 严格匹配时写 consume proof；P2 仍按既有 ActorRef 注册/readback 逐人绑定票据。
 - 当前缝合怪只有归档配置、TavernDB 默认召回没有第三方 verified slot；两者均不会自动注册，也不会被医生写入其 prompt/finalMessage/injects/user_input。TavernDB `GENERATION_ENDED` 填表保持独立。
-- `applySocialInjection`、`applyContinuityInjection`、`registerSerendipityInjection` 和旧 key 均不接回生产事件。
+- `applySocialInjection`、`applyContinuityInjection`、`registerSerendipityInjection` 已物理移除；P4 只清理三个固定旧 key，随后唯一写入 `mvu-auto-doctor-next-turn-consumer`。

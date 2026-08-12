@@ -91,7 +91,6 @@ function normalizeActorActionTargetInternal(value, { legacy = false } = {}) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const chatId = cleanText(value.chatId, 180);
     const messageId = cleanText(value.messageId, 180);
-    const branchId = cleanText(value.branchId, 180);
     const scopeDigest = cleanText(value.scopeDigest, 180);
     const contentHash = cleanText(value.contentHash || value.hash, 120);
     const generationId = cleanText(value.generationId, 180);
@@ -104,7 +103,6 @@ function normalizeActorActionTargetInternal(value, { legacy = false } = {}) {
         !chatId
         || (!legacy && !hasLogicalIndex)
         || !messageId
-        || !branchId
         || !contentHash
         || (!legacy && !scopeDigest)
         || (!legacy && (!generationId || !generationType))
@@ -126,7 +124,6 @@ function normalizeActorActionTargetInternal(value, { legacy = false } = {}) {
         generation: integer(generation),
         generationId,
         generationType,
-        branchId,
         scopeDigest,
         contentHash,
         hash: contentHash,
@@ -156,7 +153,6 @@ export function actorActionTargetMatches(left, right) {
         'generation',
         'generationId',
         'generationType',
-        'branchId',
         'scopeDigest',
         'contentHash',
     ].every((field) => first[field] === second[field]);

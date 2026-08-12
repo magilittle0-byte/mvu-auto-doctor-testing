@@ -1021,7 +1021,6 @@ function normalizeCharacterCreationTarget(value) {
         generation: integer(source.generation ?? source.generationSerial),
         generationId: cleanText(source.generationId, 180),
         generationType: cleanText(source.generationType, 40),
-        branchId: cleanText(source.branchId, 180),
         hash: cleanText(source.hash ?? source.fingerprint, 180),
     };
 }
@@ -1906,7 +1905,6 @@ function ticketCandidateMatchesTarget(candidate, target) {
         'index',
         'swipeId',
         'generation',
-        'branchId',
         'hash',
     ]);
 }
@@ -4545,7 +4543,6 @@ function normalizeProfileProjectionSourceRef(value) {
         generation: integer(value.generation),
         generationId: cleanText(value.generationId, 180),
         generationType: cleanText(value.generationType, 80),
-        branchId: cleanText(value.branchId, 180),
         identityScopeId: cleanText(value.identityScopeId, 300),
         hash,
     };

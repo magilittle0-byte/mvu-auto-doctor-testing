@@ -16,7 +16,6 @@ export interface SovereigntySourceRef {
     generation: number;
     generationId: string;
     generationType: string;
-    branchId: string;
     contentHash: string;
     scopeDigest: string;
 }

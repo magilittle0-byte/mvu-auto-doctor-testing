@@ -154,7 +154,6 @@ function sourceIdentity(value = {}) {
         integer(value.generation),
         cleanText(value.generationId, 180),
         cleanText(value.generationType, 80),
-        cleanText(value.branchId, 180),
         cleanText(value.contentHash ?? value.hash, 180),
     ];
     const scopeDigest = cleanText(value.scopeDigest, 180);
@@ -172,7 +171,6 @@ export function normalizeSovereigntySourceRef(value) {
         'generation',
         'generationId',
         'generationType',
-        'branchId',
         'contentHash',
         'scopeDigest',
     ];
@@ -188,7 +186,6 @@ export function normalizeSovereigntySourceRef(value) {
         generation: integer(value.generation),
         generationId: cleanText(value.generationId, 180),
         generationType: cleanText(value.generationType, 80),
-        branchId: cleanText(value.branchId, 180),
         contentHash: cleanText(value.contentHash, 180),
         scopeDigest: cleanText(value.scopeDigest, 180),
     };
@@ -197,7 +194,6 @@ export function normalizeSovereigntySourceRef(value) {
         || !source.messageId
         || !source.generationId
         || !source.generationType
-        || !source.branchId
         || !source.contentHash
         || !source.scopeDigest
     ) {
@@ -220,11 +216,10 @@ function normalizeLegacySovereigntySourceRef(value) {
         ...(cleanText(value.generationType, 80)
             ? { generationType: cleanText(value.generationType, 80) }
             : {}),
-        branchId: cleanText(value.branchId, 180),
         contentHash: cleanText(value.contentHash ?? value.hash, 180),
         scopeDigest: cleanText(value.scopeDigest, 180),
     };
-    return source.chatId && source.messageId && source.branchId && source.contentHash
+    return source.chatId && source.messageId && source.contentHash
         ? source
         : null;
 }
@@ -241,7 +236,6 @@ export function sovereigntySourceRefsMatch(left, right) {
         'generation',
         'generationId',
         'generationType',
-        'branchId',
         'contentHash',
         'scopeDigest',
     ].every((field) => first[field] === second[field]);
@@ -262,7 +256,6 @@ function normalizeObservationConvergenceTarget(value) {
         'generation',
         'generationId',
         'generationType',
-        'branchId',
         'contentHash',
     ];
     if (!required.every((field) => Object.hasOwn(value, field))) return null;
@@ -277,7 +270,6 @@ function normalizeObservationConvergenceTarget(value) {
         generation: Number(value.generation),
         generationId: cleanText(value.generationId, 180),
         generationType: cleanText(value.generationType, 80),
-        branchId: cleanText(value.branchId, 180),
         contentHash: cleanText(value.contentHash, 180),
     };
     return [
@@ -285,7 +277,6 @@ function normalizeObservationConvergenceTarget(value) {
         target.messageId,
         target.generationId,
         target.generationType,
-        target.branchId,
         target.contentHash,
     ].every(Boolean) ? target : null;
 }

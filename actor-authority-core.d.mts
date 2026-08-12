@@ -10,7 +10,6 @@ export interface ActorActionTarget {
     generation: number;
     generationId: string;
     generationType: string;
-    branchId: string;
     scopeDigest: string;
     contentHash: string;
     hash: string;

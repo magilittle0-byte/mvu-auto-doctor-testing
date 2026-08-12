@@ -170,7 +170,6 @@ const captured = {
     generationSerial: 6,
     generationId: 'generation-6',
     generationType: 'normal',
-    branchId: 'branch-main',
     identityScopeId: 'chat-p3|character:card-main',
     scopeDigest: 'scope:chat-p3|character:card-main',
     contentFingerprint: 'accepted-p3-6',
@@ -464,7 +463,6 @@ test('an exact committed world target skips recovery generation and world-domain
         generationSerial: 9,
         generationId: 'generation-9',
         generationType: 'normal',
-        branchId: 'branch-main',
         identityScopeId: 'chat-p3|character:card-main',
         scopeDigest: 'scope:chat-p3|character:card-main',
         contentFingerprint: 'accepted-content-fingerprint',
@@ -493,7 +491,6 @@ test('an exact committed world target skips recovery generation and world-domain
         ['generationSerial', 10],
         ['generationId', 'generation-10'],
         ['generationType', 'regenerate'],
-        ['branchId', 'branch-other'],
         ['scopeDigest', 'scope:another-card'],
         ['contentFingerprint', 'different-accepted-content'],
     ]) {

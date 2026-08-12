@@ -53,7 +53,6 @@ function acceptedTarget(overrides = {}) {
         messageId: 'message-4',
         index: 4,
         swipeId: 0,
-        branchId: 'branch-A',
         hash: 'content-hash-A',
         ...overrides,
     };
@@ -85,7 +84,6 @@ function candidate(id, name, target = acceptedTarget(), sourceKind = 'accepted_n
             index: target.index,
             swipeId: target.swipeId,
             generation: target.generation,
-            branchId: target.branchId,
             hash: target.hash,
         },
     };
@@ -551,7 +549,7 @@ test('static production path proves pre-generation injection and forbids doctor 
             < nextTurnConsumer.indexOf('immutableNextTurnConsumerPayload(worldText, ticketText)'),
         '票据必须在唯一 P4 next-turn consumer 组装最终提示词前创建',
     );
-    assert.match(runtimeSource, /await precomposeNextTurnConsumer\(lastGeneration\)/u);
+    assert.match(runtimeSource, /await precomposeNextTurnConsumer\(session\)/u);
     assert.doesNotMatch(nextTurnConsumer, /Parallel_Continuity_Bridge|combined.?pool|applySocialInjection/u);
     const actorTransaction = runtimeSource.slice(runtimeSource.indexOf(
         'const actorRegistration = promoteActorCandidatesToRegistry',
@@ -561,9 +559,10 @@ test('static production path proves pre-generation injection and forbids doctor 
     assert.ok(bindAt < actorTransaction.indexOf('persistActorRegistryForTurn'));
     assert.ok(bindAt < actorTransaction.indexOf('prepareActorLedgerProfilesV6'));
     assert.doesNotMatch(runtimeSource, /settleNpcDesignTicketBatch/u);
-    const chatSwitchEnd = runtimeSource.indexOf('pendingSerendipityOpportunities.clear');
+    const chatSwitchStart = runtimeSource.indexOf('const onChatChanged = async () =>');
+    const chatSwitchEnd = runtimeSource.indexOf('lastGeneration = {', chatSwitchStart);
     const chatSwitchReset = runtimeSource.slice(
-        runtimeSource.lastIndexOf('pendingSerendipityDraft = null', chatSwitchEnd),
+        chatSwitchStart,
         chatSwitchEnd,
     );
     assert.match(chatSwitchReset, /pendingNpcDesignTicketBatch = null/u);

@@ -98,7 +98,6 @@ function normalizeTarget(value) {
         swipeId: nonNegativeInteger(source.swipeId),
         generation: nonNegativeInteger(source.generation),
         generationId: cleanText(source.generationId, 220),
-        branchId: cleanText(source.branchId, 220),
         contentFingerprint: cleanText(source.contentFingerprint, 160),
     };
 }
@@ -395,7 +394,6 @@ export function bindAndSettleSerendipityLicense(ledgerInput, draftInput, targetI
         && draft.target.generation === target.generation
         && draft.target.generationId === target.generationId
         && target.messageId
-        && target.branchId
         && target.contentFingerprint
     );
     if (!exactGeneration) {

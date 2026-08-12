@@ -2874,7 +2874,7 @@ export function buildContinuityInjection(state, {
         thread.rumors.length ? `仍在传播=${thread.rumors.join('；')}` : '',
     ].filter(Boolean).join('；'));
     return [
-        '<Parallel_Continuity_Bridge>',
+        '<World_Continuity_Package>',
         directorText,
         normalized.lastTick.action
             ? `最近世界调度=${CONTINUITY_TICK_LABELS[normalized.lastTick.action] || normalized.lastTick.action}；对象=${normalized.lastTick.threadId || '全局'}；依据=${tickReason}`
@@ -2906,7 +2906,7 @@ export function buildContinuityInjection(state, {
         ...visibleWorldRows,
         ...rows,
         ...aftermathRows,
-        '</Parallel_Continuity_Bridge>',
+        '</World_Continuity_Package>',
     ].join('\n');
 }
 
@@ -2991,9 +2991,8 @@ export function buildContinuityConsumerPayload(state, packet) {
     const lines = rawText.split('\n');
     if (
         lines.length < 4
-        || lines[0] !== '<Parallel_Continuity_Bridge>'
-        || lines.at(-1) !== '</Parallel_Continuity_Bridge>'
-        || lines.slice(2, -1).some((line) => line.includes('Parallel_Continuity_Bridge'))
+        || lines[0] !== '<World_Continuity_Package>'
+        || lines.at(-1) !== '</World_Continuity_Package>'
     ) return { ok: false, reason: 'legacy_projection_structure_invalid' };
 
     const expectedDirectorLine = matches[0].legacyText.split('\n')[1];

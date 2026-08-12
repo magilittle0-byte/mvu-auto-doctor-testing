@@ -35,7 +35,7 @@
 | 有完整、逐项相等 scope 且 task/checkpoint 自带相同 `scopeDigest` | 原位规范化并内容寻址读回 | 可恢复 | 仅在两阶段迁移提交和 marker 读回成功后开放 |
 | `legacy_persisted` Profile V6 | 保留档案内容和来源 | 无 action-ready 资格 | 不补造 commitId、digest 或 readback；等待正式完整档案事务 |
 | receipt 内嵌 `actionAttempt` | 提升为顶层 `actionAttempts` 历史项 | 无 settlement 资格 | 标记 `compatibilityOnly=true`、`settlementEligible=false`、`migratedFromLegacyReceipt=true`；删除内嵌副本；无效 receipt 外壳可丢弃 |
-| 旧 `targetIndex` / 宽松 target checkpoint | 只读历史 | 不可恢复 | 不补造 message/swipe/generation/branch/hash |
+| 旧 `targetIndex` / 宽松 target checkpoint | 只读历史 | 不可恢复 | 不补造 message/swipe/generation/content hash |
 | 旧 pending/retry/deferred task | 保留失败、重试和隔离原因 | 仅完整 scopeDigest 同值时可 claim | 缺证据或 mismatch 统一延后到最大 turn 并隔离 |
 | 已 committed 历史 | 原样保留 | 不重放 | 不把历史完成重新物化为行动 |
 | 规范化无法接纳的 actor/task/checkpoint/blob/receipt/未知字段 | 原始片段逐字段存入内容寻址 compatibility archive | 无 | archive 全局 `actionReady=false/settlementEligible=false/restorable=false`，重复迁移按条目摘要去重 |
@@ -61,11 +61,11 @@
 Observation gap 只有收到 `current_chat_observation_convergence` proof 才能推进 `simulatedThrough`。proof 必须：
 
 1. 从当前已接受聊天逐条重新捕获目标；
-2. 逐项匹配 `chatId/logicalIndex/messageId/swipeId/generation/generationId/generationType/branchId/contentHash`；
+2. 逐项匹配 `chatId/logicalIndex/messageId/swipeId/generation/generationId/generationType/contentHash`；
 3. 覆盖 metadata 记录的全部 sourceKey，且 latest sourceKey 一致；
 4. 自身内容摘要正确，scopeDigest 与 runtime 完全相等。
 
-缺 proof、正文变化、swipe/branch/generation 变化或覆盖不全都保持红色 gap。未收敛 WAL、任务和对应 observation 不受普通 240/600 历史容量裁剪；仅可压缩已终结历史。
+缺 proof、正文变化、swipe/generation 变化或覆盖不全都保持红色 gap。旧 branch 字段只读忽略，不能授予恢复资格。未收敛 WAL、任务和对应 observation 不受普通 240/600 历史容量裁剪；仅可压缩已终结历史。
 
 ## 5. 所有局部写入共用迁移守卫
 
@@ -81,7 +81,7 @@ Observation gap 只有收到 `current_chat_observation_convergence` proof 才能
 | forum | `forum`、`forumCheckpoint` | 不把旧聊天/卡/世界书帖子写回新 scope |
 | injection receipt | continuity queue/batch、`worldPressure`、`actorLedger` | 未读回不宣称正文消费或人物回执成功 |
 | diagnostics / operation log | `operationLog`、`modelCallStats`、`modelDiagnostics`、custom-instruction diagnostics | 诊断写也不享有迁移旁路 |
-| legacy phase6 runtime adapter | `phase6Runtime` | 只经普通守卫写；不拥有 raw 迁移能力 |
+| legacy phase6 runtime adapter | 仅历史兼容读取 | 无 | 全局 barrier/director 根入口已退役，加载与聊天切换零迁移写 |
 | manual clear / profile edit | 对应 continuity/forum/actor 字段 | 保存失败不向界面返回已清空/已编辑 |
 
 底层 `enqueueChatNamespaceWrite()` 在 `index.js` 只剩 3 个源码引用：函数定义、受守卫的普通写入口、以及 `runActorSovereigntyMigrationPersisted()` 内部闭包。raw 闭包要求函数局部且不可导出的 `Symbol('actor-sovereignty-migration-write')`；只有迁移 payload 和 marker 两阶段提交能够持有该 token，因此不会递归进入 guard，也不能被其他模块调用。

@@ -28,7 +28,6 @@ function sourceRef(chatId, index = 1, cardId = 'card-main') {
         generation: index,
         generationId: `generation-${index}`,
         generationType: 'normal',
-        branchId: 'branch-main',
         identityScopeId: `${chatId}|character:${cardId}`,
         scopeDigest: `scope:${chatId}|character:${cardId}`,
         hash: `hash-${chatId}-${index}`,
@@ -411,7 +410,6 @@ test('ActorId depends only on chat plus card scope and canonical name', () => {
     const secondRef = {
         ...sourceRef('chat-id', 9, 'card-a'),
         swipeId: 3,
-        branchId: 'branch-reroll',
         hash: 'hash-reroll',
     };
     const first = registerNames(emptyActorLedger('chat-id'), ['许澄'], firstRef).registration;
@@ -596,7 +594,7 @@ test('production call order is candidate upsert, copy/delete promotion, readback
     const selectorEnd = shard.indexOf('export function buildActorShardMessages', selectorStart);
     const selector = shard.slice(selectorStart, selectorEnd);
     assert.match(selector, /runRegisteredActorGate/u);
-    assert.match(selector, /actorProfileActionReadiness\(actor\)\.ready/u);
+    assert.match(selector, /actorProfileReadinessInLedger\(actorLedger, id\)\.ready/u);
     assert.match(selector, /scheduleProvided && scheduledIds\.size === 0/u);
 
     const persistStart = source.indexOf('async function persistActorRegistryForTurn');

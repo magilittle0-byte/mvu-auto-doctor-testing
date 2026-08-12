@@ -29,7 +29,6 @@ function sourceRef(chatId, generation = 1) {
         generation,
         generationId: `generation-${generation}`,
         generationType: 'normal',
-        branchId: 'branch-main',
         identityScopeId: `${chatId}|character:card-main`,
         scopeDigest: `scope:${chatId}|character:card-main`,
         hash: `hash-${chatId}-${generation}`,

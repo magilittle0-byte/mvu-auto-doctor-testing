@@ -109,7 +109,6 @@ export function makeActionReadyActor(rawActor, { turn = 1, sourceRef: suppliedSo
         generation: turn,
         generationId: `action-ready-generation-${turn}`,
         generationType: 'normal',
-        branchId: 'branch-main',
         identityScopeId: `${chatId}|character:fixture`,
         scopeDigest: `${chatId}|scope:fixture`,
         hash: `action-ready-hash-${turn}`,

@@ -1,6 +1,27 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
+
+async function loadClearLegacyNextTurnSlots(context) {
+    const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const start = source.indexOf('function clearLegacyNextTurnSlots() {');
+    const end = source.indexOf('\nfunction setNextTurnConsumerFallback', start);
+    assert.ok(start >= 0 && end > start);
+    const sandbox = {
+        getContext: () => context,
+        CONTINUITY_INJECTION_NAME: 'mvu-auto-doctor-continuity',
+        SOCIAL_INJECTION_NAME: 'mvu-auto-doctor-social-contract',
+        SERENDIPITY_INJECTION_NAME: 'mvu-auto-doctor-serendipity-license',
+        IN_CHAT_POSITION: 1,
+        IN_CHAT_DEPTH: 1,
+    };
+    vm.runInNewContext(
+        `${source.slice(start, end)}\nthis.clearLegacyNextTurnSlots = clearLegacyNextTurnSlots;`,
+        sandbox,
+    );
+    return sandbox.clearLegacyNextTurnSlots;
+}
 
 test('P4 production uses one actor proposal batch, no per-actor or repair model path, before P3 world batch', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
@@ -18,7 +39,12 @@ test('P4 production uses one actor proposal batch, no per-actor or repair model 
     assert.doesNotMatch(collect, /repairWorker\s*:/u);
     assert.doesNotMatch(collect, /buildActorShardRepairMessages/u);
     assert.match(collect, /status:\s*result\.status/u);
-    assert.match(collect, /actorShardLeaseManager\.fail\(leaseId,\s*result\.status\)/u);
+    assert.match(collect, /const current = \(\) =>/u);
+    assert.match(
+        collect,
+        /actorActionTargetMatches\(\s*target,\s*actorShardLeaseFingerprint\(fresh\),?\s*\)/u,
+    );
+    assert.doesNotMatch(collect, /TaskLeaseManager|actorShardLeaseManager|leaseId|branchId/u);
     assert.doesNotMatch(collect, /status:\s*'completed',\s*\n\s*candidates:/u);
 
     const persist = source.indexOf('await persistActorActionAttemptsForTurn', end);
@@ -49,7 +75,7 @@ test('P4 has one strict next-turn consumer: verified world package plus ticket p
     assert.match(consumer, /providerId: 'sillytavern-fallback'/u);
     assert.doesNotMatch(
         consumer,
-        /runSovereigntyAgentPool|Parallel_Continuity_Bridge|CONTINUITY_INJECTION_NAME|SOCIAL_INJECTION_NAME|SERENDIPITY_INJECTION_NAME/u,
+        /runSovereigntyAgentPool|CONTINUITY_INJECTION_NAME|SOCIAL_INJECTION_NAME|SERENDIPITY_INJECTION_NAME/u,
     );
 
     const providerRegistration = source.slice(
@@ -59,6 +85,31 @@ test('P4 has one strict next-turn consumer: verified world package plus ticket p
     assert.match(providerRegistration, /typeof provider\?\.precompose !== 'function'/u);
     assert.match(providerRegistration, /typeof provider\?\.cleanup !== 'function'/u);
     assert.doesNotMatch(providerRegistration, /window\.|Stitches|TavernDB|combined/u);
+});
+
+test('P4 clears exactly the three retired host slots before the sole consumer is placed', async () => {
+    const calls = [];
+    const clearLegacyNextTurnSlots = await loadClearLegacyNextTurnSlots({
+        setExtensionPrompt(...args) {
+            calls.push(args);
+        },
+    });
+    assert.equal(clearLegacyNextTurnSlots(), true);
+    assert.deepEqual(
+        calls.map(([key]) => key),
+        [
+            'mvu-auto-doctor-continuity',
+            'mvu-auto-doctor-social-contract',
+            'mvu-auto-doctor-serendipity-license',
+        ],
+    );
+    for (const [, content, position, depth, isChatDisabled, order] of calls) {
+        assert.equal(content, '');
+        assert.equal(position, 1);
+        assert.equal(depth, 1);
+        assert.equal(isChatDisabled, false);
+        assert.equal(order, 0);
+    }
 });
 
 test('P4 cleanup failure fails closed and never restarts a producer or legacy bridge', async () => {
@@ -85,7 +136,7 @@ test('P4 cleanup failure fails closed and never restarts a producer or legacy br
     );
     assert.doesNotMatch(
         consumer,
-        /collectActorShardProposals|planActorAttemptRecovery|runSovereigntyAgentPool|applyContinuityInjection|Parallel_Continuity_Bridge/u,
+        /collectActorShardProposals|planActorAttemptRecovery|runSovereigntyAgentPool|applyContinuityInjection/u,
     );
 });
 

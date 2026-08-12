@@ -16,7 +16,6 @@ export interface SerendipityTarget {
     swipeId: number;
     generation: number;
     generationId: string;
-    branchId: string;
     contentFingerprint: string;
 }
 

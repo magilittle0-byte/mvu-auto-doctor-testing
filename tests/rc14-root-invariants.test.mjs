@@ -133,7 +133,6 @@ function source(index) {
         generation: index,
         generationId: `generation-${index}`,
         generationType: 'normal',
-        branchId: 'branch-main',
         contentHash: `hash-${index}`,
         scopeDigest: 'rc14-root-invariants-scope',
     };
@@ -150,7 +149,6 @@ function identitySourceRef(chatId, generation = 5, cardId = 'card-main') {
         generationSerial: generation,
         generationId: `identity-generation-${generation}`,
         generationType: 'normal',
-        branchId: 'identity-branch-main',
         identityScopeId: `${chatId}|character:${cardId}`,
         scopeDigest: `scope:${chatId}|character:${cardId}`,
         hash: `identity-hash-${chatId}-${generation}`,
