@@ -4742,8 +4742,15 @@ function currentFinalAssistant(context) {
 }
 
 function generationCandidateAllowed(type, params, dryRun) {
-    const missingType = type == null || (typeof type === 'string' && !type.trim());
-    const generationType = typeof type === 'string' ? type.trim().toLowerCase() : '';
+    // SillyTavern omits the lifecycle type for an ordinary first generation.
+    // Only that absent value defaults to normal. An explicit null, malformed
+    // value, empty string, or unknown type stays fail-closed.
+    const missingType = type === null || (typeof type === 'string' && !type.trim());
+    const generationType = type === undefined
+        ? 'normal'
+        : typeof type === 'string'
+            ? type.trim().toLowerCase()
+            : '';
     const allowedTypes = new Set(['normal', 'regenerate', 'swipe', 'continue']);
     const quietPrompt = params?.quiet_prompt;
     const hasQuietPrompt = typeof quietPrompt === 'string'
@@ -4753,7 +4760,7 @@ function generationCandidateAllowed(type, params, dryRun) {
             : Boolean(quietPrompt);
     let rejectionKind = '';
     if (missingType) rejectionKind = 'missing_type';
-    else if (typeof type !== 'string' || !allowedTypes.has(generationType)) {
+    else if (type !== undefined && (typeof type !== 'string' || !allowedTypes.has(generationType))) {
         rejectionKind = 'unknown_type';
     } else if (dryRun === true || params?.dryRun === true || params?.dry_run === true) {
         rejectionKind = 'dry_run';

@@ -66,9 +66,10 @@ test('R9 generation candidate rejection kinds remain precise and fail-closed', (
     const candidate = loadGenerationCandidateAllowed();
     const cases = [
         [null, {}, false, 'missing_type'],
-        [undefined, {}, false, 'missing_type'],
         ['   ', {}, false, 'missing_type'],
         [{ type: 'normal' }, {}, false, 'unknown_type'],
+        [[], {}, false, 'unknown_type'],
+        [false, {}, false, 'unknown_type'],
         ['tool', {}, false, 'unknown_type'],
         ['normal', {}, true, 'dry_run'],
         ['normal', { quiet_prompt: 'silent' }, false, 'quiet_prompt'],
@@ -84,6 +85,74 @@ test('R9 generation candidate rejection kinds remain precise and fail-closed', (
         assert.equal(result.allowed, true, type);
         assert.equal(result.rejectionKind, '');
         assert.equal(result.generationType, type);
+    }
+    const missing = candidate(undefined, {}, false);
+    assert.equal(missing.allowed, true);
+    assert.equal(missing.rejectionKind, '');
+    assert.equal(missing.generationType, 'normal');
+});
+
+test('R9 explicit invalid lifecycle types stay diagnostic-only at the event gate', async () => {
+    const candidate = sourceSection(
+        'function generationCandidateAllowed(type, params, dryRun)',
+        'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
+    );
+    const rejection = sourceSection(
+        'function recordAcceptedFinalRejection(generation, reason)',
+        'async function moduleTargetForAcceptedFinal(envelope)',
+    );
+    const bind = sourceSection(
+        'function bindEvents()',
+        'function dualSurfaceRollbackSummary()',
+    );
+    const cases = [
+        [null, {}, false, 'missing_type'],
+        ['   ', {}, false, 'missing_type'],
+        [{ type: 'normal' }, {}, false, 'unknown_type'],
+        ['tool', {}, false, 'unknown_type'],
+        ['normal', {}, true, 'dry_run'],
+        ['normal', { quiet_prompt: 'silent' }, false, 'quiet_prompt'],
+        ['normal', { is_impersonate: true }, false, 'impersonate'],
+    ];
+    for (const [type, params, dryRun, reason] of cases) {
+        const state = { callbacks: new Map(), p4: 0, model: 0, identity: 0, tasks: 0, busy: 0, statuses: 0 };
+        const sandbox = {
+            currentGenerationEpoch: 0, operationEpoch: 0, generationSerial: 0,
+            activeGenerationSession: null, activeNextTurnConsumer: null,
+            lastGeneration: { id: '', type: 'normal', dryRun: false },
+            pendingAcceptedFinalTimer: null, lastInjectionInspection: {}, continuationIdentityHint: null,
+            getContext: () => ({
+                chatId: 'chat-a', chat: [],
+                eventTypes: { GENERATION_STARTED: 'generation_started' },
+                eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
+            }),
+            acceptedFinalSessionIsCurrent: (generation) => generation === sandbox.activeGenerationSession,
+            acceptedFinalSnapshot: () => ({ contentFingerprint: 'before' }),
+            invalidateOperations: () => { sandbox.operationEpoch += 1; },
+            resetCurrentModelCallStats: () => { state.model += 1; },
+            precomposeNextTurnConsumer: async () => { state.p4 += 1; },
+            ensureAcceptedFinalTargetIdentity: () => { state.identity += 1; },
+            enqueueActorProfiles: () => { state.tasks += 1; },
+            enqueueContinuity: () => { state.tasks += 1; },
+            setStatus: () => { state.statuses += 1; },
+            setBusy: () => { state.busy += 1; },
+            setTimeout: () => 1, clearTimeout: () => undefined,
+            Date: { now: () => 7 }, Math,
+        };
+        vm.runInNewContext(
+            `${lifecycleVmStubs}\n${candidate}\n${rejection}\n${bind}\nthis.bindEvents = bindEvents;`,
+            sandbox,
+        );
+        sandbox.bindEvents();
+        await state.callbacks.get('generation_started')(type, params, dryRun);
+        assert.equal(sandbox.lastGeneration.acceptedFinalEligible, false, reason);
+        assert.equal(sandbox.lastGeneration.rejectionKind, reason, reason);
+        assert.equal(state.p4, 0, reason);
+        assert.equal(state.model, 0, reason);
+        assert.equal(state.identity, 0, reason);
+        assert.equal(state.tasks, 0, reason);
+        assert.equal(state.busy, 0, reason);
+        assert.equal(state.statuses, 1, reason);
     }
 });
 
@@ -615,7 +684,13 @@ test('a cleanup-failed P4 lease blocks placement only', async () => {
     assert.equal(runtime.state.injectionInspection.status, 'blocked');
 });
 
-test('R7 cleanup_failed blocks only P4 placement; ENDED still performs real accepted-final dispatch', async () => {
+async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandidate }) {
+    const candidate = useProductionCandidate
+        ? sourceSection(
+            'function generationCandidateAllowed(type, params, dryRun)',
+            'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
+        )
+        : '';
     const identity = sourceSection(
         'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
         'function acceptedFinalEnvelopeMatchesContext(context, envelope, session)',
@@ -682,7 +757,9 @@ test('R7 cleanup_failed blocks only P4 placement; ENDED still performs real acce
             continuity: { nextTurnInjection: { consumerLease: { state: 'cleanup_failed' } } },
         }),
         writeChatNamespace: async () => { state.namespaceWrites += 1; return true; },
-        generationCandidateAllowed: () => ({ allowed: true, generationType: 'regenerate' }),
+        generationCandidateAllowed: useProductionCandidate
+            ? undefined
+            : () => ({ allowed: true, generationType: 'regenerate' }),
         acceptedFinalSnapshot: () => ({ index: 0, swipeId: 1, contentFingerprint: 'before' }),
         invalidateOperations: () => { sandbox.operationEpoch += 1; },
         resetCurrentModelCallStats: () => undefined,
@@ -736,17 +813,17 @@ test('R7 cleanup_failed blocks only P4 placement; ENDED still performs real acce
         Math,
     };
     vm.runInNewContext(
-        `${lifecycleVmStubs}\n${identity}\n${support}\n${dispatch}\n${accept}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents;`,
+        `${lifecycleVmStubs}\n${candidate}\n${identity}\n${support}\n${dispatch}\n${accept}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents;`,
         sandbox,
     );
     sandbox.bindEvents();
 
-    await state.callbacks.get('generation_started')('regenerate', {}, false);
+    await state.callbacks.get('generation_started')(type, {}, false);
     const session = sandbox.lastGeneration;
     assert.equal(session.chatId, 'chat-a');
-    assert.equal(session.type, 'regenerate');
-    assert.equal(session.operationEpoch, 13);
-    assert.equal(sandbox.operationEpoch, 13);
+    assert.equal(session.type, useProductionCandidate ? 'normal' : 'regenerate');
+    assert.equal(session.operationEpoch, useProductionCandidate ? 12 : 13);
+    assert.equal(sandbox.operationEpoch, useProductionCandidate ? 12 : 13);
     assert.equal(session.start.contentFingerprint, 'before');
     assert.equal(sandbox.activeGenerationSession, session);
     assert.equal(session.p4PlacementScopeDigest, undefined);
@@ -776,6 +853,14 @@ test('R7 cleanup_failed blocks only P4 placement; ENDED still performs real acce
             { chatId: 'chat-a', cardId: 'character:card-a', runtimeVersion: 'rc14' },
         );
     }
+}
+
+test('R7 cleanup_failed blocks only P4 placement; ENDED still performs real accepted-final dispatch', async () => {
+    await runCleanupFailedAcceptedFinalLifecycle({ type: 'regenerate', useProductionCandidate: false });
+});
+
+test('R9 undefined lifecycle type defaults normal and still performs real accepted-final dispatch', async () => {
+    await runCleanupFailedAcceptedFinalLifecycle({ type: undefined, useProductionCandidate: true });
 });
 
 test('R8 keeps the P0 session when P4 precompose throws', async () => {
