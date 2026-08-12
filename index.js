@@ -667,6 +667,11 @@ function fixedGenerationLifecycleReason(value) {
         'epoch',
         'stopped',
         'type',
+        'missing_type',
+        'unknown_type',
+        'dry_run',
+        'quiet_prompt',
+        'impersonate',
         'chat',
         'generating',
         'no_final_ai',
@@ -4737,6 +4742,7 @@ function currentFinalAssistant(context) {
 }
 
 function generationCandidateAllowed(type, params, dryRun) {
+    const missingType = type == null || (typeof type === 'string' && !type.trim());
     const generationType = typeof type === 'string' ? type.trim().toLowerCase() : '';
     const allowedTypes = new Set(['normal', 'regenerate', 'swipe', 'continue']);
     const quietPrompt = params?.quiet_prompt;
@@ -4745,18 +4751,18 @@ function generationCandidateAllowed(type, params, dryRun) {
         : Array.isArray(quietPrompt)
             ? quietPrompt.length > 0
             : Boolean(quietPrompt);
-    return {
-        allowed: (
-            allowedTypes.has(generationType)
-            && dryRun !== true
-            && params?.dryRun !== true
-            && params?.dry_run !== true
-            && !hasQuietPrompt
-            && params?.impersonate !== true
-            && params?.is_impersonate !== true
-        ),
-        generationType,
-    };
+    let rejectionKind = '';
+    if (missingType) rejectionKind = 'missing_type';
+    else if (typeof type !== 'string' || !allowedTypes.has(generationType)) {
+        rejectionKind = 'unknown_type';
+    } else if (dryRun === true || params?.dryRun === true || params?.dry_run === true) {
+        rejectionKind = 'dry_run';
+    } else if (hasQuietPrompt) {
+        rejectionKind = 'quiet_prompt';
+    } else if (params?.impersonate === true || params?.is_impersonate === true) {
+        rejectionKind = 'impersonate';
+    }
+    return { allowed: !rejectionKind, generationType, rejectionKind };
 }
 
 function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {
@@ -4902,10 +4908,20 @@ async function acceptedFinalEnvelopeScopeIsCurrent(context, envelope) {
 
 function recordAcceptedFinalRejection(generation, reason) {
     if (!acceptedFinalSessionIsCurrent(generation)) return;
+    const rejectionKind = fixedGenerationLifecycleReason(reason);
     // Rejection is an ephemeral entry-gate diagnostic.  It must not create an
     // operation-log timer or write a chat namespace while no module ran.
-    setStatus(`最终正文未进入医生：${String(reason || 'rejected')}`, '', {
+    setStatus(`最终正文未进入医生：${rejectionKind}`, '', {
         record: false,
+    });
+    recordGenerationLifecycleTrace('rejected', {
+        chatId: generation.chatId,
+        epoch: generation.epoch,
+        operation: generation.operationEpoch,
+        type: generation.type,
+        allowed: false,
+        serial: generation.serial,
+        reason: rejectionKind,
     });
 }
 
@@ -5005,7 +5021,9 @@ async function acceptFinalGeneration(generation) {
     const epoch = generation.epoch;
     if (!epoch || epoch !== currentGenerationEpoch) return reject('epoch');
     if (generation.stopped) return reject('stopped');
-    if (generation.acceptedFinalEligible !== true) return reject('type');
+    if (generation.acceptedFinalEligible !== true) {
+        return reject(generation.rejectionKind || 'unknown_type');
+    }
     const context = getContext();
     if (!context || String(context.chatId || '') !== generation.chatId) {
         return reject('chat');
@@ -19142,6 +19160,7 @@ function bindEvents() {
                 operation: operationEpoch,
                 type: generationType,
                 allowed: candidate.allowed,
+                reason: candidate.rejectionKind,
                 oldOperation: oldOperationEpoch,
                 newOperation: operationEpoch,
             });
@@ -19158,6 +19177,7 @@ function bindEvents() {
                 start: baseline,
                 stopped: false,
                 acceptedFinalEligible: candidate.allowed,
+                rejectionKind: candidate.rejectionKind,
                 observedNestedStart: false,
                 startedCount: 1,
             };
@@ -19179,7 +19199,8 @@ function bindEvents() {
                 baselinePresent: !!baseline?.contentFingerprint,
             });
             if (!candidate.allowed) {
-                recordAcceptedFinalRejection(session, 'type');
+                session.acceptedFinalOutcome = candidate.rejectionKind;
+                recordAcceptedFinalRejection(session, candidate.rejectionKind);
                 return;
             }
             lastInjectionInspection = {

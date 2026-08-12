@@ -52,6 +52,139 @@ function loadAcceptedFinalScopeDecision() {
     return sandbox.acceptedFinalScopeDecision;
 }
 
+function loadGenerationCandidateAllowed() {
+    const code = sourceSection(
+        'function generationCandidateAllowed(type, params, dryRun)',
+        'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
+    );
+    const sandbox = {};
+    vm.runInNewContext(`${code}\nthis.generationCandidateAllowed = generationCandidateAllowed;`, sandbox);
+    return sandbox.generationCandidateAllowed;
+}
+
+test('R9 generation candidate rejection kinds remain precise and fail-closed', () => {
+    const candidate = loadGenerationCandidateAllowed();
+    const cases = [
+        [null, {}, false, 'missing_type'],
+        [undefined, {}, false, 'missing_type'],
+        ['   ', {}, false, 'missing_type'],
+        [{ type: 'normal' }, {}, false, 'unknown_type'],
+        ['tool', {}, false, 'unknown_type'],
+        ['normal', {}, true, 'dry_run'],
+        ['normal', { quiet_prompt: 'silent' }, false, 'quiet_prompt'],
+        ['normal', { is_impersonate: true }, false, 'impersonate'],
+    ];
+    for (const [type, params, dryRun, rejectionKind] of cases) {
+        const result = candidate(type, params, dryRun);
+        assert.equal(result.allowed, false, rejectionKind);
+        assert.equal(result.rejectionKind, rejectionKind);
+    }
+    for (const type of ['normal', 'regenerate', 'swipe', 'continue']) {
+        const result = candidate(type, {}, false);
+        assert.equal(result.allowed, true, type);
+        assert.equal(result.rejectionKind, '');
+        assert.equal(result.generationType, type);
+    }
+});
+
+test('R9 default opening keeps Doctor inert and rejection traces stay diagnostic-only', () => {
+    const bind = sourceSection(
+        'function bindEvents()',
+        'function dualSurfaceRollbackSummary()',
+    );
+    const trace = sourceSection(
+        'function recordGenerationLifecycleTrace(code, {',
+        'function generationLifecycleTraceDiagnosticProjection(context = getContext())',
+    );
+    const rejection = sourceSection(
+        'function recordAcceptedFinalRejection(generation, reason)',
+        'async function moduleTargetForAcceptedFinal(envelope)',
+    );
+    assert.match(bind, /GENERATION_STARTED/u);
+    assert.doesNotMatch(bind, /MESSAGE_RECEIVED|MESSAGE_SWIPED/u);
+    assert.match(rejection, /recordGenerationLifecycleTrace\('rejected'/u);
+    assert.match(rejection, /record:\s*false/u);
+    assert.doesNotMatch(
+        `${trace}\n${rejection}`,
+        /writeChatNamespace|recordOperation|scheduleOperationLogSave|\.mes|secret|credential/iu,
+    );
+});
+
+test('R9 rejection status and trace expose the exact fixed rejection kind', () => {
+    const rejection = sourceSection(
+        'function recordAcceptedFinalRejection(generation, reason)',
+        'async function moduleTargetForAcceptedFinal(envelope)',
+    );
+    const state = { statuses: [], traces: [], writes: 0, operations: 0 };
+    const generation = {
+        chatId: 'chat-a', epoch: 3, operationEpoch: 5, serial: 7, type: '', id: 'generation-a',
+    };
+    const sandbox = {
+        acceptedFinalSessionIsCurrent: (value) => value === generation,
+        fixedGenerationLifecycleReason: (value) => value,
+        setStatus: (...args) => state.statuses.push(args),
+        recordGenerationLifecycleTrace: (...args) => state.traces.push(args),
+        writeChatNamespace: () => { state.writes += 1; },
+        recordOperation: () => { state.operations += 1; },
+    };
+    vm.runInNewContext(`${rejection}\nthis.record = recordAcceptedFinalRejection;`, sandbox);
+    sandbox.record(generation, 'missing_type');
+    assert.equal(state.statuses.length, 1);
+    assert.match(state.statuses[0][0], /missing_type$/u);
+    assert.deepEqual({ ...state.statuses[0][2] }, { record: false });
+    assert.equal(state.traces.length, 1);
+    assert.equal(state.traces[0][0], 'rejected');
+    assert.equal(state.traces[0][1].reason, 'missing_type');
+    assert.equal(state.writes, 0);
+    assert.equal(state.operations, 0);
+});
+
+test('R9 default opening without a generation lifecycle does zero Doctor work', () => {
+    const bind = sourceSection(
+        'function bindEvents()',
+        'function dualSurfaceRollbackSummary()',
+    );
+    const state = {
+        callbacks: new Map(), p4: 0, accepted: 0, writes: 0, operations: 0, statuses: 0, modelStats: 0,
+    };
+    const sandbox = {
+        activeGenerationSession: null,
+        activeNextTurnConsumer: null,
+        currentGenerationEpoch: 0,
+        operationEpoch: 0,
+        generationSerial: 0,
+        lastGeneration: { id: '', type: 'normal', dryRun: false },
+        pendingAcceptedFinalTimer: null,
+        pendingChatSaveTimer: null,
+        pendingOperationLogSaveTimer: null,
+        getContext: () => ({
+            chatId: 'new-chat',
+            eventTypes: {
+                GENERATION_STARTED: 'generation_started',
+                GENERATION_STOPPED: 'generation_stopped',
+                GENERATION_ENDED: 'generation_ended',
+                CHAT_CHANGED: 'chat_changed',
+            },
+            eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
+        }),
+        precomposeNextTurnConsumer: async () => { state.p4 += 1; },
+        acceptFinalGeneration: async () => { state.accepted += 1; },
+        writeChatNamespace: async () => { state.writes += 1; },
+        recordOperation: () => { state.operations += 1; },
+        setStatus: () => { state.statuses += 1; },
+        resetCurrentModelCallStats: () => { state.modelStats += 1; },
+    };
+    vm.runInNewContext(`${lifecycleVmStubs}\n${bind}\nthis.bindEvents = bindEvents;`, sandbox);
+    sandbox.bindEvents();
+    assert.equal(sandbox.activeGenerationSession, null);
+    assert.equal(state.p4, 0);
+    assert.equal(state.accepted, 0);
+    assert.equal(state.writes, 0);
+    assert.equal(state.operations, 0);
+    assert.equal(state.statuses, 0);
+    assert.equal(state.modelStats, 0);
+});
+
 function loadAcceptedFinalRuntimeHarness({
     placementScope = '',
     scopeChangesAfterCommit = false,
