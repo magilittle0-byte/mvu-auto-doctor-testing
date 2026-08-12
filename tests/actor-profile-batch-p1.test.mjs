@@ -1261,6 +1261,205 @@ test('identity module or format failure cannot be erased by retry empty', async 
     )));
 });
 
+test('protected identity context drives a semantic retry while another newcomer completes pending and final readback', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const protectedName = '\u73a9\u5bb6\u7532';
+    const validName = '\u5c91\u9065';
+    const excludedActorNames = [protectedName];
+    const acceptedNarrative = `${protectedName}\u7ad9\u5728\u95e8\u8fb9\uff0c${validName}\u968f\u540e\u8d70\u8fdb\u5927\u5385\u5e76\u6e05\u695a\u62a5\u4e0a\u59d3\u540d\u3002`;
+    const source = narrativeDiscoverySourceRef(fixture.ref);
+    const calls = [];
+    const moduleText = (key, name) => `${name}${key}\uff1a${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u4eba\u7269\u6863\u6848\u5185\u5bb9\uff0c\u5305\u542b\u7a33\u5b9a\u4e8b\u5b9e\u3001\u73b0\u5b9e\u9650\u5236\u3001\u9009\u62e9\u4f9d\u636e\u4e0e\u540e\u7eed\u53d1\u5c55\u7a7a\u95f4\u3002'.repeat(4)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: source,
+            registeredActorIndex: [],
+            excludedActorNames: [protectedName, protectedName],
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative, {
+            excludedActorNames,
+        }),
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt, messages }) => {
+            calls.push({ groupKey, attempt, candidates: structuredClone(candidates), messages });
+            if (groupKey === 'identity_bootstrap') {
+                const name = attempt === 0 ? protectedName : validName;
+                return [
+                    `<profile-target actor="new" name="${name}">`,
+                    `<module key="person">${moduleText('person', name)}</module>`,
+                    '</profile-target>',
+                ].join('\n');
+            }
+            assert.deepEqual(candidates.map((candidate) => candidate.actorRef.name), [validName]);
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+        resolveDiscoveries: async ({ discoveries }) => {
+            assert.deepEqual(discoveries.map((entry) => entry.candidateRef.name), [validName]);
+            const discovered = discoverActorsFromTurnSources(fixture.ledger, {
+                acceptedContent: acceptedNarrative,
+                excludedActorNames,
+                sourceRef: source,
+                turn: fixture.ref.generation,
+                modelProfileDiscoveries: structuredClone(discoveries),
+            });
+            const upsert = runActorRegistryUpsert(discovered.ledger, discovered.candidates, {
+                chatId: fixture.ledger.chatId,
+                identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref,
+                turn: fixture.ref.generation,
+                excludedActorNames,
+            });
+            const registration = promoteActorCandidatesToRegistry(
+                upsert.ledger,
+                discovered.candidates,
+                {
+                    chatId: fixture.ledger.chatId,
+                    identityScopeId: fixture.ref.identityScopeId,
+                    scopeDigest: fixture.ref.scopeDigest,
+                    allowScopeDigestFill: true,
+                    expectedSourceRef: fixture.ref,
+                    turn: fixture.ref.generation,
+                    excludedActorNames,
+                },
+            );
+            const prepared = prepareActorLedgerProfilesV6(registration.ledger, {
+                mode: 'full', turn: fixture.ref.generation,
+            }).ledger;
+            const promotedIds = registration.promoted.map((entry) => entry.actorRef.actorId);
+            const candidates = selectActorProfileCompletionCandidates(prepared, {
+                initialActorIds: promotedIds,
+                maintenanceMaxActors: 0,
+                turn: fixture.ref.generation,
+            });
+            return {
+                ok: true,
+                ledger: registration.ledger,
+                candidates,
+                entries: registration.promoted.map((promotion) => ({
+                    candidateId: promotion.candidateId,
+                    actorRef: {
+                        actorId: promotion.actorRef.actorId,
+                        name: promotion.actorRef.displayName,
+                    },
+                    candidate: discoveries.find((entry) => (
+                        entry.candidateRef.name === promotion.actorRef.displayName
+                    )).candidate,
+                    repairs: [],
+                })),
+                failures: [],
+                rejected: [],
+                snapshot: { fieldRevision: 0 },
+                registry: registration,
+            };
+        },
+    });
+    const identityCalls = calls.filter((entry) => entry.groupKey === 'identity_bootstrap');
+    assert.equal(identityCalls.length, 2);
+    const firstUserPrompt = identityCalls[0].messages.find((entry) => entry.role === 'user').content;
+    assert.equal((firstUserPrompt.match(/\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09/g) || []).length, 1);
+    assert.match(firstUserPrompt, /\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a\["\u73a9\u5bb6\u7532"\]/u);
+    const retrySystemPrompt = identityCalls[1].messages.find((entry) => entry.role === 'system').content;
+    assert.match(retrySystemPrompt, /actor_candidate\.identity_excluded/u);
+    assert.match(retrySystemPrompt, /\u5220\u9664\u8be5\u53d7\u4fdd\u62a4\u8eab\u4efd\u5019\u9009/u);
+    assert.match(retrySystemPrompt, /\u65e0\u4eba\u7269\u6863\u6848/u);
+    assert.doesNotMatch(retrySystemPrompt, new RegExp(protectedName, 'u'));
+    for (const call of calls.filter((entry) => entry.groupKey !== 'identity_bootstrap')) {
+        const prompt = call.messages.map((entry) => entry.content).join('\n');
+        assert.doesNotMatch(prompt, /\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09/u);
+    }
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.readbackVerified, true);
+    assert.equal(run.saveCount, 2);
+    assert.ok(run.persistencePayloads[0].ledger.actors[0]?.pendingProfile);
+    assert.equal(run.persistencePayloads[1].ledger.actors[0]?.pendingProfile, null);
+    assert.equal(run.persistencePayloads[1].ledger.actors[0]?.name, validName);
+    assert.equal(actorProfileReadyForAction(run.persistencePayloads[1].ledger.actors[0]), true);
+});
+
+test('identity retry feedback replaces an untrusted preflight reason with a bounded local code', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const name = '\u5c91\u9065';
+    const acceptedNarrative = `${name}\u8d70\u8fdb\u5927\u5385\u5e76\u62a5\u4e0a\u59d3\u540d\u3002`;
+    const secretReason = 'private transport detail must not return to model';
+    let retryPrompt = '';
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+        preflightDiscoveries: async () => ({
+            ok: false,
+            failures: [{ reason: secretReason }],
+            validCandidateCount: 0,
+            allDiscoveriesDeterministicallyInvalid: false,
+        }),
+        requestBatch: ({ attempt, groupKey, messages }) => {
+            if (groupKey === 'identity_bootstrap' && attempt === 1) {
+                retryPrompt = messages.map((entry) => entry.content).join('\n');
+            }
+            return [
+                `<profile-target actor="new" name="${name}">`,
+                `<module key="person">${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u4eba\u7269\u8eab\u4efd\u6863\u6848\u5185\u5bb9\uff0c\u5305\u542b\u660e\u786e\u4e8b\u5b9e\u3001\u73b0\u5b9e\u9650\u5236\u4e0e\u540e\u7eed\u884c\u52a8\u4f9d\u636e\u3002'.repeat(4)}</module>`,
+                '</profile-target>',
+            ].join('\n');
+        },
+    });
+    assert.doesNotMatch(retryPrompt, new RegExp(secretReason, 'u'));
+    assert.match(retryPrompt, /actor_profile\.module_invalid/u);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
+});
+
+test('all seven controlled identity failures receive bounded executable retry semantics', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const name = '\u5c91\u9065';
+    const acceptedNarrative = `${name}\u8d70\u8fdb\u5927\u5385\u5e76\u62a5\u4e0a\u59d3\u540d\u3002`;
+    const codes = [
+        'actor_candidate.identity_missing_or_short',
+        'actor_candidate.identity_system',
+        'actor_candidate.identity_group',
+        'actor_candidate.identity_excluded',
+        'actor_candidate.identity_internal_id',
+        'actor_candidate.identity_registry_conflict',
+        'actor_candidate.identity_quarantined',
+    ];
+    for (const code of codes) {
+        let retryPrompt = '';
+        const run = await runBatch({ ...fixture, candidates: [] }, {
+            moduleProtocol: true,
+            allowDiscovery: true,
+            discoveryContext: { acceptedNarrative, completionMode: 'full' },
+            preflightDiscoveries: async () => ({
+                ok: false,
+                failures: [{ reason: code }],
+                validCandidateCount: 0,
+                allDiscoveriesDeterministicallyInvalid: false,
+            }),
+            requestBatch: ({ attempt, messages }) => {
+                if (attempt === 1) retryPrompt = messages.map((entry) => entry.content).join('\n');
+                return [
+                    `<profile-target actor="new" name="${name}">`,
+                    `<module key="person">${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u4eba\u7269\u8eab\u4efd\u6863\u6848\u5185\u5bb9\uff0c\u5305\u542b\u660e\u786e\u4e8b\u5b9e\u3001\u73b0\u5b9e\u9650\u5236\u4e0e\u540e\u7eed\u884c\u52a8\u4f9d\u636e\u3002'.repeat(4)}</module>`,
+                    '</profile-target>',
+                ].join('\n');
+            },
+        });
+        assert.match(retryPrompt, new RegExp(code.replaceAll('.', '\\.').replaceAll('-', '\\-'), 'u'), code);
+        assert.match(retryPrompt, /\u5220\u9664/u, code);
+        assert.match(retryPrompt, /\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba/u, code);
+        assert.match(retryPrompt, /\u65e0\u4eba\u7269\u6863\u6848/u, code);
+        assert.equal(run.saveCount, 0, code);
+    }
+});
+
 test('module protocol sorts reversed discoveries by accepted first offset before provisional and final ticket binding', async () => {
     const fixture = prepareRegisteredBatch(0);
     const names = ['\u7532\u660e', '\u4e59\u5b81'];
@@ -2221,6 +2420,9 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /scopeDigest: captured\.scopeDigest/u);
     assert.match(profileFunction, /const discoverySourceRef = \{[\s\S]*?logicalIndex: captured\.index,[\s\S]*?generationSerial: captured\.generationSerial,[\s\S]*?contentHash: captured\.contentFingerprint \|\| captured\.fingerprint,[\s\S]*?contentFingerprint: captured\.contentFingerprint \|\| captured\.fingerprint,/u);
     assert.match(profileFunction, /discoveryContext: \{[\s\S]*?sourceRef: discoverySourceRef,/u);
+    assert.match(entryFunction, /const excludedActorNames = currentPlayerActorNames\(context\)/u);
+    assert.match(entryFunction, /classifyActorRegistryTargetName\([\s\S]*?entry\?\.candidateRef\?\.name,[\s\S]*?excludedActorNames,/u);
+    assert.match(entryFunction, /discoveryContext: \{[\s\S]*?excludedActorNames: deepClone\(excludedActorNames\),/u);
     const diagnosticProjection = source.slice(
         source.indexOf('const narrativeValidationDiagnostic'),
         source.indexOf('const quarantined'),

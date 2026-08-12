@@ -65,6 +65,9 @@ test('profile recovery uses the existing namespace with durable readback and sur
     );
     assert.match(ticketPersistence, /readbackAttempts:\s*3/u);
     assert.match(recoveryPersistence, /readbackAttempts:\s*3/u);
+    assert.match(recoveryPersistence, /validationDiagnostic\?\.failingGroups/u);
+    assert.match(recoveryPersistence, /validationDiagnostic\?\.missingModules/u);
+    assert.match(recoveryPersistence, /expectedReceipt: namespace\.actorProfileRetryReceipt/u);
     assert.match(ticketPersistence, /contentValidator:\s*\(persistedNamespace\) =>/u);
     assert.match(indexSource, /precondition: sourceStillCurrent/u);
     assert.match(indexSource, /contentValidator: \(persisted\) =>/u);
@@ -144,6 +147,69 @@ test('recovery receipt survives refresh only for the exact accepted target and i
     assert.equal(actorProfileRetryReceiptMatches(receipt, {
         currentSourceRef: current, ticketBatch: damaged,
     }), false);
+});
+
+test('current retry receipt seals diagnostic arrays while bounded V2 compatibility rejects missing fields', () => {
+    const current = recoverySource();
+    const receipt = createActorProfileRetryReceipt({
+        sourceRef: current,
+        failingModules: ['identity_bootstrap', 'person', 'identity_bootstrap'],
+        failureCodes: [
+            'actor_candidate.identity_excluded',
+            'actor_profile.module_content_incomplete',
+            'actor_candidate.identity_excluded',
+        ],
+        updatedAt: 456,
+    });
+    assert.equal(receipt.version, 3);
+    assert.deepEqual(receipt.failingModules, ['identity_bootstrap', 'person']);
+    assert.deepEqual(receipt.failureCodes, [
+        'actor_candidate.identity_excluded',
+        'actor_profile.module_content_incomplete',
+    ]);
+    assert.equal(actorProfileRetryReceiptMatches(receipt, {
+        currentSourceRef: current,
+        ticketBatch: null,
+        expectedReceipt: structuredClone(receipt),
+    }), true);
+    for (const field of ['failingModules', 'failureCodes']) {
+        const deleted = structuredClone(receipt);
+        delete deleted[field];
+        assert.equal(actorProfileRetryReceiptMatches(deleted, {
+            currentSourceRef: current, ticketBatch: null,
+        }), false, `${field}:deleted`);
+        const truncated = structuredClone(receipt);
+        truncated[field] = truncated[field].slice(1);
+        assert.equal(actorProfileRetryReceiptMatches(truncated, {
+            currentSourceRef: current, ticketBatch: null,
+        }), false, `${field}:truncated`);
+        const changed = structuredClone(receipt);
+        changed[field][0] = `${changed[field][0]}.tampered`;
+        assert.equal(actorProfileRetryReceiptMatches(changed, {
+            currentSourceRef: current, ticketBatch: null,
+        }), false, `${field}:changed`);
+        const reordered = structuredClone(receipt);
+        reordered[field].reverse();
+        assert.equal(actorProfileRetryReceiptMatches(reordered, {
+            currentSourceRef: current, ticketBatch: null,
+        }), false, `${field}:reordered`);
+    }
+    const oldified = structuredClone(receipt);
+    oldified.version = 2;
+    delete oldified.receiptDigest;
+    assert.equal(actorProfileRetryReceiptMatches(oldified, {
+        currentSourceRef: current, ticketBatch: null,
+    }), true, 'canonical V2 receipt remains refresh-compatible');
+    assert.equal(actorProfileRetryReceiptMatches(oldified, {
+        currentSourceRef: current, ticketBatch: null, expectedReceipt: receipt,
+    }), false, 'host oldification cannot satisfy a current V3 write readback');
+    for (const field of ['failingModules', 'failureCodes']) {
+        const incompleteV2 = structuredClone(oldified);
+        delete incompleteV2[field];
+        assert.equal(actorProfileRetryReceiptMatches(incompleteV2, {
+            currentSourceRef: current, ticketBatch: null,
+        }), false, `legacy V2 missing ${field} cannot hydrate`);
+    }
 });
 
 test('recovery target comparison is complete and receipt status fails closed', () => {
@@ -310,6 +376,10 @@ test('changing any recovery helper implementation changes the critical manifest 
         'actorProfileTicketBatchPersistenceDigest',
         'sealActorProfileTicketBatchForPersistence',
         'actorProfileTicketBatchPersistenceMatches',
+        'normalizeActorProfileRetryDiagnosticList',
+        'actorProfileRetryDiagnosticListsMatch',
+        'actorProfileRetryReceiptDigestPayload',
+        'actorProfileRetryReceiptDigest',
         'createActorProfileRetryReceipt',
         'actorProfileRetryReceiptMatches',
     ];

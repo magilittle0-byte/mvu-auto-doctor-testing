@@ -231,6 +231,10 @@ const PROFILE_MODULE_NOTES = Object.freeze({
 export function buildActorProfileModuleGroupMessages(group, {
     evidenceText = '', customPrompt = '', discoveryContext = null, validationFeedback = [],
 } = {}) {
+    // This index is supplied by the local host from the same player-identity
+    // source used by Registry preflight.  The model may consume it, but must
+    // never manufacture or extend it.
+    const excludedActorNames = cleanList(discoveryContext?.excludedActorNames, 24, 160);
     const authorityProjection = (candidate) => ({
         profileV6: candidate?.profileV6 || candidate?.previousProfile || null,
         designRolls: candidate?.designRolls || candidate?.characterCreationTicket?.designRolls || null,
@@ -269,6 +273,9 @@ export function buildActorProfileModuleGroupMessages(group, {
         group?.key === 'identity_bootstrap'
             ? '\u5fc5\u987b\u53d1\u73b0\u5df2\u63a5\u53d7\u6b63\u6587\u4e2d\u6240\u6709\u771f\u6b63\u51fa\u573a\u3001\u6709\u9010\u5b57\u660e\u786e\u59d3\u540d\u4e14\u5c1a\u672a\u767b\u8bb0\u7684\u4eba\u7269\uff1b\u4e0d\u5f97\u628a\u73a9\u5bb6\u3001\u6cdb\u79f0\u3001\u53ea\u88ab\u63d0\u53ca\u8005\u6216\u5df2\u767b\u8bb0\u522b\u540d\u5f53\u65b0\u4eba\u3002'
             : '',
+        group?.key === 'identity_bootstrap'
+            ? '\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\u4e2d\u7684\u59d3\u540d\u7edd\u5bf9\u4e0d\u5f97\u4ee5 actor="new" \u8f93\u51fa\u3002\u5220\u9664\u8fd9\u7c7b\u5019\u9009\u540e\uff0c\u7ee7\u7eed\u67e5\u627e\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u672a\u767b\u8bb0\u65b0\u4eba\u7269\uff1b\u82e5\u6ca1\u6709\u5176\u4ed6\u5408\u683c\u4eba\u7269\uff0c\u552f\u4e00\u5141\u8bb8\u7684\u8f93\u51fa\u662f\u4e25\u683c\u7684\u201c\u65e0\u4eba\u7269\u6863\u6848\u201d\uff0c\u4e0d\u5e26\u6807\u7b7e\u3001\u89e3\u91ca\u6216\u6807\u70b9\u3002'
+            : '',
         '\u65b0\u53d1\u73b0\u884c\u4e2d\u7684\u540c\u56de\u5408\u7968\u636e\u53ea\u662f\u4ea4\u6613\u5185\u7684 provisional working context\uff1a\u6743\u5a01\u8bbe\u5b9a\u3001\u5df2\u63a5\u53d7\u6b63\u6587\u548c\u5df2\u786e\u8ba4\u6863\u6848\u4f18\u5148\uff0c\u51b2\u7a81\u8f74\u5fc5\u987b\u4e22\u5f03\uff1b\u6700\u7ec8\u53ea\u6709\u672c\u5730 Registry promotion \u540e\u7684 ticket binding \u662f\u771f\u503c\u3002\u6a21\u5757\u6587\u672c\u4e0d\u5f97\u8986\u76d6 confirmed/locks/designRolls\u3002',
         guides,
         validationFeedback.length ? `\u4ec5\u4fee\u590d\u672c\u7ec4\uff1a${validationFeedback.join('; ')}` : '',
@@ -277,6 +284,9 @@ export function buildActorProfileModuleGroupMessages(group, {
         `\u5df2\u63a5\u53d7\u6b63\u6587\uff1a\n${String(discoveryContext?.acceptedNarrative || '').slice(0, 42000)}`,
         group?.key === 'identity_bootstrap'
             ? `\u5df2\u767b\u8bb0\u7d22\u5f15\uff1a${JSON.stringify(discoveryContext?.registeredActorIndex || [])}`
+            : '',
+        group?.key === 'identity_bootstrap'
+            ? `\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a${JSON.stringify(excludedActorNames)}`
             : '',
         group?.key === 'identity_bootstrap'
             ? `\u540c\u672c\u56de\u5408\u4eba\u7269\u521b\u5efa\u7968\u636e\uff1a${JSON.stringify(discoveryContext?.characterCreationTickets || [])}`
@@ -1728,6 +1738,36 @@ export function actorProfileTicketBatchPersistenceMatches(value, {
         && (!expectedDigest || value.persistenceDigest === expectedDigest);
 }
 
+function normalizeActorProfileRetryDiagnosticList(value) {
+    return cleanList(value, 8, 120);
+}
+
+function actorProfileRetryDiagnosticListsMatch(left, right) {
+    return JSON.stringify(normalizeActorProfileRetryDiagnosticList(left))
+        === JSON.stringify(normalizeActorProfileRetryDiagnosticList(right));
+}
+
+function actorProfileRetryReceiptDigestPayload(value) {
+    return {
+        version: Math.max(0, Number(value?.version) || 0),
+        generationId: cleanText(value?.generationId, 180),
+        sourceRef: normalizeActorProfileRecoverySourceRef(value?.sourceRef),
+        sourceDigest: cleanText(value?.sourceDigest, 240),
+        ticketBatchDigest: cleanText(value?.ticketBatchDigest, 240),
+        status: cleanText(value?.status, 80),
+        outcomeStatus: cleanText(value?.outcomeStatus, 80),
+        failingModules: normalizeActorProfileRetryDiagnosticList(value?.failingModules),
+        failureCodes: normalizeActorProfileRetryDiagnosticList(value?.failureCodes),
+        updatedAt: Math.max(0, Number(value?.updatedAt) || 0),
+    };
+}
+
+function actorProfileRetryReceiptDigest(value) {
+    return `profile-retry-receipt:${fingerprint(JSON.stringify(canonicalProfileValue(
+        actorProfileRetryReceiptDigestPayload(value),
+    )))}`;
+}
+
 export function createActorProfileRetryReceipt({
     sourceRef,
     ticketBatch = null,
@@ -1738,8 +1778,8 @@ export function createActorProfileRetryReceipt({
 } = {}) {
     if (!actorProfileRecoverySourceMatches(sourceRef, sourceRef)) return null;
     const normalizedSource = normalizeActorProfileRecoverySourceRef(sourceRef);
-    return {
-        version: 2,
+    const receipt = {
+        version: 3,
         generationId: normalizedSource.generationId,
         sourceRef: normalizedSource,
         sourceDigest: actorProfileRecoverySourceDigest(normalizedSource),
@@ -1748,22 +1788,57 @@ export function createActorProfileRetryReceipt({
         }) ? ticketBatch.persistenceDigest : '',
         status: 'not_completed',
         outcomeStatus: cleanText(outcomeStatus, 80) || 'not_completed',
-        failingModules: cleanList(failingModules, 8, 120),
-        failureCodes: cleanList(failureCodes, 8, 120),
+        failingModules: normalizeActorProfileRetryDiagnosticList(failingModules),
+        failureCodes: normalizeActorProfileRetryDiagnosticList(failureCodes),
         updatedAt: Math.max(0, Number(updatedAt) || 0),
     };
+    receipt.receiptDigest = actorProfileRetryReceiptDigest(receipt);
+    return receipt;
 }
 
 export function actorProfileRetryReceiptMatches(value, {
     currentSourceRef = null,
     ticketBatch = null,
+    expectedReceipt = null,
 } = {}) {
+    const version = Math.max(0, Number(value?.version) || 0);
+    const failingModules = normalizeActorProfileRetryDiagnosticList(value?.failingModules);
+    const failureCodes = normalizeActorProfileRetryDiagnosticList(value?.failureCodes);
     if (
-        value?.version !== 2
+        ![2, 3].includes(version)
         || value?.status !== 'not_completed'
+        || !Array.isArray(value?.failingModules)
+        || !Array.isArray(value?.failureCodes)
+        || JSON.stringify(value.failingModules) !== JSON.stringify(failingModules)
+        || JSON.stringify(value.failureCodes) !== JSON.stringify(failureCodes)
         || !actorProfileRecoverySourceMatches(value.sourceRef, currentSourceRef)
         || value.sourceDigest !== actorProfileRecoverySourceDigest(value.sourceRef)
     ) return false;
+    // V3 is the current durable format and seals the complete normalized
+    // diagnostic receipt. V2 remains refresh-compatible only when both
+    // diagnostic arrays exist in canonical form; a legacy receipt missing
+    // either field cannot impersonate a current recoverable failure.
+    if (
+        version === 3
+        && (
+            !cleanText(value?.receiptDigest, 240)
+            || value.receiptDigest !== actorProfileRetryReceiptDigest(value)
+        )
+    ) return false;
+    if (expectedReceipt) {
+        if (
+            version !== Math.max(0, Number(expectedReceipt?.version) || 0)
+            || !actorProfileRetryDiagnosticListsMatch(
+                failingModules,
+                expectedReceipt?.failingModules,
+            )
+            || !actorProfileRetryDiagnosticListsMatch(
+                failureCodes,
+                expectedReceipt?.failureCodes,
+            )
+            || (version === 3 && value.receiptDigest !== expectedReceipt?.receiptDigest)
+        ) return false;
+    }
     if (!value.ticketBatchDigest) return ticketBatch == null;
     return actorProfileTicketBatchPersistenceMatches(ticketBatch, {
         acceptedTarget: currentSourceRef,
@@ -1781,6 +1856,10 @@ export function actorProfileRecoveryCriticalFingerprint(overrides = {}) {
         actorProfileTicketBatchPersistenceDigest,
         sealActorProfileTicketBatchForPersistence,
         actorProfileTicketBatchPersistenceMatches,
+        normalizeActorProfileRetryDiagnosticList,
+        actorProfileRetryDiagnosticListsMatch,
+        actorProfileRetryReceiptDigestPayload,
+        actorProfileRetryReceiptDigest,
         createActorProfileRetryReceipt,
         actorProfileRetryReceiptMatches,
     };

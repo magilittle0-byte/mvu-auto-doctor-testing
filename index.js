@@ -12501,9 +12501,10 @@ async function persistActorProfileRecoveryState(captured, result) {
             sourceRef: acceptedTarget,
             ticketBatch: sealedBatch,
             outcomeStatus: status,
-            failingModules: deepClone(
-                result?.profileBatch?.validationDiagnostic?.missingModules || [],
-            ).slice(0, 8),
+            failingModules: [...new Set([
+                ...(result?.profileBatch?.validationDiagnostic?.failingGroups || []),
+                ...(result?.profileBatch?.validationDiagnostic?.missingModules || []),
+            ].map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 8),
             failureCodes: (result?.profileBatch?.failed || [])
                 .map((entry) => compactActorProfileFailureCode(entry?.reason))
                 .filter(Boolean).slice(0, 8),
@@ -12537,6 +12538,7 @@ async function persistActorProfileRecoveryState(captured, result) {
             return actorProfileRetryReceiptMatches(persisted?.actorProfileRetryReceipt, {
                 currentSourceRef: acceptedTarget,
                 ticketBatch: persistedBatch,
+                expectedReceipt: namespace.actorProfileRetryReceipt,
             });
         },
     });
@@ -13133,6 +13135,10 @@ async function runActorProfileTarget(captured, {
             acceptedNarrative,
             sourceRef: discoverySourceRef,
             registeredActorIndex,
+            // Keep this byte-for-byte sourced from currentPlayerActorNames(),
+            // the same local list passed to classifyActorRegistryTargetName()
+            // during Registry preflight. The model never supplies this index.
+            excludedActorNames: deepClone(excludedActorNames),
             characterCreationTickets: deepClone(
                 characterCreationTicketBatch?.tickets || [],
             ),

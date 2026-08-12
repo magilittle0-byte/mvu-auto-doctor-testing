@@ -44,6 +44,29 @@ function failureFor(candidate, reason, extras = {}) {
     };
 }
 
+const SAFE_IDENTITY_RETRY_GUIDANCE = Object.freeze({
+    'actor_candidate.identity_missing_or_short': '\u5220\u9664\u8be5\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u660e\u786e\u3001\u4e0d\u5c11\u4e8e\u4e24\u4e2a\u5b57\u7b26\u7684\u771f\u5b9e\u4eba\u540d\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_system': '\u5220\u9664\u7cfb\u7edf\u3001\u65c1\u767d\u3001\u73af\u5883\u6216\u6e38\u620f\u63d0\u793a\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u771f\u5b9e\u65b0\u4eba\u7269\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_group': '\u5220\u9664\u7ec4\u7ec7\u3001\u56e2\u4f53\u6216\u7fa4\u4f53\u540d\u79f0\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u6709\u660e\u786e\u59d3\u540d\u7684\u771f\u5b9e\u65b0\u4eba\u7269\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_excluded': '\u5220\u9664\u8be5\u53d7\u4fdd\u62a4\u8eab\u4efd\u5019\u9009\uff0c\u7edd\u4e0d\u5c06\u5176\u8f93\u51fa\u4e3a new\uff1b\u7ee7\u7eed\u67e5\u627e\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u65b0\u4eba\u7269\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_internal_id': '\u5220\u9664 ActorRef\u3001\u5185\u90e8 ID \u6216\u8def\u7531\u6807\u8bc6\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u51fa\u73b0\u7684\u4eba\u7269\u59d3\u540d\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_registry_conflict': '\u5220\u9664\u5df2\u767b\u8bb0\u4eba\u7269\u3001\u522b\u540d\u6216\u4e0e Registry \u51b2\u7a81\u7684\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u5176\u4ed6\u672a\u767b\u8bb0\u65b0\u4eba\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_quarantined': '\u5220\u9664\u88ab\u672c\u5730\u8eab\u4efd\u9694\u79bb\u7684\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u5176\u4ed6\u80fd\u901a\u8fc7\u8eab\u4efd\u9884\u68c0\u7684\u660e\u786e\u65b0\u4eba\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+});
+
+const SAFE_PROFILE_RETRY_CODES = new Set([
+    'actor_profile.format_unrecoverable',
+    'actor_profile.module_target_duplicate',
+    'actor_profile.module_target_missing',
+    'actor_profile.module_unexpected',
+    'actor_profile.module_duplicate',
+    'actor_profile.module_content_incomplete',
+    'actor_profile.module_missing',
+    'actor_profile.discovery_name_not_in_narrative',
+    'actor_profile.discovery_duplicate',
+    'actor_profile.actor_ref_mismatch',
+]);
+
 const PROFILE_BATCH_FAILURE_CATEGORIES = new Set([
     'scope_stale',
     'target_stale',
@@ -357,14 +380,32 @@ export async function completeActorProfileBatchTransaction({
                     groupKey: group?.key || '',
                 });
             }
-            return structured.map((entry) => JSON.stringify({
-            code: entry.reason || 'actor_profile.module_invalid',
-            actorId: entry.actorId || '',
-            name: entry.name || entry.candidateRef?.name || '',
-            moduleKey: entry.moduleKey || '',
-            groupKey: entry.groupKey || group?.key || '',
-            missingFields: entry.missingFields || [],
-            }));
+            return structured.map((entry) => {
+                const rawCode = cleanText(entry?.reason, 160);
+                const identityAction = SAFE_IDENTITY_RETRY_GUIDANCE[rawCode] || '';
+                const code = identityAction || SAFE_PROFILE_RETRY_CODES.has(rawCode)
+                    ? rawCode
+                    : 'actor_profile.module_invalid';
+                const safeToken = (value, limit = 120) => {
+                    const token = cleanText(value, limit);
+                    return /^[a-z0-9_.:-]+$/iu.test(token) ? token : '';
+                };
+                const missingFields = (Array.isArray(entry?.missingFields)
+                    ? entry.missingFields : [])
+                    .map((value) => safeToken(value))
+                    .filter(Boolean)
+                    .slice(0, 8);
+                return JSON.stringify({
+                    code,
+                    action: identityAction
+                        ? `${identityAction}\u82e5\u5220\u9664\u65e0\u6548\u5019\u9009\u540e\u6ca1\u6709\u4efb\u4f55\u5408\u683c\u65b0\u4eba\uff0c\u5219\u53ea\u8f93\u51fa\u4e25\u683c\u7684\u201c\u65e0\u4eba\u7269\u6863\u6848\u201d\u3002`
+                        : '\u6309\u5f53\u524d\u8def\u7531\u534f\u8bae\u4ec5\u91cd\u53d1\u672c\u7ec4\u5931\u8d25\u5185\u5bb9\uff0c\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u8f93\u51fa\uff0c\u4e0d\u8981\u6dfb\u52a0\u89e3\u91ca\u3002',
+                    actorId: safeToken(entry?.actorId),
+                    moduleKey: safeToken(entry?.moduleKey, 80),
+                    groupKey: safeToken(entry?.groupKey || group?.key, 80),
+                    missingFields,
+                });
+            });
         };
         const preflightIdentityDiscoveries = async (preparedApply, group, groupAttempt) => {
             if ((preparedApply?.failures || []).length) return {
