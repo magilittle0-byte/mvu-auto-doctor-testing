@@ -1,11 +1,26 @@
 export const ACTOR_ACTION_ROUTES: readonly string[];
 export const ACTION_ATTEMPT_KIND: 'action_attempt';
 export const WORLD_ADJUDICATION_RESULT_KIND: 'world_adjudication_result';
+export interface ActorActionTarget {
+    chatId: string;
+    logicalIndex: number;
+    index: number;
+    messageId: string;
+    swipeId: number;
+    generation: number;
+    generationId: string;
+    generationType: string;
+    branchId: string;
+    scopeDigest: string;
+    contentHash: string;
+    hash: string;
+    compatibilityOnly?: boolean;
+}
 export function routeActorActionAttempt(candidate: unknown, options?: object): string;
 export function createActorActionAttempt(candidate: unknown, options?: object): object;
 export function actorActionAttemptWorldView(attempt: unknown): object;
-export function normalizeActorActionTarget(value: unknown): object | null;
-export function normalizeLegacyActorActionTarget(value: unknown): object | null;
+export function normalizeActorActionTarget(value: unknown): ActorActionTarget | null;
+export function normalizeLegacyActorActionTarget(value: unknown): ActorActionTarget | null;
 export function actorActionTargetMatches(left: unknown, right: unknown): boolean;
 export function actorRefsMatch(left: unknown, right: unknown): boolean;
 export function validateActorActionAttempt(value: unknown): {

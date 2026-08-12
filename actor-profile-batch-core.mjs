@@ -4,11 +4,16 @@ import {
     buildActorProfileCompletionMessages,
     materializeActorProfileBaseline,
     parseActorProfileCompletionBatchOutput,
+    validateActorProfileInsertCandidate,
 } from './actor-profile-v6-core.mjs';
 import {
     actorProfileCommitMatchesLedger,
+    actorProfilePendingWriteSetDigest,
+    actorProfileTransactionId,
+    finalizeActorProfileBaselinesInLedger,
     normalizeActorLedger,
     replaceActorProfileBaselineInLedger,
+    sealActorProfilePendingTransactionInLedger,
 } from './actor-ledger-core.mjs';
 
 function clone(value) {
@@ -48,6 +53,8 @@ function persistenceFailureReason(reason) {
         'chat_context_changed',
         'chat_context_changed_after_save',
         'write_precondition_failed',
+        'field_state_mismatch',
+        'stale_namespace_revision',
         'actor_profile.target_stale',
     ].includes(reason)) return 'actor_profile.target_stale';
     return 'actor_profile.commit_rejected';
@@ -55,14 +62,19 @@ function persistenceFailureReason(reason) {
 
 export async function completeActorProfileBatchTransaction({
     ledger,
+    persistenceBaseLedger = ledger,
     candidates = [],
     evidenceText = '',
     customPrompt = '',
     turn = 0,
     target = {},
     semanticRetry = true,
+    allowDiscovery = false,
+    discoveryContext = null,
     requestBatch,
-    persistBatch,
+    resolveDiscoveries,
+    persistPendingBatch,
+    persistFinalizedBatch,
     isTargetCurrent = () => true,
 } = {}) {
     const supplied = (Array.isArray(candidates) ? candidates : [])
@@ -82,7 +94,12 @@ export async function completeActorProfileBatchTransaction({
     const selected = supplied.filter((candidate) => !duplicateInputIds.has(
         candidateActorId(candidate),
     ));
-    const originalLedger = normalizeActorLedger(ledger, { chatId: ledger?.chatId });
+    // Candidate preparation may create in-memory scaffolds. Atomic persistence
+    // always starts from the pre-preparation ledger so a rejected actor remains
+    // byte-for-byte untouched while successful peers commit together.
+    const originalLedger = normalizeActorLedger(persistenceBaseLedger, {
+        chatId: persistenceBaseLedger?.chatId || ledger?.chatId,
+    });
     const base = {
         ledger: originalLedger,
         candidates: supplied,
@@ -91,9 +108,16 @@ export async function completeActorProfileBatchTransaction({
         failures: inputFailures,
         persistenceMeta: null,
         modelCalls: 0,
+        persistenceStatus: 'not_completed',
+        readbackVerified: false,
     };
-    if (!selected.length) return base;
-    if (typeof requestBatch !== 'function' || typeof persistBatch !== 'function') {
+    if (!selected.length && !allowDiscovery) return base;
+    if (
+        typeof requestBatch !== 'function'
+        || typeof resolveDiscoveries !== 'function'
+        || typeof persistPendingBatch !== 'function'
+        || typeof persistFinalizedBatch !== 'function'
+    ) {
         return {
             ...base,
             failures: [...inputFailures, ...selected.map((candidate) => failureFor(
@@ -123,11 +147,25 @@ export async function completeActorProfileBatchTransaction({
     const failureById = new Map();
     const rejected = [];
     let modelCalls = 0;
-    const collect = async (subset, validationFeedback, attempt) => {
+    const collect = async (
+        subset,
+        validationFeedback,
+        attempt,
+        discoveryRetryTargets = [],
+    ) => {
+        const attemptDiscoveryContext = attempt === 0
+            ? discoveryContext
+            : {
+                ...(discoveryContext || {}),
+                discoveryEnabled: discoveryRetryTargets.length > 0,
+                discoveryRetryOnly: discoveryRetryTargets.length > 0,
+            };
         const messages = buildActorProfileCompletionMessages(subset, {
             evidenceText,
             customPrompt,
             validationFeedback,
+            discoveryContext: attemptDiscoveryContext,
+            discoveryRetryTargets,
         });
         let output;
         try {
@@ -146,7 +184,10 @@ export async function completeActorProfileBatchTransaction({
             };
         }
         if (!await current()) return { stale: true };
-        return parseActorProfileCompletionBatchOutput(output, { candidates: subset });
+        return parseActorProfileCompletionBatchOutput(output, {
+            candidates: subset,
+            discoveryContext: attemptDiscoveryContext,
+        });
     };
 
     const first = await collect(selected, [], 0);
@@ -154,31 +195,53 @@ export async function completeActorProfileBatchTransaction({
         return {
             ...base,
             modelCalls,
-            failures: [...inputFailures, ...selected.map((candidate) => failureFor(
-                candidate,
-                'actor_profile.transport_failed',
-                { detail: first.transportFailure },
-            ))],
+            failures: [
+                ...inputFailures,
+                ...(selected.length ? selected.map((candidate) => failureFor(
+                    candidate,
+                    'actor_profile.transport_failed',
+                    { detail: first.transportFailure },
+                )) : [{
+                    reason: 'actor_profile.transport_failed',
+                    detail: first.transportFailure,
+                }]),
+            ],
         };
     }
     if (first.stale) {
         return {
             ...base,
             modelCalls,
-            failures: [...inputFailures, ...selected.map((candidate) => failureFor(
-                candidate,
-                'actor_profile.target_stale',
-            ))],
+            failures: [
+                ...inputFailures,
+                ...(selected.length ? selected.map((candidate) => failureFor(
+                    candidate,
+                    'actor_profile.target_stale',
+                )) : [{ reason: 'actor_profile.target_stale' }]),
+            ],
         };
     }
     for (const entry of first.entries || []) acceptedById.set(entry.actorId, entry);
     for (const failure of first.failures || []) failureById.set(failure.actorId, failure);
     rejected.push(...(first.unexpected || []));
-
+    let discoveries = [...(first.discoveries || [])];
+    let unresolved = [...(first.unresolved || [])];
+    const explicitEmpty = first.explicitEmpty === true;
     const retryCandidates = semanticRetry
-        ? selected.filter((candidate) => failureById.get(candidateActorId(candidate))?.retryable)
+        ? selected.filter((candidate) => (
+            failureById.get(candidateActorId(candidate))?.retryable
+        ))
         : [];
-    if (retryCandidates.length) {
+    const retryDiscoveryTargets = semanticRetry
+        ? unresolved
+            .filter((entry) => (
+                entry.retryable === true
+                && entry.candidateRef?.name
+                && entry.candidateRef?.sourceAnchor
+            ))
+            .map((entry) => clone(entry.candidateRef))
+        : [];
+    if (retryCandidates.length || retryDiscoveryTargets.length) {
         const feedback = retryCandidates.map((candidate) => {
             const failure = failureById.get(candidateActorId(candidate));
             const detail = failure?.missingFields?.length
@@ -186,7 +249,15 @@ export async function completeActorProfileBatchTransaction({
                 : failure?.reason || 'actor_profile.missing_candidate';
             return `${candidateActorId(candidate)}:${detail}`;
         });
-        const retry = await collect(retryCandidates, feedback, 1);
+        feedback.push(...unresolved.map((entry) => (
+            `${entry.candidateRef?.name || 'candidateRef'}:${entry.reason}`
+        )));
+        const retry = await collect(
+            retryCandidates,
+            feedback,
+            1,
+            retryDiscoveryTargets,
+        );
         if (retry.stale) {
             for (const candidate of retryCandidates) {
                 failureById.set(candidateActorId(candidate), failureFor(
@@ -194,6 +265,11 @@ export async function completeActorProfileBatchTransaction({
                     'actor_profile.target_stale',
                 ));
             }
+            unresolved = unresolved.map((entry) => ({
+                ...entry,
+                reason: 'actor_profile.target_stale',
+                retryable: false,
+            }));
         } else if (retry.transportFailure) {
             for (const candidate of retryCandidates) {
                 failureById.set(candidateActorId(candidate), failureFor(
@@ -202,6 +278,12 @@ export async function completeActorProfileBatchTransaction({
                     { detail: retry.transportFailure },
                 ));
             }
+            unresolved = unresolved.map((entry) => ({
+                ...entry,
+                reason: 'actor_profile.transport_failed',
+                detail: retry.transportFailure,
+                retryable: false,
+            }));
         } else {
             for (const entry of retry.entries || []) {
                 acceptedById.set(entry.actorId, entry);
@@ -211,12 +293,165 @@ export async function completeActorProfileBatchTransaction({
                 failureById.set(failure.actorId, failure);
             }
             rejected.push(...(retry.unexpected || []));
+            const retriedKeys = new Set(retryDiscoveryTargets.map((entry) => (
+                `${entry.name}\u0000${entry.sourceAnchor}`
+            )));
+            const retryByKey = new Map();
+            for (const entry of retry.discoveries || []) {
+                const key = `${entry.candidateRef?.name}\u0000${entry.candidateRef?.sourceAnchor}`;
+                if (retriedKeys.has(key)) retryByKey.set(key, entry);
+                else rejected.push({
+                    candidateRef: clone(entry.candidateRef),
+                    reason: 'actor_profile.discovery_retry_unexpected',
+                });
+            }
+            discoveries = discoveries.filter((entry) => !retriedKeys.has(
+                `${entry.candidateRef?.name}\u0000${entry.candidateRef?.sourceAnchor}`,
+            ));
+            discoveries.push(...retryByKey.values());
+            const untouchedUnresolved = unresolved.filter((entry) => !retriedKeys.has(
+                `${entry.candidateRef?.name}\u0000${entry.candidateRef?.sourceAnchor}`,
+            ));
+            const retryUnresolved = [...(retry.unresolved || [])];
+            for (const targetRef of retryDiscoveryTargets) {
+                const key = `${targetRef.name}\u0000${targetRef.sourceAnchor}`;
+                if (
+                    retryByKey.has(key)
+                    || retryUnresolved.some((entry) => (
+                        `${entry.candidateRef?.name}\u0000${entry.candidateRef?.sourceAnchor}` === key
+                    ))
+                ) continue;
+                retryUnresolved.push({
+                    candidateRef: clone(targetRef),
+                    reason: 'actor_profile.discovery_retry_missing',
+                    missingFields: [],
+                    retryable: false,
+                });
+            }
+            unresolved = [...untouchedUnresolved, ...retryUnresolved];
         }
     }
 
-    let workingLedger = clone(originalLedger);
+    if (!await current()) {
+        return {
+            ...base,
+            modelCalls,
+            rejected,
+            failures: [...inputFailures, ...selected.map((candidate) => failureFor(
+                candidate,
+                'actor_profile.target_stale',
+            ))],
+        };
+    }
+
+    let resolved;
+    try {
+        resolved = await resolveDiscoveries({
+            discoveries: clone(discoveries),
+            unresolved: clone(unresolved),
+            unexpected: clone(rejected),
+            explicitEmpty,
+        });
+    } catch (error) {
+        resolved = {
+            ok: false,
+            ledger: originalLedger,
+            reason: cleanText(error?.message || error, 240) || 'actor_profile.discovery_failed',
+        };
+    }
+    const resolvedLedger = normalizeActorLedger(
+        resolved?.ledger || originalLedger,
+        { chatId: originalLedger.chatId },
+    );
+    rejected.push(...(resolved?.rejected || []));
+    const discoveryFailures = [
+        ...unresolved,
+        ...(resolved?.failures || []),
+    ];
+    if (resolved?.ok !== true) {
+        return {
+            ...base,
+            ledger: resolvedLedger,
+            modelCalls,
+            rejected,
+            failures: [
+                ...inputFailures,
+                ...selected
+                    .map((candidate) => failureById.get(candidateActorId(candidate)))
+                    .filter(Boolean),
+                ...discoveryFailures,
+                { reason: resolved?.reason || 'actor_profile.discovery_failed' },
+            ],
+            explicitEmpty,
+            registry: clone(resolved?.registry || null),
+        };
+    }
+
+    const resolvedCandidates = Array.isArray(resolved.candidates)
+        ? resolved.candidates
+        : [];
+    const resolvedCandidateById = new Map(resolvedCandidates.map((candidate) => [
+        candidateActorId(candidate),
+        candidate,
+    ]));
+    for (const entry of Array.isArray(resolved.entries) ? resolved.entries : []) {
+        const actorId = cleanText(entry?.actorRef?.actorId, 120);
+        const context = resolvedCandidateById.get(actorId);
+        const profileCandidate = clone(entry?.candidate);
+        if (!actorId || !context || !profileCandidate) {
+            discoveryFailures.push({
+                candidateId: cleanText(entry?.candidateId, 120),
+                reason: 'actor_profile.discovery_promotion_mapping_missing',
+            });
+            continue;
+        }
+        profileCandidate.actorRef = clone(context.actorRef);
+        delete profileCandidate.candidateRef;
+        const validation = validateActorProfileInsertCandidate(profileCandidate, context);
+        if (!validation.ok) {
+            discoveryFailures.push({
+                actorId,
+                name: candidateName(context),
+                reason: validation.errorCode || 'actor_profile.schema_incomplete',
+                missingFields: validation.missingFields || [],
+            });
+            continue;
+        }
+        acceptedById.set(actorId, {
+            actorId,
+            name: candidateName(context),
+            candidate: validation.candidate,
+            repairs: entry.repairs || [],
+            resolutions: validation.resolutions || [],
+        });
+    }
+
+    const allCandidates = [...selected, ...resolvedCandidates]
+        .filter((candidate, index, list) => (
+            candidateActorId(candidate)
+            && list.findIndex((item) => candidateActorId(item) === candidateActorId(candidate)) === index
+        ));
+    if (!allCandidates.length) {
+        return {
+            ...base,
+            ledger: resolvedLedger,
+            candidates: [],
+            modelCalls,
+            rejected,
+            failures: [...inputFailures, ...discoveryFailures],
+            persistenceStatus: explicitEmpty
+                && !rejected.length
+                && !discoveryFailures.length
+                ? 'no_candidates'
+                : 'not_completed',
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
+        };
+    }
+
+    let workingLedger = clone(resolvedLedger);
     const prepared = [];
-    for (const candidate of selected) {
+    for (const candidate of allCandidates) {
         const actorId = candidateActorId(candidate);
         const completion = acceptedById.get(actorId);
         if (!completion) continue;
@@ -245,6 +480,11 @@ export async function completeActorProfileBatchTransaction({
             schemaVersion: baseline.version,
             commitId,
             digest,
+            profileDigest: digest,
+            sourceRef: clone(target.sourceRef || null),
+            scopeDigest: cleanText(target.sourceRef?.scopeDigest, 180),
+            locks: clone(actor.profileV6?.locks || {}),
+            manualOverrides: clone(actor.profileV6?.manualOverrides || {}),
         };
         const replaced = replaceActorProfileBaselineInLedger(
             workingLedger,
@@ -254,7 +494,8 @@ export async function completeActorProfileBatchTransaction({
                 ...expectedCommit,
                 sourceRef: clone(target.sourceRef || null),
                 committedTurn: turn,
-                readbackVerified: true,
+                readbackVerified: false,
+                phase: 'pending',
             },
         );
         if (!replaced.committed) {
@@ -271,7 +512,7 @@ export async function completeActorProfileBatchTransaction({
             name: candidateName(candidate),
             commitId,
             digest,
-            expectedCommit,
+            expectedCommit: { ...expectedCommit, profileDigest: digest, phase: 'pending' },
             repairs: completion.repairs || [],
             resolutions: completion.resolutions || [],
         });
@@ -279,68 +520,220 @@ export async function completeActorProfileBatchTransaction({
     if (!prepared.length) {
         return {
             ...base,
+            ledger: resolvedLedger,
+            candidates: allCandidates,
             modelCalls,
             rejected,
-            failures: [...inputFailures, ...selected
+            failures: [...inputFailures, ...allCandidates
                 .map((candidate) => failureById.get(candidateActorId(candidate)))
-                .filter(Boolean)],
+                .filter(Boolean), ...discoveryFailures],
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
         };
     }
     if (!await current()) {
         return {
             ...base,
+            ledger: resolvedLedger,
+            candidates: allCandidates,
             modelCalls,
             rejected,
-            failures: [...inputFailures, ...selected.map((candidate) => failureFor(
+            failures: [...inputFailures, ...allCandidates.map((candidate) => failureFor(
                 candidate,
                 'actor_profile.target_stale',
             ))],
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
         };
     }
 
-    let persisted;
+    const preparedFieldRevision = Math.max(
+        0,
+        Number(resolved?.snapshot?.fieldRevision) || 0,
+    );
+    const expectedCommits = prepared.map((entry) => clone(entry.expectedCommit));
+    const transactionId = actorProfileTransactionId({
+        chatId: target.chatId,
+        sourceRef: target.sourceRef,
+        preparedFieldRevision,
+        expectedCommits,
+    });
+    const sealed = sealActorProfilePendingTransactionInLedger(workingLedger, expectedCommits, {
+        transactionId,
+        preparedFieldRevision,
+    });
+    if (!sealed.sealed) {
+        for (const entry of prepared) {
+            failureById.set(entry.actorId, failureFor(entry, sealed.reason || 'actor_profile.pending_transaction_mismatch'));
+        }
+        return {
+            ...base,
+            ledger: resolvedLedger,
+            candidates: allCandidates,
+            modelCalls,
+            rejected,
+            failures: [...inputFailures, ...allCandidates
+                .map((candidate) => failureById.get(candidateActorId(candidate)))
+                .filter(Boolean), ...discoveryFailures],
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
+        };
+    }
+    workingLedger = sealed.ledger;
+    const { preparedLedgerDigest, writeSetDigest } = sealed;
+    let pendingPersisted;
     try {
-        persisted = await persistBatch({
+        pendingPersisted = await persistPendingBatch({
             ledger: workingLedger,
-            expectedCommits: prepared.map((entry) => clone(entry.expectedCommit)),
+            expectedCommits,
+            expectedState: clone(resolved.snapshot || null),
+            preparedLedgerDigest,
+            preparedFieldRevision,
+            transactionId,
+            writeSetDigest,
         });
     } catch (error) {
-        persisted = {
+        pendingPersisted = {
             ok: false,
             reason: cleanText(error?.message || error, 200) || 'host_save_rejected',
         };
     }
-    const persistedLedger = persisted?.ok === true
-        ? normalizeActorLedger(persisted.ledger, { chatId: originalLedger.chatId })
+    const pendingLedger = pendingPersisted?.ok === true
+        ? normalizeActorLedger(pendingPersisted.ledger, { chatId: originalLedger.chatId })
         : null;
-    const readbackOk = persistedLedger && prepared.every((entry) => (
-        actorProfileCommitMatchesLedger(persistedLedger, entry.expectedCommit).ok
-    ));
-    if (!persisted?.ok || !readbackOk) {
+    const pendingReadbackOk = pendingLedger
+        && expectedCommits.every((expected) => actorProfileCommitMatchesLedger(
+            pendingLedger,
+            {
+                ...expected,
+                transactionId,
+                writeSetDigest,
+                preparedLedgerDigest,
+                preparedFieldRevision,
+                phase: 'pending',
+            },
+        ).ok)
+        && actorProfilePendingWriteSetDigest(pendingLedger, expectedCommits, {
+            preparedFieldRevision,
+            transactionId,
+            writeSetDigest,
+        }) === preparedLedgerDigest;
+    if (!pendingPersisted?.ok || !pendingReadbackOk) {
         const reason = persistenceFailureReason(
-            persisted?.reason || 'host_save_readback_mismatch',
+            pendingPersisted?.reason || 'host_save_readback_mismatch',
         );
         for (const entry of prepared) {
             failureById.set(entry.actorId, failureFor(entry, reason));
         }
         return {
             ...base,
+            ledger: resolvedLedger,
+            candidates: allCandidates,
             modelCalls,
             rejected,
-            failures: [...inputFailures, ...selected
+            failures: [...inputFailures, ...allCandidates
                 .map((candidate) => failureById.get(candidateActorId(candidate)))
-                .filter(Boolean)],
+                .filter(Boolean), ...discoveryFailures],
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
+        };
+    }
+
+    const finalized = finalizeActorProfileBaselinesInLedger(
+        pendingLedger,
+        expectedCommits,
+        { preparedLedgerDigest, preparedFieldRevision, transactionId, writeSetDigest },
+    );
+    if (!finalized.finalized) {
+        return {
+            ...base,
+            ledger: pendingLedger,
+            candidates: allCandidates,
+            modelCalls,
+            rejected,
+            failures: [
+                ...inputFailures,
+                ...discoveryFailures,
+                ...prepared.map((entry) => failureFor(
+                    entry,
+                    finalized.reason || 'actor_profile.finalize_rejected',
+                )),
+            ],
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
+        };
+    }
+
+    let finalPersisted;
+    try {
+        finalPersisted = await persistFinalizedBatch({
+            ledger: finalized.ledger,
+            readShadowLedger: pendingLedger,
+            expectedCommits: expectedCommits.map((expected) => ({
+                ...expected,
+                phase: 'final',
+            })),
+            expectedState: clone(pendingPersisted.snapshot || null),
+            preparedLedgerDigest,
+            preparedFieldRevision,
+            transactionId,
+            writeSetDigest,
+        });
+    } catch (error) {
+        finalPersisted = {
+            ok: false,
+            reason: cleanText(error?.message || error, 200) || 'host_save_rejected',
+        };
+    }
+    const persistedLedger = finalPersisted?.ok === true
+        ? normalizeActorLedger(finalPersisted.ledger, { chatId: originalLedger.chatId })
+        : null;
+    const finalReadbackOk = persistedLedger && expectedCommits.every((expected) => (
+        actorProfileCommitMatchesLedger(
+            persistedLedger,
+            {
+                ...expected,
+                transactionId,
+                writeSetDigest,
+                preparedLedgerDigest,
+                preparedFieldRevision,
+                phase: 'final',
+            },
+        ).ok
+    ));
+    if (!finalPersisted?.ok || !finalReadbackOk) {
+        const reason = persistenceFailureReason(
+            finalPersisted?.reason || 'host_save_readback_mismatch',
+        );
+        for (const entry of prepared) {
+            failureById.set(entry.actorId, failureFor(entry, reason));
+        }
+        return {
+            ...base,
+            ledger: pendingLedger,
+            candidates: allCandidates,
+            modelCalls,
+            rejected,
+            failures: [...inputFailures, ...allCandidates
+                .map((candidate) => failureById.get(candidateActorId(candidate)))
+                .filter(Boolean), ...discoveryFailures],
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
         };
     }
     return {
         ledger: persistedLedger,
-        candidates: supplied,
+        candidates: allCandidates,
         accepted: prepared.map(({ expectedCommit: _expectedCommit, ...entry }) => entry),
         rejected,
-        failures: [...inputFailures, ...selected
+        failures: [...inputFailures, ...allCandidates
             .map((candidate) => failureById.get(candidateActorId(candidate)))
-            .filter(Boolean)],
-        persistenceMeta: clone(persisted.persistenceMeta || null),
+            .filter(Boolean), ...discoveryFailures],
+        persistenceMeta: clone(finalPersisted.persistenceMeta || null),
         modelCalls,
+        persistenceStatus: 'atomic_readback',
+        readbackVerified: true,
+        explicitEmpty,
+        registry: clone(resolved.registry || null),
     };
 }

@@ -4,6 +4,7 @@ export const ACTOR_SOVEREIGNTY_RETIRED_WRITE_PATHS_VERSION: number;
 export const ACTOR_SOVEREIGNTY_NAMESPACE_WRITE_PATH: string;
 export const RETIRED_ACTOR_WRITE_PATHS: readonly string[];
 
+export function normalizeWorldbookSelectorKeys(value: unknown): string[];
 export function flattenActorSovereigntyScopeValues(value: unknown, output?: string[]): string[];
 export function stableActorSovereigntyWorldbookEntries(value: unknown): object[];
 export function actorSovereigntyWorldbookDescriptor(

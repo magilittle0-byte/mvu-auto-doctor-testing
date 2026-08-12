@@ -29,46 +29,64 @@ test('P4 production uses one actor proposal batch, no per-actor or repair model 
     assert.ok(settle > world, 'settlement must occur only after the world batch');
 });
 
-test('P4 semantic-zero cannot be published as a successful pool candidate or committed actor task', async () => {
+test('P4 has one strict next-turn consumer: verified world package plus ticket payload, provider or ST fallback', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-    const poolStart = source.indexOf('const sovereigntyAgentPool = await runSovereigntyAgentPool');
-    const poolEnd = source.indexOf('const adjudicatedBlackboard', poolStart);
-    const pool = source.slice(poolStart, poolEnd);
-    assert.match(pool, /actorBatch\.status === 'semantic-failed'/u);
-    assert.match(pool, /error\.code\s*=\s*actorBatch\.status === 'semantic-failed'\s*\?\s*'ACTOR_BATCH_SEMANTIC_FAILED'/u);
-    assert.match(pool, /throw error/u);
+    const start = source.indexOf('async function precomposeNextTurnConsumer(session)');
+    const end = source.indexOf('async function commitNextTurnConsumer(session, envelope)', start);
+    assert.ok(start >= 0 && end > start);
+    const consumer = source.slice(start, end);
+    const clearAt = consumer.indexOf('clearLegacyNextTurnSlots()');
+    const verifyAt = consumer.indexOf('verifiedNextTurnWorldPackage');
+    const projectAt = consumer.indexOf('buildContinuityConsumerPayload', verifyAt);
+    const ticketAt = consumer.indexOf('npcDesignTicketPrompt');
+    const payloadAt = consumer.indexOf('immutableNextTurnConsumerPayload', ticketAt);
+    const providerAt = consumer.indexOf('selectNextTurnConsumerProvider()', payloadAt);
+    const fallbackAt = consumer.indexOf('setNextTurnConsumerFallback(payload.text)', providerAt);
+    assert.ok(clearAt >= 0 && verifyAt > clearAt && projectAt > verifyAt);
+    assert.ok(ticketAt > projectAt && payloadAt > ticketAt && providerAt > payloadAt);
+    assert.ok(fallbackAt > providerAt);
+    assert.match(consumer, /receipt\?\.placementConfirmed !== true[\s\S]*?receipt\?\.consumerPayloadDigest !== payload\.digest/u);
+    assert.match(consumer, /providerId: 'sillytavern-fallback'/u);
+    assert.doesNotMatch(
+        consumer,
+        /runSovereigntyAgentPool|Parallel_Continuity_Bridge|CONTINUITY_INJECTION_NAME|SOCIAL_INJECTION_NAME|SERENDIPITY_INJECTION_NAME/u,
+    );
 
-    const downstreamStart = source.indexOf('let actorShardStatus =', poolEnd);
-    const downstreamEnd = source.indexOf('let worldLaneSchedule =', downstreamStart);
-    const downstream = source.slice(downstreamStart, downstreamEnd);
-    assert.match(downstream, /\['semantic-failed', 'failed'\]\.includes\(latestActorShardDiagnostics\.status\)/u);
-    assert.match(downstream, /semanticActions:\s*0/u);
-    assert.match(downstream, /actorTechnicalFailure\s*\|\|=/u);
-
-    const completionStart = source.indexOf('async function completeSovereigntyCycle');
-    const completionEnd = source.indexOf('\nfunction ', completionStart + 20);
-    const completion = source.slice(completionStart, completionEnd > completionStart
-        ? completionEnd
-        : source.length);
-    assert.match(completion, /success:\s*actorSubtasksSucceeded\s*&&\s*!actorFailure\s*&&\s*persistenceSuccess/u);
-    assert.match(completion, /failureCode:\s*persistenceSuccess\s*\?\s*actorFailure\s*\|\|\s*'actor\.technical_failure'/u);
+    const providerRegistration = source.slice(
+        source.indexOf('function registerNextTurnConsumerProvider(provider)'),
+        source.indexOf('function nextTurnConsumerProviderView()', source.indexOf('function registerNextTurnConsumerProvider(provider)')),
+    );
+    assert.match(providerRegistration, /typeof provider\?\.precompose !== 'function'/u);
+    assert.match(providerRegistration, /typeof provider\?\.cleanup !== 'function'/u);
+    assert.doesNotMatch(providerRegistration, /window\.|Stitches|TavernDB|combined/u);
 });
 
-test('P4 exact-target recovery schedules zero actor proposal calls and reuses pending attempts', async () => {
+test('P4 cleanup failure fails closed and never restarts a producer or legacy bridge', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-    const recovery = source.indexOf('const recoveredActorAttemptBatch = planActorAttemptRecovery');
-    const pool = source.indexOf('const sovereigntyAgentPool = await runSovereigntyAgentPool', recovery);
-    const scheduling = source.slice(recovery, pool + 1200);
-    assert.match(scheduling, /recoveredActorAttemptBatch\.shouldRunActorWorker\s*\?\s*\[\{/u);
-    assert.match(scheduling, /agentType:\s*'actor'/u);
-
-    const recovered = source.indexOf('const pooledActorShardResult = recoveredActorAttemptBatch.attempts.length', pool);
-    const recoveredEnd = source.indexOf('const prefetchedWorldOutput', recovered);
-    const recoveredBranch = source.slice(recovered, recoveredEnd);
-    assert.match(recoveredBranch, /status:\s*'resumed'/u);
-    assert.match(recoveredBranch, /recoveredAttempts:\s*recoveredActorAttemptBatch\.attempts/u);
-    assert.match(recoveredBranch, /recoveredCandidates:\s*recoveredActorAttemptBatch\.candidates/u);
-    assert.doesNotMatch(recoveredBranch, /collectActorShardProposals/u);
+    const start = source.indexOf('async function precomposeNextTurnConsumer(session)');
+    const end = source.indexOf('async function commitNextTurnConsumer(session, envelope)', start);
+    const consumer = source.slice(start, end);
+    assert.match(
+        consumer,
+        /packet\?\.consumerLease\?\.state === 'cleanup_failed'[\s\S]*?lastInjectionInspection\.status = 'blocked';[\s\S]*?return;/u,
+    );
+    assert.match(
+        consumer,
+        /packet\.consumerLease\?\.state === 'reserved'[\s\S]*?convergePersistedStaleNextTurnWorldLease\([\s\S]*?packet = null;[\s\S]*?prepareNpcDesignTicketBatch\(\)/u,
+    );
+    assert.match(
+        consumer,
+        /refreshedPacket\?\.consumerLease\?\.state === 'reserved'[\s\S]*?convergePersistedStaleNextTurnWorldLease\([\s\S]*?packet = null;[\s\S]*?worldText = ''[\s\S]*?selected = \{ provider: null, conflict: false \}/u,
+    );
+    assert.doesNotMatch(consumer, /releaseStaleNextTurnWorldLease/u);
+    assert.match(
+        consumer,
+        /refreshedPacket\?\.consumerLease\?\.state === 'cleanup_failed'[\s\S]*?lastInjectionInspection\.status = 'blocked';[\s\S]*?return;/u,
+    );
+    assert.doesNotMatch(
+        consumer,
+        /collectActorShardProposals|planActorAttemptRecovery|runSovereigntyAgentPool|applyContinuityInjection|Parallel_Continuity_Bridge/u,
+    );
 });
 
 test('P4 six-actor capacity is wired through selector, scheduler, settings and UI without changing defaults', async () => {

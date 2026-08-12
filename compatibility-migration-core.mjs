@@ -25,6 +25,34 @@ export const ACTOR_SOVEREIGNTY_MIGRATION_VERSION = 4;
 export const ACTOR_SOVEREIGNTY_RETIRED_WRITE_PATHS_VERSION = 2;
 export const ACTOR_SOVEREIGNTY_NAMESPACE_WRITE_PATH = 'chat_namespace.actor_sovereignty_v13';
 
+function codePointCompare(left, right) {
+    const first = [...left];
+    const second = [...right];
+    const length = Math.min(first.length, second.length);
+    for (let index = 0; index < length; index += 1) {
+        const difference = first[index].codePointAt(0) - second[index].codePointAt(0);
+        if (difference) return difference;
+    }
+    return first.length - second.length;
+}
+
+export function normalizeWorldbookSelectorKeys(value) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value
+        .filter((entry) => typeof entry === 'string')
+        .map((entry) => entry.trim())
+        .filter(Boolean))]
+        .sort(codePointCompare);
+}
+
+function normalizeCardScopeId(value) {
+    const cardId = cleanText(value, 240);
+    const legacyCharacter = /^character:[^:]+:(.+)$/u.exec(cardId);
+    return legacyCharacter?.[1] && legacyCharacter[1] !== 'no-avatar'
+        ? `character:${legacyCharacter[1]}`
+        : cardId;
+}
+
 export const RETIRED_ACTOR_WRITE_PATHS = Object.freeze([
     'continuity.actorProfiles',
     'actionReceipts.actionAttempt',
@@ -225,22 +253,14 @@ export function createActorSovereigntyWorldbookManifest(
 export function createActorSovereigntyScope({
     chatId = '',
     cardId = '',
-    cardVersion = '',
-    cardStatus = 'confirmed',
-    worldbookIds = [],
-    worldbookVersion = '',
-    worldbookStatus = 'confirmed',
+    worldbookSelectorKeys = [],
     runtimeVersion = '',
 } = {}) {
     return {
         version: ACTOR_SOVEREIGNTY_SCOPE_VERSION,
         chatId: cleanText(chatId, 180),
-        cardId: cleanText(cardId, 240),
-        cardVersion: cleanText(cardVersion, 120) || 'unversioned',
-        cardStatus: cardStatus === 'confirmed' ? 'confirmed' : 'unresolved',
-        worldbookIds: cleanList(worldbookIds, 32, 240),
-        worldbookVersion: cleanText(worldbookVersion, 120) || 'unversioned',
-        worldbookStatus: worldbookStatus === 'confirmed' ? 'confirmed' : 'unresolved',
+        cardId: normalizeCardScopeId(cardId),
+        worldbookSelectorKeys: normalizeWorldbookSelectorKeys(worldbookSelectorKeys),
         runtimeVersion: cleanText(runtimeVersion, 120),
     };
 }
@@ -255,12 +275,9 @@ export function actorSovereigntyScopesMatch(left, right) {
     return first.version === second.version
         && first.chatId === second.chatId
         && first.cardId === second.cardId
-        && first.cardVersion === second.cardVersion
-        && first.cardStatus === second.cardStatus
-        && first.worldbookVersion === second.worldbookVersion
-        && first.worldbookStatus === second.worldbookStatus
         && first.runtimeVersion === second.runtimeVersion
-        && JSON.stringify(first.worldbookIds) === JSON.stringify(second.worldbookIds);
+        && JSON.stringify(first.worldbookSelectorKeys)
+            === JSON.stringify(second.worldbookSelectorKeys);
 }
 
 export function prepareActorSovereigntyFieldWriteCandidate(candidateValue, currentValue, {
@@ -357,7 +374,11 @@ export function prepareActorSovereigntyFieldWriteCandidate(candidateValue, curre
 
 function strictTargetForScope(value, scope) {
     const target = normalizeActorActionTarget(value);
-    return target && target.chatId === scope.chatId ? target : null;
+    return target
+        && target.chatId === scope.chatId
+        && target.scopeDigest === actorSovereigntyScopeDigest(scope)
+        ? target
+        : null;
 }
 
 function quarantineAttempt(attempt, reason) {
@@ -934,8 +955,6 @@ export function migrateActorSovereigntyNamespace(value, {
         !expectedScope.chatId
         || !expectedScope.cardId
         || !expectedScope.runtimeVersion
-        || expectedScope.cardStatus !== 'confirmed'
-        || expectedScope.worldbookStatus !== 'confirmed'
     ) {
         return {
             applicable: false,

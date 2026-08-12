@@ -9,8 +9,8 @@ import {
     ACTOR_PROFILE_V6_VERSION,
     actorProfileActionReadiness,
     actorProfileBaselineDigest,
-    actorProfileReadyForAction,
     normalizeActorProfileV6,
+    validateActorProfileDiscoveryAnchor,
 } from './actor-profile-v6-core.mjs';
 import {
     actorActionTargetMatches,
@@ -71,6 +71,19 @@ function cleanList(value, limit = 12, itemLimit = 300) {
     return result;
 }
 
+function cleanActorIdList(value) {
+    if (!Array.isArray(value)) return [];
+    const result = [];
+    const seen = new Set();
+    for (const raw of value) {
+        const actorId = cleanText(raw, 120);
+        if (!actorId || seen.has(actorId)) continue;
+        seen.add(actorId);
+        result.push(actorId);
+    }
+    return result;
+}
+
 function integer(value, minimum, maximum, fallback) {
     const parsed = Math.floor(Number(value));
     return Math.min(maximum, Math.max(minimum, Number.isFinite(parsed) ? parsed : fallback));
@@ -115,6 +128,7 @@ function normalizeSourceRef(value) {
     const chatId = cleanText(value.chatId, 180);
     const messageId = cleanText(value.messageId, 180);
     const hash = cleanText(value.hash, 100);
+    const scopeDigest = cleanText(value.scopeDigest, 180);
     if (!chatId || !messageId || !hash) return null;
     return {
         chatId,
@@ -126,7 +140,9 @@ function normalizeSourceRef(value) {
         generationType: cleanText(value.generationType, 80),
         branchId: cleanText(value.branchId, 180),
         identityScopeId: cleanText(value.identityScopeId, 300),
+        scopeDigest,
         hash,
+        compatibilityOnly: !scopeDigest,
     };
 }
 
@@ -148,17 +164,22 @@ export function acceptedActorSourceRefMatches(value, expected) {
     const actual = normalizeSourceRef(value);
     const target = normalizeSourceRef(expected);
     if (!actual || !target) return false;
+    // A pre-scope persisted record may only reconcile with another equally
+    // unscoped record whose full legacy identity below still matches exactly.
+    // A scoped record never matches an unscoped one.
+    if (Boolean(actual.scopeDigest) !== Boolean(target.scopeDigest)) return false;
     return [
         'chatId', 'messageId', 'index', 'swipeId', 'generation',
-        'generationId', 'generationType', 'branchId', 'identityScopeId', 'hash',
+        'generationId', 'generationType', 'branchId', 'identityScopeId', 'scopeDigest', 'hash',
     ].every((field) => actual[field] === target[field]);
 }
 
-export function emptyActorRegistry(chatId = '', identityScopeId = '') {
+export function emptyActorRegistry(chatId = '', identityScopeId = '', scopeDigest = '') {
     return {
         version: ACTOR_REGISTRY_VERSION,
         chatId: cleanText(chatId, 180),
         identityScopeId: cleanText(identityScopeId, 300),
+        scopeDigest: cleanText(scopeDigest, 180),
         characters: {},
         registered: {},
         updatedAt: 0,
@@ -180,6 +201,7 @@ function registrySourceRefs(value, chatId) {
             ref.generationType,
             ref.branchId,
             ref.identityScopeId,
+            ref.scopeDigest,
             ref.hash,
         ].join('|');
         if (seen.has(key)) continue;
@@ -284,20 +306,29 @@ function normalizeCandidateRegistryRow(value, chatId) {
 export function normalizeActorRegistry(value, {
     chatId = '',
     identityScopeId = '',
+    scopeDigest = '',
+    allowScopeDigestFill = false,
     actors = [],
     migrateLegacy = false,
 } = {}) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const expectedChatId = cleanText(chatId || source.chatId, 180);
+    const expectedScopeDigest = cleanText(scopeDigest, 180);
     const sourceChatId = cleanText(source.chatId, 180);
     if (chatId && sourceChatId && cleanText(chatId, 180) !== sourceChatId) {
-        return emptyActorRegistry(chatId, identityScopeId);
+        return emptyActorRegistry(chatId, identityScopeId, expectedScopeDigest);
     }
     const expectedScopeId = cleanText(identityScopeId || source.identityScopeId, 300);
     const sourceScopeId = cleanText(source.identityScopeId, 300);
     if (identityScopeId && sourceScopeId && expectedScopeId !== sourceScopeId) {
-        return emptyActorRegistry(expectedChatId, expectedScopeId);
+        return emptyActorRegistry(expectedChatId, expectedScopeId, expectedScopeDigest);
     }
+    const sourceScopeDigest = cleanText(source.scopeDigest, 180);
+    if (expectedScopeDigest && sourceScopeDigest && expectedScopeDigest !== sourceScopeDigest) {
+        return emptyActorRegistry(expectedChatId, expectedScopeId, expectedScopeDigest);
+    }
+    const normalizedScopeDigest = sourceScopeDigest
+        || (allowScopeDigestFill ? expectedScopeDigest : '');
     const characters = {};
     const registered = {};
     const usedActorIds = new Set();
@@ -336,8 +367,11 @@ export function normalizeActorRegistry(value, {
         version: ACTOR_REGISTRY_VERSION,
         chatId: expectedChatId,
         identityScopeId: expectedScopeId,
-        characters: Object.fromEntries(Object.entries(characters).slice(0, ACTOR_LEDGER_MAX_ACTORS)),
-        registered: Object.fromEntries(Object.entries(registered).slice(0, ACTOR_LEDGER_MAX_ACTORS)),
+        scopeDigest: normalizedScopeDigest,
+        // Registry identity is authoritative storage, not an action/display
+        // budget. Production normalization must retain every validated row.
+        characters,
+        registered,
         updatedAt: integer(source.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
     };
 }
@@ -348,6 +382,7 @@ export function actorRegistryDigest(value) {
         version: registry.version,
         chatId: registry.chatId,
         identityScopeId: registry.identityScopeId,
+        scopeDigest: registry.scopeDigest,
         characters: Object.values(registry.characters)
             .sort((left, right) => left.actorRef.actorId.localeCompare(right.actorRef.actorId)),
         registered: Object.values(registry.registered)
@@ -364,15 +399,21 @@ export function actorRegistryDigest(value) {
 }
 
 export function actorRegistryMatchesLedger(value, expected = {}) {
-    const ledger = normalizeActorLedger(value, { chatId: expected.chatId || value?.chatId });
+    const ledger = normalizeActorLedger(value, {
+        chatId: expected.chatId || value?.chatId,
+        scopeDigest: expected.scopeDigest || '',
+    });
     const mismatches = [];
     if (expected.chatId && ledger.chatId !== expected.chatId) mismatches.push('chatId');
+    if (expected.scopeDigest && ledger.actorRegistry.scopeDigest !== expected.scopeDigest) {
+        mismatches.push('scopeDigest');
+    }
     if (expected.digest && actorRegistryDigest(ledger.actorRegistry) !== expected.digest) {
         mismatches.push('digest');
     }
     const registered = new Set(Object.values(ledger.actorRegistry.registered)
         .map((entry) => entry.actorRef.actorId));
-    for (const actorId of cleanList(expected.actorIds, ACTOR_LEDGER_MAX_ACTORS, 120)) {
+    for (const actorId of cleanActorIdList(expected.actorIds)) {
         if (!registered.has(actorId)) mismatches.push(`actorRef:${actorId}`);
     }
     return { ok: mismatches.length === 0, mismatches };
@@ -474,6 +515,52 @@ function normalizeCommitments(value, turn) {
         }))
         .filter((item) => item.summary)
         .slice(0, 16);
+}
+
+function normalizeActorPendingProfile(value, actorId, name) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const profileV6 = normalizeActorProfileV6(value.profileV6, {
+        actorId,
+        name,
+        mode: value.profileV6?.completionMode,
+    });
+    return {
+        version: 1,
+        transactionId: cleanText(value.transactionId, 180),
+        writeSetDigest: cleanText(value.writeSetDigest, 180),
+        preparedLedgerDigest: cleanText(value.preparedLedgerDigest, 180),
+        preparedFieldRevision: integer(
+            value.preparedFieldRevision,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            0,
+        ),
+        actorRef: {
+            actorId: cleanText(value.actorRef?.actorId || actorId, 120),
+            name: cleanText(value.actorRef?.name || name, 160),
+        },
+        sourceRef: normalizeSourceRef(value.sourceRef),
+        scopeDigest: cleanText(value.scopeDigest || value.sourceRef?.scopeDigest, 180),
+        schemaVersion: integer(
+            value.schemaVersion,
+            1,
+            Number.MAX_SAFE_INTEGER,
+            ACTOR_PROFILE_V6_VERSION,
+        ),
+        commitId: cleanText(value.commitId, 180),
+        profileDigest: cleanText(value.profileDigest, 120),
+        status: 'pending_readback',
+        readbackVerified: false,
+        preparedForAction: false,
+        locks: clone(value.locks || profileV6.locks || {}),
+        manualOverrides: clone(value.manualOverrides || profileV6.manualOverrides || {}),
+        writeSet: canonicalProfileWriteSet(value.writeSet),
+        committedTurn: integer(value.committedTurn, 0, Number.MAX_SAFE_INTEGER, 0),
+        preparedProjection: value.preparedProjection && typeof value.preparedProjection === 'object'
+            ? clone(value.preparedProjection)
+            : null,
+        profileV6,
+    };
 }
 
 function normalizeActor(value, index, turn) {
@@ -677,6 +764,7 @@ function normalizeActor(value, index, turn) {
             .filter((item) => item.id && item.attempt)
             .slice(-80),
         profileV6: normalizeActorProfileV6(value.profileV6, { id, actorId: id, name }),
+        pendingProfile: normalizeActorPendingProfile(value.pendingProfile, id, name),
         nextActionTurn: integer(value.nextActionTurn, 0, Number.MAX_SAFE_INTEGER, turn + 1),
         deadlineTurn: integer(value.deadlineTurn, 0, Number.MAX_SAFE_INTEGER, 0),
         lastSemanticTurn: integer(
@@ -764,6 +852,7 @@ function normalizeReceipt(value) {
                 generationId: cleanText(value.target.generationId, 180),
                 generationType: cleanText(value.target.generationType, 80),
                 branchId: cleanText(value.target.branchId, 180),
+                scopeDigest: cleanText(value.target.scopeDigest, 180),
                 contentHash: cleanText(value.target.contentHash || value.target.hash, 120),
                 hash: cleanText(value.target.contentHash || value.target.hash, 120),
             }
@@ -924,7 +1013,9 @@ export function emptyActorLedger(chatId = '') {
 export function normalizeActorLedger(value, {
     chatId = '',
     identityScopeId = '',
-    maxActors = ACTOR_LEDGER_MAX_ACTORS,
+    scopeDigest = '',
+    allowScopeDigestFill = false,
+    maxActors = null,
     excludedActorNames = [],
 } = {}) {
     const source = value && typeof value === 'object' ? value : {};
@@ -937,12 +1028,20 @@ export function normalizeActorLedger(value, {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const actors = [];
     const used = new Set();
+    const explicitProjectionLimit = maxActors !== null
+        && maxActors !== undefined
+        && Number.isFinite(Number(maxActors))
+        ? Math.max(0, Math.floor(Number(maxActors)))
+        : null;
     for (const raw of Array.isArray(source.actors) ? source.actors : []) {
+        if (explicitProjectionLimit === 0) break;
         const item = normalizeActor(raw, actors.length, turn);
         if (!item || !isActorName(item.name, excluded) || used.has(item.id)) continue;
         used.add(item.id);
         actors.push(item);
-        if (actors.length >= integer(maxActors, 1, ACTOR_LEDGER_MAX_ACTORS, ACTOR_LEDGER_MAX_ACTORS)) {
+        // A caller may still request an explicit compatibility/read-only
+        // projection. The production ledger path passes no limit.
+        if (explicitProjectionLimit !== null && actors.length >= explicitProjectionLimit) {
             break;
         }
     }
@@ -954,6 +1053,8 @@ export function normalizeActorLedger(value, {
     const actorRegistry = normalizeActorRegistry(source.actorRegistry, {
         chatId: expectedChatId,
         identityScopeId,
+        scopeDigest,
+        allowScopeDigestFill,
         actors,
         migrateLegacy: !hasPersistedRegistry,
     });
@@ -1070,6 +1171,277 @@ export function normalizeActorLedger(value, {
     };
 }
 
+function canonicalActorLedgerValue(value) {
+    if (Array.isArray(value)) return value.map(canonicalActorLedgerValue);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [
+        key,
+        canonicalActorLedgerValue(value[key]),
+    ]));
+}
+
+export function actorLedgerDigest(value) {
+    const ledger = normalizeActorLedger(value, { chatId: value?.chatId || '' });
+    return `actor-ledger-v1:${fingerprint(JSON.stringify(canonicalActorLedgerValue(ledger)))}`;
+}
+
+function canonicalProfileWriteSet(expectedCommits) {
+    return (Array.isArray(expectedCommits) ? expectedCommits : [])
+        .map((entry) => ({
+            actorRef: {
+                actorId: cleanText(entry?.actorRef?.actorId || entry?.actorId, 120),
+                name: cleanText(entry?.actorRef?.name || entry?.name, 160),
+            },
+            schemaVersion: integer(
+                entry?.schemaVersion,
+                1,
+                Number.MAX_SAFE_INTEGER,
+                ACTOR_PROFILE_V6_VERSION,
+            ),
+            commitId: cleanText(entry?.commitId, 180),
+            profileDigest: cleanText(entry?.profileDigest || entry?.digest, 120),
+            sourceRef: normalizeSourceRef(entry?.sourceRef),
+            scopeDigest: cleanText(
+                entry?.scopeDigest || entry?.sourceRef?.scopeDigest,
+                180,
+            ),
+            locks: clone(entry?.locks || {}),
+            manualOverrides: clone(entry?.manualOverrides || {}),
+        }))
+        .filter((entry) => (
+            entry.actorRef.actorId
+            && entry.commitId
+            && entry.profileDigest
+        ))
+        .sort((left, right) => left.actorRef.actorId.localeCompare(right.actorRef.actorId));
+}
+
+export function actorProfileWriteSetDigest(expectedCommits) {
+    const writeSet = canonicalProfileWriteSet(expectedCommits);
+    return `actor-profile-write-set-v1:${fingerprint(JSON.stringify(
+        canonicalActorLedgerValue(writeSet),
+    ))}`;
+}
+
+export function actorProfileTransactionId({ chatId = '', sourceRef = null, preparedFieldRevision = 0, expectedCommits = [] } = {}) {
+    return `PBT-${fingerprint(JSON.stringify([
+        cleanText(chatId, 180),
+        normalizeSourceRef(sourceRef),
+        integer(preparedFieldRevision, 0, Number.MAX_SAFE_INTEGER, 0),
+        canonicalProfileWriteSet(expectedCommits),
+    ])).slice(0, 24)}`;
+}
+
+export function actorProfilePendingWriteSetProjection(value, expectedCommits, {
+    preparedFieldRevision = 0,
+    transactionId = '',
+    writeSetDigest = '',
+} = {}) {
+    const ledger = normalizeActorLedger(value, { chatId: value?.chatId || '' });
+    const writeSet = canonicalProfileWriteSet(expectedCommits);
+    // Phase 1 staging: project only from a fully matching
+    // actor.pendingProfile. Missing or mismatched candidates produce an
+    // explicitly unmatchable placeholder; the live profileV6 is never used
+    // as a fallback here.
+    const pendingEntries = writeSet.map((expected) => {
+        const actor = ledger.actors.find((entry) => entry.id === expected.actorRef.actorId);
+        const pending = actor?.pendingProfile || null;
+        if (!actor || !pending) {
+            return { expected, pending: null, pendingDigest: '' };
+        }
+        const profile = normalizeActorProfileV6(pending.profileV6, {
+            actorId: actor.id,
+            name: actor.name,
+            mode: pending.profileV6?.completionMode,
+        });
+        const pendingDigest = actorProfileBaselineDigest(profile);
+        const pendingMatches = pending.actorRef?.actorId === expected.actorRef.actorId
+            && pending.schemaVersion === expected.schemaVersion
+            && pending.commitId === expected.commitId
+            && pending.profileDigest === expected.profileDigest
+            && pendingDigest === expected.profileDigest;
+        return { expected, pending: pendingMatches ? pending : null, pendingDigest };
+    });
+    const actors = pendingEntries.map(({ expected, pending, pendingDigest }) => {
+        const actor = ledger.actors.find((entry) => entry.id === expected.actorRef.actorId);
+        const finalProfile = actor?.profileV6;
+        const finalVerification = finalProfile?.baselineCommit?.verification;
+        const finalMode = !pending && finalProfile && finalVerification ? 'final' : 'pending';
+        const sourceRef = pending
+            ? pending.sourceRef
+            : (finalProfile?.baselineCommit?.sourceRef || null);
+        const locks = clone(pending?.locks || finalProfile?.locks || expected.locks || {});
+        const manualOverrides = clone(
+            pending?.manualOverrides
+                || finalProfile?.manualOverrides
+                || expected.manualOverrides
+                || {},
+        );
+        const finalCommitId = finalProfile?.baselineCommit?.commitId || expected.commitId;
+        const finalDigest = finalProfile
+            ? actorProfileBaselineDigest(finalProfile)
+            : pendingDigest;
+        if (!pending) {
+            return {
+                actorRef: {
+                    actorId: cleanText(expected.actorRef.actorId, 120),
+                    name: cleanText(expected.actorRef.name, 160),
+                },
+                schemaVersion: integer(
+                    expected.schemaVersion,
+                    1,
+                    Number.MAX_SAFE_INTEGER,
+                    ACTOR_PROFILE_V6_VERSION,
+                ),
+                commitId: finalMode === 'final' ? finalCommitId : '',
+                profileDigest: finalMode === 'final' ? finalDigest : '',
+                sourceRef: finalMode === 'final' ? normalizeSourceRef(sourceRef) : null,
+                scopeDigest: finalMode === 'final'
+                    ? cleanText(sourceRef?.scopeDigest, 180)
+                    : '',
+                status: finalMode === 'final' ? 'pending_readback' : 'pending_missing',
+                readbackVerified: false,
+                preparedForAction: false,
+                locks,
+                manualOverrides,
+            };
+        }
+        return {
+            actorRef: {
+                actorId: cleanText(pending.actorRef?.actorId || expected.actorRef.actorId, 120),
+                name: cleanText(pending.actorRef?.name || expected.actorRef.name, 160),
+            },
+            schemaVersion: integer(
+                pending.schemaVersion,
+                1,
+                Number.MAX_SAFE_INTEGER,
+                ACTOR_PROFILE_V6_VERSION,
+            ),
+            commitId: cleanText(pending.commitId, 180),
+            profileDigest: pendingDigest,
+            sourceRef: normalizeSourceRef(pending.sourceRef),
+            scopeDigest: cleanText(
+                pending.scopeDigest || pending.sourceRef?.scopeDigest,
+                180,
+            ),
+            status: 'pending_readback',
+            readbackVerified: false,
+            preparedForAction: false,
+            locks: clone(pending.locks || {}),
+            manualOverrides: clone(pending.manualOverrides || {}),
+        };
+    });
+    const transactionMetadata = pendingEntries.map(({ pending, expected }) => {
+        if (pending) return pending;
+        const actor = ledger.actors.find((entry) => entry.id === expected.actorRef.actorId);
+        return actor?.profileV6?.baselineCommit?.verification || {};
+    });
+    return canonicalActorLedgerValue({
+        version: 1,
+        transactionId: cleanText(
+            transactionId
+                || transactionMetadata.map((entry) => entry.transactionId).find(Boolean),
+            180,
+        ),
+        writeSetDigest: cleanText(
+            writeSetDigest
+                || transactionMetadata.map((entry) => entry.writeSetDigest).find(Boolean),
+            180,
+        ) || actorProfileWriteSetDigest(writeSet),
+        preparedFieldRevision: integer(
+            preparedFieldRevision,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            0,
+        ),
+        writeSet,
+        actors,
+    });
+}
+
+export function actorProfilePendingWriteSetDigest(value, expectedCommits, options = {}) {
+    const projection = actorProfilePendingWriteSetProjection(
+        value,
+        expectedCommits,
+        options,
+    );
+    return `actor-profile-pending-v1:${fingerprint(JSON.stringify(projection))}`;
+}
+
+// Phase 1 never publishes a candidate profile.  It seals every pending row
+// with one canonical write-set before the single durable pending save, so a
+// later recovery cannot promote an arbitrary subset of the batch.
+export function sealActorProfilePendingTransactionInLedger(value, expectedCommits, {
+    transactionId = '',
+    preparedFieldRevision = 0,
+} = {}) {
+    let ledger = normalizeActorLedger(value, { chatId: value?.chatId || '' });
+    const originalLedger = clone(ledger);
+    const writeSet = canonicalProfileWriteSet(expectedCommits);
+    if (!writeSet.length) {
+        return { ledger: originalLedger, sealed: false, reason: 'actor_profile.write_set_empty' };
+    }
+    const canonicalTransactionId = cleanText(transactionId, 180)
+        || actorProfileTransactionId({
+            chatId: ledger.chatId,
+            sourceRef: writeSet[0]?.sourceRef,
+            preparedFieldRevision,
+            expectedCommits: writeSet,
+        });
+    const writeSetDigest = actorProfileWriteSetDigest(writeSet);
+    const revision = integer(preparedFieldRevision, 0, Number.MAX_SAFE_INTEGER, 0);
+    for (const expected of writeSet) {
+        const index = ledger.actors.findIndex((actor) => actor.id === expected.actorRef.actorId);
+        const actor = index >= 0 ? clone(ledger.actors[index]) : null;
+        if (!actor || !actorProfileCommitMatchesLedger(ledger, {
+            ...expected,
+            transactionId: '',
+            writeSetDigest: '',
+            preparedLedgerDigest: '',
+            phase: 'pending',
+        }).ok) {
+            return { ledger: originalLedger, sealed: false, reason: 'actor_profile.pending_readback_mismatch' };
+        }
+        actor.pendingProfile = {
+            ...actor.pendingProfile,
+            transactionId: canonicalTransactionId,
+            writeSetDigest,
+            preparedFieldRevision: revision,
+            writeSet: clone(writeSet),
+            preparedLedgerDigest: '',
+            preparedProjection: null,
+        };
+        ledger.actors[index] = actor;
+    }
+    const projection = actorProfilePendingWriteSetProjection(ledger, writeSet, {
+        transactionId: canonicalTransactionId,
+        writeSetDigest,
+        preparedFieldRevision: revision,
+    });
+    const preparedLedgerDigest = `actor-profile-pending-v1:${fingerprint(JSON.stringify(projection))}`;
+    for (const expected of writeSet) {
+        const index = ledger.actors.findIndex((actor) => actor.id === expected.actorRef.actorId);
+        ledger.actors[index] = {
+            ...ledger.actors[index],
+            pendingProfile: {
+                ...ledger.actors[index].pendingProfile,
+                preparedLedgerDigest,
+                preparedProjection: clone(projection),
+            },
+        };
+    }
+    ledger = normalizeActorLedger(ledger, { chatId: ledger.chatId });
+    return {
+        ledger,
+        sealed: true,
+        transactionId: canonicalTransactionId,
+        writeSetDigest,
+        preparedFieldRevision: revision,
+        preparedLedgerDigest,
+        writeSet,
+    };
+}
+
 export function replaceActorProfileBaselineInLedger(value, actorRef, baseline, commitMeta = {}) {
     const ledger = normalizeActorLedger(value);
     const originalLedger = clone(ledger);
@@ -1110,6 +1482,75 @@ export function replaceActorProfileBaselineInLedger(value, actorRef, baseline, c
     if (commitMeta.digest && cleanText(commitMeta.digest, 120) !== digest) {
         return { ledger, committed: false, reason: 'actor_profile.commit_rejected' };
     }
+    if (commitMeta.phase === 'pending') {
+        // Phase 1 staging only: persist the full candidate on
+        // actor.pendingProfile and leave actor.profileV6 plus every live
+        // compatibility projection (identity/goals/relationships/knowledge/
+        // resources/capabilities) untouched until a later final commit.
+        const pendingCommitId = cleanText(commitMeta.commitId, 180);
+        const stagedWriteSet = canonicalProfileWriteSet(
+            Array.isArray(commitMeta.writeSet) && commitMeta.writeSet.length
+                ? commitMeta.writeSet
+                : [{
+                    actorRef: { actorId: actor.id, name: actor.name },
+                    schemaVersion: profile.version,
+                    commitId: pendingCommitId,
+                    profileDigest: digest,
+                    sourceRef: commitMeta.sourceRef,
+                    scopeDigest: cleanText(
+                        commitMeta.scopeDigest || commitMeta.sourceRef?.scopeDigest,
+                        180,
+                    ),
+                }],
+        );
+        profile.preparedForAction = false;
+        profile.backgroundPending = true;
+        const pendingProfile = normalizeActorPendingProfile({
+            version: 1,
+            transactionId: cleanText(commitMeta.transactionId, 180),
+            writeSetDigest: cleanText(commitMeta.writeSetDigest, 180)
+                || actorProfileWriteSetDigest(stagedWriteSet),
+            preparedLedgerDigest: cleanText(commitMeta.preparedLedgerDigest, 180),
+            preparedFieldRevision: integer(
+                commitMeta.preparedFieldRevision,
+                0,
+                Number.MAX_SAFE_INTEGER,
+                0,
+            ),
+            actorRef: { actorId: actor.id, name: actor.name },
+            sourceRef: commitMeta.sourceRef && typeof commitMeta.sourceRef === 'object'
+                ? clone(commitMeta.sourceRef)
+                : null,
+            scopeDigest: cleanText(
+                commitMeta.scopeDigest || commitMeta.sourceRef?.scopeDigest,
+                180,
+            ),
+            schemaVersion: profile.version,
+            commitId: pendingCommitId,
+            profileDigest: digest,
+            locks: clone(profile.locks || {}),
+            manualOverrides: clone(profile.manualOverrides || {}),
+            writeSet: stagedWriteSet,
+            profileV6: profile,
+        }, actor.id, actor.name);
+        actor.pendingProfile = pendingProfile;
+        ledger.actors[actorIndex] = actor;
+        return {
+            ledger,
+            committed: true,
+            pending: true,
+            phase: 'pending',
+            actorId: actor.id,
+            commitId: pendingCommitId,
+            profileDigest: digest,
+            transactionId: pendingProfile?.transactionId || '',
+            writeSetDigest: pendingProfile?.writeSetDigest || '',
+            ledgerChanged: JSON.stringify(canonicalActorLedgerValue(ledger))
+                !== JSON.stringify(canonicalActorLedgerValue(originalLedger)),
+        };
+    }
+    const finalized = commitMeta.phase === 'final'
+        && commitMeta.readbackVerified === true;
     profile.baselineCommit = {
         schemaVersion: profile.version,
         commitId: cleanText(commitMeta.commitId, 180),
@@ -1124,10 +1565,13 @@ export function replaceActorProfileBaselineInLedger(value, actorRef, baseline, c
             Number.MAX_SAFE_INTEGER,
             ledger.turn,
         ),
-        readbackVerified: commitMeta.readbackVerified === true,
-        status: commitMeta.readbackVerified === true ? 'committed' : 'pending_readback',
+        readbackVerified: finalized,
+        status: finalized ? 'committed' : 'pending_readback',
+        verification: finalized && commitMeta.verification
+            ? clone(commitMeta.verification)
+            : null,
     };
-    profile.preparedForAction = commitMeta.readbackVerified === true;
+    profile.preparedForAction = finalized;
     profile.backgroundPending = !profile.preparedForAction;
     actor.profileV6 = profile;
 
@@ -1158,7 +1602,14 @@ export function replaceActorProfileBaselineInLedger(value, actorRef, baseline, c
     ledger.actors[actorIndex] = actor;
     const normalized = normalizeActorLedger(ledger, { chatId: ledger.chatId });
     const committedActor = normalized.actors.find((entry) => entry.id === actor.id);
-    if (!actorProfileReadyForAction(committedActor)) {
+    const expected = {
+        actorRef: { actorId: actor.id, name: actor.name },
+        schemaVersion: profile.version,
+        commitId: profile.baselineCommit.commitId,
+        digest,
+        phase: finalized ? 'final' : 'pending',
+    };
+    if (!actorProfileCommitMatchesLedger(normalized, expected).ok) {
         return { ledger: originalLedger, committed: false, reason: 'actor_profile.commit_rejected' };
     }
     return {
@@ -1169,17 +1620,142 @@ export function replaceActorProfileBaselineInLedger(value, actorRef, baseline, c
     };
 }
 
+export function finalizeActorProfileBaselinesInLedger(value, expectedCommits, {
+    preparedLedgerDigest = '',
+    preparedFieldRevision = 0,
+    transactionId = '',
+    writeSetDigest = '',
+} = {}) {
+    let ledger = normalizeActorLedger(value, { chatId: value?.chatId || '' });
+    const originalLedger = clone(ledger);
+    const writeSet = canonicalProfileWriteSet(expectedCommits);
+    if (!writeSet.length) {
+        return { ledger, finalized: false, reason: 'actor_profile.write_set_empty' };
+    }
+    const firstPending = ledger.actors.find((actor) => actor.pendingProfile
+        && actor.pendingProfile.actorRef?.actorId === writeSet[0].actorRef.actorId)?.pendingProfile;
+    const expectedTransactionId = cleanText(transactionId || firstPending?.transactionId, 180);
+    const expectedWriteSetDigest = cleanText(
+        writeSetDigest || firstPending?.writeSetDigest,
+        180,
+    );
+    const expectedPreparedDigest = cleanText(
+        preparedLedgerDigest || firstPending?.preparedLedgerDigest,
+        180,
+    );
+    const revision = integer(
+        preparedFieldRevision || firstPending?.preparedFieldRevision,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        0,
+    );
+    if (
+        !expectedTransactionId
+        || expectedWriteSetDigest !== actorProfileWriteSetDigest(writeSet)
+        || !expectedPreparedDigest
+    ) return { ledger: originalLedger, finalized: false, reason: 'actor_profile.pending_transaction_mismatch' };
+    const actualPreparedDigest = actorProfilePendingWriteSetDigest(ledger, writeSet, {
+        preparedFieldRevision: revision,
+        transactionId: expectedTransactionId,
+        writeSetDigest: expectedWriteSetDigest,
+    });
+    if (actualPreparedDigest !== expectedPreparedDigest) {
+        return { ledger: originalLedger, finalized: false, reason: 'actor_profile.pending_digest_mismatch' };
+    }
+    for (const expected of writeSet) {
+        if (!actorProfileCommitMatchesLedger(ledger, {
+            ...expected,
+            transactionId: expectedTransactionId,
+            writeSetDigest: expectedWriteSetDigest,
+            preparedLedgerDigest: expectedPreparedDigest,
+            preparedFieldRevision: revision,
+            phase: 'pending',
+        }).ok) {
+            return { ledger: originalLedger, finalized: false, reason: 'actor_profile.pending_readback_mismatch' };
+        }
+    }
+    for (const expected of writeSet) {
+        const pendingActor = ledger.actors.find((entry) => entry.id === expected.actorRef.actorId);
+        const pending = pendingActor?.pendingProfile;
+        if (!pendingActor || !pending) {
+            return { ledger: originalLedger, finalized: false, reason: 'actor_profile.actor_ref_mismatch' };
+        }
+        const replaced = replaceActorProfileBaselineInLedger(ledger, expected.actorRef,
+            pending.profileV6, {
+                ...expected,
+                sourceRef: pending.sourceRef,
+                scopeDigest: pending.scopeDigest,
+                committedTurn: pending.committedTurn,
+                readbackVerified: true,
+                phase: 'final',
+                verification: {
+                    version: 1,
+                    transactionId: expectedTransactionId,
+                    writeSetDigest: expectedWriteSetDigest,
+                    preparedLedgerDigest: expectedPreparedDigest,
+                    preparedFieldRevision: revision,
+                    commitId: expected.commitId,
+                    profileDigest: expected.profileDigest,
+                    writeSet: clone(writeSet),
+                    preparedProjection: clone(pending.preparedProjection),
+                },
+            });
+        if (!replaced.committed) {
+            return { ledger: originalLedger, finalized: false, reason: replaced.reason || 'actor_profile.finalize_rejected' };
+        }
+        ledger = replaced.ledger;
+        const actorIndex = ledger.actors.findIndex((entry) => entry.id === expected.actorRef.actorId);
+        ledger.actors[actorIndex] = { ...ledger.actors[actorIndex], pendingProfile: null };
+    }
+    ledger.updatedAt = Date.now();
+    const normalized = normalizeActorLedger(ledger, { chatId: ledger.chatId });
+    if (!writeSet.every((expected) => actorProfileCommitMatchesLedger(
+        normalized,
+        {
+            ...expected,
+            transactionId: expectedTransactionId,
+            writeSetDigest: expectedWriteSetDigest,
+            preparedLedgerDigest: expectedPreparedDigest,
+            preparedFieldRevision: revision,
+            phase: 'final',
+        },
+    ).ok)) {
+        return { ledger: originalLedger, finalized: false, reason: 'actor_profile.finalize_rejected' };
+    }
+    return {
+        ledger: normalized,
+        finalized: true,
+        transactionId: expectedTransactionId,
+        writeSetDigest: expectedWriteSetDigest,
+        preparedLedgerDigest: expectedPreparedDigest,
+        preparedFieldRevision: revision,
+        writeSet,
+    };
+}
+
 export function actorProfileCommitMatchesLedger(value, expected = {}) {
     const ledger = normalizeActorLedger(value);
     const actorId = cleanText(expected.actorRef?.actorId || expected.actorId, 120);
     const actorName = cleanText(expected.actorRef?.name || expected.name, 160);
     const actor = ledger.actors.find((entry) => entry.id === actorId);
     if (!actor) return { ok: false, mismatches: ['actorRef'] };
-    const profile = normalizeActorProfileV6(actor.profileV6, {
+    const phase = expected.phase === 'pending' ? 'pending' : 'final';
+    const pending = phase === 'pending' ? actor.pendingProfile : null;
+    const profile = normalizeActorProfileV6(
+        phase === 'pending' ? pending?.profileV6 : actor.profileV6, {
         actorId: actor.id,
         name: actor.name,
     });
-    const commit = profile.baselineCommit;
+    const commit = phase === 'pending'
+        ? {
+            actorRef: pending?.actorRef,
+            schemaVersion: pending?.schemaVersion,
+            commitId: pending?.commitId,
+            digest: pending?.profileDigest,
+            readbackVerified: pending?.readbackVerified,
+            status: pending?.status,
+        }
+        : profile.baselineCommit;
     const mismatches = [];
     if (commit?.actorRef?.actorId !== actorId) mismatches.push('actorRef');
     if (
@@ -1190,12 +1766,170 @@ export function actorProfileCommitMatchesLedger(value, expected = {}) {
     if (commit?.schemaVersion !== Number(expected.schemaVersion)) mismatches.push('commitSchemaVersion');
     if (commit?.commitId !== cleanText(expected.commitId, 180)) mismatches.push('commitId');
     const digest = actorProfileBaselineDigest(profile);
-    if (digest !== cleanText(expected.digest, 120)) mismatches.push('digest');
+    if (digest !== cleanText(expected.digest || expected.profileDigest, 120)) {
+        mismatches.push('digest');
+    }
     if (commit?.digest !== digest) mismatches.push('commitDigest');
-    if (commit?.readbackVerified !== true || commit?.status !== 'committed') {
-        mismatches.push('readbackVerified');
+    if (phase === 'pending') {
+        if (!pending) mismatches.push('pendingProfile');
+        if (commit?.readbackVerified !== false || commit?.status !== 'pending_readback') {
+            mismatches.push('pendingReadback');
+        }
+        if (profile.preparedForAction !== false) mismatches.push('preparedForAction');
+        for (const field of [
+            'transactionId', 'writeSetDigest', 'preparedLedgerDigest', 'preparedFieldRevision',
+        ]) {
+            if (expected[field] !== undefined && expected[field] !== ''
+                && pending?.[field] !== expected[field]) mismatches.push(field);
+        }
+        if (expected.sourceRef && JSON.stringify(canonicalActorLedgerValue(normalizeSourceRef(pending?.sourceRef)))
+            !== JSON.stringify(canonicalActorLedgerValue(normalizeSourceRef(expected.sourceRef)))) mismatches.push('sourceRef');
+        if (expected.scopeDigest && cleanText(pending?.scopeDigest, 180) !== cleanText(expected.scopeDigest, 180)) mismatches.push('scopeDigest');
+        if (expected.locks && JSON.stringify(canonicalActorLedgerValue(pending?.locks || {}))
+            !== JSON.stringify(canonicalActorLedgerValue(expected.locks))) mismatches.push('locks');
+        if (expected.manualOverrides && JSON.stringify(canonicalActorLedgerValue(pending?.manualOverrides || {}))
+            !== JSON.stringify(canonicalActorLedgerValue(expected.manualOverrides))) mismatches.push('manualOverrides');
+    } else {
+        if (commit?.readbackVerified !== true || commit?.status !== 'committed') {
+            mismatches.push('readbackVerified');
+        }
+        if (profile.preparedForAction !== true) mismatches.push('preparedForAction');
+        const verification = commit?.verification;
+        const writeSet = canonicalProfileWriteSet(verification?.writeSet);
+        if (
+            !verification
+            || verification.commitId !== commit?.commitId
+            || verification.profileDigest !== commit?.digest
+            || !writeSet.some((entry) => (
+                entry.actorRef.actorId === actorId
+                && entry.commitId === commit?.commitId
+                && entry.profileDigest === commit?.digest
+            ))
+        ) {
+            mismatches.push('verification');
+        } else {
+            // Rebuild the pending-equivalent projection from the current
+            // final ledger.  The stored projection is diagnostic only: locks,
+            // manual overrides, profile digest, and the complete write-set
+            // must all come from the current host value before readiness.
+            const projectedDigest = actorProfilePendingWriteSetDigest(
+                ledger,
+                writeSet,
+                {
+                    preparedFieldRevision: verification.preparedFieldRevision,
+                    transactionId: verification.transactionId,
+                    writeSetDigest: verification.writeSetDigest,
+                },
+            );
+            if (projectedDigest !== verification.preparedLedgerDigest) {
+                mismatches.push('preparedLedgerDigest');
+            }
+            for (const field of [
+                'transactionId', 'writeSetDigest', 'preparedLedgerDigest', 'preparedFieldRevision',
+            ]) {
+                if (expected[field] !== undefined && expected[field] !== ''
+                    && verification?.[field] !== expected[field]) mismatches.push(field);
+            }
+        }
     }
     return { ok: mismatches.length === 0, mismatches };
+}
+
+export function actorProfileReadinessInLedger(value, actorId) {
+    const ledger = normalizeActorLedger(value, { chatId: value?.chatId || '' });
+    const id = cleanText(actorId, 120);
+    const actor = ledger.actors.find((entry) => entry.id === id);
+    if (!actor) return { ready: false, reason: 'actor_profile.actor_missing' };
+    if (actor.pendingProfile) {
+        return { ready: false, reason: 'actor_profile.pending_readback', migrationRequired: false };
+    }
+    const base = actorProfileActionReadiness(actor);
+    if (!base.ready) return base;
+    const matched = actorProfileCommitMatchesLedger(ledger, {
+        actorRef: {
+            actorId: actor.id,
+            name: actor.name,
+        },
+        schemaVersion: actor.profileV6?.baselineCommit?.schemaVersion,
+        commitId: actor.profileV6?.baselineCommit?.commitId,
+        digest: actor.profileV6?.baselineCommit?.digest,
+        phase: 'final',
+    });
+    return matched.ok
+        ? { ready: true, reason: '', migrationRequired: false }
+        : {
+            ready: false,
+            reason: 'actor_profile.ledger_verification_mismatch',
+            migrationRequired: false,
+            mismatches: matched.mismatches,
+        };
+}
+
+export function actorProfilePendingTransactionForSource(value, {
+    sourceRef = null,
+    scopeDigest = '',
+} = {}) {
+    const ledger = normalizeActorLedger(value, { chatId: value?.chatId || '' });
+    const expectedScope = cleanText(scopeDigest || sourceRef?.scopeDigest, 180);
+    const matching = ledger.actors.filter((actor) => {
+        const pending = actor.pendingProfile;
+        return pending
+            && acceptedActorSourceRefMatches(pending.sourceRef, sourceRef)
+            && cleanText(pending.scopeDigest || pending.sourceRef?.scopeDigest, 180) === expectedScope;
+    });
+    if (!matching.length) return { present: false, valid: true, ledger };
+    const first = matching[0].pendingProfile;
+    const transactionId = cleanText(first.transactionId, 180);
+    const writeSetDigest = cleanText(first.writeSetDigest, 180);
+    const preparedLedgerDigest = cleanText(first.preparedLedgerDigest, 180);
+    const preparedFieldRevision = integer(first.preparedFieldRevision, 0, Number.MAX_SAFE_INTEGER, 0);
+    const writeSet = canonicalProfileWriteSet(first.writeSet);
+    const reasons = [];
+    if (!transactionId || !writeSetDigest || !preparedLedgerDigest || !writeSet.length) {
+        reasons.push('transaction_seal_missing');
+    }
+    if (writeSetDigest !== actorProfileWriteSetDigest(writeSet)) reasons.push('write_set_digest');
+    const expectedIds = new Set(writeSet.map((entry) => entry.actorRef.actorId));
+    if (expectedIds.size !== writeSet.length || expectedIds.size !== matching.length) reasons.push('write_set_members');
+    for (const actor of matching) {
+        const pending = actor.pendingProfile;
+        const expected = writeSet.find((entry) => entry.actorRef.actorId === actor.id);
+        if (!expected || pending.transactionId !== transactionId
+            || pending.writeSetDigest !== writeSetDigest
+            || pending.preparedLedgerDigest !== preparedLedgerDigest
+            || integer(pending.preparedFieldRevision, 0, Number.MAX_SAFE_INTEGER, 0) !== preparedFieldRevision
+            || JSON.stringify(canonicalActorLedgerValue(canonicalProfileWriteSet(pending.writeSet)))
+                !== JSON.stringify(canonicalActorLedgerValue(writeSet))) {
+            reasons.push(`member:${actor.id}`);
+        }
+    }
+    const projectedDigest = actorProfilePendingWriteSetDigest(ledger, writeSet, {
+        preparedFieldRevision,
+        transactionId,
+        writeSetDigest,
+    });
+    if (projectedDigest !== preparedLedgerDigest) reasons.push('prepared_projection');
+    const expectedTransactionId = actorProfileTransactionId({
+        chatId: ledger.chatId,
+        sourceRef,
+        preparedFieldRevision,
+        expectedCommits: writeSet,
+    });
+    if (transactionId !== expectedTransactionId) reasons.push('transaction_seal');
+    return {
+        present: true,
+        valid: reasons.length === 0,
+        reason: reasons[0] || '',
+        reasons,
+        ledger,
+        transactionId,
+        writeSetDigest,
+        preparedLedgerDigest,
+        preparedFieldRevision,
+        writeSet,
+        actorIds: writeSet.map((entry) => entry.actorRef.actorId),
+        ledgerDigest: actorLedgerDigest(ledger),
+    };
 }
 
 function mergeEvidence(current, additions, limit = 24) {
@@ -1832,6 +2566,70 @@ function structuredContentActorFacts(content) {
         .map(({ position: _position, ordinal: _ordinal, ...fact }) => fact);
 }
 
+function acceptedModelProfileDiscoveryFacts(content, discoveries) {
+    const source = String(content || '');
+    const supplied = Array.isArray(discoveries) ? discoveries : [];
+    const prepared = supplied.map((entry, inputIndex) => {
+        const name = cleanText(entry?.candidateRef?.name, 160);
+        const sourceAnchor = String(entry?.candidateRef?.sourceAnchor || '')
+            .trim().slice(0, 1200);
+        const anchorCheck = validateActorProfileDiscoveryAnchor(
+            { name, sourceAnchor },
+            source,
+        );
+        return {
+            entry,
+            inputIndex,
+            name,
+            sourceAnchor,
+            sourceOffset: anchorCheck.offset,
+            reason: anchorCheck.ok ? '' : anchorCheck.reason,
+        };
+    });
+    const nameCounts = new Map();
+    for (const item of prepared) {
+        const key = item.name.toLocaleLowerCase('zh-CN');
+        if (!key || item.reason) continue;
+        nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+    }
+    const facts = [];
+    const accepted = [];
+    const unresolved = [];
+    for (const item of prepared) {
+        const duplicateName = (nameCounts.get(item.name.toLocaleLowerCase('zh-CN')) || 0) > 1;
+        const reason = item.reason || (duplicateName
+            ? 'actor_profile.discovery_name_duplicate'
+            : '');
+        if (reason) {
+            unresolved.push({
+                candidateRef: { name: item.name, sourceAnchor: item.sourceAnchor },
+                reason,
+                inputIndex: item.inputIndex,
+            });
+            continue;
+        }
+        const acceptedIndex = accepted.length;
+        accepted.push({
+            ...clone(item.entry),
+            candidateRef: { name: item.name, sourceAnchor: item.sourceAnchor },
+            sourceOffset: item.sourceOffset,
+            inputIndex: item.inputIndex,
+        });
+        facts.push({
+            name: item.name,
+            evidence: item.sourceAnchor,
+            present: true,
+            sourceKind: 'accepted_narrative',
+            identityKey: `model-profile:${item.sourceOffset}:${item.name}`,
+            position: item.sourceOffset,
+            ordinal: acceptedIndex,
+            modelProfileDiscoveryIndex: acceptedIndex,
+        });
+    }
+    facts.sort((left, right) => left.position - right.position || left.ordinal - right.ordinal);
+    return { facts, accepted, unresolved };
+}
+
 export function discoverActorsFromTurnSources(value, {
     userText = '',
     acceptedContent = '',
@@ -1839,6 +2637,7 @@ export function discoverActorsFromTurnSources(value, {
     excludedActorNames = [],
     sourceRef = null,
     turn = null,
+    modelProfileDiscoveries = null,
 } = {}) {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = normalizeActorLedger(value, { excludedActorNames });
@@ -1847,10 +2646,17 @@ export function discoverActorsFromTurnSources(value, {
         : integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
     const ref = normalizeSourceRef(sourceRef);
     const scene = sceneActorFacts(userText);
+    const modelDiscovery = acceptedModelProfileDiscoveryFacts(
+        acceptedContent,
+        modelProfileDiscoveries,
+    );
+    const useModelProfileDiscoveries = Array.isArray(modelProfileDiscoveries);
     const facts = [
         ...actActorFacts(userText),
         ...scene.facts,
-        ...structuredContentActorFacts(acceptedContent),
+        ...(useModelProfileDiscoveries
+            ? modelDiscovery.facts
+            : structuredContentActorFacts(acceptedContent)),
         ...(Array.isArray(knownActorNames) ? knownActorNames : []).map((name) => ({
             name,
             evidence: `MVU人物锚点：${cleanText(name, 160)}`,
@@ -1860,6 +2666,7 @@ export function discoverActorsFromTurnSources(value, {
         })),
     ];
     const candidates = [];
+    const acceptedProfiles = [];
     const byKey = new Map();
     for (const [factIndex, fact] of facts.entries()) {
         const actorName = resolveActorRegistryTargetName(fact.name);
@@ -1907,6 +2714,16 @@ export function discoverActorsFromTurnSources(value, {
         };
         byKey.set(candidateKey, candidate);
         candidates.push(candidate);
+        if (Number.isInteger(fact.modelProfileDiscoveryIndex)) {
+            const profileDiscovery = modelDiscovery.accepted[fact.modelProfileDiscoveryIndex];
+            if (profileDiscovery) {
+                acceptedProfiles.push({
+                    ...clone(profileDiscovery),
+                    candidateId: candidate.candidateId,
+                    sourceOffset: Number(fact.position) || 0,
+                });
+            }
+        }
     }
     return {
         ledger,
@@ -1914,6 +2731,20 @@ export function discoverActorsFromTurnSources(value, {
         discovered: [],
         touched: [],
         location: scene.location,
+        modelProfileDiscoveries: acceptedProfiles
+            .sort((left, right) => left.sourceOffset - right.sourceOffset),
+        unresolved: [
+            ...clone(modelDiscovery.unresolved),
+            ...modelDiscovery.accepted
+                .filter((entry) => !acceptedProfiles.some((accepted) => (
+                    accepted.inputIndex === entry.inputIndex
+                )))
+                .map((entry) => ({
+                    candidateRef: clone(entry.candidateRef),
+                    reason: 'actor_candidate.identity_quarantined',
+                    inputIndex: entry.inputIndex,
+                })),
+        ],
     };
 }
 
@@ -1965,12 +2796,16 @@ export function applyCandidateRegistryResult(characters, result) {
 export function runActorRegistryUpsert(value, candidates, {
     chatId = '',
     identityScopeId = '',
+    scopeDigest = '',
+    allowScopeDigestFill = false,
     expectedSourceRef = null,
     turn = null,
     excludedActorNames = [],
 } = {}) {
     const sourceChatId = cleanText(value?.chatId, 180);
     const expectedChatId = cleanText(chatId || sourceChatId, 180);
+    const expectedScopeDigest = cleanText(scopeDigest, 180);
+    const persistedScopeDigest = cleanText(value?.actorRegistry?.scopeDigest, 180);
     if (sourceChatId && expectedChatId && sourceChatId !== expectedChatId) {
         return {
             ledger: normalizeActorLedger(value),
@@ -1984,10 +2819,29 @@ export function runActorRegistryUpsert(value, candidates, {
             changed: false,
         };
     }
+    if (
+        expectedScopeDigest
+        && persistedScopeDigest
+        && expectedScopeDigest !== persistedScopeDigest
+    ) {
+        return {
+            ledger: normalizeActorLedger(value),
+            inserted: [],
+            updated: [],
+            quarantined: (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
+                candidateId: cleanText(candidate?.candidateId, 120),
+                name: cleanText(candidate?.name, 160),
+                reason: 'actor_candidate.scope_digest_mismatch',
+            })),
+            changed: false,
+        };
+    }
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = normalizeActorLedger(value, {
         chatId: expectedChatId,
         identityScopeId,
+        scopeDigest: expectedScopeDigest,
+        allowScopeDigestFill,
         excludedActorNames,
     });
     const currentTurn = turn === null || turn === undefined
@@ -2028,6 +2882,8 @@ export function runActorRegistryUpsert(value, candidates, {
             || !sourceRef.identityScopeId
             || (expectedSourceRef && !acceptedActorSourceRefMatches(sourceRef, expectedSourceRef))
             || (registry.identityScopeId && sourceRef.identityScopeId !== registry.identityScopeId)
+            || (Boolean(registry.scopeDigest) !== Boolean(sourceRef.scopeDigest))
+            || (registry.scopeDigest && sourceRef.scopeDigest !== registry.scopeDigest)
         ) {
             reject('actor_candidate.source_ref_mismatch');
             continue;
@@ -2173,6 +3029,7 @@ export function runActorRegistryUpsert(value, candidates, {
     const normalized = normalizeActorLedger(ledger, {
         chatId: expectedChatId,
         identityScopeId: registry.identityScopeId,
+        scopeDigest: registry.scopeDigest,
         excludedActorNames,
     });
     return {
@@ -2230,6 +3087,8 @@ export function actorCandidatesForRegistryPromotion(candidates, upsertResult) {
 export function promoteActorCandidatesToRegistry(value, candidates, {
     chatId = '',
     identityScopeId = '',
+    scopeDigest = '',
+    allowScopeDigestFill = false,
     expectedSourceRef = null,
     turn = null,
     excludedActorNames = [],
@@ -2238,6 +3097,8 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
     const ledger = normalizeActorLedger(value, {
         chatId: expectedChatId,
         identityScopeId,
+        scopeDigest,
+        allowScopeDigestFill,
         excludedActorNames,
     });
     const registry = clone(ledger.actorRegistry);
@@ -2252,23 +3113,31 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
         const candidateId = cleanText(raw?.candidateId, 120);
         const name = resolveActorRegistryTargetName(raw?.name);
         const sourceRef = normalizeSourceRef(raw?.sourceRef);
+        if (
+            !sourceRef
+            || (Boolean(registry.scopeDigest) !== Boolean(sourceRef.scopeDigest))
+            || (registry.scopeDigest && sourceRef.scopeDigest !== registry.scopeDigest)
+            || (expectedSourceRef && !acceptedActorSourceRefMatches(sourceRef, expectedSourceRef))
+        ) {
+            quarantined.push({ candidateId, name, reason: 'actor_candidate.scope_digest_mismatch' });
+            continue;
+        }
         if (raw?.sourceKind !== 'accepted_narrative') {
             quarantined.push({ candidateId, name, reason: 'actor_candidate.promotion_not_accepted' });
             continue;
         }
-        const row = Object.values(registry.characters).find((item) => (
-            (candidateId && item.candidateId === candidateId) || item.name === name
+        const rowsForCandidate = Object.values(registry.characters).filter((item) => (
+            candidateId && item.candidateId === candidateId
         ));
+        const row = rowsForCandidate.length === 1 ? rowsForCandidate[0] : null;
         if (!row) {
-            const claims = new Set([name, ...explicitDelimitedActorAliases(name)]);
-            const alreadyCopied = promoted.some((item) => (
-                [item.actorRef.displayName, ...item.actorRef.aliases]
-                    .some((claim) => claims.has(claim))
-            ));
-            if (alreadyCopied) {
-                continue;
-            }
-            quarantined.push({ candidateId, name, reason: 'actor_candidate.candidate_missing' });
+            quarantined.push({
+                candidateId,
+                name,
+                reason: rowsForCandidate.length > 1
+                    ? 'actor_candidate.candidate_ambiguous'
+                    : 'actor_candidate.candidate_missing',
+            });
             continue;
         }
         const quarantineRevealEntries = explicitQuarantineRevealEntries(ledger, raw);
@@ -2377,6 +3246,7 @@ export function promoteActorCandidatesToRegistry(value, candidates, {
     const normalized = normalizeActorLedger(ledger, {
         chatId: expectedChatId,
         identityScopeId: registry.identityScopeId,
+        scopeDigest: registry.scopeDigest,
         excludedActorNames,
     });
     return {
@@ -2552,7 +3422,7 @@ export function reconcileActorIdentityRevealsFromAcceptedContent(value, {
 } = {}) {
     let ledger = normalizeActorLedger(value);
     const ref = normalizeSourceRef(sourceRef);
-    if (!ref) return ledger;
+    if (!ref || ref.compatibilityOnly) return ledger;
     const body = String(content ?? '')
         .replace(/^[\s\S]*?<content\b[^>]*>/iu, '')
         .replace(/<\/content>[\s\S]*$/iu, '');
@@ -2618,7 +3488,7 @@ export function reconcileActorMutationLineageFromAcceptedContent(value, {
 } = {}) {
     const ledger = normalizeActorLedger(value);
     const ref = normalizeSourceRef(sourceRef);
-    if (!ref) return ledger;
+    if (!ref || ref.compatibilityOnly) return ledger;
     const body = String(content ?? '')
         .replace(/^[\s\S]*?<content\b[^>]*>/iu, '')
         .replace(/<\/content>[\s\S]*$/iu, '');
@@ -2700,13 +3570,14 @@ export function applyAcceptedContentObservations(value, {
     const ref = normalizeSourceRef(sourceRef);
     const observers = new Set(cleanList(observerActorIds, 32, 120));
     const statements = observableStatements(content);
-    if (!ref || !observers.size || !statements.length) return ledger;
+    if (!ref || ref.compatibilityOnly || !observers.size || !statements.length) return ledger;
     const receiptId = `actor-observation:${fingerprint(JSON.stringify([
         ref.chatId,
         ref.messageId,
         ref.swipeId,
         ref.generation,
         ref.branchId,
+        ref.scopeDigest,
         ref.hash,
     ])).slice(0, 18)}`;
     if (ledger.observationReceipts.some((receipt) => receipt.receiptId === receiptId)) {
@@ -2763,7 +3634,7 @@ export function reconcileActorLifecycleFromAcceptedContent(value, {
 } = {}) {
     const ledger = normalizeActorLedger(value);
     const ref = normalizeSourceRef(sourceRef);
-    if (!ref) return ledger;
+    if (!ref || ref.compatibilityOnly) return ledger;
     const statements = observableStatements(content);
     const transitions = [];
     ledger.actors = ledger.actors.map((current) => {
@@ -2904,6 +3775,15 @@ function actorActionEligibilityInLedger(ledger, actorId) {
     if (!actor || !isActorId(id)) {
         return { ready: false, reason: 'actor_action.actor_missing', actor: null, actorRef: null };
     }
+    if (!cleanText(ledger.actorRegistry?.scopeDigest, 180)) {
+        return {
+            ready: false,
+            reason: 'actor_action.registry_scope_digest_missing',
+            actor,
+            actorRef: null,
+            migrationRequired: true,
+        };
+    }
     const registryEntry = Object.values(ledger.actorRegistry?.registered || {})
         .find((entry) => entry?.actorRef?.actorId === id);
     if (!registryEntry) {
@@ -2935,7 +3815,7 @@ function actorActionEligibilityInLedger(ledger, actorId) {
             actorRef: clone(registryEntry.actorRef),
         };
     }
-    const profileReadiness = actorProfileActionReadiness(actor);
+    const profileReadiness = actorProfileReadinessInLedger(ledger, actor.id);
     if (!profileReadiness.ready) {
         return {
             ready: false,
@@ -3204,7 +4084,9 @@ function validateCandidate(ledger, actor, candidate, turn) {
         return ['actor-identity-mismatch'];
     }
     if (!registeredActorRef(ledger, actor)) reasons.push('actor-ref-not-registered');
-    if (!actorProfileReadyForAction(actor)) reasons.push('actor-profile-not-ready');
+    if (!actorProfileReadinessInLedger(ledger, actor.id).ready) {
+        reasons.push('actor-profile-not-ready');
+    }
     if (
         !['active', 'dormant'].includes(actor.status)
         || (actor.status === 'dormant' && actor.inactiveReason === 'sleep')
@@ -4020,20 +4902,22 @@ export function settleActorInjectionReceipts(value, {
         .replace(/^[\s\S]*?<content\b[^>]*>/iu, '')
         .replace(/<\/content>[\s\S]*$/iu, '');
     const ref = normalizeSourceRef(sourceRef);
-    if (!ref) return ledger;
+    if (!ref || ref.compatibilityOnly) return ledger;
     ledger.actionReceipts = ledger.actionReceipts.map((receipt) => {
         if (receipt.stage !== 'injected' || receipt.status !== 'pending') return receipt;
         const target = receipt.target && typeof receipt.target === 'object'
             ? receipt.target
             : null;
-        if (target && (
+        if (!target || !cleanText(target.scopeDigest, 180)) return receipt;
+        if (
             (target.chatId && target.chatId !== ref.chatId)
             || (target.messageId && target.messageId !== ref.messageId)
             || (target.swipeId && target.swipeId !== ref.swipeId)
             || (target.generation && target.generation !== ref.generation)
             || (target.branchId && target.branchId !== ref.branchId)
+            || (target.scopeDigest && target.scopeDigest !== ref.scopeDigest)
             || (target.hash && target.hash !== ref.hash)
-        )) return receipt;
+        ) return receipt;
         const evidence = receipt.observableConsequence
             && accepted.includes(receipt.observableConsequence)
             ? receipt.observableConsequence

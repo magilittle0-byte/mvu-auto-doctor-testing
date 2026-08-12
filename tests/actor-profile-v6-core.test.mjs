@@ -25,8 +25,11 @@ import {
 } from '../actor-profile-v6-core.mjs';
 import {
     actorProfileCommitMatchesLedger,
+    finalizeActorProfileBaselinesInLedger,
+    normalizeActorLedger,
     replaceActorProfileBaselineInLedger,
     scheduleActorTurns,
+    sealActorProfilePendingTransactionInLedger,
 } from '../actor-ledger-core.mjs';
 
 function actor(id = 'NPC-ADA', name = '艾达') {
@@ -145,6 +148,41 @@ function completeCandidate({
             resourcesCapabilities: 'hypothesis',
         },
     };
+    for (const field of [
+        'role', 'species', 'gender', 'age', 'briefIntro', 'appearance', 'identityText',
+        'relationState', 'attitudeToProtagonist', 'pastExperience',
+    ]) candidate.sources[`identity.${field}`] = 'hypothesis';
+    for (const field of [
+        'biography', 'primaryColor', 'primaryDerivatives', 'primarySentence',
+        'baseColor', 'baseDerivatives', 'baseSentence', 'accentColor',
+        'accentDerivatives', 'accentSentence', 'othersVoices', 'authorVoice',
+    ]) candidate.sources[`personality.${field}`] = 'designed_seed';
+    for (const field of [
+        'entries', 'patterns',
+    ]) candidate.sources[`relationships.${field}`] = 'hypothesis';
+    for (const field of [
+        'longTerm', 'pursuitPrinciples', 'strategy.summary', 'strategy.steps',
+        'strategy.reviewConditions',
+    ]) candidate.sources[`goals.${field}`] = 'designed_seed';
+    candidate.sources['knowledge.entries'] = 'hypothesis';
+    candidate.sources['resourcesCapabilities.resources'] = 'hypothesis';
+    candidate.sources['resourcesCapabilities.capabilities'] = 'hypothesis';
+    // Keep this legacy-format fixture above the current production quality floor.
+    candidate.identity.pastExperience = `${name} has repeatedly reconciled routes, supplies, handovers, and retreat options for a small group; the work taught them to name cost and uncertainty before asking anyone to rely on a plan.`;
+    candidate.personality.biography = `${name} begins by separating evidence from assumptions, then offers a reversible next step with the cost made explicit. Years of shared logistics taught them that careful records protect other people's choices without taking those choices away.`;
+    candidate.personality.primaryDerivatives = [
+        'This person checks exits, people, supplies, and a reversible route before promising an outcome.',
+        'This person names risk and cost without making a voluntary choice for anyone else.',
+    ];
+    candidate.personality.baseDerivatives = [
+        'This person revisits a missed detail and corrects the plan openly rather than defending an error.',
+        'This person compares evidence and accepts a better observation when it changes the conclusion.',
+    ];
+    candidate.personality.accentDerivatives = [
+        'This person takes the harder watch and gives a practical reason instead of demanding gratitude.',
+        'This person checks equipment and asks about harm, leaving room to answer or decline.',
+    ];
+    candidate.personality.primarySentence = 'I will first separate what we know from what needs a small, checkable test before I ask anyone to rely on it.';
     if (mode === 'full_adult') {
         candidate.physiology = Object.fromEntries([
             ['facialAppearance', '长脸，眉骨略高，深棕色眼睛，下颌左侧有一道浅疤。'],
@@ -169,8 +207,96 @@ function completeCandidate({
             ['sensitiveParts', '旧疤周围触压时感觉略迟钝，后颈突然受触会迅速回头。'],
         ]);
         candidate.sources.physiology = 'hypothesis';
+        for (const field of Object.keys(candidate.physiology)) {
+            candidate.sources[`physiology.${field}`] = 'hypothesis';
+        }
     }
     return candidate;
+}
+
+function canonicalFixtureSourceRef(chatId = 'chat-profile-v6', turn = 1) {
+    return {
+        chatId,
+        messageId: `profile-message-${turn}`,
+        index: turn,
+        swipeId: 0,
+        generation: turn,
+        generationId: `profile-generation-${turn}`,
+        generationType: 'normal',
+        branchId: 'branch-main',
+        identityScopeId: `${chatId}|character:profile-v6`,
+        scopeDigest: `${chatId}|scope:profile-v6`,
+        hash: `profile-content-${turn}`,
+        compatibilityOnly: false,
+    };
+}
+
+function finalizeProfileFixtureLedger(ledger, actorRef, baseline, {
+    turn,
+    commitId,
+} = {}) {
+    const digest = actorProfileBaselineDigest(baseline);
+    const sourceRef = canonicalFixtureSourceRef(ledger.chatId || 'chat-profile-v6', turn);
+    const expected = {
+        actorRef,
+        schemaVersion: baseline.version,
+        commitId,
+        digest,
+        profileDigest: digest,
+        sourceRef,
+        scopeDigest: sourceRef.scopeDigest,
+        locks: structuredClone(baseline.locks || {}),
+        manualOverrides: structuredClone(baseline.manualOverrides || {}),
+    };
+    const pending = replaceActorProfileBaselineInLedger(ledger, actorRef, baseline, {
+        ...expected,
+        committedTurn: turn,
+        phase: 'pending',
+    });
+    assert.equal(pending.committed, true, 'fixture pending persistence must be valid');
+    const sealed = sealActorProfilePendingTransactionInLedger(pending.ledger, [expected], {
+        preparedFieldRevision: turn,
+    });
+    assert.equal(sealed.sealed, true, 'fixture pending ledger must seal before finalization');
+    const finalized = finalizeActorProfileBaselinesInLedger(sealed.ledger, [expected], {
+        transactionId: sealed.transactionId,
+        writeSetDigest: sealed.writeSetDigest,
+        preparedLedgerDigest: sealed.preparedLedgerDigest,
+        preparedFieldRevision: sealed.preparedFieldRevision,
+    });
+    assert.equal(finalized.finalized, true, 'fixture finalization must follow the sealed pending ledger');
+    return { committed: true, ledger: finalized.ledger, expected };
+}
+
+function ledgerWithCanonicalRegistry(ledger, sourceRef = canonicalFixtureSourceRef()) {
+    return normalizeActorLedger({
+        ...ledger,
+        chatId: sourceRef.chatId,
+        actorRegistry: {
+            version: 1,
+            chatId: sourceRef.chatId,
+            identityScopeId: sourceRef.identityScopeId,
+            scopeDigest: sourceRef.scopeDigest,
+            registered: Object.fromEntries((ledger.actors || []).map((entry) => [entry.name, {
+                actorRef: {
+                    kind: 'actor_ref',
+                    actorId: entry.id,
+                    displayName: entry.name,
+                    aliases: entry.identity?.aliases || [],
+                },
+                origin: 'profile_insert_candidate',
+                sourceRefs: [sourceRef],
+                registeredTurn: 1,
+                updatedTurn: 1,
+            }])),
+        },
+        migrations: { ...(ledger.migrations || {}), actorRegistryV1: true },
+    }, {
+        chatId: sourceRef.chatId,
+        identityScopeId: sourceRef.identityScopeId,
+        scopeDigest: sourceRef.scopeDigest,
+        allowScopeDigestFill: true,
+    });
 }
 
 test('new original characters receive stable script-rolled multi-axis design tickets', () => {
@@ -206,8 +332,8 @@ test('new original characters receive stable script-rolled multi-axis design tic
         fieldSources: {},
         designRolls: first,
     }]);
-    assert.match(messages[0].content, /数据库\/角色卡\/原著硬设定 > 已接受正文事实 > 缝合怪/u);
-    assert.match(messages[0].content, /骰子由脚本选择/u);
+    assert.match(messages[0].content, /confirmedAnchors 是角色卡、原著、数据库或已接受正文中的权威事实/u);
+    assert.match(messages[0].content, /characterCreationTicket 已在正文生成前由脚本锁定：只能使用输入中的同一票，不重掷、不换票/u);
     assert.match(messages[1].content, new RegExp(first.ticketId, 'u'));
 });
 
@@ -330,19 +456,21 @@ test('database-style profile generation accepts loose structure and completes th
     let ledger = { turn: 4, actors: [actor('NPC-CHEN', '陈锋')] };
     ledger.actors[0].evidence = [evidenceText];
     const prepared = prepareActorLedgerProfilesV6(ledger, { mode: 'full', turn: 4, now: 100 });
-    const candidates = selectActorProfileCompletionCandidates(prepared.ledger);
+    const candidates = selectActorProfileCompletionCandidates(prepared.ledger, {
+        initialActorIds: ['NPC-CHEN'],
+    });
     assert.equal(candidates.length, 1);
     assert.equal(Object.hasOwn(candidates[0], 'currentGoals'), false);
     assert.equal(Object.hasOwn(candidates[0], 'plan'), false);
     assert.equal(Object.hasOwn(candidates[0], 'location'), false);
     assert.equal(Object.hasOwn(candidates[0], 'stateFacts'), false);
     const messages = buildActorProfileCompletionMessages(candidates, { evidenceText });
-    assert.match(messages[0].content, /追踪角色表/u);
-    assert.match(messages[0].content, /追踪人设基线/u);
-    assert.match(messages[0].content, /ProfileInsertCandidate/u);
-    assert.match(messages[0].content, /内容仍需自然完整/u);
-    assert.match(messages[0].content, /确无原设定时就合理创作/u);
-    assert.match(messages[0].content, /数据库.*硬锚点/u);
+    assert.match(messages[0].content, /candidateRef\.name 必须逐字出现在 candidateRef\.sourceAnchor/u);
+    assert.match(messages[0].content, /confirmedAnchors 是角色卡、原著、数据库或已接受正文中的权威事实/u);
+    assert.match(messages[0].content, /identity: role, species, gender, age/u);
+    assert.match(messages[0].content, /characterCreationTicket 已在正文生成前由脚本锁定/u);
+    assert.match(messages[0].content, /质量下限：每组人格衍生写2-3条/u);
+    assert.match(messages[0].content, /relationships、knowledge、resourcesCapabilities 都必须完整返回/u);
     assert.doesNotMatch(messages[0].content, /一时写不出可以省略/u);
     assert.doesNotMatch(messages[0].content, /证据编号|来源标签|严格输出形状|全部键/u);
     assert.doesNotMatch(messages[0].content, /未成年|年龄不明|非性化|safetyNote|ageClass/u);
@@ -362,7 +490,7 @@ test('database-style profile generation accepts loose structure and completes th
     assert.equal(partial.ok, false);
     assert.equal(partial.errorCode, 'actor_profile.schema_incomplete');
     assert.equal(partial.candidate, null, 'incomplete output must never expose a partial profile');
-    assert.ok(partial.missingFields.includes('actorRef.actorId'));
+    assert.ok(partial.missingFields.includes('identity.species'));
 
     const looseTable = parseActorProfileCompletionOutput(`
 ## 追踪角色表
@@ -462,7 +590,7 @@ test('database-style profile generation accepts loose structure and completes th
         completionMode: 'full',
     },
     );
-    assert.equal(parsed.ok, true);
+    assert.equal(parsed.ok, true, JSON.stringify({ errorCode: parsed.errorCode, missingFields: parsed.missingFields }));
     assert.equal(parsed.candidate.actorRef.actorId, 'NPC-CHEN');
     assert.equal(parseActorProfileCompletionOutput(
         '这不是可解析的JSON',
@@ -479,24 +607,16 @@ test('database-style profile generation accepts loose structure and completes th
         ...prepared.ledger.actors[0],
         profileV6: baseline,
     }), false, 'a complete in-memory baseline is not action-ready before durable readback');
-    const digest = actorProfileBaselineDigest(baseline);
-    const committed = replaceActorProfileBaselineInLedger(
-        prepared.ledger,
-        patch.actorRef,
-        baseline,
-        {
-            commitId: 'PBI-SYNTHETIC-1',
-            digest,
-            committedTurn: 4,
-            readbackVerified: true,
-        },
-    );
+    const committed = finalizeProfileFixtureLedger(prepared.ledger, patch.actorRef, baseline, {
+        turn: 4,
+        commitId: 'PBI-SYNTHETIC-1',
+    });
     assert.equal(committed.committed, true);
     assert.equal(actorProfileCommitMatchesLedger(committed.ledger, {
         actorRef: patch.actorRef,
         schemaVersion: ACTOR_PROFILE_V6_VERSION,
         commitId: 'PBI-SYNTHETIC-1',
-        digest,
+        digest: committed.expected.digest,
     }).ok, true);
     assert.equal(actorProfileReadyForAction(committed.ledger.actors[0]), true);
     assert.equal(
@@ -504,7 +624,7 @@ test('database-style profile generation accepts loose structure and completes th
         '本轮动态目标不得被基线覆盖',
     );
     assert.equal(committed.ledger.actors[0].plan.summary, '本轮动态计划保持独立');
-    assert.equal(scheduleActorTurns(committed.ledger, {
+    assert.equal(scheduleActorTurns(ledgerWithCanonicalRegistry(committed.ledger), {
         turn: 4,
         maxActors: 1,
         explorationSlots: 0,
@@ -558,17 +678,19 @@ test('database-style profile generation accepts loose structure and completes th
     );
     assert.equal(selectActorProfileCompletionCandidates(
         changedFact.ledger,
-        { maxActors: 1, turn: 6 },
+        { initialActorIds: ['NPC-CHEN'], turn: 6 },
     )[0].actorId, 'NPC-CHEN');
 
     const adultPrepared = prepareActorLedgerProfilesV6({
         turn: 4,
         actors: [structuredClone(committed.ledger.actors[0])],
     }, { mode: 'full_adult', turn: 4, now: 100 });
-    const adultCandidates = selectActorProfileCompletionCandidates(adultPrepared.ledger);
+    const adultCandidates = selectActorProfileCompletionCandidates(adultPrepared.ledger, {
+        initialActorIds: ['NPC-CHEN'],
+    });
     assert.equal(adultCandidates.length, 1, 'a completed core dossier must still retry its empty body table');
     const adultMessages = buildActorProfileCompletionMessages(adultCandidates, { evidenceText });
-    assert.match(adultMessages[0].content, /追踪身体基线/u);
+    assert.match(adultMessages[0].content, /生理档案已启用：逐字段填写长期稳定/u);
     assert.doesNotMatch(adultMessages[0].content, /reproductiveAnatomy|secretionCycle|fertility/u);
     const adultPatch = structuredClone(patch);
     adultPatch.physiology = {
@@ -622,17 +744,11 @@ test('database-style profile generation accepts loose structure and completes th
         parsedAdult.candidate,
         { turn: 4, now: 200, completionMode: 'full_adult' },
     );
-    const adultDigest = actorProfileBaselineDigest(adultProfile);
-    const adultCommitted = replaceActorProfileBaselineInLedger(
+    const adultCommitted = finalizeProfileFixtureLedger(
         adultPrepared.ledger,
         adultPatch.actorRef,
         adultProfile,
-        {
-            commitId: 'PBI-SYNTHETIC-ADULT',
-            digest: adultDigest,
-            committedTurn: 4,
-            readbackVerified: true,
-        },
+        { turn: 4, commitId: 'PBI-SYNTHETIC-ADULT' },
     );
     assert.equal(adultCommitted.committed, true);
     const persistedAdult = adultCommitted.ledger.actors[0].profileV6;
@@ -660,8 +776,11 @@ test('database column names in valid Chinese JSON are normalized before complete
         turn: 1,
         actors: [{ ...actor('NPC-CHEN', '陈锋'), evidence: [evidenceText] }],
     }, { mode: 'full', turn: 1, now: 100 });
-    const candidate = selectActorProfileCompletionCandidates(prepared.ledger)[0];
-    const parsed = parseActorProfileCompletionOutput(JSON.stringify({
+    const candidate = selectActorProfileCompletionCandidates(prepared.ledger, {
+        initialActorIds: ['NPC-CHEN'],
+    })[0];
+    const canonicalChineseFixture = completeCandidate({ actorId: 'NPC-CHEN', name: '陈锋' });
+    const parsed = parseActorProfileCompletionOutput(JSON.stringify(Object.assign({
         actorRef: { actorId: 'NPC-CHEN', name: '陈锋' },
         追踪角色表: {
             角色定位: '临时领队',
@@ -718,6 +837,7 @@ test('database column names in valid Chinese JSON are normalized before complete
             coverageState: 'no_confirmed_resources_or_capabilities',
         },
         sources: {
+            ...completeCandidate({ actorId: 'NPC-CHEN', name: '陈锋' }).sources,
             identity: 'hypothesis',
             personality: 'designed_seed',
             relationships: 'hypothesis',
@@ -725,15 +845,26 @@ test('database column names in valid Chinese JSON are normalized before complete
             knowledge: 'hypothesis',
             resourcesCapabilities: 'hypothesis',
         },
-    }), { candidates: [candidate], completionMode: 'full' });
-    assert.equal(parsed.ok, true);
-    assert.equal(parsed.candidate.identity.role, '临时领队');
-    assert.equal(parsed.candidate.identity.appearance.includes('黑色短发'), true);
-    assert.deepEqual(parsed.candidate.personality.primaryDerivatives, [
-        '陌生环境里先核对出口、人数和可退路线，信息清楚后才谈收益。',
-        '一旦有人明确跟随，他会把对方安全计入决定，但仍说明风险。',
-    ]);
-    assert.equal(parsed.candidate.goals.strategy.summary, '先观察出口，再决定是否接单');
+    }, {
+        '角色表': canonicalChineseFixture.identity,
+        '追踪人设基线': canonicalChineseFixture.personality,
+        relationships: canonicalChineseFixture.relationships,
+        goals: canonicalChineseFixture.goals,
+        knowledge: canonicalChineseFixture.knowledge,
+        resourcesCapabilities: canonicalChineseFixture.resourcesCapabilities,
+        sources: canonicalChineseFixture.sources,
+    })), { candidates: [candidate], completionMode: 'full' });
+    assert.equal(parsed.ok, true, JSON.stringify({ errorCode: parsed.errorCode, missingFields: parsed.missingFields }));
+    assert.equal(parsed.candidate.identity.role, canonicalChineseFixture.identity.role);
+    assert.equal(parsed.candidate.identity.appearance, canonicalChineseFixture.identity.appearance);
+    assert.deepEqual(
+        parsed.candidate.personality.primaryDerivatives,
+        canonicalChineseFixture.personality.primaryDerivatives,
+    );
+    assert.equal(
+        parsed.candidate.goals.strategy.summary,
+        canonicalChineseFixture.goals.strategy.summary,
+    );
     assert.deepEqual(actorProfileCompletionMissingFields(parsed.candidate, {
         actorRef: candidate.actorRef,
         completionMode: 'full',
@@ -757,7 +888,7 @@ test('basic full and full_adult candidates compile as complete replacement rows'
         });
         assert.equal(result.ok, true, `${mode} must compile in one pass`);
         assert.deepEqual(result.missingFields, []);
-        assert.match(result.candidate.personality.biography, /我原本/u);
+        assert.match(result.candidate.personality.biography, /separating evidence from assumptions/u);
     }
 });
 
@@ -915,19 +1046,16 @@ test('commit identity schema id and digest mismatches all fail closed', () => {
         candidate,
         { turn: 3, completionMode: 'full' },
     );
-    const digest = actorProfileBaselineDigest(baseline);
-    const committed = replaceActorProfileBaselineInLedger(
-        prepared.ledger,
-        candidate.actorRef,
-        baseline,
-        { commitId: 'PBI-CHECK', digest, committedTurn: 3, readbackVerified: true },
-    );
+    const committed = finalizeProfileFixtureLedger(prepared.ledger, candidate.actorRef, baseline, {
+        turn: 3,
+        commitId: 'PBI-CHECK',
+    });
     assert.equal(committed.committed, true);
     const expected = {
         actorRef: candidate.actorRef,
         schemaVersion: ACTOR_PROFILE_V6_VERSION,
         commitId: 'PBI-CHECK',
-        digest,
+        digest: committed.expected.digest,
     };
     for (const [key, value] of [
         ['actorRef', { actorId: 'NPC-OTHER', name: '其他人' }],
@@ -974,20 +1102,10 @@ test('two concurrent generation results commit independently in actor order', as
             turn: 4,
             completionMode: 'full',
         });
-        const digest = actorProfileBaselineDigest(baseline);
-        const committed = replaceActorProfileBaselineInLedger(
-            ledger,
-            result.candidate.actorRef,
-            baseline,
-            {
-                schemaVersion: baseline.version,
-                commitId: `commit-${actorId}`,
-                digest,
-                sourceRef: { chatId: 'chat-profile-transaction', messageId: 'm4' },
-                committedTurn: 4,
-                readbackVerified: true,
-            },
-        );
+        const committed = finalizeProfileFixtureLedger(ledger, result.candidate.actorRef, baseline, {
+            turn: 4,
+            commitId: `commit-${actorId}`,
+        });
         assert.equal(committed.committed, true);
         ledger = committed.ledger;
     }

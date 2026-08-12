@@ -243,7 +243,6 @@ export function createDoctorRuntimePresentation({
     const surfaceKinds = Object.values(statusKinds || {}).map((value) => String(value || ''));
     const surfaceErrorCount = surfaceKinds.filter((kind) => kind === 'error').length;
     const surfaceWarningCount = surfaceKinds.filter((kind) => kind === 'warn').length;
-    const surfaceBusyCount = surfaceKinds.filter((kind) => kind === 'busy').length;
 
     const alerts = [];
     const addAlert = (code, color, count = 0) => {
@@ -281,7 +280,7 @@ export function createDoctorRuntimePresentation({
         : 'green';
     let color = baseColor;
     if (
-        (backgroundActive || running > 0 || surfaceBusyCount > 0)
+        (backgroundActive || running > 0)
         && DOCTOR_HEALTH_RANK[color] < DOCTOR_HEALTH_RANK.blue
     ) {
         color = 'blue';
@@ -317,7 +316,7 @@ export function createDoctorRuntimePresentation({
             deferred,
             cancelledIncomplete,
             dueTaskCount: nonNegativeInteger(dueTaskCount),
-            backgroundActive: backgroundActive === true || surfaceBusyCount > 0,
+            backgroundActive: backgroundActive === true || running > 0,
             failingModules,
             lastFailureCodes,
         },
@@ -399,7 +398,6 @@ export function createPrivacySafeDiagnosticProjection({
     environment = {},
     chat = {},
     statuses = {},
-    hardContract = null,
     socialAudit = null,
     prompt = null,
     modelDiagnostics = [],
@@ -599,20 +597,6 @@ export function createPrivacySafeDiagnosticProjection({
             ]),
         ),
         latestStatuses: statusKinds,
-        latestHardContract: hardContract
-            ? {
-                checkedAt: Math.max(0, Number(hardContract.checkedAt) || 0),
-                targetIndex: Number.isInteger(Number(hardContract.targetIndex))
-                    ? Number(hardContract.targetIndex)
-                    : -1,
-                issueCount: (hardContract.issues || []).length,
-                issues: (hardContract.issues || []).map((item) => ({
-                    code: String(item?.code || 'unknown'),
-                    severity: String(item?.severity || 'error'),
-                    pathDigest: shortHash(item?.path || '$'),
-                })),
-            }
-            : null,
         latestSocialAudit: socialAudit
             ? {
                 createdAt: Math.max(0, Number(socialAudit.createdAt) || 0),

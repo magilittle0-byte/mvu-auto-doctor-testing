@@ -32,9 +32,7 @@ function scope(overrides = {}) {
     return createActorSovereigntyScope({
         chatId: 'chat-stage6',
         cardId: 'character:0:card.png',
-        cardVersion: 'host:1',
-        worldbookIds: ['book-a', 'book-b'],
-        worldbookVersion: 'manifest:1',
+        worldbookSelectorKeys: ['book-a', 'book-b'],
         runtimeVersion: '2.0.0-rc.14:namespace-13',
         ...overrides,
     });
@@ -44,6 +42,7 @@ function sourceRef(valueScope = scope(), overrides = {}) {
     return {
         chatId: valueScope.chatId,
         logicalIndex: 4,
+        index: 4,
         messageId: 'message-4',
         swipeId: 0,
         generation: 2,
@@ -288,7 +287,7 @@ test('generic field-write guard rejects old scope/state and only rebases identic
     assert.equal(rejectedLedger.allowed, false);
     assert.deepEqual(rejectedLedger.staleFields, ['actorLedger']);
 
-    const wrongScope = scope({ cardVersion: 'host:previous' });
+    const wrongScope = scope({ cardId: 'character:0:previous-card.png' });
     const oldScopeCandidate = structuredClone(current);
     oldScopeCandidate.actorSovereigntyScope = wrongScope;
     const rejectedScope = prepareActorSovereigntyFieldWriteCandidate(oldScopeCandidate, current, {
@@ -402,7 +401,7 @@ test('only an exact persisted scopeDigest keeps tasks and checkpoints recoverabl
         sovereigntyRuntime: runtime,
         continuityCheckpoint: {
             scopeDigest: digest,
-            target: strictTarget(),
+            target: strictTarget({ scopeDigest: digest }),
             state: { turn: 1 },
         },
     }, { scope: valueScope });
@@ -554,13 +553,12 @@ test('lossy legacy normalization archives rejected raw data exactly and idempote
     assert.deepEqual(replay.namespace.actorSovereigntyCompatibilityArchive.items, archive.items);
 });
 
-test('same chat rejects card, worldbook revision, worldbook membership and runtime changes', () => {
+test('same chat rejects card, worldbook selector membership and runtime changes', () => {
     const original = scope();
     const source = namespace(original);
     for (const changed of [
-        scope({ cardVersion: 'host:2' }),
-        scope({ worldbookVersion: 'manifest:2' }),
-        scope({ worldbookIds: ['book-a', 'book-c'] }),
+        scope({ cardId: 'character:0:other-card.png' }),
+        scope({ worldbookSelectorKeys: ['book-a', 'book-c'] }),
         scope({ runtimeVersion: '2.0.0-rc.15:namespace-14' }),
     ]) {
         const migrated = migrateActorSovereigntyNamespace(source, { scope: changed });
@@ -568,14 +566,9 @@ test('same chat rejects card, worldbook revision, worldbook membership and runti
         assert.equal(migrated.reason, 'migration.scope_mismatch');
     }
     assert.equal(
-        actorSovereigntyScopeDigest(scope({ worldbookIds: ['book-b', 'book-a'] })),
+        actorSovereigntyScopeDigest(scope({ worldbookSelectorKeys: ['book-b', 'book-a'] })),
         actorSovereigntyScopeDigest(original),
         'worldbook order must not change scope',
-    );
-    assert.notEqual(
-        actorSovereigntyScopeDigest(scope({ worldbookVersion: 'synthetic:content-b' })),
-        actorSovereigntyScopeDigest(scope({ worldbookVersion: 'synthetic:content-a' })),
-        'same-name content changes must change scope',
     );
 });
 
@@ -681,18 +674,15 @@ test('worldbook manifest hashes real content canonically and honors host revisio
         createActorSovereigntyWorldbookManifest([hostB]).manifestDigest,
     );
 
-    const unresolvedScope = scope({
-        worldbookVersion: 'unresolved',
-        worldbookStatus: 'unresolved',
-    });
+    const unresolvedScope = scope({ worldbookSelectorKeys: ['book-a', 'unresolved-book'] });
     assert.equal(
-        migrateActorSovereigntyNamespace(namespace(unresolvedScope), {
+        migrateActorSovereigntyNamespace(namespace(scope()), {
             scope: unresolvedScope,
         }).applicable,
         false,
     );
     assert.equal(
-        actorSovereigntyMigrationIsCurrent(namespace(unresolvedScope), unresolvedScope),
+        actorSovereigntyMigrationIsCurrent(namespace(scope()), unresolvedScope),
         false,
     );
 });
@@ -914,7 +904,7 @@ test('observation-only advances without actions while an explicit gap waits for 
         now: 53,
     });
     gap = converged.runtime;
-    assert.equal(converged.completed.length, 1);
+    assert.equal(converged.completed.length, 1, JSON.stringify(converged.completed));
     assert.equal(gap.backlog.filter((task) => task.module !== 'observation').length, 0);
     assert.equal(gap.simulatedThrough.turn, 1);
     assert.equal(

@@ -30,6 +30,7 @@ function sourceRef(chatId, index = 1, cardId = 'card-main') {
         generationType: 'normal',
         branchId: 'branch-main',
         identityScopeId: `${chatId}|character:${cardId}`,
+        scopeDigest: `scope:${chatId}|character:${cardId}`,
         hash: `hash-${chatId}-${index}`,
     };
 }
@@ -49,6 +50,8 @@ function upsert(discovery, ref = discovery.candidates[0]?.sourceRef) {
     return runActorRegistryUpsert(discovery.ledger, discovery.candidates, {
         chatId: discovery.ledger.chatId,
         identityScopeId: ref?.identityScopeId,
+        scopeDigest: ref?.scopeDigest,
+        allowScopeDigestFill: true,
         expectedSourceRef: ref,
         turn: ref?.generation,
     });
@@ -58,6 +61,8 @@ function promote(candidateRegistry, candidates, ref = candidates[0]?.sourceRef) 
     return promoteActorCandidatesToRegistry(candidateRegistry.ledger, candidates, {
         chatId: candidateRegistry.ledger.chatId,
         identityScopeId: ref?.identityScopeId,
+        scopeDigest: ref?.scopeDigest,
+        allowScopeDigestFill: true,
         expectedSourceRef: ref,
         turn: ref?.generation,
     });
@@ -226,6 +231,8 @@ test('production chain promotes an updated character row by candidateId and stri
     const anchored = runActorRegistryUpsert(anchorDiscovery.ledger, anchorCandidates, {
         chatId: ledger.chatId,
         identityScopeId: anchorRef.identityScopeId,
+        scopeDigest: anchorRef.scopeDigest,
+        allowScopeDigestFill: true,
         expectedSourceRef: anchorRef,
         turn: 1,
     });
@@ -477,6 +484,8 @@ test('continuity projections and direct promotion cannot bypass candidate insert
     const rejected = promoteActorCandidatesToRegistry(ledger, discovery.candidates, {
         chatId: ledger.chatId,
         identityScopeId: discovery.candidates[0].sourceRef.identityScopeId,
+        scopeDigest: discovery.candidates[0].sourceRef.scopeDigest,
+        allowScopeDigestFill: true,
         expectedSourceRef: discovery.candidates[0].sourceRef,
         turn: 4,
     });
@@ -488,6 +497,8 @@ test('continuity projections and direct promotion cannot bypass candidate insert
     const stillRejected = promoteActorCandidatesToRegistry(registered.ledger, repeated.candidates, {
         chatId: ledger.chatId,
         identityScopeId: repeated.candidates[0].sourceRef.identityScopeId,
+        scopeDigest: repeated.candidates[0].sourceRef.scopeDigest,
+        allowScopeDigestFill: true,
         expectedSourceRef: repeated.candidates[0].sourceRef,
         turn: 6,
     });
@@ -538,10 +549,10 @@ test('current Registry blocks compatibility promotion of unregistered ledger and
 
 test('production call order is candidate upsert, copy/delete promotion, readback, then profiles', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-    const start = source.indexOf('async function runContinuityTarget');
-    const end = source.indexOf('async function confirmDangerousAction', start);
-    assert.ok(start >= 0 && end > start);
-    const runtime = source.slice(start, end);
+    const profileStart = source.indexOf('async function runActorProfileTarget');
+    const continuityStart = source.indexOf('async function runContinuityTarget');
+    assert.ok(profileStart >= 0 && continuityStart > profileStart);
+    const runtime = source.slice(profileStart, continuityStart);
     const discoveryAt = runtime.indexOf('discoverActorsFromTurnSources');
     const candidateAt = runtime.indexOf('runActorRegistryUpsert');
     const promotionAt = runtime.indexOf('promoteActorCandidatesToRegistry');
@@ -551,6 +562,19 @@ test('production call order is candidate upsert, copy/delete promotion, readback
     assert.ok(discoveryAt >= 0 && candidateAt > discoveryAt && promotionAt > candidateAt);
     assert.ok(promotionSelectionAt > promotionAt && persistAt > promotionSelectionAt);
     assert.ok(persistAt > promotionAt && profileAt > persistAt);
+
+    const continuityEnd = source.indexOf('async function confirmDangerousAction', continuityStart);
+    assert.ok(continuityEnd > continuityStart);
+    const continuityRuntime = source.slice(continuityStart, continuityEnd);
+    for (const p1Step of [
+        'discoverActorsFromTurnSources',
+        'runActorRegistryUpsert',
+        'promoteActorCandidatesToRegistry',
+        'persistActorRegistryForTurn',
+        'completeActorProfilesForTurn',
+    ]) {
+        assert.equal(continuityRuntime.includes(p1Step), false, `P3 must not repeat P1 step ${p1Step}`);
+    }
 
     const core = await readFile(new URL('../actor-ledger-core.mjs', import.meta.url), 'utf8');
     const selectionStart = core.indexOf('export function actorCandidatesForRegistryPromotion');

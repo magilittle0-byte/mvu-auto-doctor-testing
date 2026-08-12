@@ -542,12 +542,17 @@ test('static production path proves pre-generation injection and forbids doctor 
     assert.doesNotMatch(prepareProfile, /rollActorProfileDiversity|issueCharacterCreationTicket/u);
     assert.match(prepareProfile, /Missing tickets stay missing here/u);
 
-    const generationStart = runtimeSource.slice(runtimeSource.indexOf("types.GENERATION_STARTED"));
-    assert.ok(
-        generationStart.indexOf('prepareNpcDesignTicketBatch()')
-            < generationStart.indexOf('applySocialInjection()'),
-        '票据必须在预设注入与正文生成之前创建',
+    const nextTurnConsumer = runtimeSource.slice(
+        runtimeSource.indexOf('async function precomposeNextTurnConsumer'),
+        runtimeSource.indexOf('async function commitNextTurnConsumer'),
     );
+    assert.ok(
+        nextTurnConsumer.indexOf('prepareNpcDesignTicketBatch()')
+            < nextTurnConsumer.indexOf('immutableNextTurnConsumerPayload(worldText, ticketText)'),
+        '票据必须在唯一 P4 next-turn consumer 组装最终提示词前创建',
+    );
+    assert.match(runtimeSource, /await precomposeNextTurnConsumer\(lastGeneration\)/u);
+    assert.doesNotMatch(nextTurnConsumer, /Parallel_Continuity_Bridge|combined.?pool|applySocialInjection/u);
     const actorTransaction = runtimeSource.slice(runtimeSource.indexOf(
         'const actorRegistration = promoteActorCandidatesToRegistry',
     ));

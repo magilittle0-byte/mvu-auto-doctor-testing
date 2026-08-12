@@ -29,6 +29,14 @@ export function buildActorProfileEvidenceBank(evidenceText: string, options?: ob
 export function buildActorProfileCompletionMessages(candidates: unknown[], options?: object): object[];
 export function repairActorProfileInsertLocally(output: string, context?: object): object;
 export function validateActorProfileInsertCandidate(candidate: unknown, context?: object): object;
+export function validateActorProfileDiscoveryAnchor(candidateRef: unknown, acceptedNarrative: unknown): {
+    ok: boolean;
+    reason: string;
+    retryable: boolean;
+    offset: number;
+    name: string;
+    sourceAnchor: string;
+};
 export function parseActorProfileCompletionOutput(output: string, options?: object): object;
 export function parseActorProfileCompletionBatchOutput(output: string, options?: object): object;
 export function actorProfileCompletionMissingFields(candidate: unknown, context?: object): string[];

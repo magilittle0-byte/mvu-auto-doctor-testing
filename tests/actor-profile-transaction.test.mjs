@@ -39,16 +39,24 @@ test('profile runtime delegates one batch and contains no per-actor model lane o
 test('profile commit is durable, content-verified, fail-closed, and accepted only after readback', () => {
     const completion = sourceBetween(
         'async function completeActorProfilesForTurn',
-        'async function runContinuityTarget',
+        'async function runActorProfileTarget',
     );
-    const writeAt = batchSource.indexOf('persisted = await persistBatch');
-    const readbackAt = batchSource.indexOf('const readbackOk');
+    const pendingWriteAt = batchSource.indexOf('pendingPersisted = await persistPendingBatch');
+    const pendingReadbackAt = batchSource.indexOf('const pendingReadbackOk');
+    const finalWriteAt = batchSource.indexOf('finalPersisted = await persistFinalizedBatch');
+    const finalReadbackAt = batchSource.indexOf('const finalReadbackOk');
     const acceptAt = batchSource.indexOf('accepted: prepared.map');
-    assert.ok(writeAt >= 0 && readbackAt > writeAt && acceptAt > readbackAt);
+    assert.ok(
+        pendingWriteAt >= 0
+        && pendingReadbackAt > pendingWriteAt
+        && finalWriteAt > pendingReadbackAt
+        && finalReadbackAt > finalWriteAt
+        && acceptAt > finalReadbackAt,
+    );
     assert.match(completion, /fields: \['actorLedger'\]/u);
     assert.match(completion, /durable: true/u);
     assert.match(completion, /requireReadback: true/u);
-    assert.match(completion, /readbackAttempts: 1/u);
+    assert.match(completion, /readbackAttempts: 3/u);
     assert.match(completion, /contentValidator: \(persisted\) => expectedCommits\.every/u);
     assert.match(completion, /precondition: \(\) =>/u);
     for (const code of [
@@ -83,20 +91,25 @@ test('namespace writer rejects stale targets and revisions before mutation and r
 test('stale swipe checks precede materialization and scheduling follows persisted completion', () => {
     const completion = sourceBetween(
         'async function completeActorProfilesForTurn',
-        'async function runContinuityTarget',
+        'async function runActorProfileTarget',
     );
     assert.ok(
         batchSource.indexOf('if (!await current())')
             < batchSource.indexOf('const baseline = materializeActorProfileBaseline'),
     );
+    const profileRuntime = sourceBetween(
+        'async function runActorProfileTarget',
+        'async function runContinuityTarget',
+    );
+    assert.ok(
+        profileRuntime.indexOf('await completeActorProfilesForTurn') >= 0,
+        'P1 completion has exactly one automatic P1 entry',
+    );
     const runtime = sourceBetween(
         'async function runContinuityTarget',
         'async function confirmDangerousAction',
     );
-    assert.ok(
-        runtime.indexOf('await completeActorProfilesForTurn')
-            < runtime.indexOf('scheduleActorTurns(actorLedger'),
-    );
+    assert.doesNotMatch(runtime, /completeActorProfilesForTurn|discovery|upsert|promotion|actorRegistry|profile completion/u);
 });
 
 test('continuity has no profile macro write entrance and rejects the retired root field', async () => {

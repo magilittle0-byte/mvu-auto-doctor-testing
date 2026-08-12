@@ -49,10 +49,13 @@ function target(overrides = {}) {
         messageId: 'message-7',
         swipeId: 0,
         generation: 11,
+        generationSerial: 11,
         generationId: 'generation-11',
         generationType: 'normal',
         branchId: 'branch-main',
+        identityScopeId: `${CHAT_ID}|character:stage5`,
         contentHash: 'content-hash-11',
+        contentFingerprint: 'content-hash-11',
         hash: 'content-hash-11',
         scopeDigest: 'stage5-actor-world-scope',
         ...overrides,
@@ -125,7 +128,10 @@ function rawActor(name = 'Ada', overrides = {}) {
 }
 
 function readyActor(name = 'Ada', overrides = {}) {
-    return makeActionReadyActor(rawActor(name, overrides), { turn: 1 });
+    return makeActionReadyActor(rawActor(name, overrides), {
+        turn: 1,
+        sourceRef: target(),
+    });
 }
 
 function actorRefOf(actor) {
@@ -148,6 +154,8 @@ function ledgerFor(actor, {
         actorRegistry: {
             version: 1,
             chatId: CHAT_ID,
+            identityScopeId: target().identityScopeId,
+            scopeDigest: target().scopeDigest,
             entries: [{
                 state: registryState,
                 actorRef: actorRefOf(actor),
@@ -155,7 +163,7 @@ function ledgerFor(actor, {
                 identityKeys: [actor.name.toLocaleLowerCase()],
                 lifecycle: { status: actor.status, inactiveReason: '' },
                 lineage: {},
-                sourceRefs: [],
+                sourceRefs: [target()],
                 registeredTurn: 1,
                 updatedTurn: 1,
             }],
@@ -173,7 +181,12 @@ function ledgerFor(actor, {
             actorRegistryV1: true,
         },
     };
-    return normalizeActorLedger(value, { chatId: CHAT_ID });
+    return normalizeActorLedger(value, {
+        chatId: CHAT_ID,
+        identityScopeId: target().identityScopeId,
+        scopeDigest: target().scopeDigest,
+        allowScopeDigestFill: true,
+    });
 }
 
 function candidateFor(actor, overrides = {}) {
@@ -291,7 +304,7 @@ test('exact-target recovery materializes and settles recovered actor A, never ne
                     identityKeys: [actorB.name.toLocaleLowerCase()],
                     lifecycle: { status: actorB.status, inactiveReason: '' },
                     lineage: {},
-                    sourceRefs: [],
+                    sourceRefs: [target()],
                     registeredTurn: 1,
                     updatedTurn: 1,
                 },
@@ -457,8 +470,9 @@ test('attempt is a complete stable proposal and persistence does not apply its d
     assert.ok(actorRefsMatch(attempt.actorRef, actorRefOf(actor)));
     assert.ok(actorActionTargetMatches(attempt.target, target()));
     assert.deepEqual(Object.keys(attempt.target).sort(), [
-        'branchId', 'chatId', 'contentHash', 'generation', 'generationId', 'generationType',
-        'hash', 'index', 'logicalIndex', 'messageId', 'swipeId',
+        'branchId', 'chatId', 'compatibilityOnly', 'contentHash', 'generation',
+        'generationId', 'generationType', 'hash', 'index', 'logicalIndex', 'messageId',
+        'scopeDigest', 'swipeId',
     ].sort());
     assert.equal(attempt.expectedCost, 'one coin and focused attention');
     assert.equal(attempt.expectedDuration, 'one turn');
@@ -650,21 +664,29 @@ test('two stable actors cannot swap display identity and settlements read back a
         actorRegistry: {
             version: 1,
             chatId: CHAT_ID,
+            identityScopeId: target().identityScopeId,
+            scopeDigest: target().scopeDigest,
             characters: {},
             registered: Object.fromEntries([ada, bella].map((actor) => [actor.name, {
                 actorRef: actorRefOf(actor),
                 origin: 'profile_insert_candidate',
-                sourceRefs: [],
+                sourceRefs: [target()],
                 registeredTurn: 1,
                 updatedTurn: 1,
             }])),
             updatedAt: 1,
         },
         migrations: { ...emptyActorLedger(CHAT_ID).migrations, actorRegistryV1: true },
-    }, { chatId: CHAT_ID });
+    }, {
+        chatId: CHAT_ID,
+        identityScopeId: target().identityScopeId,
+        scopeDigest: target().scopeDigest,
+        allowScopeDigestFill: true,
+    });
     const prepared = prepareActorActionAttempts(combined, [candidateFor(ada), candidateFor(bella, {
         action: 'Bella checks a second warehouse record.',
     })], { turn: 7, sourceRef: target(), target: target() });
+    assert.deepEqual(prepared.rejected, [], 'both canonical Registry rows must admit their finalized profiles');
     const recorded = recordActorActionAttempts(prepared.ledger, prepared.attempts, { target: target() });
     assert.equal(recorded.recorded.length, 2);
     assert.notEqual(recorded.recorded[0].actorRef.actorId, recorded.recorded[1].actorRef.actorId);
@@ -888,20 +910,20 @@ test('no new actor action creates no progress while an independent world process
 test('production persists supplied attempts before adjudication and settle has no reconstruction fallback', async () => {
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const ledgerSource = await readFile(new URL('../actor-ledger-core.mjs', import.meta.url), 'utf8');
-    const runtimeStart = indexSource.indexOf('const preparedActorAttempts = prepareActorActionAttempts');
+    const runtimeStart = indexSource.indexOf('const prepared = prepareActorActionAttempts');
     const persistAt = indexSource.indexOf('await persistActorActionAttemptsForTurn', runtimeStart);
     const settleAt = indexSource.indexOf('settleActorActionCandidates(', persistAt);
     assert.ok(runtimeStart >= 0 && persistAt > runtimeStart && settleAt > persistAt);
     const runtime = indexSource.slice(runtimeStart, settleAt + 800);
     assert.match(runtime, /recordActorActionAttempts/u);
-    assert.match(runtime, /attempts: pendingActorAttempts/u);
-    assert.match(runtime, /target: actorActionTargetOf\(captured\)/u);
+    assert.match(runtime, /attempts: recorded\.recorded/u);
+    assert.match(runtime, /sourceRef: actorActionTargetOf\(captured\)/u);
+    assert.match(runtime, /target: actionTarget/u);
     assert.match(indexSource, /actorActionSettlementsMatchLedger/u);
-    assert.match(indexSource, /requireReadback: settlementReadbackRequired/u);
-    assert.match(indexSource, /scheduledActorIds: actorSchedule\.selected\.map/u);
-    assert.match(indexSource, /actorIds: recoveredActorAttemptBatch\.actorIds/u);
-    assert.match(indexSource, /const scheduledActorIds = recoveredActorAttemptBatch\.actorIds/u);
-    assert.match(indexSource, /actor_recovery_scope_superseded/u);
+    assert.match(indexSource, /requireReadback: true,\s*readbackAttempts: 1,\s*failureSink/u);
+    assert.match(indexSource, /actorSchedule\.selected\.length/u);
+    assert.match(indexSource, /pendingActorActionAttempts\(actionLedger, \{ target: actionTarget \}\)/u);
+    assert.match(indexSource, /world_task_owner_changed/u);
 
     const settleStart = ledgerSource.indexOf('export function settleActorActionCandidates');
     const settleEnd = ledgerSource.indexOf('export function settleActorInjectionReceipts', settleStart);

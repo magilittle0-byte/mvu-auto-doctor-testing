@@ -34,12 +34,10 @@ import {
     actorSovereigntyMigrationIsCurrent,
     actorSovereigntyScopeDigest,
     actorSovereigntyScopesMatch,
-    actorSovereigntyWorldbookDescriptor,
     createActorSovereigntyScope,
-    createActorSovereigntyWorldbookManifest,
     ensureActorSovereigntyMigration,
-    flattenActorSovereigntyScopeValues as flattenedScopeStrings,
     migrateActorSovereigntyNamespace,
+    normalizeWorldbookSelectorKeys,
     prepareActorSovereigntyFieldWriteCandidate,
 } from './compatibility-migration-core.mjs';
 import {
@@ -47,6 +45,7 @@ import {
     advanceContinuityClocks,
     applyWorldUpdate,
     attachChangedSourceRefs,
+    buildContinuityConsumerPayload,
     buildContinuityInjection,
     continuityContentDigest,
     continuityLifecycleStats,
@@ -93,14 +92,18 @@ import {
     actorActionAttemptsMatchLedger,
     actorActionSettlementsMatchLedger,
     actorProfileCommitMatchesLedger,
+    actorProfilePendingTransactionForSource,
+    actorProfileReadinessInLedger,
+    actorLedgerDigest,
     actorRegistryDigest,
     actorRegistryMatchesLedger,
+    acceptedActorSourceRefMatches,
     applyAcceptedContentObservations,
     discoverActorsFromTurnSources,
     emptyActorLedger,
     inferObserverActorIds,
-    mergeActorWorldEventsIntoContinuity,
     normalizeActorLedger,
+    finalizeActorProfileBaselinesInLedger,
     pendingActorActionAttempts,
     planActorAttemptRecovery,
     prepareActorActionAttempts,
@@ -110,9 +113,10 @@ import {
     reconcileActorIdentityRevealsFromAcceptedContent,
     reconcileActorLifecycleFromAcceptedContent,
     reconcileActorMutationLineageFromAcceptedContent,
-    scheduleActorTurns,
+    mergeActorWorldEventsIntoContinuity,
     settleActorActionCandidates,
     settleActorInjectionReceipts,
+    scheduleActorTurns,
 } from './actor-ledger-core.mjs';
 import {
     admitDoctorWorldCandidates,
@@ -143,7 +147,6 @@ import {
     nextModelRouteHealth,
 } from './model-queue.mjs';
 import {
-    actorProfileReadyForAction,
     actorProfileV6View,
     applyActorProfileV6Override,
     bindCharacterCreationTicketsToRegisteredActors,
@@ -171,7 +174,6 @@ import {
     recoverOrphanedSovereigntyTasks,
     requeueSovereigntyTaskForLatestState,
     restoreSovereigntyCheckpoint,
-    retrySovereigntyTaskNow,
     sovereigntyHealthView,
     sovereigntyRetryDelay,
     supersedeSovereigntyObservationSources,
@@ -182,15 +184,6 @@ import {
     customInstructionDiagnosticProjection,
     normalizeGlobalInstructionConfig,
 } from './custom-instruction-core.mjs';
-import {
-    adjudicateSovereigntyBlackboard,
-    createSovereigntyBlackboard,
-    runSovereigntyAgentPool,
-} from './sovereignty-orchestrator-core.mjs';
-import {
-    auditHardContracts,
-    stripLeakedPlanningPrefix,
-} from './protocol-core.mjs';
 import {
     buildSocialNarrativeContract,
     buildSocialRollbackOps,
@@ -229,6 +222,7 @@ const SERENDIPITY_INJECTION_NAME = 'mvu-auto-doctor-serendipity-license';
 const SERENDIPITY_INJECTION_SENTINEL = '【MVU医生·偶发许可证】';
 const IN_CHAT_POSITION = 1;
 const IN_CHAT_DEPTH = 1;
+const NEXT_TURN_CONSUMER_INJECTION_NAME = 'mvu-auto-doctor-next-turn-consumer';
 const ACTOR_ACTION_ERROR_LABELS = Object.freeze({
     'actor-identity-mismatch': '人物身份与当前账本不一致',
     'actor-not-actionable': '人物已死亡、离场或暂时无法行动',
@@ -275,7 +269,6 @@ const DEFAULTS = Object.freeze({
     strictChannelConcurrency: 2,
     fastChannelConcurrency: 4,
     modelConcurrencySettingsVersion: 2,
-    preventDoubleWrite: true,
     notifyNoChange: false,
     notificationLevel: 'all',
     delayMs: 1600,
@@ -289,12 +282,9 @@ const DEFAULTS = Object.freeze({
     sovereigntyForegroundWaitMs: 3000,
     sovereigntySoftTimeoutMs: 12000,
     sovereigntyHardTimeoutMs: 30000,
-    sovereigntyRunUntilCancelled: true,
     sovereigntySettingsVersion: 2,
     mvuIdleTimeoutMs: 8000,
     mvuStableTimeoutMs: 8000,
-    hardContractAuditEnabled: true,
-    hardContractCorrectionEnabled: false,
     socialNarrativeGuardEnabled: true,
     socialAuditMode: 'balanced',
     socialAuditMaxTokens: 1024,
@@ -321,6 +311,8 @@ const DEFAULTS = Object.freeze({
     continuityContextMessages: 12,
     continuityMaxTokens: 12288,
     continuityPromptAddon: '',
+    nextTurnConsumerPreferredProvider: '',
+    nextTurnConsumerProviderPriorities: {},
     actorShardMode: 'auto',
     actorShardMaxWorkers: 2,
     actorShardMaxTokens: 0,
@@ -355,8 +347,7 @@ const DEFAULTS = Object.freeze({
 let mvuPromise = null;
 let runChain = Promise.resolve();
 let mvuWriteChain = Promise.resolve();
-let hardContractChain = Promise.resolve();
-let continuityChain = Promise.resolve();
+let actorProfileChain = Promise.resolve();
 let forumChain = Promise.resolve();
 let runtimePersistenceChain = Promise.resolve();
 const chatNamespaceWriteChains = new Map();
@@ -514,27 +505,27 @@ const automaticPendingKeys = new Set();
 const automaticCompletedKeys = new Set();
 const openingSyncPendingKeys = new Set();
 const openingSyncCompletedKeys = new Set();
+const actorProfilePendingKeys = new Map();
+const actorProfileCompletedKeys = new Set();
+let actorProfileReadShadow = null;
 const continuityPendingKeys = new Set();
 const continuityCompletedKeys = new Set();
+const continuityProfileRetrySignals = new Map();
+let continuityChain = Promise.resolve();
 const forumPendingKeys = new Set();
 const forumCompletedKeys = new Set();
-const hardContractPendingKeys = new Set();
-const hardContractCompletedKeys = new Set();
-const targetSettlementRecords = new Map();
-let targetSettlementSerial = 0;
 let continuationIdentityHint = null;
 let lastUndo = null;
 let latestStatus = '等待新的 AI 回复';
 let latestStatusKind = '';
-let latestHardContractStatus = '硬合同：等待检查';
-let latestHardContractKind = '';
-let latestHardContractAudit = null;
 let latestSocialStatus = '人物关系：等待检查';
 let latestSocialKind = '';
 let dualSurfaceController = null;
 let latestSocialAudit = null;
 let latestContinuityStatus = '世界连续性：等待事件';
 let latestContinuityKind = '';
+let latestActorProfileStatus = '人物档案：等待最终正文';
+let latestActorProfileKind = '';
 let latestActorShardDiagnostics = {
     status: 'disabled',
     selected: 0,
@@ -587,19 +578,8 @@ let modelCallStats = {
 };
 const activeModelControllers = new Set();
 const activeSovereigntyTaskIds = new Set();
-let activeSovereigntyRecoveryCount = 0;
-let pendingSovereigntyRetryTimer = null;
-let pendingSovereigntyRetry = null;
 const pendingSovereigntyObservations = new Map();
-const actorSovereigntyScopeManifestCache = new Map();
-
-function hasPendingSovereigntyRetryForChat(context = getContext()) {
-    return Boolean(
-        pendingSovereigntyRetry
-        && context?.chatId
-        && pendingSovereigntyRetry.chatId === context.chatId
-    );
-}
+const actorSovereigntyScopeSelectorCache = new Map();
 const modelRouteSlotCursors = { strict: 0, fast: 0 };
 const modelRouteHealth = { strict: new Map(), fast: new Map() };
 
@@ -649,6 +629,13 @@ let pendingSerendipityDraft = null;
 let pendingSerendipityBaseline = null;
 let pendingNpcDesignTicketBatch = null;
 const npcDesignTicketBatches = new Map();
+const nextTurnConsumerProviders = new Map();
+const nextTurnProviderCleanupFlights = new Map();
+let activeNextTurnConsumer = null;
+// A provider slot from a different chat must never be cleaned, retried, or
+// allowed to occupy that chat's runtime slot.  This is a bounded in-memory
+// tombstone only; it is not a lease store and never writes host data.
+const retiredNextTurnConsumerTombstones = new Map();
 const pendingSerendipityOpportunities = new Map();
 let lastSocialPromptSanitization = {
     checkedAt: 0,
@@ -657,7 +644,6 @@ let lastSocialPromptSanitization = {
 };
 let lastFocusedBeforeFloatingPanel = null;
 let lastFocusedBeforeForumPanel = null;
-let oracleAutoDisabledNoticeShown = false;
 let ui = { ledgerSurfaces: [] };
 let operationEpoch = 0;
 let generationSerial = 0;
@@ -667,6 +653,79 @@ let lastGeneration = {
     type: 'normal',
     dryRun: false,
 };
+let currentGenerationEpoch = 0;
+let activeGenerationSession = null;
+let pendingAcceptedFinalTimer = null;
+const GENERATION_LIFECYCLE_TRACE_LIMIT = 12;
+let generationLifecycleTrace = [];
+
+function fixedGenerationLifecycleReason(value) {
+    const reason = String(value || 'other');
+    return new Set([
+        'accepted',
+        'no_session',
+        'epoch',
+        'stopped',
+        'type',
+        'chat',
+        'generating',
+        'no_final_ai',
+        'narrative_ineligible',
+        'unchanged',
+        'scope_unavailable',
+        'p4_scope_stale',
+        'acceptance_envelope_failed',
+        'acceptance_consume_failed',
+        'acceptance_target_stale',
+    ]).has(reason) ? reason : 'other';
+}
+
+function recordGenerationLifecycleTrace(code, {
+    chatId = '',
+    epoch = currentGenerationEpoch,
+    operation = operationEpoch,
+    type = '',
+    allowed = null,
+    oldOperation = null,
+    newOperation = null,
+    serial = 0,
+    baselinePresent = false,
+    p4 = '',
+    reason = '',
+} = {}) {
+    const context = getContext();
+    const currentChatId = String(context?.chatId || '');
+    if (!currentChatId || (chatId && String(chatId) !== currentChatId)) return;
+    if (Number(epoch) !== Number(currentGenerationEpoch)) return;
+    if (Number(operation) !== Number(operationEpoch)) return;
+    const entry = Object.freeze({
+        code: String(code || 'other'),
+        chatId: currentChatId,
+        epoch: Number(currentGenerationEpoch),
+        operationEpoch: Number(operationEpoch),
+        type: String(type || ''),
+        allowed: allowed === true ? true : allowed === false ? false : null,
+        oldOperationEpoch: Number.isFinite(oldOperation) ? Number(oldOperation) : null,
+        newOperationEpoch: Number.isFinite(newOperation) ? Number(newOperation) : null,
+        stamp: Number.isFinite(serial) && Number(serial) > 0 ? Number(serial) : 0,
+        baselinePresent: baselinePresent === true,
+        p4: ['placed', 'blocked', 'ticket_only', 'exception'].includes(p4) ? p4 : '',
+        reason: reason ? fixedGenerationLifecycleReason(reason) : '',
+    });
+    generationLifecycleTrace = [...generationLifecycleTrace, entry]
+        .slice(-GENERATION_LIFECYCLE_TRACE_LIMIT);
+}
+
+function generationLifecycleTraceDiagnosticProjection(context = getContext()) {
+    const chatId = String(context?.chatId || '');
+    return generationLifecycleTrace
+        .filter((entry) => (
+            entry.chatId === chatId
+            && Number(entry.epoch) === Number(currentGenerationEpoch)
+            && Number(entry.operationEpoch) === Number(operationEpoch)
+        ))
+        .map((entry) => ({ ...entry }));
+}
 let pendingChatSaveTimer = null;
 let pendingOpeningSyncTimer = null;
 let presetContinuityCache = { checkedAt: 0, active: false };
@@ -682,7 +741,7 @@ function getContext() {
     return window.SillyTavern?.getContext?.() || null;
 }
 
-function getSettings() {
+function getSettings({ persistMigrations = true } = {}) {
     const context = getContext();
     if (!context) return { ...DEFAULTS };
     const root = context.extensionSettings || {};
@@ -892,15 +951,6 @@ function getSettings() {
     if (previousSovereigntySettingsVersion < 1) {
         settings.sovereigntyMode = 'active';
         settings.sovereigntySettingsVersion = 1;
-        changed = true;
-    }
-    if (previousSovereigntySettingsVersion < 2) {
-        settings.sovereigntyRunUntilCancelled = true;
-        settings.sovereigntySettingsVersion = 2;
-        changed = true;
-    }
-    if (typeof settings.sovereigntyRunUntilCancelled !== 'boolean') {
-        settings.sovereigntyRunUntilCancelled = true;
         changed = true;
     }
     if (!['off', 'basic', 'full', 'full_adult'].includes(settings.actorProfileCompletionMode)) {
@@ -1198,10 +1248,6 @@ function getSettings() {
             ? Math.round(Number(settings.variableRetryLimit))
             : DEFAULTS.variableRetryLimit),
     );
-    if (settings.hardContractCorrectionEnabled !== false) {
-        settings.hardContractCorrectionEnabled = false;
-        changed = true;
-    }
     if (previousForumSettingsVersion < 3) {
         settings.forumRefreshMode = 'manual';
         settings.forumAutoRefresh = false;
@@ -1257,7 +1303,7 @@ function getSettings() {
         settings.continuitySettingsVersion = 7;
         changed = true;
     }
-    if (changed) context.saveSettingsDebounced?.();
+    if (changed && persistMigrations) context.saveSettingsDebounced?.();
     return settings;
 }
 
@@ -1505,7 +1551,7 @@ function doctorSemanticHealthView(namespaceValue = null, runtimeValue = null) {
             )).length,
             identityQuarantineCount: ledger.identityQuarantine?.length || 0,
             profileIncompleteCount: profileActors.filter((actor) => (
-                !actorProfileReadyForAction(actor)
+                !actorProfileReadinessInLedger(ledger, actor.id).ready
             )).length,
             profileActorCount: profileActors.length,
             profileOptionalPendingCount: optionalProfilePending,
@@ -1570,9 +1616,11 @@ function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = nu
     const backgroundActive = schedulerState.backgroundActive ?? Boolean(
         activeTaskProgress
         || activeModelControllers.size
-        || activeSovereigntyRecoveryCount > 0
-        || pendingSovereigntyRetryTimer
-        || continuityPendingKeys.size
+        || activeSovereigntyTaskIds.size
+        || automaticPendingKeys.size
+        || openingSyncPendingKeys.size
+        || actorProfilePendingKeys.size
+        || forumPendingKeys.size
     );
     return {
         sovereignty: health,
@@ -1580,8 +1628,12 @@ function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = nu
         actorLedger: ledger,
         profileReadiness: {
             actorCount: profileActors.length,
-            ready: profileActors.filter((actor) => actorProfileReadyForAction(actor)).length,
-            incomplete: profileActors.filter((actor) => !actorProfileReadyForAction(actor)).length,
+            ready: profileActors.filter((actor) => (
+                actorProfileReadinessInLedger(ledger, actor.id).ready
+            )).length,
+            incomplete: profileActors.filter((actor) => (
+                !actorProfileReadinessInLedger(ledger, actor.id).ready
+            )).length,
             optionalPending,
         },
         actorShards: latestActorShardDiagnostics,
@@ -1593,8 +1645,8 @@ function doctorRuntimePresentationInput(namespaceValue = null, runtimeValue = nu
         routeHealth: modelRouteHealthPresentation(),
         statusKinds: {
             variable: latestStatusKind,
-            hardContract: latestHardContractKind,
             social: latestSocialKind,
+            profile: latestActorProfileKind,
             continuity: latestContinuityKind,
             forum: latestForumKind,
         },
@@ -1807,25 +1859,26 @@ function renderSovereigntyHealth(value = readChatNamespace()?.sovereigntyRuntime
 }
 
 function sovereigntyHealthWithScheduler(namespace = readChatNamespace()) {
-    const context = getContext();
-    const retryQueued = hasPendingSovereigntyRetryForChat(context);
     const runtime = sovereigntyRuntimeWithSessionObservationFailures(
         namespace,
         namespace?.sovereigntyRuntime,
-        context,
+        getContext(),
     );
     const health = doctorSemanticHealthView(namespace, runtime);
     const scheduler = {
         dueTaskCount: dueSovereigntyTasks(runtime).length,
-        autoRetryQueued: retryQueued,
-        autoRetryAt: retryQueued ? Number(pendingSovereigntyRetry?.runAt || 0) : 0,
-        continuityInFlight: continuityPendingKeys.size > 0,
+        autoRetryQueued: false,
+        autoRetryAt: 0,
+        continuityInFlight: false,
+        actorProfileInFlight: actorProfilePendingKeys.size > 0,
         backgroundActive: Boolean(
             activeTaskProgress
             || activeModelControllers.size
-            || activeSovereigntyRecoveryCount > 0
-            || pendingSovereigntyRetryTimer
-            || continuityPendingKeys.size
+            || activeSovereigntyTaskIds.size
+            || automaticPendingKeys.size
+            || openingSyncPendingKeys.size
+            || actorProfilePendingKeys.size
+            || forumPendingKeys.size
         ),
     };
     const presentation = doctorRuntimePresentation(namespace, runtime, { scheduler });
@@ -1839,36 +1892,16 @@ function sovereigntyHealthWithScheduler(namespace = readChatNamespace()) {
 
 async function retrySovereigntyNow() {
     const context = getContext();
-    const chatId = context?.chatId || '';
-    if (!chatId) return { status: 'blocked' };
-    const migration = await ensureActorSovereigntyMigrationPersisted(context);
-    if (!migration.ok) {
-        toast('warning', '迁移尚未完成；旧任务继续隔离，当前观察会在迁移成功后补入。');
-        return { status: 'blocked', reason: migration.reason };
-    }
-    let namespace = migration.namespace || readChatNamespace(context);
-    const replay = await replayPendingSovereigntyObservations(namespace, context, {
-        reconstruct: true,
-    });
-    if (!replay.ok) return { status: 'blocked', reason: replay.reason };
-    namespace = replay.namespace;
-    const retried = retrySovereigntyTaskNow(
-        sovereigntyRuntimeFromNamespace(namespace),
-    );
-    clearPendingSovereigntyRetry();
-    await persistSovereigntyRuntime(retried.runtime, chatId, { durable: true });
     const latest = latestAiMessage(context);
     const captured = captureTarget(context, latest.index);
-    if (captured && retried.retried.length) {
-        enqueueContinuity(latest.index, { force: true, expectedTarget: captured });
-    }
-    toast(
-        retried.retried.length ? 'success' : 'info',
-        retried.retried.length
-            ? `已将 ${retried.retried.length} 项技术任务加入立即恢复。`
-            : '当前没有可立即重试的失败任务。',
-    );
-    return { status: 'completed', retried: retried.retried };
+    if (!captured) return { status: 'stale', reason: 'current_source_unavailable' };
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
+    return enqueueActorProfiles(latest.index, {
+        force: true,
+        includeMaintenance: false,
+        expectedTarget: captured,
+    });
 }
 
 async function restoreLatestSovereigntyCheckpoint() {
@@ -1903,7 +1936,6 @@ async function restoreLatestSovereigntyCheckpoint() {
     });
     renderSovereigntyHealth(namespace.sovereigntyRuntime);
     if (saved) {
-        await applyContinuityInjection();
         renderContinuityLedger();
     }
     toast(saved ? 'success' : 'warning', saved
@@ -1932,7 +1964,6 @@ function resetCurrentModelCallStats(type = 'normal') {
     };
     modelCallStats = stats;
     renderModelCallStats();
-    scheduleOperationLogSave();
 }
 
 function recordModelCall(task, outcome = 'started', error = null, runtimeSerial = generationSerial) {
@@ -2032,7 +2063,6 @@ function scheduleOperationLogSave() {
 function recordOperation(category, text, kind = '') {
     const scope = {
         变量: 'variable',
-        硬合同: 'contract',
         人物关系: 'social',
         世界: 'world',
         论坛: 'forum',
@@ -2089,8 +2119,8 @@ function actionableStatusText(text, kind, scope) {
     if (kind !== 'error' || /怎么解决[：:]/u.test(source)) return source;
     const resolutions = {
         variable: '查看变量操作记录与严格模型连通测试，修正连接或规则后直接检查当前回合；不要为了修变量而重 roll 正文。',
-        contract: '查看硬合同明细并修正角色卡规则或变量数据；该检查不会自动改写正文。',
         social: '检查轻量模型连接与本回合关系证据；失败时关系变量保持不变，也不阻塞正文、数据库或变量医生。',
+        profile: '检查人物档案模型连接和当前回复；可对当前回复手动补全档案，失败不会启动世界模块，也不会留下半张档案。',
         world: '检查轻量模型连接与世界事件账本，然后可手动“整理世界”；失败不阻塞正文、数据库或变量结算。',
         forum: '检查轻量模型连接、公开风声与论坛来源，然后手动刷新论坛；失败不阻塞正文、数据库或变量结算。',
     };
@@ -2112,21 +2142,6 @@ function setStatus(text, kind = '', { record = true } = {}) {
     updateFloatingOrb();
 }
 
-function setHardContractStatus(text, kind = '', { record = true } = {}) {
-    latestHardContractStatus = actionableStatusText(text, kind, 'contract');
-    latestHardContractKind = kind;
-    if (record) recordOperation('硬合同', latestHardContractStatus, kind);
-    if (ui?.hardContractStatus) {
-        ui.hardContractStatus.textContent = latestHardContractStatus;
-        ui.hardContractStatus.dataset.kind = kind;
-    }
-    if (ui?.floatingHardContractStatus) {
-        ui.floatingHardContractStatus.textContent = latestHardContractStatus;
-        ui.floatingHardContractStatus.dataset.kind = kind;
-    }
-    renderHardContractAudit();
-    updateFloatingOrb();
-}
 
 function renderSocialAudit() {
     const root = ui?.socialAuditList;
@@ -2137,7 +2152,7 @@ function renderSocialAudit() {
         : [];
     if (!audits.length) {
         const empty = document.createElement('li');
-        empty.className = 'mvuad-protocol-empty';
+        empty.className = 'mvuad-audit-empty';
         empty.textContent = '尚无人物关系二审记录。';
         root.appendChild(empty);
         return;
@@ -2186,6 +2201,22 @@ function setContinuityStatus(text, kind = '', { record = true } = {}) {
     renderContinuityLedger();
 }
 
+function setActorProfileStatus(text, kind = '', { record = true } = {}) {
+    latestActorProfileStatus = actionableStatusText(text, kind, 'profile');
+    latestActorProfileKind = kind;
+    if (record) recordOperation('人物档案', latestActorProfileStatus, kind);
+    if (ui?.actorProfileStatus) {
+        ui.actorProfileStatus.textContent = latestActorProfileStatus;
+        ui.actorProfileStatus.dataset.kind = kind;
+    }
+    if (ui?.floatingActorProfileStatus) {
+        ui.floatingActorProfileStatus.textContent = latestActorProfileStatus;
+        ui.floatingActorProfileStatus.dataset.kind = kind;
+    }
+    updateFloatingOrb();
+    renderActorProfiles();
+}
+
 function setForumStatus(text, kind = '', { record = true } = {}) {
     latestForumStatus = actionableStatusText(text, kind, 'forum');
     latestForumKind = kind;
@@ -2208,6 +2239,27 @@ function setForumStatus(text, kind = '', { record = true } = {}) {
     renderForum();
 }
 
+function settleEndedBusyStatus(result, currentKind, setter, label) {
+    if (currentKind !== 'busy') return result;
+    const status = String(result?.status || 'ended');
+    const reason = safeDiagnosticReason(result?.reason || '');
+    if (['failed', 'error', 'stalled', 'blocked', 'timeout', 'busy'].includes(status)) {
+        setter(`${label}：${reason || '本次处理失败'}`, 'error');
+    } else {
+        const detail = status === 'stale'
+            ? '目标已变化，本次已结束'
+            : status === 'disabled'
+                ? '当前已停用'
+                : status === 'duplicate'
+                    ? '重复目标未再次处理'
+                    : ['cancel', 'cancelled', 'canceled'].includes(status)
+                        ? '本次已取消'
+                        : '本次处理已结束';
+        setter(`${label}：${detail}`, '');
+    }
+    return result;
+}
+
 function hasCancellableSovereigntyTasks(context = getContext()) {
     if (!context?.chatId) return false;
     const cancellable = new Set(['pending', 'running', 'retryable_failed', 'deferred']);
@@ -2218,7 +2270,11 @@ function hasCancellableSovereigntyTasks(context = getContext()) {
 function syncTaskCancelButtons() {
     const active = !!activeTaskProgress
         || activeModelControllers.size > 0
-        || !!pendingSovereigntyRetryTimer
+        || activeSovereigntyTaskIds.size > 0
+        || automaticPendingKeys.size > 0
+        || openingSyncPendingKeys.size > 0
+        || actorProfilePendingKeys.size > 0
+        || forumPendingKeys.size > 0
         || hasCancellableSovereigntyTasks();
     for (const button of [ui?.cancelTask, ui?.floatingCancelTask]) {
         if (!button) continue;
@@ -2273,7 +2329,7 @@ function finishTaskProgress(id) {
     scheduleOperationLogSave();
 }
 
-function invalidateOperations(reason = '') {
+function invalidateOperations(reason = '', { persistProgress = true } = {}) {
     operationEpoch += 1;
     for (const controller of activeModelControllers) {
         try {
@@ -2284,8 +2340,15 @@ function invalidateOperations(reason = '') {
     }
     activeModelControllers.clear();
     activeSovereigntyTaskIds.clear();
-    clearPendingSovereigntyRetry();
-    if (activeTaskProgress) finishTaskProgress(activeTaskProgress.id);
+    if (activeTaskProgress) {
+        if (persistProgress) {
+            finishTaskProgress(activeTaskProgress.id);
+        } else {
+            clearInterval(activeTaskProgress.timer);
+            activeTaskProgress = null;
+            syncTaskCancelButtons();
+        }
+    }
     clearTimeout(pendingOpeningSyncTimer);
     pendingOpeningSyncTimer = null;
     automaticPendingKeys.clear();
@@ -2293,7 +2356,9 @@ function invalidateOperations(reason = '') {
     // so detach the new queue. The old request may finish, but its epoch guard
     // prevents it from touching chat or MVU state.
     runChain = Promise.resolve();
-    continuityChain = Promise.resolve();
+    actorProfilePendingKeys.clear();
+    continuityProfileRetrySignals.clear();
+    actorProfileChain = Promise.resolve();
     forumChain = Promise.resolve();
     if (reason) console.info('[MVU Auto Doctor] 旧任务已失效：', reason);
 }
@@ -2332,7 +2397,11 @@ function cancelCurrentOperations() {
     if (
         !activeTaskProgress
         && !activeModelControllers.size
-        && !pendingSovereigntyRetryTimer
+        && !activeSovereigntyTaskIds.size
+        && !automaticPendingKeys.size
+        && !openingSyncPendingKeys.size
+        && !actorProfilePendingKeys.size
+        && !forumPendingKeys.size
         && !hasCancellableSovereigntyTasks()
     ) {
         toast('info', '当前没有正在执行的模型任务。');
@@ -2341,6 +2410,10 @@ function cancelCurrentOperations() {
     void cancelRunningSovereigntyTasks('user_cancelled');
     invalidateOperations('用户停止了当前后台任务');
     setStatus('已停止当前后台任务；迟到结果不会写入聊天或变量', '');
+    if (latestSocialKind === 'busy') setSocialStatus('人物关系：本次处理已取消', '');
+    if (latestActorProfileKind === 'busy') setActorProfileStatus('人物档案：本次处理已取消', '');
+    if (latestContinuityKind === 'busy') setContinuityStatus('世界连续性：本次处理已取消', '');
+    if (latestForumKind === 'busy') setForumStatus('论坛：本次处理已取消', '');
     toast('info', '已停止当前后台任务；若上游不支持取消，迟到结果也会被安全丢弃。');
     return true;
 }
@@ -2419,13 +2492,8 @@ function downloadText(filename, text, type = 'text/plain;charset=utf-8') {
 }
 
 function injectionInspectionText(snapshot = lastInjectionInspection) {
-    const labels = {
-        'not-yet': '尚未生成，暂无注入落地记录',
-        success: '上轮活世界注入已进入最终提示词',
-        missing: '上轮已经注册活世界注入，但没有进入最终提示词',
-        skipped: '上轮没有注册活世界内容，按设计跳过',
-    };
-    return labels[snapshot?.status] || labels['not-yet'];
+    void snapshot;
+    return '阶段一已停用旧平行注入；不再检查或报告落地状态';
 }
 
 function promptPayloadContainsSentinel(eventData) {
@@ -2597,9 +2665,9 @@ async function inspectEnvironment({ waitForMvu = false, mvuOverride = null } = {
 
     const oracle = window.StoryOracleAPI;
     if (!oracle) {
-        checks.push(environmentCheck('info', '故事神谕', '未安装或尚未就绪；医生会使用酒馆当前连接'));
+        checks.push(environmentCheck('info', '故事神谕', '未安装或尚未就绪；医生不会修改其设置'));
     } else if (!oracle?.isCompatible?.(1)) {
-        checks.push(environmentCheck('warn', '故事神谕', 'Hook API 版本不兼容，无法安全复用连接或检查 AUTO'));
+        checks.push(environmentCheck('info', '故事神谕', '兼容接口版本不同；仅在用户明确选择该 provider 时使用'));
     } else {
         let oracleSettings = null;
         try {
@@ -2608,47 +2676,21 @@ async function inspectEnvironment({ waitForMvu = false, mvuOverride = null } = {
             oracleSettings = null;
         }
         checks.push(!oracleSettings
-            ? environmentCheck('warn', '故事神谕 AUTO', '无法只读回查设置；自动写入时医生会保持阻断')
+            ? environmentCheck('info', '故事神谕 AUTO', '未公开只读设置；医生不会读取后修改或保存该设置')
             : oracleSettings.autoDiagnoseEnabled === true
-                ? environmentCheck('error', '故事神谕 AUTO', '仍处于开启状态，会造成两个程序竞争写变量')
-                : environmentCheck('ok', '故事神谕 AUTO', '已关闭；神谕手动诊断不受影响'));
+                ? environmentCheck('info', '故事神谕 AUTO', '检测为开启；仅作只读提示，医生不会自动关闭或保存对方设置')
+                : environmentCheck('info', '故事神谕 AUTO', '检测为关闭；仅作只读信息'));
     }
 
-    const injectionCapable = !!(
-        typeof context?.setExtensionPrompt === 'function'
-        || typeof context?.registerInjection === 'function'
-        || Array.isArray(context?.extensionPrompts)
-    );
-    checks.push(injectionCapable
-        ? environmentCheck('ok', '活世界注入接口', '宿主提供可用的注入通道')
-        : environmentCheck('warn', '活世界注入接口', '宿主未提供已知注入通道，事件只能记账不能进入后续正文'));
-
-    const injectionKind = lastInjectionInspection.status === 'missing'
-        ? 'error'
-        : lastInjectionInspection.status === 'success'
-            ? 'ok'
-            : 'info';
     checks.push(environmentCheck(
-        injectionKind,
-        '上轮注入落地',
-        injectionInspectionText(),
+        'info',
+        '旧平行注入',
+        '阶段一已停用；不检查宿主注入通道，也不把旧落地状态计为故障或处理中',
     ));
     checks.push(environmentCheck(
-        !getSettings().socialNarrativeGuardEnabled
-            ? 'info'
-            : lastInjectionInspection.socialLanded === true
-                ? 'ok'
-                : lastInjectionInspection.checkedAt
-                    ? 'error'
-                    : 'info',
+        'info',
         '人物动机合同',
-        !getSettings().socialNarrativeGuardEnabled
-            ? '当前已关闭'
-            : lastInjectionInspection.socialLanded === true
-                ? '上轮已进入真实最终提示词'
-                : lastInjectionInspection.checkedAt
-                    ? '已注册但上轮未在最终提示词中找到'
-                    : '已注册，等待下一次真实生成验证',
+        '阶段一预生成注入已停用；旧配置只兼容读取',
     ));
 
     const legacyDatabasePatch = legacyDoctorDatabasePatchDetected(context);
@@ -2839,10 +2881,8 @@ function diagnosticPayload() {
             actorShards: latestActorShardDiagnostics,
             sovereignty: {
                 ...sovereignty,
-                autoRetryScheduled: hasPendingSovereigntyRetryForChat(context),
-                autoRetryAt: hasPendingSovereigntyRetryForChat(context)
-                    ? pendingSovereigntyRetry.runAt
-                    : 0,
+                autoRetryScheduled: false,
+                autoRetryAt: 0,
             },
             runtimePresentation: doctorRuntimePresentationInput(
                 namespace,
@@ -2861,6 +2901,7 @@ function diagnosticPayload() {
             chat: {
                 present: !!context?.chatId,
                 messageCount: Array.isArray(context?.chat) ? context.chat.length : 0,
+                generationLifecycleTrace: generationLifecycleTraceDiagnosticProjection(context),
                 modelCalls: normalizedModelCallStats(modelCallStats),
                 repairJournalCount: Array.isArray(namespace.repairJournal)
                     ? namespace.repairJournal.length
@@ -2903,12 +2944,10 @@ function diagnosticPayload() {
             },
             statuses: {
                 variable: { kind: latestStatusKind },
-                hardContract: { kind: latestHardContractKind },
                 social: { kind: latestSocialKind },
                 continuity: { kind: latestContinuityKind },
                 forum: { kind: latestForumKind },
             },
-            hardContract: latestHardContractAudit,
             socialAudit: latestSocialAudit,
             prompt: lastPromptSnapshot,
             modelDiagnostics: modelDiagnosticsForChat(modelDiagnostics, getContext()),
@@ -3116,11 +3155,10 @@ function cardScopeIdentity(context, character) {
     if (context?.groupId != null && String(context.groupId).trim()) {
         return { id: `group:${String(context.groupId).trim()}`, status: 'confirmed' };
     }
-    const characterId = String(context?.characterId ?? '').trim();
     const avatar = String(character?.avatar || character?.data?.avatar || '').trim();
-    if (!characterId && !avatar) return { id: 'character:unresolved', status: 'unresolved' };
+    if (!avatar) return { id: '', status: 'unresolved' };
     return {
-        id: `character:${characterId || 'no-index'}:${avatar || 'no-avatar'}`,
+        id: `character:${avatar}`,
         status: 'confirmed',
     };
 }
@@ -3133,155 +3171,50 @@ function actorIdentityScopeId(context = getContext()) {
     return `${chatId}|${card.id}`;
 }
 
-function cardScopeVersion(character) {
-    const explicit = character?.data?.character_version
-        || character?.character_version
-        || character?.data?.extensions?.version
-        || character?.extensions?.version;
-    if (explicit) return `host:${String(explicit).trim()}`;
-    return `synthetic:${contentAddressedJsonRef({
-        avatar: character?.avatar || character?.data?.avatar || '',
-        description: character?.data?.description || character?.description || '',
-        personality: character?.data?.personality || character?.personality || '',
-        scenario: character?.data?.scenario || character?.scenario || '',
-        systemPrompt: character?.data?.system_prompt || character?.system_prompt || '',
-    })}`;
+function appendWorldbookSelectorStrings(value, output) {
+    if (Array.isArray(value)) {
+        for (const entry of value) appendWorldbookSelectorStrings(entry, output);
+        return;
+    }
+    if (typeof value !== 'string') return;
+    const selector = value.trim();
+    if (selector) output.push(selector);
 }
 
-function configuredWorldbookIds(context, character) {
-    return [...new Set([
-        ...flattenedScopeStrings(context?.chatMetadata?.world_info),
-        ...flattenedScopeStrings(character?.data?.extensions?.world),
-        ...flattenedScopeStrings(character?.extensions?.world),
-        ...flattenedScopeStrings(character?.json_data?.data?.extensions?.world),
-        ...flattenedScopeStrings(character?.json_data?.extensions?.world),
-    ])].sort((left, right) => left.localeCompare(right));
+function configuredWorldbookSelectorKeys(context, character) {
+    const selectors = [];
+    for (const value of [
+        context?.chatMetadata?.world_info,
+        character?.data?.extensions?.world,
+        character?.extensions?.world,
+        character?.json_data?.data?.extensions?.world,
+        character?.json_data?.extensions?.world,
+    ]) appendWorldbookSelectorStrings(value, selectors);
+    return normalizeWorldbookSelectorKeys(selectors);
 }
 
-function embeddedWorldbookDescriptors(character, cardId) {
-    return embeddedBooks(character).map((book, index) => {
-        const rawId = String(book?.id || book?.name || book?.title || index).trim();
-        return actorSovereigntyWorldbookDescriptor(
-            `embedded:${cardId}:${rawId}`,
-            book,
-            { kind: 'embedded' },
-        );
-    }).sort((left, right) => left.id.localeCompare(right.id));
-}
-
-function scopeWorldbookManifest(context, character, cardId) {
-    const chatId = String(context?.chatId || '');
-    const stored = actorSovereigntyScopeManifestCache.get(chatId)
-        || context?.chatMetadata?.[PLUGIN_ID]?.actorSovereigntyWorldbookManifest
-        || null;
-    const embedded = embeddedWorldbookDescriptors(character, cardId);
-    const external = (Array.isArray(stored?.books) ? stored.books : [])
-        .filter((book) => book?.kind === 'external');
-    const configuredExternal = configuredWorldbookIds(context, character);
-    const status = stored?.status === 'confirmed'
-        ? 'confirmed'
-        : configuredExternal.length
-            ? 'unresolved'
-            : 'confirmed';
-    const manifest = createActorSovereigntyWorldbookManifest(
-        [...external, ...embedded],
-        {
-            status,
-            reason: status === 'confirmed'
-                ? ''
-                : stored?.reason || 'worldbook_manifest_not_loaded',
-        },
-    );
-    actorSovereigntyScopeManifestCache.set(chatId, manifest);
-    return manifest;
-}
-
-async function resolveActorSovereigntyWorldbookManifest(context, character, cardId) {
-    const configuredIds = new Set(configuredWorldbookIds(context, character));
-    const descriptors = embeddedWorldbookDescriptors(character, cardId);
-    const loadedById = new Map();
-    let hostModuleReadable = false;
+async function resolveWorldbookSelectorKeys(context, character) {
+    const selectors = configuredWorldbookSelectorKeys(context, character);
     try {
         const module = await import('/scripts/world-info.js');
-        hostModuleReadable = true;
-        for (const id of flattenedScopeStrings(module.selected_world_info)) configuredIds.add(id);
-        const sorted = typeof module.getSortedEntries === 'function'
-            ? await module.getSortedEntries()
-            : [];
-        const entriesByWorld = new Map();
-        for (const entry of Array.isArray(sorted) ? sorted : []) {
-            const id = String(entry?.world || '').trim();
-            if (!id) continue;
-            configuredIds.add(id);
-            if (!entriesByWorld.has(id)) entriesByWorld.set(id, []);
-            entriesByWorld.get(id).push(entry);
-        }
-        const globalRevision = context?.chatMetadata?.world_info_version
-            || character?.data?.extensions?.world_version
-            || character?.extensions?.world_version
-            || '';
-        for (const id of [...configuredIds].sort()) {
-            let book = null;
-            if (typeof module.loadWorldInfo === 'function') {
-                try {
-                    book = await module.loadWorldInfo(id);
-                } catch {
-                    book = null;
-                }
-            }
-            if (!book && entriesByWorld.has(id)) book = { entries: entriesByWorld.get(id) };
-            if (!book && globalRevision) book = { entries: [] };
-            if (!book) continue;
-            loadedById.set(id, actorSovereigntyWorldbookDescriptor(id, book, {
-                kind: 'external',
-                explicitRevision: globalRevision,
-            }));
-        }
+        appendWorldbookSelectorStrings(module.selected_world_info, selectors);
     } catch {
-        hostModuleReadable = false;
+        // The configured host selectors remain authoritative when the optional
+        // world-info module is unavailable. No content is loaded for scope identity.
     }
-    descriptors.push(...loadedById.values());
-    const unresolvedIds = [...configuredIds]
-        .filter((id) => !loadedById.has(id))
-        .sort((left, right) => left.localeCompare(right));
-    if (unresolvedIds.length) {
-        const persisted = context?.chatMetadata?.[PLUGIN_ID]
-            ?.actorSovereigntyWorldbookManifest;
-        const expectedIds = [...new Set([
-            ...unresolvedIds,
-            ...descriptors.map((entry) => entry.id),
-        ])].sort();
-        if (
-            persisted?.status === 'confirmed'
-            && JSON.stringify(persisted.ids || []) === JSON.stringify(expectedIds)
-        ) return deepClone(persisted);
-        return createActorSovereigntyWorldbookManifest(
-            descriptors,
-            {
-                status: 'unresolved',
-                reason: hostModuleReadable
-                ? `worldbook_unreadable:${unresolvedIds.join('|')}`
-                : `worldbook_module_unavailable:${unresolvedIds.join('|')}`,
-            },
-        );
-    }
-    return createActorSovereigntyWorldbookManifest(descriptors);
+    return normalizeWorldbookSelectorKeys(selectors);
 }
 
 function currentActorSovereigntyScope(context = getContext()) {
     const character = currentCharacter(context);
     const card = cardScopeIdentity(context, character);
-    const cached = scopeWorldbookManifest(context, character, card.id);
+    const chatId = String(context?.chatId || '').trim();
+    const worldbookSelectorKeys = actorSovereigntyScopeSelectorCache.get(chatId)
+        || configuredWorldbookSelectorKeys(context, character);
     return createActorSovereigntyScope({
-        chatId: context?.chatId || '',
+        chatId,
         cardId: card.id,
-        cardStatus: card.status,
-        cardVersion: cardScopeVersion(character),
-        worldbookIds: cached.ids,
-        worldbookVersion: cached.status === 'confirmed'
-            ? cached.manifestDigest
-            : 'unresolved',
-        worldbookStatus: cached.status,
+        worldbookSelectorKeys,
         runtimeVersion: `${VERSION}:namespace-${CHAT_NAMESPACE_VERSION}`,
     });
 }
@@ -3289,17 +3222,18 @@ function currentActorSovereigntyScope(context = getContext()) {
 async function resolveCurrentActorSovereigntyScope(context = getContext()) {
     const character = currentCharacter(context);
     const card = cardScopeIdentity(context, character);
-    const manifest = await resolveActorSovereigntyWorldbookManifest(
-        context,
-        character,
-        card.id,
-    );
-    actorSovereigntyScopeManifestCache.set(String(context?.chatId || ''), manifest);
+    const chatId = String(context?.chatId || '').trim();
+    const worldbookSelectorKeys = await resolveWorldbookSelectorKeys(context, character);
+    actorSovereigntyScopeSelectorCache.set(chatId, worldbookSelectorKeys);
     return {
-        scope: currentActorSovereigntyScope(context),
-        manifest,
-        resolved: card.status === 'confirmed' && manifest.status === 'confirmed',
-        reason: card.status !== 'confirmed' ? 'card_identity_unresolved' : manifest.reason || '',
+        scope: createActorSovereigntyScope({
+            chatId,
+            cardId: card.id,
+            worldbookSelectorKeys,
+            runtimeVersion: `${VERSION}:namespace-${CHAT_NAMESPACE_VERSION}`,
+        }),
+        resolved: Boolean(chatId && card.status === 'confirmed'),
+        reason: chatId && card.status === 'confirmed' ? '' : 'card_identity_unresolved',
     };
 }
 
@@ -3307,16 +3241,12 @@ function emptyChatNamespace(context = getContext()) {
     const chatId = String(context?.chatId || '');
     const actorSovereigntyScope = currentActorSovereigntyScope(context);
     const scopeDigest = actorSovereigntyScopeDigest(actorSovereigntyScope);
-    const actorSovereigntyWorldbookManifest = actorSovereigntyScopeManifestCache.get(chatId)
-        || context?.chatMetadata?.[PLUGIN_ID]?.actorSovereigntyWorldbookManifest
-        || null;
     return {
         version: CHAT_NAMESPACE_VERSION,
         rev: 0,
         fieldRevisions: {},
         chatId,
         actorSovereigntyScope,
-        actorSovereigntyWorldbookManifest,
         actorSovereigntyMigration: null,
         compatibilityScopeArchives: [],
         actorSovereigntyObservationWAL: [],
@@ -3421,34 +3351,21 @@ function readChatNamespace(context = getContext()) {
     });
     if (migrated.applicable && migrated.namespace) return migrated.namespace;
 
-    // A same-chat card/worldbook/version change is isolated without deleting
-    // its old actor/world history. The new active scope starts empty, while the
-    // previous scope remains a read-only archive and can never be recovered as
-    // current work. A copied namespace from another chat is rejected above and
-    // remains intact in its owning chat.
+    // Chat loading is strictly read-only. A real selector/card scope change is
+    // represented by an in-memory isolated view; archival and compatibility
+    // convergence are deferred until an accepted-final module actually writes.
     const fresh = emptyChatNamespace(context);
     fresh.rev = Math.max(0, Number(value.rev) || 0);
     fresh.fieldRevisions = isPlainObject(value.fieldRevisions)
         ? deepClone(value.fieldRevisions)
         : {};
-    const archives = Array.isArray(value.compatibilityScopeArchives)
-        ? deepClone(value.compatibilityScopeArchives)
-        : [];
-    const archive = archivedActorSovereigntyScope(value, migrated.report);
-    if (!archives.some((entry) => entry?.digest === archive.digest)) archives.push(archive);
-    fresh.compatibilityScopeArchives = archives;
     fresh.actorSovereigntyObservationWAL = Array.isArray(
         value.actorSovereigntyObservationWAL,
     ) ? deepClone(value.actorSovereigntyObservationWAL) : [];
-    const isolated = migrateActorSovereigntyNamespace(fresh, {
-        scope,
-        namespaceVersion: CHAT_NAMESPACE_VERSION,
-    });
-    if (isolated.namespace) {
-        isolated.namespace.compatibilityScopeArchives = archives;
-        isolated.namespace.actorSovereigntyMigration.scopeIsolation = deepClone(migrated.report);
-    }
-    return isolated.namespace || fresh;
+    fresh.repairJournal = Array.isArray(value.repairJournal)
+        ? deepClone(value.repairJournal)
+        : [];
+    return fresh;
 }
 
 function openingSyncState(namespace = readChatNamespace()) {
@@ -3471,6 +3388,7 @@ async function performChatNamespaceWrite(next, expectedChatId, {
     readbackAttempts = 3,
     contentValidator = null,
     precondition = null,
+    expectedFieldStates = null,
 } = {}) {
     chatNamespacePersistenceMetrics.writeAttempts += 1;
     if (durable) chatNamespacePersistenceMetrics.durableAttempts += 1;
@@ -3505,6 +3423,35 @@ async function performChatNamespaceWrite(next, expectedChatId, {
     const currentFieldRevisions = isPlainObject(current.fieldRevisions)
         ? current.fieldRevisions
         : {};
+    for (const [field, expectedState] of Object.entries(
+        isPlainObject(expectedFieldStates) ? expectedFieldStates : {},
+    )) {
+        const actualRevision = Math.max(
+            0,
+            Number(currentFieldRevisions[field]) || 0,
+        );
+        const expectedRevision = Math.max(
+            0,
+            Number(expectedState?.revision) || 0,
+        );
+        const actualDigest = field === 'actorLedger'
+            ? actorLedgerDigest(current?.[field])
+            : fingerprint(safeJson(current?.[field], 0));
+        const expectedDigest = String(expectedState?.digest || '');
+        if (actualRevision === expectedRevision && actualDigest === expectedDigest) continue;
+        if (failureSink && typeof failureSink === 'object') {
+            failureSink.expectedFieldStates = {
+                ...(failureSink.expectedFieldStates || {}),
+                [field]: { revision: expectedRevision, digest: expectedDigest },
+            };
+            failureSink.actualFieldStates = {
+                ...(failureSink.actualFieldStates || {}),
+                [field]: { revision: actualRevision, digest: actualDigest },
+            };
+        }
+        chatNamespacePersistenceMetrics.rejectedStale += 1;
+        return fail('field_state_mismatch');
+    }
     const nextFieldRevisions = isPlainObject(next?.fieldRevisions)
         ? next.fieldRevisions
         : {};
@@ -3725,6 +3672,29 @@ async function enqueueChatNamespaceWrite(next, expectedChatId, options = {}) {
     return task;
 }
 
+async function writeRepairJournal(repairJournal, expectedChatId, { force = false } = {}) {
+    const chatId = String(expectedChatId || '');
+    const context = getContext();
+    if (!chatId || !context || String(context.chatId || '') !== chatId) return false;
+    if (!Array.isArray(repairJournal)) return false;
+    const stored = context.chatMetadata?.[PLUGIN_ID];
+    const candidate = stored && typeof stored === 'object' && !Array.isArray(stored)
+        ? deepClone(stored)
+        : emptyChatNamespace(context);
+    candidate.repairJournal = deepClone(repairJournal);
+    const expectedDigest = fingerprint(safeJson(candidate.repairJournal, 0));
+    return writeChatNamespace(candidate, chatId, {
+        fields: ['repairJournal'],
+        durable: true,
+        force,
+        requireReadback: true,
+        contentValidator: (persisted) => (
+            Array.isArray(persisted?.repairJournal)
+            && fingerprint(safeJson(persisted.repairJournal, 0)) === expectedDigest
+        ),
+    });
+}
+
 function rejectChatNamespaceWrite(options, code, detail = '') {
     lastChatNamespaceWriteFailureCode = code;
     if (options?.failureSink && typeof options.failureSink === 'object') {
@@ -3744,7 +3714,14 @@ async function writeChatNamespace(next, expectedChatId, options = {}) {
         return rejectChatNamespaceWrite(options, 'chat_context_changed');
     }
     const candidateScope = next?.actorSovereigntyScope;
-    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    if (!candidateScope || !actorSovereigntyScopeDigest(candidateScope)) {
+        return rejectChatNamespaceWrite(
+            options,
+            'actor_sovereignty_scope_missing',
+            'migration.write_scope_missing',
+        );
+    }
+    const migration = await ensureActorSovereigntyMigrationPersisted(context, candidateScope);
     if (
         migration?.ok !== true
         || migration?.current !== true
@@ -3762,10 +3739,13 @@ async function writeChatNamespace(next, expectedChatId, options = {}) {
     }
     const committedScope = migration.namespace.actorSovereigntyScope;
     const liveContext = getContext();
+    const liveResolution = await resolveCurrentActorSovereigntyScope(liveContext);
     const authoritative = liveContext?.chatMetadata?.[PLUGIN_ID];
     if (
         !liveContext
         || String(liveContext.chatId || '') !== chatId
+        || liveResolution.resolved !== true
+        || !actorSovereigntyScopesMatch(liveResolution.scope, candidateScope)
         || !actorSovereigntyScopesMatch(candidateScope, committedScope)
         || !actorSovereigntyMigrationIsCurrent(authoritative, committedScope)
     ) {
@@ -3837,8 +3817,37 @@ function rebaseIdenticalNamespaceFields(next, current, fields) {
 
 async function runActorSovereigntyMigrationPersisted(context, resolution, chatId) {
     const scope = resolution.scope;
-    const source = readChatNamespace(context);
-    source.actorSovereigntyWorldbookManifest = deepClone(resolution.manifest);
+    const stored = context?.chatMetadata?.[PLUGIN_ID];
+    let source = readChatNamespace(context);
+    if (
+        stored
+        && typeof stored === 'object'
+        && !Array.isArray(stored)
+        && String(stored.chatId || '') === chatId
+        && !actorSovereigntyScopesMatch(stored.actorSovereigntyScope, scope)
+    ) {
+        source = emptyChatNamespace(context);
+        source.rev = Math.max(0, Number(stored.rev) || 0);
+        source.fieldRevisions = isPlainObject(stored.fieldRevisions)
+            ? deepClone(stored.fieldRevisions)
+            : {};
+        const archives = Array.isArray(stored.compatibilityScopeArchives)
+            ? deepClone(stored.compatibilityScopeArchives)
+            : [];
+        const report = {
+            reason: 'migration.scope_selector_changed',
+            sourceDigest: fingerprint(safeJson(stored, 0)),
+        };
+        const archive = archivedActorSovereigntyScope(stored, report);
+        if (!archives.some((entry) => entry?.digest === archive.digest)) archives.push(archive);
+        source.compatibilityScopeArchives = archives;
+        source.actorSovereigntyObservationWAL = Array.isArray(
+            stored.actorSovereigntyObservationWAL,
+        ) ? deepClone(stored.actorSovereigntyObservationWAL) : [];
+        source.repairJournal = Array.isArray(stored.repairJournal)
+            ? deepClone(stored.repairJournal)
+            : [];
+    }
     const scopeStillCurrent = () => {
         const freshContext = getContext();
         return freshContext?.chatId === chatId
@@ -3846,6 +3855,13 @@ async function runActorSovereigntyMigrationPersisted(context, resolution, chatId
                 currentActorSovereigntyScope(freshContext),
                 scope,
             );
+    };
+    const freshScopeStillCurrent = async () => {
+        const freshContext = getContext();
+        if (!freshContext || String(freshContext.chatId || '') !== chatId) return false;
+        const freshResolution = await resolveCurrentActorSovereigntyScope(freshContext);
+        return freshResolution.resolved === true
+            && actorSovereigntyScopesMatch(freshResolution.scope, scope);
     };
     // The only raw writer lives inside this migration transaction. Its token is
     // unreachable from profile/action/world/UI writers, so payload and marker
@@ -3862,6 +3878,9 @@ async function runActorSovereigntyMigrationPersisted(context, resolution, chatId
         namespaceVersion: CHAT_NAMESPACE_VERSION,
         commitPayload: async (candidate, evidence) => {
             chatNamespacePersistenceMetrics.migrationPayloadCommits += 1;
+            if (!await freshScopeStillCurrent()) {
+                return { ok: false, reason: 'migration.expected_scope_stale' };
+            }
             const failureSink = {};
             const successSink = {};
             const ok = await commitMigrationNamespace(candidate, {
@@ -3890,6 +3909,9 @@ async function runActorSovereigntyMigrationPersisted(context, resolution, chatId
         },
         commitMarker: async (candidate) => {
             chatNamespacePersistenceMetrics.migrationMarkerCommits += 1;
+            if (!await freshScopeStillCurrent()) {
+                return { ok: false, reason: 'migration.expected_scope_stale' };
+            }
             const failureSink = {};
             const successSink = {};
             const ok = await commitMigrationNamespace(candidate, {
@@ -3917,31 +3939,43 @@ async function runActorSovereigntyMigrationPersisted(context, resolution, chatId
     return result;
 }
 
-async function ensureActorSovereigntyMigrationPersisted(context = getContext()) {
+async function ensureActorSovereigntyMigrationPersisted(
+    context = getContext(),
+    expectedScope = null,
+) {
     const chatId = String(context?.chatId || '');
     if (!chatId) {
         return { ok: false, current: false, reason: 'migration.chat_missing', namespace: null };
     }
-    const hintedScope = currentActorSovereigntyScope(context);
-    const key = `${chatId}|${actorSovereigntyScopeDigest(hintedScope)}`;
+    const resolution = await resolveCurrentActorSovereigntyScope(context);
+    if (!resolution.resolved) {
+        return {
+            ok: false,
+            current: false,
+            reason: resolution.reason || 'migration.scope_unresolved',
+            namespace: null,
+            scope: resolution.scope,
+        };
+    }
+    if (
+        expectedScope
+        && !actorSovereigntyScopesMatch(expectedScope, resolution.scope)
+    ) {
+        return {
+            ok: false,
+            current: false,
+            reason: 'migration.expected_scope_stale',
+            namespace: null,
+            scope: resolution.scope,
+        };
+    }
+    const key = `${chatId}|${actorSovereigntyScopeDigest(resolution.scope)}`;
     const existing = actorSovereigntyMigrationPromises.get(key);
     if (existing) {
         chatNamespacePersistenceMetrics.migrationSingleflightJoins += 1;
         return deepClone(await existing);
     }
-    const task = (async () => {
-        const resolution = await resolveCurrentActorSovereigntyScope(context);
-        if (!resolution.resolved) {
-            return {
-                ok: false,
-                current: false,
-                reason: resolution.reason || 'migration.scope_unresolved',
-                namespace: readChatNamespace(context),
-                scope: resolution.scope,
-            };
-        }
-        return runActorSovereigntyMigrationPersisted(context, resolution, chatId);
-    })();
+    const task = runActorSovereigntyMigrationPersisted(context, resolution, chatId);
     actorSovereigntyMigrationPromises.set(key, task);
     try {
         return deepClone(await task);
@@ -4169,67 +4203,39 @@ function tavernDatabaseDetected(context = getContext()) {
 }
 
 async function registerBarrierProtocolClient(input) {
-    const protocol = currentDownstreamBarrierProtocol();
-    if (!protocol) {
-        return {
-            ok: false,
-            status: 'unresolved',
-            issues: [{
-                code: 'barrier.chat_missing',
-                path: '$.chatId',
-                severity: 'error',
-                message: '当前聊天不可用，无法注册下游 barrier 协议。',
-            }],
-        };
-    }
-    const result = await protocol.register(input);
-    await inspectEnvironment();
-    return result;
+    void input;
+    return {
+        ok: false,
+        status: 'unmanaged',
+        reason: 'independent_modules_no_global_settlement',
+        independentModules: true,
+    };
 }
 
 async function barrierProtocolStatus(clientId = 'taverndb') {
-    const protocol = currentDownstreamBarrierProtocol();
+    void clientId;
     const detected = tavernDatabaseDetected();
-    if (!protocol) {
-        return {
-            required: false,
-            externalDatabaseDetected: detected,
-            registered: false,
-            clientCount: 0,
-            errorCode: '',
-            mode: detected ? 'unmanaged' : 'not-detected',
-            externalWriteConsistency: 'unknown',
-        };
-    }
-    const status = await protocol.clientStatus(clientId);
     return {
         required: false,
         externalDatabaseDetected: detected,
-        registered: status.ok,
-        clientCount: status.ok ? 1 : 0,
+        registered: false,
+        clientCount: 0,
         errorCode: '',
-        mode: status.ok ? 'cooperative' : detected ? 'unmanaged' : 'not-detected',
-        externalWriteConsistency: status.ok
-            ? 'cooperative-settled-only'
-            : 'unknown',
+        mode: 'unmanaged',
+        reason: 'independent_modules_no_global_settlement',
+        independentModules: true,
+        externalWriteConsistency: 'independent',
     };
 }
 
 async function acknowledgeBarrierReceipt(input) {
-    const protocol = currentDownstreamBarrierProtocol();
-    if (!protocol) {
-        return {
-            ok: false,
-            status: 'unresolved',
-            issues: [{
-                code: 'barrier.chat_missing',
-                path: '$.chatId',
-                severity: 'error',
-                message: '当前聊天不可用，无法确认终态收据。',
-            }],
-        };
-    }
-    return protocol.acknowledge(input);
+    void input;
+    return {
+        ok: false,
+        status: 'unmanaged',
+        reason: 'independent_modules_no_global_settlement',
+        independentModules: true,
+    };
 }
 
 function currentCharacter(context) {
@@ -4337,128 +4343,6 @@ async function collectMvuRules(context, character) {
     return contents;
 }
 
-function hardContractRelevant(text) {
-    return /正文\s*\d{2,5}\s*(?:~|～|—|–|-|至)\s*\d{2,5}\s*(?:个?汉字|字)|<content\b|<options\b|结尾四项候选|(?:四|4)(?:个|项)?[^\n]{0,12}选项|骰前锁|骰后锁|唯一骰源|<UpdateVariable\b|<JSONPatch\b|可装备槽位|装备位置|完整装备字段|(?:技能|法术)[^\n]{0,80}(?:消耗|MP|耐力|体力)|(?:掉落|战利品|奖励|收获)[^\n]{0,100}(?:公式|计算|数量|品质|格式)|(?:背包|物品)[^\n]{0,100}(?:描述|数量|格式|字段)/iu.test(
-        String(text || ''),
-    );
-}
-
-function pushHardContractSource(target, seen, label, content) {
-    const text = String(content || '').trim();
-    if (!text || !hardContractRelevant(text)) return;
-    const key = fingerprint(text);
-    if (seen.has(key)) return;
-    seen.add(key);
-    target.push(`【${label}】\n${text}`);
-}
-
-async function collectHardContractTexts(context, character) {
-    const texts = [];
-    const seen = new Set();
-    const characterRoots = [
-        character?.data,
-        character,
-        character?.json_data?.data,
-        character?.json_data,
-    ].filter((value) => value && typeof value === 'object');
-    for (const root of characterRoots) {
-        for (const [label, key] of [
-            ['角色卡系统提示', 'system_prompt'],
-            ['角色卡场景规则', 'scenario'],
-        ]) {
-            pushHardContractSource(texts, seen, label, root?.[key]);
-        }
-    }
-
-    let activeWorldEntries = [];
-    try {
-        const module = await import('/scripts/world-info.js');
-        const sorted = typeof module.getSortedEntries === 'function'
-            ? await module.getSortedEntries()
-            : [];
-        activeWorldEntries = Array.isArray(sorted) ? sorted : [];
-    } catch {
-        // Embedded world-book entries remain a safe fallback.
-    }
-    const worldEntries = activeWorldEntries.length
-        ? activeWorldEntries
-        : embeddedBooks(character).flatMap(entriesOfWorldBook);
-    for (const entry of worldEntries) {
-        if (!entry || entry.disable === true || entry.enabled === false) continue;
-        pushHardContractSource(
-            texts,
-            seen,
-            `世界书：${entry.comment || entry.name || '未命名条目'}`,
-            entry.content,
-        );
-    }
-
-    try {
-        const module = await import('/scripts/openai.js');
-        const preset = module.oai_settings || {};
-        const prompts = Array.isArray(preset.prompts) ? preset.prompts : [];
-        const enabled = new Set();
-        for (const group of Array.isArray(preset.prompt_order) ? preset.prompt_order : []) {
-            for (const item of Array.isArray(group?.order) ? group.order : []) {
-                if (item?.enabled && item.identifier) enabled.add(item.identifier);
-            }
-        }
-        for (const prompt of prompts) {
-            if (enabled.size && !enabled.has(prompt?.identifier)) continue;
-            pushHardContractSource(
-                texts,
-                seen,
-                `预设：${prompt?.name || prompt?.identifier || '未命名提示'}`,
-                prompt?.content,
-            );
-        }
-    } catch {
-        // Some backends do not expose OpenAI-compatible preset modules.
-    }
-    return texts;
-}
-
-function hardContractEvidenceForPrompt(contractTexts, schemaTexts = [], ruleTexts = []) {
-    const authoritative = [...schemaTexts, ...ruleTexts]
-        .map((text) => String(text || '').trim())
-        .filter(Boolean);
-    const windows = [];
-    const seen = new Set();
-
-    for (const source of contractTexts || []) {
-        const lines = String(source || '').split(/\r?\n/u);
-        if (!lines.length) continue;
-        const selected = new Set([0]);
-        for (let index = 1; index < lines.length; index += 1) {
-            if (!hardContractRelevant(lines[index])) continue;
-            for (
-                let nearby = Math.max(1, index - 2);
-                nearby <= Math.min(lines.length - 1, index + 3);
-                nearby += 1
-            ) selected.add(nearby);
-        }
-        if (selected.size <= 1) continue;
-
-        const excerpt = [...selected]
-            .sort((left, right) => left - right)
-            .map((index, position, picked) => {
-                const previous = picked[position - 1];
-                return previous !== undefined && index > previous + 1
-                    ? `……（省略 ${index - previous - 1} 行无关内容）……\n${lines[index]}`
-                    : lines[index];
-            })
-            .join('\n')
-            .trim();
-        if (!excerpt) continue;
-        const body = excerpt.replace(/^【[^\n]+】\s*/u, '').trim();
-        if (authoritative.some((text) => text === body)) continue;
-        const key = fingerprint(excerpt);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        windows.push(excerpt);
-    }
-    return windows.join('\n\n');
-}
 
 function characterAuditContext(character, context) {
     const roots = [
@@ -4797,50 +4681,6 @@ async function waitMvuIdle(Mvu, capMs = 120000) {
     return false;
 }
 
-function disableStoryOracleAutoIfNeeded() {
-    const settings = getSettings();
-    if (!settings.preventDoubleWrite) return true;
-    const api = window.StoryOracleAPI;
-    if (!api?.isCompatible?.(1)) return true;
-    try {
-        const oracleSettings = api.context?.getSettings?.();
-        if (!oracleSettings || typeof oracleSettings !== 'object') {
-            console.warn('[MVU Auto Doctor] 故事神谕兼容接口未返回可验证设置，已阻止自动写入。');
-            return false;
-        }
-        if (oracleSettings.autoDiagnoseEnabled !== true) return true;
-        oracleSettings.autoDiagnoseEnabled = false;
-        getContext()?.saveSettingsDebounced?.();
-        const verifiedSettings = api.context?.getSettings?.();
-        if (
-            !verifiedSettings
-            || typeof verifiedSettings !== 'object'
-            || verifiedSettings.autoDiagnoseEnabled === true
-        ) {
-            console.warn('[MVU Auto Doctor] 故事神谕 AUTO 设置无法独立回读为关闭，已阻止自动写入。');
-            return false;
-        }
-        if (!oracleAutoDisabledNoticeShown) {
-            oracleAutoDisabledNoticeShown = true;
-            toast(
-                'info',
-                '已关闭故事神谕自身的 AUTO 诊断，避免两个程序同时写变量；神谕手动诊断不受影响。',
-            );
-        }
-        return true;
-    } catch (error) {
-        console.warn('[MVU Auto Doctor] 无法关闭故事神谕 AUTO：', error);
-        return false;
-    }
-}
-
-function doubleWriteGuardFailure() {
-    return {
-        status: 'failed',
-        reason: '故事神谕 AUTO 仍处于开启或不可验证状态；为避免双写，变量医生已停止本次 MVU 写入',
-    };
-}
-
 function resolveMessageId(value) {
     if (value == null) return -1;
     if (Number.isInteger(Number(value))) return Number(value);
@@ -4871,7 +4711,407 @@ function latestAiMessage(context) {
     return { index: -1, message: null };
 }
 
-function captureTarget(context, index) {
+function acceptedFinalSnapshot(context) {
+    const latest = currentFinalAssistant(context);
+    return {
+        index: latest.index,
+        swipeId: Number(latest.message?.swipe_id) || 0,
+        contentFingerprint: latest.message
+            ? acceptedContentFingerprint(latest.message.mes || '')
+            : '',
+    };
+}
+
+function currentFinalAssistant(context) {
+    const chat = Array.isArray(context?.chat) ? context.chat : [];
+    const index = chat.length - 1;
+    const message = index >= 0 ? chat[index] : null;
+    if (
+        !message
+        || message.is_user
+        || message.is_system
+        || typeof message.mes !== 'string'
+        || !message.mes.trim()
+    ) return { index: -1, message: null };
+    return { index, message };
+}
+
+function generationCandidateAllowed(type, params, dryRun) {
+    const generationType = typeof type === 'string' ? type.trim().toLowerCase() : '';
+    const allowedTypes = new Set(['normal', 'regenerate', 'swipe', 'continue']);
+    const quietPrompt = params?.quiet_prompt;
+    const hasQuietPrompt = typeof quietPrompt === 'string'
+        ? Boolean(quietPrompt.trim())
+        : Array.isArray(quietPrompt)
+            ? quietPrompt.length > 0
+            : Boolean(quietPrompt);
+    return {
+        allowed: (
+            allowedTypes.has(generationType)
+            && dryRun !== true
+            && params?.dryRun !== true
+            && params?.dry_run !== true
+            && !hasQuietPrompt
+            && params?.impersonate !== true
+            && params?.is_impersonate !== true
+        ),
+        generationType,
+    };
+}
+
+function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {
+    scopeDigest = '',
+    contentFingerprint = '',
+    epoch = 0,
+    operationEpoch: acceptedOperationEpoch = 0,
+    actorSovereigntyScope = null,
+} = {}) {
+    const messageId = ensureMessageStableId(context, message, index);
+    const swipeId = Number(message?.swipe_id) || 0;
+    const swipeInfo = currentSwipeInfo(message);
+    const holders = [message, swipeInfo].filter(Boolean);
+    let changed = false;
+    const generationId = String(
+        generation?.id
+        || swipeInfo?.extra?.mvu_auto_doctor_generation_id
+        || message?.extra?.mvu_auto_doctor_generation_id
+        || '',
+    );
+    for (const holder of holders) {
+        if (!isPlainObject(holder.extra)) holder.extra = {};
+        if (holder.extra.mvu_auto_doctor_generation_id !== generationId) {
+            holder.extra.mvu_auto_doctor_generation_id = generationId;
+            changed = true;
+        }
+        if (holder.extra.mvu_auto_doctor_generation_serial !== generation.serial) {
+            holder.extra.mvu_auto_doctor_generation_serial = generation.serial;
+            changed = true;
+        }
+        if (holder.extra.mvu_auto_doctor_generation_type !== generation.type) {
+            holder.extra.mvu_auto_doctor_generation_type = generation.type;
+            changed = true;
+        }
+    }
+    if (changed) scheduleSafeChatSave(context, context?.chatId);
+    return {
+        chatId: String(context?.chatId || ''),
+        index,
+        messageId,
+        swipeId,
+        generationId,
+        generationSerial: generation.serial,
+        generationType: generation.type,
+        scopeDigest: String(scopeDigest || ''),
+        contentFingerprint: String(contentFingerprint || ''),
+        epoch: Number(epoch) || 0,
+        operationEpoch: Number(acceptedOperationEpoch) || 0,
+        actorSovereigntyScope: actorSovereigntyScope
+            ? createActorSovereigntyScope(actorSovereigntyScope)
+            : null,
+    };
+}
+
+function acceptedFinalEnvelopeMatchesContext(context, envelope, session) {
+    if (
+        !context
+        || !envelope
+        || !session
+        || String(context.chatId || '') !== session.chatId
+        || envelope.chatId !== session.chatId
+        || envelope.generationId !== session.id
+        || envelope.generationSerial !== session.serial
+        || envelope.generationType !== session.type
+        || envelope.epoch !== session.epoch
+        || envelope.scopeDigest !== session.frozenScopeDigest
+        || session.epoch !== currentGenerationEpoch
+    ) return false;
+    const latest = currentFinalAssistant(context);
+    if (
+        !latest.message
+        || latest.index !== envelope.index
+        || ensureMessageStableId(context, latest.message, latest.index) !== envelope.messageId
+        || (Number(latest.message.swipe_id) || 0) !== envelope.swipeId
+        || acceptedContentFingerprint(latest.message.mes) !== envelope.contentFingerprint
+    ) return false;
+    return actorSovereigntyScopeDigest(currentActorSovereigntyScope(context))
+        === envelope.scopeDigest;
+}
+
+function acceptedFinalScopeDecision(generation, scopeDigest) {
+    const freshScopeDigest = String(scopeDigest || '');
+    if (!freshScopeDigest) {
+        return { ok: false, reason: 'scope_unavailable', scopeDigest: '' };
+    }
+    const placedScopeDigest = String(generation?.p4PlacementScopeDigest || '');
+    if (placedScopeDigest && placedScopeDigest !== freshScopeDigest) {
+        return { ok: false, reason: 'p4_scope_stale', scopeDigest: '' };
+    }
+    return { ok: true, reason: '', scopeDigest: freshScopeDigest };
+}
+
+function acceptedFinalSessionIsCurrent(generation) {
+    const context = getContext();
+    return !!(
+        generation
+        && Number(generation.epoch) === Number(currentGenerationEpoch)
+        && Number(generation.operationEpoch) === Number(operationEpoch)
+        && String(context?.chatId || '') === String(generation.chatId || '')
+        && String(lastGeneration?.id || '') === String(generation.id || '')
+    );
+}
+
+function acceptedFinalSessionTargetIsCurrent(generation) {
+    if (!acceptedFinalSessionIsCurrent(generation)) return false;
+    const expectedScopeDigest = String(generation?.frozenScopeDigest || '');
+    return !!expectedScopeDigest && actorSovereigntyScopeDigest(
+        currentActorSovereigntyScope(getContext()),
+    ) === expectedScopeDigest;
+}
+
+async function acceptedFinalReleaseIsCurrent(generation) {
+    if (!acceptedFinalSessionTargetIsCurrent(generation)) return false;
+    try {
+        const resolution = await resolveCurrentActorSovereigntyScope(getContext());
+        return !!(
+            resolution?.resolved
+            && actorSovereigntyScopeDigest(resolution.scope)
+                === String(generation.frozenScopeDigest || '')
+        );
+    } catch {
+        return false;
+    }
+}
+
+async function acceptedFinalEnvelopeScopeIsCurrent(context, envelope) {
+    if (!context || !envelope?.actorSovereigntyScope || !envelope.scopeDigest) return false;
+    if (String(context.chatId || '') !== String(envelope.chatId || '')) return false;
+    try {
+        const resolution = await resolveCurrentActorSovereigntyScope(context);
+        return !!(
+            resolution?.resolved
+            && actorSovereigntyScopeDigest(resolution.scope) === envelope.scopeDigest
+            && actorSovereigntyScopesMatch(
+                resolution.scope,
+                envelope.actorSovereigntyScope,
+            )
+        );
+    } catch {
+        return false;
+    }
+}
+
+function recordAcceptedFinalRejection(generation, reason) {
+    if (!acceptedFinalSessionIsCurrent(generation)) return;
+    // Rejection is an ephemeral entry-gate diagnostic.  It must not create an
+    // operation-log timer or write a chat namespace while no module ran.
+    setStatus(`最终正文未进入医生：${String(reason || 'rejected')}`, '', {
+        record: false,
+    });
+}
+
+async function moduleTargetForAcceptedFinal(envelope) {
+    const context = getContext();
+    if (!context || String(context.chatId || '') !== envelope.chatId) return null;
+    const latest = latestAiMessage(context);
+    if (latest.index !== envelope.index || !latest.message) return null;
+    if (!await acceptedFinalEnvelopeScopeIsCurrent(context, envelope)) return null;
+    const target = captureTarget(context, envelope.index, {
+        frozenScope: envelope.actorSovereigntyScope,
+    });
+    if (!target) return null;
+    return target.messageId === envelope.messageId
+        && target.swipeId === envelope.swipeId
+        && target.generationId === envelope.generationId
+        && target.generationSerial === envelope.generationSerial
+        && target.contentFingerprint === envelope.contentFingerprint
+        && target.scopeDigest === envelope.scopeDigest
+        && target.epoch === envelope.operationEpoch
+        ? target
+        : null;
+}
+
+function dispatchAcceptedFinal(envelope) {
+    const launchVariable = () => {
+        Promise.resolve().then(async () => {
+            const target = await moduleTargetForAcceptedFinal(envelope);
+            if (!target) return { status: 'stale', reason: 'accepted_final_target_changed' };
+            return enqueue(envelope.index, {
+                queuedTarget: target,
+                skipDelay: true,
+                skipStabilityWait: true,
+            });
+        }).catch((error) => {
+            recordOperation('变量医生', safeDiagnosticReason(error?.message || error), 'error');
+        });
+    };
+    const launchScoped = (label, handler) => {
+        Promise.resolve()
+            .then(async () => {
+                const target = await moduleTargetForAcceptedFinal(envelope);
+                if (!target) return { status: 'stale', reason: 'accepted_final_target_changed' };
+                return handler(target);
+            })
+            .catch((error) => {
+                recordOperation(label, safeDiagnosticReason(error?.message || error), 'error');
+            });
+    };
+
+    launchVariable();
+    launchScoped('开局资源', (target) => enqueueOpeningResourceSync(envelope.index, {
+        expectedTarget: target,
+    }));
+    launchScoped('人物关系', (target) => runSocialAuditTarget(target));
+    launchScoped('论坛', (target) => enqueueForum(envelope.index, { expectedTarget: target }));
+    launchScoped('人物档案', (target) => {
+        const profileTask = enqueueActorProfiles(envelope.index, {
+            expectedTarget: target,
+            includeMaintenance: false,
+        });
+        void profileTask.then((result) => {
+            if (!['atomic_readback', 'no_candidates'].includes(result?.status)) return;
+            if (target.epoch !== operationEpoch || target.chatId !== getContext()?.chatId) return;
+            const retryKey = stage3AcceptedTargetKey(target);
+            if (retryKey) {
+                continuityProfileRetrySignals.set(retryKey, {
+                    epoch: target.epoch,
+                    chatId: target.chatId,
+                    noActorPermit: result?.status === 'no_candidates' ? result : null,
+                });
+            }
+            void enqueueContinuity(envelope.index, {
+                expectedTarget: target,
+                noActorPermit: result?.status === 'no_candidates' ? result : null,
+            });
+        });
+        return profileTask;
+    });
+    launchScoped('世界连续性', (target) => enqueueContinuity(envelope.index, {
+        expectedTarget: target,
+    }));
+}
+
+async function acceptFinalGeneration(generation) {
+    const reject = async (reason) => {
+        if (generation) generation.acceptedFinalOutcome = fixedGenerationLifecycleReason(reason);
+        recordAcceptedFinalRejection(generation, reason);
+        if (acceptedFinalSessionTargetIsCurrent(generation)) {
+            await releaseNextTurnConsumer(generation, reason, {
+                requireCurrentSession: true,
+            });
+        }
+        return false;
+    };
+    if (!generation) return reject('no_session');
+    const epoch = generation.epoch;
+    if (!epoch || epoch !== currentGenerationEpoch) return reject('epoch');
+    if (generation.stopped) return reject('stopped');
+    if (generation.acceptedFinalEligible !== true) return reject('type');
+    const context = getContext();
+    if (!context || String(context.chatId || '') !== generation.chatId) {
+        return reject('chat');
+    }
+    if (
+        document.body?.dataset
+        && Object.prototype.hasOwnProperty.call(document.body.dataset, 'generating')
+    ) return reject('generating');
+    const latest = currentFinalAssistant(context);
+    if (!latest.message) return reject('no_final_ai');
+    if (!sovereigntyNarrativeEligible(latest.message.mes)) {
+        return reject('narrative_ineligible');
+    }
+    const currentFingerprint = acceptedContentFingerprint(latest.message.mes);
+    if (currentFingerprint === generation.start.contentFingerprint) {
+        return reject('unchanged');
+    }
+    if (epoch !== currentGenerationEpoch) return reject('epoch');
+    let scopeResolution;
+    try {
+        scopeResolution = await resolveCurrentActorSovereigntyScope(context);
+    } catch {
+        return reject('scope_unavailable');
+    }
+    if (!scopeResolution?.resolved) return reject('scope_unavailable');
+    const scopeDecision = acceptedFinalScopeDecision(
+        generation,
+        actorSovereigntyScopeDigest(scopeResolution.scope),
+    );
+    if (!scopeDecision.ok) return reject(scopeDecision.reason);
+    const scopeDigest = scopeDecision.scopeDigest;
+    // A failed or ticket-only P4 placement cannot veto this accepted final.
+    // Once the live canonical scope is fresh-read, it is the only scope carried
+    // into the downstream target unless P4 actually placed a same-session slot.
+    generation.frozenScopeDigest = scopeDigest;
+    if (epoch !== currentGenerationEpoch) return reject('epoch');
+    generation.acceptedFinalEligible = false;
+    if (lastGeneration?.epoch === epoch) lastGeneration.acceptedFinalEligible = false;
+    let envelope;
+    try {
+        envelope = ensureAcceptedFinalTargetIdentity(
+            context,
+            latest.message,
+            latest.index,
+            generation,
+            {
+                scopeDigest,
+                contentFingerprint: currentFingerprint,
+                epoch,
+                operationEpoch,
+                actorSovereigntyScope: createActorSovereigntyScope(scopeResolution.scope),
+            },
+        );
+    } catch {
+        return reject('acceptance_envelope_failed');
+    }
+    recordGenerationLifecycleTrace('identity', {
+        chatId: generation.chatId,
+        epoch,
+        operation: generation.operationEpoch,
+        serial: generation.serial,
+    });
+    let committed = false;
+    try {
+        committed = await commitNextTurnConsumer(generation, envelope);
+    } catch {
+        committed = false;
+    }
+    if (!committed) {
+        if (acceptedFinalSessionTargetIsCurrent(generation)) {
+            await releaseNextTurnConsumer(generation, 'acceptance_consume_failed', {
+                requireCurrentSession: true,
+            });
+        }
+        return false;
+    }
+    if (
+        !acceptedFinalSessionIsCurrent(generation)
+        || !await acceptedFinalEnvelopeScopeIsCurrent(context, envelope)
+    ) {
+        if (acceptedFinalSessionTargetIsCurrent(generation)) {
+            await releaseNextTurnConsumer(generation, 'acceptance_target_stale', {
+                requireCurrentSession: true,
+            });
+        }
+        return false;
+    }
+    dispatchAcceptedFinal(envelope);
+    generation.acceptedFinalOutcome = 'accepted';
+    recordGenerationLifecycleTrace('dispatch', {
+        chatId: generation.chatId,
+        epoch,
+        operation: generation.operationEpoch,
+        serial: generation.serial,
+        reason: 'accepted',
+    });
+    return committed;
+}
+
+function frozenIdentityScopeId(scope) {
+    const chatId = String(scope?.chatId || '');
+    const cardId = String(scope?.cardId || '');
+    return chatId && cardId ? `${chatId}|${cardId}` : '';
+}
+
+function captureTarget(context, index, { frozenScope = null, unscoped = false } = {}) {
     const message = context?.chat?.[index];
     if (!message || message.is_user || message.is_system || !message.mes?.trim()) {
         return null;
@@ -4883,9 +5123,19 @@ function captureTarget(context, index) {
         index,
         messageId,
     );
+    const actorSovereigntyScope = unscoped
+        ? null
+        : createActorSovereigntyScope(frozenScope || currentActorSovereigntyScope(context));
+    const scopeDigest = actorSovereigntyScope
+        ? actorSovereigntyScopeDigest(actorSovereigntyScope)
+        : '';
     return {
         chatId: context.chatId,
-        identityScopeId: actorIdentityScopeId(context),
+        actorSovereigntyScope,
+        scopeDigest,
+        identityScopeId: actorSovereigntyScope
+            ? frozenIdentityScopeId(actorSovereigntyScope)
+            : actorIdentityScopeId(context),
         index,
         messageId,
         swipeId: Number(message.swipe_id) || 0,
@@ -4899,6 +5149,28 @@ function captureTarget(context, index) {
     };
 }
 
+async function freshFrozenScopeGuard(captured) {
+    if (!captured?.actorSovereigntyScope || !captured.scopeDigest) {
+        return { ok: false, reason: 'actor_sovereignty_scope_missing' };
+    }
+    const context = getContext();
+    if (!context || String(context.chatId || '') !== String(captured.chatId || '')) {
+        return { ok: false, reason: 'chat_context_changed' };
+    }
+    const resolution = await resolveCurrentActorSovereigntyScope(context);
+    if (!resolution.resolved) {
+        return { ok: false, reason: resolution.reason || 'actor_sovereignty_scope_unresolved' };
+    }
+    const resolvedDigest = actorSovereigntyScopeDigest(resolution.scope);
+    if (
+        resolvedDigest !== captured.scopeDigest
+        || !actorSovereigntyScopesMatch(resolution.scope, captured.actorSovereigntyScope)
+    ) {
+        return { ok: false, reason: 'actor_sovereignty_scope_changed' };
+    }
+    return { ok: true, scope: createActorSovereigntyScope(resolution.scope), scopeDigest: resolvedDigest };
+}
+
 function targetIsCurrent(captured, token = null, { requireLatest = true } = {}) {
     const context = getContext();
     if (token && !operationIsCurrent(token)) {
@@ -4906,6 +5178,13 @@ function targetIsCurrent(captured, token = null, { requireLatest = true } = {}) 
     }
     if (!captured || !context || context.chatId !== captured.chatId) {
         return { ok: false, reason: '聊天已经切换' };
+    }
+    if (
+        captured.scopeDigest
+        && actorSovereigntyScopeDigest(currentActorSovereigntyScope(context))
+            !== captured.scopeDigest
+    ) {
+        return { ok: false, reason: '人物主权作用域已经变化' };
     }
     const latest = latestAiMessage(context);
     if (requireLatest && latest.index !== captured.index) {
@@ -4949,7 +5228,10 @@ function targetBranchIsCurrent(captured, { requireLatest = true } = {}) {
     if (requireLatest && latest.index !== captured.index) {
         return { ok: false, reason: '主聊天已经出现更新的 AI 回复' };
     }
-    const fresh = captureTarget(context, captured.index);
+    const fresh = captureTarget(context, captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    });
     if (!fresh) return { ok: false, reason: '目标回复已不存在' };
     if (
         fresh.messageId !== captured.messageId
@@ -5072,6 +5354,7 @@ function sourceRefOf(captured) {
         generationType: captured.generationType,
         branchId: captured.branchId,
         identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
         hash: captured.fingerprint,
         target: observationConvergenceTargetOf(actorActionTargetOf(captured)),
     };
@@ -5090,6 +5373,7 @@ function actorActionTargetOf(captured) {
         generationId: captured.generationId,
         generationType: captured.generationType,
         branchId: captured.branchId,
+        scopeDigest: captured.scopeDigest,
         contentHash,
         hash: contentHash,
     };
@@ -5106,13 +5390,13 @@ function observationConvergenceTargetOf(value) {
         generationId: target.generationId,
         generationType: target.generationType,
         branchId: target.branchId,
+        scopeDigest: target.scopeDigest,
         contentHash: target.contentHash,
     } : null;
 }
 
 function sovereigntySourceRefOf(captured) {
     if (!captured) return null;
-    const scopeDigest = actorSovereigntyScopeDigest(currentActorSovereigntyScope(getContext()));
     return {
         chatId: captured.chatId,
         logicalIndex: captured.index,
@@ -5123,7 +5407,7 @@ function sovereigntySourceRefOf(captured) {
         generationType: captured.generationType,
         branchId: captured.branchId,
         contentHash: captured.contentFingerprint || captured.fingerprint,
-        scopeDigest,
+        scopeDigest: captured.scopeDigest,
     };
 }
 
@@ -5132,9 +5416,8 @@ function sovereigntyObservationRecord(
     reason = 'migration_pending',
     failureStage = 'migration_commit',
 ) {
-    const context = getContext();
-    const scope = currentActorSovereigntyScope(context);
-    const scopeDigest = actorSovereigntyScopeDigest(scope);
+    const scope = deepClone(captured.actorSovereigntyScope);
+    const scopeDigest = captured.scopeDigest;
     const sourceRef = {
         ...sovereigntySourceRefOf(captured),
         scopeDigest,
@@ -5159,13 +5442,18 @@ function sovereigntyObservationRecord(
     };
 }
 
-function currentPendingSovereigntyObservationRecords(context = getContext()) {
+function currentPendingSovereigntyObservationRecords(
+    context = getContext(),
+    expectedScope = null,
+) {
     const chatId = String(context?.chatId || '');
     if (!chatId) {
         pendingSovereigntyObservations.clear();
         return [];
     }
-    const scope = currentActorSovereigntyScope(context);
+    const scope = createActorSovereigntyScope(
+        expectedScope || currentActorSovereigntyScope(context),
+    );
     const scopeDigest = actorSovereigntyScopeDigest(scope);
     const current = [];
     for (const [key, record] of pendingSovereigntyObservations.entries()) {
@@ -5189,12 +5477,15 @@ function sovereigntyRuntimeWithSessionObservationFailures(
     runtimeValue = null,
     context = getContext(),
 ) {
-    const scopeDigest = actorSovereigntyScopeDigest(currentActorSovereigntyScope(context));
+    const scope = createActorSovereigntyScope(
+        namespace?.actorSovereigntyScope || currentActorSovereigntyScope(context),
+    );
+    const scopeDigest = actorSovereigntyScopeDigest(scope);
     const runtime = normalizeSovereigntyRuntime(
         runtimeValue ?? namespace?.sovereigntyRuntime,
         { chatId: context?.chatId || '', scopeDigest },
     );
-    const pending = currentPendingSovereigntyObservationRecords(context)
+    const pending = currentPendingSovereigntyObservationRecords(context, scope)
         .filter((record) => !runtime.observations.some(
             (observation) => observation.sourceKey === record.sourceKey,
         ));
@@ -5258,6 +5549,8 @@ function sovereigntyRuntimeWithSessionObservationFailures(
 async function queuePendingSovereigntyObservation(captured, reason, {
     failureStage = 'migration_commit',
 } = {}) {
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) return { queued: false, persisted: false, record: null };
     const record = sovereigntyObservationRecord(captured, reason, failureStage);
     if (!record.sourceKey) return { queued: false, persisted: false, record: null };
     const key = `${record.scopeDigest}|${record.sourceKey}`;
@@ -5295,7 +5588,7 @@ function reconstructMissingSovereigntyObservations(context, runtime, scope) {
             && !message.is_system
             && sovereigntyNarrativeEligible(message.mes || '')
         ))
-        .map(({ index }) => captureTarget(context, index))
+        .map(({ index }) => captureTarget(context, index, { frozenScope: scope }))
         .filter(Boolean)
         .map((captured) => sovereigntyObservationRecord(captured, 'chat_gap_reconstructed'))
         .filter((record) => (
@@ -5324,7 +5617,7 @@ function currentObservationConvergenceProof(runtime, context, scope) {
         const expectedTarget = normalizeActorActionTarget(item?.target);
         const logicalIndex = Number(expectedTarget?.logicalIndex);
         if (!expectedTarget || !Number.isInteger(logicalIndex)) return null;
-        const captured = captureTarget(context, logicalIndex);
+        const captured = captureTarget(context, logicalIndex, { frozenScope: scope });
         const currentTarget = actorActionTargetOf(captured);
         const currentSourceRef = sovereigntySourceRefOf(captured);
         if (
@@ -5404,7 +5697,7 @@ function supersedeReplacedSovereigntyObservations(
     for (const item of expected.values()) {
         const logicalIndex = Number(item.target.logicalIndex);
         if (!Number.isInteger(logicalIndex)) continue;
-        const captured = captureTarget(context, logicalIndex);
+        const captured = captureTarget(context, logicalIndex, { frozenScope: scope });
         const currentTarget = actorActionTargetOf(captured);
         const currentSourceRef = sovereigntySourceRefOf(captured);
         if (
@@ -5460,7 +5753,9 @@ async function replayPendingSovereigntyObservations(
     context = getContext(),
     { reconstruct = false } = {},
 ) {
-    const scope = currentActorSovereigntyScope(context);
+    const scope = createActorSovereigntyScope(
+        namespace?.actorSovereigntyScope || currentActorSovereigntyScope(context),
+    );
     const scopeDigest = actorSovereigntyScopeDigest(scope);
     let runtime = sovereigntyRuntimeFromNamespace(namespace);
     const persistedWal = Array.isArray(namespace.actorSovereigntyObservationWAL)
@@ -5717,11 +6012,22 @@ function sovereigntyRuntimeFromNamespace(namespace, settings = getSettings()) {
 async function persistSovereigntyRuntime(runtime, expectedChatId, {
     durable = true,
     force = true,
+    expectedScope = null,
 } = {}) {
     const namespace = readChatNamespace();
+    const frozenScope = expectedScope
+        ? createActorSovereigntyScope(expectedScope)
+        : namespace.actorSovereigntyScope;
+    if (
+        !frozenScope
+        || !actorSovereigntyScopesMatch(namespace.actorSovereigntyScope, frozenScope)
+    ) {
+        lastChatNamespaceWriteFailureCode = 'actor_sovereignty_scope_changed';
+        return false;
+    }
     namespace.sovereigntyRuntime = normalizeSovereigntyRuntime(runtime, {
         chatId: expectedChatId,
-        scopeDigest: actorSovereigntyScopeDigest(namespace.actorSovereigntyScope),
+        scopeDigest: actorSovereigntyScopeDigest(frozenScope),
     });
     const saved = await writeChatNamespace(namespace, expectedChatId, {
         fields: ['sovereigntyRuntime'],
@@ -5732,92 +6038,24 @@ async function persistSovereigntyRuntime(runtime, expectedChatId, {
     return saved;
 }
 
-function clearPendingSovereigntyRetry() {
-    if (pendingSovereigntyRetryTimer) clearTimeout(pendingSovereigntyRetryTimer);
-    pendingSovereigntyRetryTimer = null;
-    pendingSovereigntyRetry = null;
-    syncTaskCancelButtons();
-}
-
-function scheduleSovereigntyAutoRetry(captured, runtime = null) {
-    const settings = getSettings();
-    const context = getContext();
-    const chatId = context?.chatId || '';
-    const currentNamespace = readChatNamespace(context);
-    const currentRuntime = runtime
-        ? normalizeSovereigntyRuntime(runtime, {
-            chatId,
-            scopeDigest: actorSovereigntyScopeDigest(
-                currentNamespace.actorSovereigntyScope,
-            ),
-        })
-        : sovereigntyRuntimeFromNamespace(currentNamespace);
-    const due = dueSovereigntyTasks(currentRuntime);
-    if (
-        !captured
-        || !chatId
-        || !actorSovereigntyMigrationIsCurrent(
-            currentNamespace,
-            currentActorSovereigntyScope(context),
-        )
-        || settings.sovereigntyMode === 'legacy'
-        || settings.sovereigntyRunUntilCancelled === false
-        || !due.length
-    ) {
-        clearPendingSovereigntyRetry();
-        return false;
-    }
-    const delayMs = sovereigntyRetryDelay(currentRuntime);
-    if (!delayMs) {
-        clearPendingSovereigntyRetry();
-        return false;
-    }
-    const runAt = Date.now() + delayMs;
-    if (
-        pendingSovereigntyRetry
-        && pendingSovereigntyRetry.chatId === chatId
-        && pendingSovereigntyRetry.targetIndex === captured.index
-        && pendingSovereigntyRetry.runAt <= runAt
-    ) return true;
-    clearPendingSovereigntyRetry();
-    const scheduledEpoch = operationEpoch;
-    pendingSovereigntyRetry = {
-        chatId,
-        targetIndex: captured.index,
-        runAt,
-        epoch: scheduledEpoch,
-    };
-    pendingSovereigntyRetryTimer = setTimeout(() => {
-        const scheduled = pendingSovereigntyRetry;
-        pendingSovereigntyRetryTimer = null;
-        pendingSovereigntyRetry = null;
-        syncTaskCancelButtons();
-        const freshContext = getContext();
-        if (
-            !scheduled
-            || scheduled.epoch !== operationEpoch
-            || freshContext?.chatId !== scheduled.chatId
-        ) return;
-        const fresh = captureTarget(freshContext, scheduled.targetIndex);
-        if (!fresh || !dueSovereigntyTasks(
-            sovereigntyRuntimeFromNamespace(readChatNamespace(freshContext)),
-        ).length) {
-            renderSovereigntyHealth();
-            return;
-        }
-        enqueueContinuity(scheduled.targetIndex, {
-            force: true,
-            expectedTarget: fresh,
-        });
-    }, delayMs);
-    syncTaskCancelButtons();
-    renderSovereigntyHealth(currentRuntime);
-    return true;
-}
 
 async function observeSovereigntyTarget(captured) {
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) {
+        return {
+            observed: false,
+            recovered: [],
+            runtime: null,
+            persisted: false,
+            migrationBlocked: true,
+            failureCode: scopeGuard.reason,
+        };
+    }
     const settings = getSettings();
-    const migration = await ensureActorSovereigntyMigrationPersisted(getContext());
+    const migration = await ensureActorSovereigntyMigrationPersisted(
+        getContext(),
+        captured.actorSovereigntyScope,
+    );
     if (!migration.ok) {
         const queued = await queuePendingSovereigntyObservation(
             captured,
@@ -5878,6 +6116,7 @@ async function observeSovereigntyTarget(captured) {
     const persisted = await persistSovereigntyRuntime(runtime, captured.chatId, {
         durable: true,
         force: true,
+        expectedScope: captured.actorSovereigntyScope,
     });
     if (observed.observed) {
         recordOperation(
@@ -5895,75 +6134,12 @@ async function observeSovereigntyTarget(captured) {
     };
 }
 
-async function recoverSovereigntyOnChatLoad() {
-    const context = getContext();
-    const chatId = context?.chatId || '';
-    if (!chatId) return { recovered: [], scheduled: false };
-    activeSovereigntyRecoveryCount += 1;
-    renderSovereigntyHealth();
-    try {
-        const settings = getSettings();
-        const migration = await ensureActorSovereigntyMigrationPersisted(context);
-        if (!migration.ok) {
-            return {
-                recovered: [],
-                scheduled: false,
-                migrationBlocked: true,
-                reason: migration.reason,
-            };
-        }
-        let namespace = migration.namespace || readChatNamespace(context);
-        const replay = await replayPendingSovereigntyObservations(
-            namespace,
-            context,
-            { reconstruct: true },
-        );
-        if (!replay.ok) {
-            return {
-                recovered: [],
-                scheduled: false,
-                observationPending: true,
-                reason: replay.reason,
-            };
-        }
-        namespace = replay.namespace;
-        const recovered = recoverOrphanedSovereigntyTasks(
-            normalizeSovereigntyRuntime(replay.runtime, {
-                chatId,
-                scopeDigest: actorSovereigntyScopeDigest(namespace.actorSovereigntyScope),
-            }),
-            {
-                staleAfterMs: settings.sovereigntyRunUntilCancelled ? 1_000 : settings.sovereigntyHardTimeoutMs + 5_000,
-                excludeTaskIds: [...activeSovereigntyTaskIds],
-            },
-        );
-        await persistSovereigntyRuntime(recovered.runtime, chatId, { durable: true });
-        const health = sovereigntyHealthView(recovered.runtime);
-        const due = recovered.runtime.backlog.some((task) => (
-            ['pending', 'retryable_failed', 'deferred'].includes(task.status)
-            && task.nextRetryTurn <= recovered.runtime.observedThrough.turn
-        ));
-        const freshContext = getContext();
-        const latest = latestAiMessage(freshContext);
-        const captured = freshContext?.chatId === chatId
-            ? captureTarget(freshContext, latest.index)
-            : null;
-        const scheduled = Boolean(
-            captured
-            && settings.sovereigntyMode !== 'legacy'
-            && due
-            && health.running === 0
-        );
-        if (scheduled) enqueueContinuity(latest.index, { force: true, expectedTarget: captured });
-        return { recovered: recovered.recovered, scheduled };
-    } finally {
-        activeSovereigntyRecoveryCount = Math.max(0, activeSovereigntyRecoveryCount - 1);
-        renderSovereigntyHealth();
-    }
-}
 
 async function claimSovereigntyModules(namespace, captured, modules) {
-    const migration = await ensureActorSovereigntyMigrationPersisted(getContext());
+    const migration = await ensureActorSovereigntyMigrationPersisted(
+        getContext(),
+        captured.actorSovereigntyScope,
+    );
     if (!migration.ok) {
         return {
             runtime: sovereigntyRuntimeFromNamespace(
@@ -6020,7 +6196,10 @@ async function requeueClaimedSovereigntyTasks(tasks, captured, reason = 'target_
         }).runtime;
         activeSovereigntyTaskIds.delete(task.id);
     }
-    await persistSovereigntyRuntime(runtime, captured.chatId, { durable: true });
+    await persistSovereigntyRuntime(runtime, captured.chatId, {
+        durable: true,
+        expectedScope: captured.actorSovereigntyScope,
+    });
 }
 
 function settleSovereigntyModule(runtime, task, {
@@ -6252,7 +6431,10 @@ async function completeSovereigntyCycle({
         retryOnCurrentTurn,
     });
     if (persist) {
-        await persistSovereigntyRuntime(next, captured.chatId, { durable: true });
+        await persistSovereigntyRuntime(next, captured.chatId, {
+            durable: true,
+            expectedScope: captured.actorSovereigntyScope,
+        });
     }
     for (const task of [
         ...Object.values(tasks || {}),
@@ -6286,12 +6468,32 @@ function acceptedContentText(text) {
 }
 
 function acceptedContentFingerprint(text) {
-    return fingerprint(acceptedContentText(text));
+    return fingerprint(mechanismFreeAcceptedContent(text).trim());
+}
+
+function mechanismFreeAcceptedContent(text) {
+    let narrative = acceptedContentText(text);
+    for (const tag of [
+        'StatusPlaceHolder',
+        'StatusPlaceHolderImpl',
+        'UpdateVariable',
+        'JSONPatch',
+        'options',
+        'branches',
+    ]) {
+        const escaped = tag.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+        narrative = narrative
+            .replace(new RegExp(`<${escaped}\\b[^>]*\\/\\s*>`, 'giu'), ' ')
+            .replace(new RegExp(`<${escaped}\\b[^>]*>[\\s\\S]*?<\\/${escaped}\\s*>`, 'giu'), ' ')
+            .replace(new RegExp(`<${escaped}\\b[^>]*>[\\s\\S]*$`, 'iu'), ' ');
+    }
+    return narrative;
 }
 
 function sovereigntyNarrativeEligible(text) {
-    const narrative = acceptedContentText(text)
+    const narrative = mechanismFreeAcceptedContent(text)
         .replace(/<[^>]+>/gu, ' ')
+        .replace(/[\[\]{}(),.:;"'`~_+=*|\\/\-]+/gu, ' ')
         .replace(/\s+/gu, ' ')
         .trim();
     return narrative.length >= 2 && /[\p{L}\p{N}]/u.test(narrative);
@@ -6327,181 +6529,6 @@ function playerAuthoredTextFromCompiledMessage(value) {
     return (compiledMarker >= 0 ? source.slice(0, compiledMarker) : source).trim();
 }
 
-function renderHardContractAudit() {
-    const details = ui?.hardContractDetails;
-    const summary = ui?.hardContractSummary;
-    const list = ui?.hardContractList;
-    if (!details || !summary || !list) return;
-    const issues = latestHardContractAudit?.issues || [];
-    const errorCount = issues.filter((issue) => issue.severity === 'error').length;
-    const warningCount = issues.filter((issue) => issue.severity === 'warning').length;
-    summary.textContent = latestHardContractAudit
-        ? `查看硬合同明细（错误 ${errorCount} · 提醒 ${warningCount}）`
-        : '查看硬合同明细';
-    list.replaceChildren();
-    if (!issues.length) {
-        const empty = document.createElement('li');
-        empty.className = 'mvuad-protocol-empty';
-        empty.textContent = latestHardContractAudit
-            ? '未发现可由程序确定的正文或装备合同问题。'
-            : '尚未检查。';
-        list.appendChild(empty);
-        return;
-    }
-    for (const issue of issues) {
-        const item = document.createElement('li');
-        item.className = 'mvuad-protocol-issue';
-        item.dataset.severity = issue.severity || 'info';
-        const badge = document.createElement('b');
-        badge.textContent = issue.severity === 'error'
-            ? '错误'
-            : issue.severity === 'warning'
-                ? '提醒'
-                : '信息';
-        const message = document.createElement('span');
-        message.textContent = issue.path
-            ? `${issue.message}（${issue.path}）`
-            : issue.message;
-        item.append(badge, message);
-        list.appendChild(item);
-    }
-}
-
-async function runHardContractAudit(targetId, {
-    manual = false,
-    queuedTarget = null,
-    skipDelay = false,
-} = {}) {
-    const settings = getSettings();
-    if (!manual && !settings.hardContractAuditEnabled) {
-        return { status: 'disabled' };
-    }
-    const context = getContext();
-    const latest = latestAiMessage(context);
-    const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
-    const captured = queuedTarget || captureTarget(context, resolved);
-    if (!captured) return { status: 'stale', reason: '目标回复不可用' };
-    const token = operationToken(captured);
-    let targetCheck = targetIsCurrent(captured, token);
-    if (!targetCheck.ok) return { status: 'stale', reason: targetCheck.reason };
-    if (!manual && !skipDelay) {
-        await sleep(Math.max(300, Number(settings.delayMs) || 1600));
-        targetCheck = targetIsCurrent(captured, token);
-        if (!targetCheck.ok) return { status: 'stale', reason: targetCheck.reason };
-    }
-    setHardContractStatus('硬合同：正在本地检查正文、骰子与装备结构…', 'busy');
-
-    const character = currentCharacter(context);
-    const schemaScripts = extractSchemaScripts(character);
-    const [contractTexts, ruleTexts] = await Promise.all([
-        collectHardContractTexts(context, character),
-        collectMvuRules(context, character),
-    ]);
-    targetCheck = targetIsCurrent(captured, token);
-    if (!targetCheck.ok) return { status: 'stale', reason: targetCheck.reason };
-
-    let currentData = null;
-    let previousData = null;
-    let Mvu = null;
-    try {
-        Mvu = await getMvu();
-        if (Mvu && typeof Mvu.getMvuData === 'function') {
-            currentData = await mvuDataAt(Mvu, resolved);
-            previousData = await previousMvuData(Mvu, context, resolved);
-        }
-    } catch (error) {
-        console.warn('[MVU Auto Doctor] 硬合同检查读取 MVU 失败，将只检查正文：', error);
-    }
-    targetCheck = targetIsCurrent(captured, token);
-    if (!targetCheck.ok) return { status: 'stale', reason: targetCheck.reason };
-
-    const correctedTarget = null;
-    const deterministicCorrection = {
-        status: 'disabled',
-        reason: '正文只读：硬合同检查仅报告，不创建或切换 swipe',
-    };
-
-    const result = auditHardContracts({
-        replyText: context.chat[resolved]?.mes || '',
-        previousUserText: previousUserMessageText(context, resolved),
-        contractTexts,
-        statData: statDataOf(currentData) || {},
-        previousStatData: statDataOf(previousData),
-        schemaTexts: schemaScripts.map((script) => script.content),
-        ruleTexts,
-    });
-    const severityOrder = { error: 0, warning: 1, info: 2 };
-    result.issues.sort((left, right) => (
-        (severityOrder[left.severity] ?? 3) - (severityOrder[right.severity] ?? 3)
-    ));
-    latestHardContractAudit = {
-        ...result,
-        checkedAt: new Date().toISOString(),
-        targetIndex: resolved,
-        messageId: captured.messageId,
-        swipeId: captured.swipeId,
-    };
-    const errorCount = result.issues.filter((issue) => issue.severity === 'error').length;
-    const warningCount = result.issues.filter((issue) => issue.severity === 'warning').length;
-    if (!result.issues.length) {
-        setHardContractStatus('硬合同：正文与装备结构未发现确定性问题', 'ok');
-    } else {
-        setHardContractStatus(
-            `硬合同：发现 ${errorCount} 个错误、${warningCount} 个提醒（只读报告，不修改正文）`,
-            errorCount ? 'error' : '',
-        );
-        if (manual || errorCount) {
-            toast(
-                errorCount ? 'warning' : 'info',
-                `硬合同检查：${errorCount} 个错误、${warningCount} 个提醒。正文保持原样；变量医生只处理 MVU 补丁。`,
-            );
-        }
-    }
-    return {
-        status: 'audited',
-        ...latestHardContractAudit,
-        correctedTarget,
-        deterministicCorrection,
-    };
-}
-
-function enqueueHardContractAudit(targetId, options = {}) {
-    const automatic = !options.manual;
-    const context = getContext();
-    const latest = latestAiMessage(context);
-    const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
-    const queuedTarget = options.queuedTarget
-        || (automatic ? captureTarget(context, resolved) : null);
-    const key = automatic && queuedTarget
-        ? `${capturedTargetKey(queuedTarget)}:${queuedTarget.epoch}`
-        : '';
-    if (
-        key
-        && (hardContractPendingKeys.has(key) || hardContractCompletedKeys.has(key))
-    ) return Promise.resolve({ status: 'duplicate' });
-    if (key) hardContractPendingKeys.add(key);
-    hardContractChain = hardContractChain
-        .catch(() => {})
-        .then(() => runHardContractAudit(automatic ? resolved : targetId, {
-            ...options,
-            queuedTarget,
-        }))
-        .then((result) => {
-            if (key && ['audited', 'disabled'].includes(result?.status)) {
-                hardContractCompletedKeys.add(key);
-            }
-            return result;
-        })
-        .catch((error) => {
-            console.error('[MVU Auto Doctor] 硬合同检查异常：', error);
-            setHardContractStatus(`硬合同：检查失败：${error.message || error}`, 'error');
-            return { status: 'failed', reason: String(error.message || error) };
-        })
-        .finally(() => {
-            if (key) hardContractPendingKeys.delete(key);
-        });
-    return hardContractChain;
-}
 
 function lifecycleTranscriptEntries(context, targetIndex) {
     return (context?.chat || [])
@@ -6740,23 +6767,22 @@ function openingSyncLabel(mismatch) {
     return `${leaf} ${mismatch.from}→${mismatch.to}`;
 }
 
-async function runOpeningResourceSync(targetId, { manual = false } = {}) {
+async function runOpeningResourceSync(targetId, {
+    manual = false,
+    expectedTarget = null,
+} = {}) {
     const settings = getSettings();
     if (!settings.normalizeOpeningResources) return { status: 'disabled' };
-    if (!disableStoryOracleAutoIfNeeded()) {
-        const result = doubleWriteGuardFailure();
-        setStatus(result.reason, 'error');
-        if (manual) toast('warning', result.reason);
-        return result;
-    }
     const context = getContext();
     const latest = latestAiMessage(context);
     const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
     if (resolved < 0 || assistantMessageOrdinal(context, resolved) > 4) {
         return { status: 'outside-opening' };
     }
-    const captured = captureTarget(context, resolved);
+    const captured = expectedTarget || captureTarget(context, resolved);
     if (!captured) return { status: 'stale', reason: '开局资源同步目标不可用' };
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
     const token = operationToken(captured);
     const Mvu = await getMvu();
     if (
@@ -6799,6 +6825,8 @@ async function runOpeningResourceSync(targetId, { manual = false } = {}) {
         freshContext,
         currentCharacter(freshContext),
     );
+    const refreshedScope = await freshFrozenScopeGuard(captured);
+    if (!refreshedScope.ok) return { status: 'stale', reason: refreshedScope.reason };
     guard = targetIsCurrent(captured, token);
     if (!guard.ok) return { status: 'stale', reason: guard.reason };
     const namespace = readChatNamespace(freshContext);
@@ -6837,7 +6865,10 @@ async function runOpeningResourceSync(targetId, { manual = false } = {}) {
             reason: candidate.reason || '开局资源补丁未通过 MVU/Schema 校验',
         };
     }
-    const migration = await ensureActorSovereigntyMigrationPersisted(freshContext);
+    const migration = await ensureActorSovereigntyMigrationPersisted(
+        freshContext,
+        captured.actorSovereigntyScope,
+    );
     if (!migration.ok) {
         return {
             status: 'failed',
@@ -6884,19 +6915,21 @@ async function runOpeningResourceSync(targetId, { manual = false } = {}) {
     return { ...result, mismatches };
 }
 
-function enqueueOpeningResourceSync(targetId, options = {}) {
+async function enqueueOpeningResourceSync(targetId, options = {}) {
     const automatic = !options.manual;
     const context = getContext();
     const latest = latestAiMessage(context);
     const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
-    const captured = captureTarget(context, resolved);
+    const captured = options.expectedTarget || captureTarget(context, resolved);
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
     const key = capturedTargetKey(captured);
-    if (
-        automatic
-        &&
-        key
-        && (openingSyncPendingKeys.has(key) || openingSyncCompletedKeys.has(key))
-    ) return Promise.resolve({ status: 'duplicate' });
+    if (automatic && key && openingSyncPendingKeys.has(key)) {
+        return Promise.resolve({ status: 'duplicate' });
+    }
+    if (automatic && key && openingSyncCompletedKeys.has(key)) {
+        return Promise.resolve({ status: 'duplicate' });
+    }
     if (automatic && key) openingSyncPendingKeys.add(key);
     return runOpeningResourceSync(resolved, options)
         .then((result) => {
@@ -6928,15 +6961,6 @@ function scheduleOpeningResourceSync(delayMs = 700) {
     }, Math.max(100, Number(delayMs) || 700));
 }
 
-function scheduleLatestHardContractAudit() {
-    const context = getContext();
-    const latest = latestAiMessage(context);
-    if (latest.index < 0) return;
-    const captured = captureTarget(context, latest.index);
-    if (!captured) return;
-    enqueueHardContractAudit(latest.index, { queuedTarget: captured });
-}
-
 async function buildAuditMessages({
     context,
     character,
@@ -6954,7 +6978,6 @@ async function buildAuditMessages({
         .join('\n\n');
     const ruleTexts = await collectMvuRules(context, character);
     const rules = ruleTexts.join('\n\n');
-    const contractTexts = await collectHardContractTexts(context, character);
     const transcript = recentTranscript(
         context,
         targetIndex,
@@ -6970,34 +6993,11 @@ async function buildAuditMessages({
         rules,
         lifecycleTranscriptEntries(context, targetIndex),
     );
-    const hardAudit = auditHardContracts({
-        replyText: message.mes,
-        previousUserText: previousUserMessageText(context, targetIndex),
-        contractTexts,
-        statData: currentStat || {},
-        previousStatData: statDataOf(previousData),
-        schemaTexts: schemaScripts.map((script) => script.content),
-        ruleTexts,
-    });
-    const hardErrors = hardAudit.issues.filter((issue) => issue.severity === 'error');
-    const correctableHardErrors = hardErrors.filter(
-        (issue) => issue.code !== 'content-under-budget',
-    );
-    const hardIssueText = hardAudit.issues.length
-        ? hardAudit.issues.map((issue) => (
-            `[${issue.severity}/${issue.code}]${issue.path ? ` ${issue.path}` : ''}：${issue.message}`
-        )).join('\n')
-        : '本地确定性检查未发现硬合同问题。';
     const auditMode = variableAuditMode(context, targetIndex, previousData);
     const initializationStates = auditMode === 'opening'
         ? await collectInitializationStates(context, character)
         : [];
     const characterContext = characterAuditContext(character, context);
-    const promptContractEvidence = hardContractEvidenceForPrompt(
-        contractTexts,
-        schemaScripts.map((script) => script.content),
-        ruleTexts,
-    );
     const promptAddon = String(settings.variablePromptAddon || '').trim();
 
     const system = [
@@ -7044,9 +7044,7 @@ async function buildAuditMessages({
         '【正文只读边界】',
         '- <content> 标签内部是本回合唯一事实来源；只依据其中已经发生的事实核对变量。',
         '- 不得重写、截断、续写、补写、纠正或重新生成正文与选项，不得创建 swipe。',
-        '- 本地硬合同问题只作旁路报告，不进入变量补丁输出协议，也不得阻塞本次变量审计。',
         '- 即使正文与规则冲突，也只能修正能够由 <content>、当前状态、Schema 与规则共同证明的 MVU 变量；正文原样保留。',
-        '- 禁止输出 HardContractCorrection、CorrectedContent、CorrectedOptions 或任何其他正文修正结构。',
         '',
         promptAddon
             ? `【用户自定义模型适配/破限提示】\n${promptAddon}\n这段只调整模型服从与表达方式，不改变上方审计职责、证据标准、玩家控制权或下方机器输出协议。`
@@ -7072,15 +7070,6 @@ async function buildAuditMessages({
         '',
         '=== 当前角色与场景（只读设定）===',
         cropText(characterContext || '角色卡未提供额外角色/场景文本。', 8000, '角色设定'),
-        '',
-        '=== 当前启用的正文/骰子/物品硬合同证据摘录 ===',
-        cropText(promptContractEvidence || '未找到额外硬合同。', 12000, '硬合同证据'),
-        '',
-        '=== 本地确定性硬合同检查 ===',
-        cropText(hardIssueText, 16000, '硬合同问题'),
-        hardErrors.length
-            ? '这些问题只作只读报告。不得修改正文；继续独立核对 MVU 变量。'
-            : '没有本地error；继续独立核对 MVU 变量。',
         '',
         '=== 当前 stat_data（原更新应用之后）===',
         stateForPrompt(currentStat),
@@ -7134,7 +7123,7 @@ async function buildAuditMessages({
                     : '',
                 '请针对失败原因重新分析。变量区块必须最先完整闭合；若上次 JSON 或路径错误，重新生成合法的最小补丁，不要复制坏格式。',
                 '若失败原因是 insert 目标已存在：先查看上方当前 stat_data；当前路径已有值且确需改变时使用 replace，已有值已经正确时删除该操作，绝不能再次对同一路径使用 insert。',
-                '所有正文问题始终只报告；重试也不得改写正文。',
+                '本任务只生成 MVU 变量补丁；重试不得改写正文。',
             ].filter(Boolean).join('\n')
             : auditMode === 'opening'
                 ? '这是开局/人物创建审计。请审计全部已确认创建选择、资源、装备、物品、奖励、派生值的错更、漏更和无效更新；若当前状态已经准确反映正文，输出空数组。'
@@ -7147,9 +7136,6 @@ async function buildAuditMessages({
             { role: 'user', content: user },
         ],
         originalBlock,
-        hardAudit,
-        correctableHardErrors,
-        contractTexts,
         schemaTexts: schemaScripts.map((script) => script.content),
         ruleTexts,
         previousUserText: previousUserMessageText(context, targetIndex),
@@ -7740,7 +7726,6 @@ function assertUsableModelOutput(output, options = {}) {
 
 async function callModel(messages, options = {}) {
     const settings = getSettings();
-    disableStoryOracleAutoIfNeeded();
     const task = String(options.task || '模型任务');
     const channel = options.channel === 'fast' ? 'fast' : 'strict';
     const selectedConnection = selectChannelConnectionProfile(
@@ -7749,21 +7734,15 @@ async function callModel(messages, options = {}) {
         options.routeSlotIndex,
     );
     const { profile, slotIndex } = selectedConnection;
-    const runUntilCancelled = options.runUntilCancelled === true
-        || (
-            options.runUntilCancelled !== false
-            && settings.sovereigntyRunUntilCancelled !== false
-        );
-    const timeoutMs = runUntilCancelled
-        ? 0
-        : Math.min(
-            MAX_MODEL_TIMEOUT_MS,
-            Math.max(
-                MIN_MODEL_TIMEOUT_MS,
-                Number(options.timeoutMs ?? settings.modelTimeoutMs) || 120000,
-            ),
-        );
-    const deadlineAt = !runUntilCancelled && Number.isFinite(Number(options.deadlineAt))
+    const runUntilCancelled = false;
+    const timeoutMs = Math.min(
+        MAX_MODEL_TIMEOUT_MS,
+        Math.max(
+            MIN_MODEL_TIMEOUT_MS,
+            Number(options.timeoutMs ?? settings.modelTimeoutMs) || 120000,
+        ),
+    );
+    const deadlineAt = Number.isFinite(Number(options.deadlineAt))
         ? Number(options.deadlineAt)
         : 0;
     const attemptedCount = Array.isArray(options.attemptedRouteSlots)
@@ -7793,7 +7772,7 @@ async function callModel(messages, options = {}) {
         : 0;
     const remainingOverallMs = deadlineAt ? deadlineAt - Date.now() : timeoutMs;
     if (deadlineAt && remainingOverallMs <= 250) {
-        const error = new Error('模型任务已到达总时限，已转入后台恢复队列');
+        const error = new Error('模型任务已到达本次执行时限，可由用户在对应模块手动重试');
         error.code = 'MODEL_TOTAL_DEADLINE';
         throw error;
     }
@@ -8266,7 +8245,7 @@ function buildSocialAuditRepairMessages(output, changes) {
     ];
 }
 
-async function runSocialAuditTarget(captured, { manual = false } = {}) {
+async function runSocialAuditTargetInner(captured, { manual = false } = {}) {
     const settings = getSettings();
     if (settings.socialAuditMode === 'off') {
         setSocialStatus('人物关系：二审已关闭；正文动机合同仍按单独开关运行', '');
@@ -8275,6 +8254,8 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
     const context = getContext();
     const target = captured || captureTarget(context, latestAiMessage(context).index);
     if (!target) return { status: 'stale', reason: '人物关系二审目标不可用' };
+    const scopeGuard = await freshFrozenScopeGuard(target);
+    if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
     const token = operationToken(target);
     let guard = targetIsCurrent(target, token);
     if (!guard.ok) return { status: 'stale', reason: guard.reason };
@@ -8320,6 +8301,8 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
         changes: relationship.changes,
         reasons: routed.reasons,
     });
+    let freshScope = await freshFrozenScopeGuard(target);
+    if (!freshScope.ok) return { status: 'stale', reason: freshScope.reason };
     setSocialStatus('人物关系：正在进行语义二审', 'busy');
     try {
         let attemptUsage = null;
@@ -8357,6 +8340,8 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
             structureRepairAttempted = true;
             let repairUsage = null;
             try {
+                freshScope = await freshFrozenScopeGuard(target);
+                if (!freshScope.ok) return { status: 'stale', reason: freshScope.reason };
                 const repairedOutput = await callModel(
                     buildSocialAuditRepairMessages(output, relationship.changes),
                     {
@@ -8528,6 +8513,8 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
             : '',
     };
     if (rollbackOps.length) {
+        freshScope = await freshFrozenScopeGuard(target);
+        if (!freshScope.ok) return { status: 'stale', reason: freshScope.reason };
         const block = renderSocialPatchBlock(rollbackOps, parsed.summary);
         const prepared = preparePatch(block, currentData);
         if (prepared.error) {
@@ -8564,6 +8551,8 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
         revertedPaths: rollbackOps.map((op) => op.path),
         reason: correction.reason || '',
     };
+    freshScope = await freshFrozenScopeGuard(target);
+    if (!freshScope.ok) return { status: 'stale', reason: freshScope.reason };
     await persistSocialAudit(record, target.chatId);
     if (correction.status === 'failed') {
         setSocialStatus(`人物关系：二审或安全回退失败：${correction.reason}`, 'error');
@@ -8595,9 +8584,32 @@ async function runSocialAuditTarget(captured, { manual = false } = {}) {
         audit: record,
         correction,
         correctedTarget: correction.status === 'applied'
-            ? captureTarget(getContext(), target.index)
+            ? captureTarget(getContext(), target.index, {
+                frozenScope: target.actorSovereigntyScope,
+                unscoped: !target.scopeDigest,
+            })
             : target,
     };
+}
+
+async function runSocialAuditTarget(captured, options = {}) {
+    try {
+        const result = await runSocialAuditTargetInner(captured, options);
+        return settleEndedBusyStatus(
+            result,
+            latestSocialKind,
+            setSocialStatus,
+            '人物关系',
+        );
+    } catch (error) {
+        settleEndedBusyStatus(
+            { status: 'failed', reason: String(error?.message || error) },
+            latestSocialKind,
+            setSocialStatus,
+            '人物关系',
+        );
+        throw error;
+    }
 }
 
 async function recognizeDeterministicMvuSideEffects(Mvu, oldData, parsed, prepared, checked) {
@@ -8627,11 +8639,6 @@ async function recognizeDeterministicMvuSideEffects(Mvu, oldData, parsed, prepar
 async function parseCandidate(Mvu, oldData, output, {
     automaticallyComputedPaths = [],
 } = {}) {
-    const correction = null;
-    const correctionWarning = /<(?:HardContractCorrection|CorrectedContent|CorrectedOptions)\b/iu
-        .test(String(output || ''))
-        ? '模型越权输出正文修正结构，已完全忽略；变量补丁仍独立校验'
-        : '';
     const extracted = extractUpdateBlockCandidate(output);
     if (!extracted.block) {
         return {
@@ -8640,7 +8647,6 @@ async function parseCandidate(Mvu, oldData, output, {
             failureKind: extracted.incomplete ? 'incomplete-output' : 'missing-output',
             reason: extracted.reason || '模型没有返回可解析的 <UpdateVariable> 区块',
             output,
-            correctionWarning,
         };
     }
     const stripped = stripAutomaticallyComputedOps(
@@ -8657,7 +8663,6 @@ async function parseCandidate(Mvu, oldData, output, {
             block: extracted.block,
             recoveredOutput: extracted.recovered || stripped.repaired === true,
             recoveryReason: stripped.repairReason || '',
-            correctionWarning,
         };
     }
     const containerNormalized = stripRedundantExistingContainerOps(stripped.block, oldData);
@@ -8676,7 +8681,6 @@ async function parseCandidate(Mvu, oldData, output, {
                 stripped.repairReason,
                 containerNormalized.repairReason,
             ].filter(Boolean).join('；'),
-            correctionWarning,
         };
     }
     const objectOpsNormalized = normalizeObjectPropertyOps(containerNormalized.block, oldData);
@@ -8697,7 +8701,6 @@ async function parseCandidate(Mvu, oldData, output, {
                 containerNormalized.repairReason,
                 objectOpsNormalized.repairReason,
             ].filter(Boolean).join('；'),
-            correctionWarning,
         };
     }
     const locallyRecovered = extracted.recovered
@@ -8721,7 +8724,6 @@ async function parseCandidate(Mvu, oldData, output, {
             block: extracted.block,
             recoveredOutput: locallyRecovered,
             recoveryReason: localRecoveryReason,
-            correctionWarning,
         };
     }
     prepared.automaticallyComputedPaths = [...automaticallyComputedPaths];
@@ -8734,11 +8736,9 @@ async function parseCandidate(Mvu, oldData, output, {
             retryable: false,
             block: prepared.block,
             output,
-            correction,
             ignoredAutomaticallyComputedPaths: stripped.ignoredPaths,
             recoveredOutput: locallyRecovered,
             recoveryReason: localRecoveryReason,
-            correctionWarning,
         };
     }
 
@@ -8755,7 +8755,6 @@ async function parseCandidate(Mvu, oldData, output, {
             block: prepared.block,
             recoveredOutput: locallyRecovered,
             recoveryReason: localRecoveryReason,
-            correctionWarning,
         };
     }
     let checked = validatePatchResult(oldData, parsed, prepared);
@@ -8790,7 +8789,6 @@ async function parseCandidate(Mvu, oldData, output, {
             block: prepared.block,
             recoveredOutput: locallyRecovered,
             recoveryReason: localRecoveryReason,
-            correctionWarning,
         };
     }
     return {
@@ -8800,13 +8798,11 @@ async function parseCandidate(Mvu, oldData, output, {
         block: prepared.block,
         prepared,
         newData: parsed,
-        correction,
         ignoredAutomaticallyComputedPaths: stripped.ignoredPaths,
         ignoredRedundantContainerPaths: containerNormalized.ignoredPaths,
         parserSideEffectPaths,
         recoveredOutput: locallyRecovered,
         recoveryReason: localRecoveryReason,
-        correctionWarning,
     };
 }
 
@@ -8878,35 +8874,6 @@ function applyBlockToCurrentSwipe(message, block, includeBlock, removeBlock = ''
     return message.mes !== before;
 }
 
-async function sanitizePlanningLeakOnReceivedMessage(context, index) {
-    const message = context?.chat?.[index];
-    if (!message || typeof message.mes !== 'string') return false;
-    const repaired = stripLeakedPlanningPrefix(message.mes);
-    if (!repaired.changed) return false;
-    message.mes = repaired.text;
-    if (
-        Array.isArray(message.swipes)
-        && typeof message.swipes[message.swipe_id] === 'string'
-    ) message.swipes[message.swipe_id] = repaired.text;
-    if (message.extra && typeof message.extra === 'object') delete message.extra.display_text;
-    try {
-        await context.saveChat?.();
-    } catch (error) {
-        console.warn('[MVU Auto Doctor] 保存规划泄漏清理结果失败：', error);
-    }
-    try {
-        context.updateMessageBlock?.(index, message);
-    } catch (error) {
-        console.warn('[MVU Auto Doctor] 重绘规划泄漏清理结果失败：', error);
-    }
-    recordOperation(
-        '回复协议',
-        '已从当前回复正文标签之前移除泄漏的模型规划文本；正文、选项和变量块保持原样',
-        'warning',
-    );
-    return true;
-}
-
 async function refreshMessage(
     index,
     block = '',
@@ -8963,15 +8930,13 @@ async function refreshMessage(
 }
 
 async function persistRepairRecord(record, expectedChatId, { durable = false } = {}) {
+    void durable;
     let namespace = readChatNamespace();
     namespace = appendRepairJournal(namespace, record, {
         maxEntries: 5,
         maxSnapshotChars: 180000,
     });
-    const saved = await writeChatNamespace(namespace, expectedChatId, {
-        fields: ['repairJournal'],
-        durable,
-    });
+    const saved = await writeRepairJournal(namespace.repairJournal, expectedChatId);
     if (saved) lastUndo = latestUndoRecord(namespace);
     return saved;
 }
@@ -9022,9 +8987,7 @@ async function discardRepairRecord(recordId, expectedChatId) {
     namespace.repairJournal = (Array.isArray(namespace.repairJournal)
         ? namespace.repairJournal
         : []).filter((record) => record?.id !== recordId);
-    const saved = await writeChatNamespace(namespace, expectedChatId, {
-        fields: ['repairJournal'],
-    });
+    const saved = await writeRepairJournal(namespace.repairJournal, expectedChatId);
     if (saved) lastUndo = latestUndoRecord(namespace);
     return saved;
 }
@@ -9107,10 +9070,6 @@ async function commitCandidateUnlocked(Mvu, candidate, captured, token, recordMe
     if (!current.ok) {
         await discardRepairRecord(record.id, captured.chatId);
         return { status: 'stale', reason: `${current.reason}，未写入` };
-    }
-    if (!disableStoryOracleAutoIfNeeded()) {
-        await discardRepairRecord(record.id, captured.chatId);
-        return doubleWriteGuardFailure();
     }
     try {
         await Mvu.replaceMvuData(reparsed, options);
@@ -9247,12 +9206,6 @@ async function runTarget(targetId, {
 } = {}) {
     const settings = getSettings();
     if (!manual && !settings.enabled) return { status: 'disabled' };
-    if (!disableStoryOracleAutoIfNeeded()) {
-        const result = doubleWriteGuardFailure();
-        setStatus(result.reason, 'error');
-        if (manual) toast('warning', result.reason);
-        return result;
-    }
 
     const initialContext = getContext();
     const initialLatest = latestAiMessage(initialContext);
@@ -9274,19 +9227,6 @@ async function runTarget(targetId, {
     updateTaskProgress(progressId, '读取 MVU 与目标楼层');
 
     const Mvu = await getMvu();
-    updateTaskProgress(progressId, '核对聊天、角色卡与世界书作用域');
-    const migration = await ensureActorSovereigntyMigrationPersisted(initialContext);
-    if (!migration.ok || !migration.current) {
-        const result = {
-            status: 'failed',
-            reason: migration.reason || 'variable.scope_migration_failed',
-            persistenceCommitted: false,
-            persistenceFailureStage: 'scope_migration',
-            zeroWrite: true,
-        };
-        setStatus('变量检查：作用域迁移尚未完成，未读取兼容视图、未写入 MVU。', 'error');
-        return result;
-    }
     let targetCheck = targetIsCurrent(captured, token);
     if (!targetCheck.ok) return { status: 'stale', reason: targetCheck.reason };
     if (
@@ -9482,18 +9422,12 @@ async function runTarget(targetId, {
         );
     }
 
-    const correctionPlan = {
-        status: 'disabled',
-        reason: '正文只读；变量医生不创建正文修正版或 swipe',
-    };
-
     if (candidate?.status === 'nochange') {
         await ensureExistingFrontend(resolved, originalBlock, captured, token);
         setStatus('已检查：本回合变量无需修正', 'ok');
         if (manual || settings.notifyNoChange) toast('info', '已检查，本回合变量无需修正。');
         return {
             ...candidate,
-            correction: correctionPlan,
             correctedTarget: null,
             finalTarget: captureTarget(getContext(), resolved),
         };
@@ -9531,7 +9465,6 @@ async function runTarget(targetId, {
             recoveredOutput: candidate.recoveredOutput,
             recoveryReason: candidate.recoveryReason,
             parserSideEffectPaths: candidate.parserSideEffectPaths || [],
-            correctionWarning: candidate.correctionWarning,
         };
     } catch (error) {
         result = {
@@ -9546,7 +9479,6 @@ async function runTarget(targetId, {
     if (result.status === 'applied') {
         result = {
             ...result,
-            correction: correctionPlan,
             correctedTarget: null,
         };
         if (result.frontendSynced === false) {
@@ -9567,7 +9499,10 @@ async function runTarget(targetId, {
     if (['applied', 'nochange'].includes(result.status)) {
         result = {
             ...result,
-            finalTarget: captureTarget(getContext(), resolved),
+            finalTarget: captureTarget(getContext(), resolved, {
+                frozenScope: captured.actorSovereigntyScope,
+                unscoped: !captured.scopeDigest,
+            }),
         };
     }
     return result;
@@ -9599,7 +9534,9 @@ function capturedTargetKey(captured) {
         captured.swipeId,
         captured.generationId,
         captured.branchId,
+        captured.scopeDigest,
         captured.contentFingerprint,
+        captured.scopeDigest,
     ].join(':');
 }
 
@@ -9611,519 +9548,27 @@ function capturedBranchKey(captured) {
         captured.messageId,
         captured.swipeId,
         captured.branchId,
+        captured.scopeDigest,
     ].join(':');
 }
 
-function targetSettlementKey(chatId, targetIndex) {
-    return `${String(chatId || '')}:${Number(targetIndex)}`;
-}
-
-function targetSettlementIdentityKey(captured) {
-    return [
-        captured?.chatId || '',
-        captured?.index ?? captured?.targetIndex ?? -1,
-        captured?.messageId || '',
-        captured?.swipeId ?? captured?.initialSwipeId ?? -1,
-        captured?.generationId || '',
-        captured?.branchId || '',
-        captured?.contentFingerprint || captured?.initialContentFingerprint || '',
-    ].join(':');
-}
-
-function persistedTerminalBarrierForCaptured(captured) {
-    return phase6BarrierHistory(readChatNamespace())
-        .filter((entry) => (
-            ['settled', 'failed', 'stale'].includes(entry?.state)
-            && entry.chatId === captured?.chatId
-            && Number(entry.targetIndex) === Number(captured?.index)
-            && String(entry.messageId || '') === String(captured?.messageId || '')
-            && Number(entry.finalSwipeId ?? entry.initialSwipeId)
-                === Number(captured?.swipeId)
-            && String(entry.generationId || '') === String(captured?.generationId || '')
-            && String(entry.branchId || '') === String(captured?.branchId || '')
-            && String(entry.finalContentFingerprint || entry.initialContentFingerprint || '')
-                === String(captured?.contentFingerprint || '')
-        ))
-        .sort((left, right) => (
-            Number(right.terminalAt ?? right.updatedAt ?? 0)
-            - Number(left.terminalAt ?? left.updatedAt ?? 0)
-        ))[0] || null;
-}
-
-function safeSettlementResult(record, status, extra = {}) {
-    return {
-        status,
-        chatId: record?.chatId || '',
-        targetIndex: Number(record?.targetIndex),
-        serial: Number(record?.serial) || 0,
-        generationId: record?.generationId || '',
-        branchId: record?.branchId || '',
-        contentFingerprint: record?.initialContentFingerprint || '',
-        contentChanged: false,
-        ...extra,
-    };
-}
-
-async function persistTargetSettlementBarrier(record, state, extra = {}) {
-    const adapter = createChatRuntimeAdapter(record.chatId);
-    const storageKey = `legacy-narrative-barrier:${record.identityKey}`;
-    const value = {
-        protocolVersion: '2.0',
-        id: `barrier:${record.serial}`,
-        chatId: record.chatId,
-        targetIndex: record.targetIndex,
-        messageId: record.messageId,
-        initialSwipeId: record.initialSwipeId,
-        initialFingerprint: record.initialFingerprint,
-        initialContentFingerprint: record.initialContentFingerprint,
-        generationId: record.generationId,
-        branchId: record.branchId,
-        targetDigest: fingerprint(record.identityKey),
-        state,
-        registeredAt: record.registeredAt,
-        updatedAt: Date.now(),
-        ...deepClone(extra),
-    };
-    const persisted = await adapter.merge(storageKey, value);
-    if (persisted?.value) return persisted.value;
-    if (persisted?.failureCode === 'chat_context_changed') {
-        return {
-            ...value,
-            state: 'stale',
-            persistenceDeferred: true,
-            persistenceFailureCode: persisted.failureCode,
-        };
-    }
-    throw new Error(
-        `正文稳定屏障持久化失败（${persisted?.failureCode || 'unknown'}）。`,
-    );
-}
-
-async function transitionTargetSettlement(record, state, extra = {}) {
-    const transition = Promise.resolve(record.persistChain)
-        .catch(() => undefined)
-        .then(async () => {
-            record.state = state;
-            const value = await persistTargetSettlementBarrier(record, state, extra);
-            record.persisted = value;
-            return value;
-        });
-    // State-committing, repair, and terminal branches can resolve in adjacent
-    // microtasks. Keep one per-target persistence lane so they do not spend all
-    // CAS retries racing each other over a 60 MB host save.
-    record.persistChain = transition.then(() => undefined, () => undefined);
-    return transition;
-}
-
-async function createTargetSettlementRecord(captured) {
-    if (!captured) return null;
-    const key = targetSettlementKey(captured.chatId, captured.index);
-    const identityKey = targetSettlementIdentityKey(captured);
-    const record = {
-        key,
-        identityKey,
-        serial: ++targetSettlementSerial,
-        chatId: captured.chatId,
-        targetIndex: captured.index,
-        messageId: captured.messageId,
-        initialSwipeId: captured.swipeId,
-        initialFingerprint: captured.fingerprint,
-        initialContentFingerprint: captured.contentFingerprint,
-        generationId: captured.generationId,
-        branchId: captured.branchId,
-        registeredAt: Date.now(),
-        settledAt: 0,
-        state: 'captured',
-        pending: true,
-        result: null,
-        persistChain: Promise.resolve(),
-        promise: null,
-        ready: null,
-    };
-    const persisted = persistedTerminalBarrierForCaptured(captured);
-    if (persisted) {
-        record.persisted = deepClone(persisted);
-        record.state = persisted.state;
-        record.pending = false;
-        record.settledAt = Number(persisted.settledAt) || Date.now();
-        record.recoveredTerminal = true;
-        record.result = safeSettlementResult(record, persisted.state, {
-            messageId: persisted.messageId || record.messageId,
-            swipeId: persisted.finalSwipeId ?? record.initialSwipeId,
-            fingerprint: persisted.finalFingerprint || record.initialFingerprint,
-            contentFingerprint: persisted.finalContentFingerprint
-                || record.initialContentFingerprint,
-            generationId: persisted.generationId || record.generationId,
-            branchId: persisted.branchId || record.branchId,
-            contentChanged: Boolean(
-                persisted.finalContentFingerprint
-                && persisted.finalContentFingerprint !== record.initialContentFingerprint
-            ),
-            workflowStatus: 'recovered-terminal',
-            reason: persisted.terminalReason || '',
-        });
-        record.ready = Promise.resolve(record.persisted);
-        record.promise = Promise.resolve(record.result);
-        targetSettlementRecords.set(key, record);
-        return record;
-    }
-    record.ready = transitionTargetSettlement(record, 'captured');
-    targetSettlementRecords.set(key, record);
-    return record;
-}
-
-function existingTargetSettlementRecord(captured) {
-    if (!captured) return null;
-    const key = targetSettlementKey(captured.chatId, captured.index);
-    const identityKey = targetSettlementIdentityKey(captured);
-    const record = targetSettlementRecords.get(key);
-    return record?.identityKey === identityKey ? record : null;
-}
-
-async function waitExistingTargetSettlement(record, timeoutMs = 2000) {
-    if (!record) return null;
-    if (!record.pending && record.result) return record.result;
-    const startedAt = Date.now();
-    while (!record.promise && Date.now() - startedAt < timeoutMs) {
-        await sleep(10);
-    }
-    if (record.promise) return record.promise;
-    return safeSettlementResult(record, 'busy', {
-        reason: '同一目标的医生流程正在登记，已合并重复宿主事件',
-    });
-}
-
-function attachTargetSettlement(record, settlementPromise) {
-    if (!record) return null;
-    record.promise = Promise.resolve(record.ready)
-        .then(() => settlementPromise)
-        .then((workflowResult) => {
-            const context = getContext();
-            const current = captureTarget(context, record.targetIndex);
-            const workflowTarget = workflowResult?.finalTarget
-                || workflowResult?.correctedTarget
-                || null;
-            const expected = workflowTarget || {
-                chatId: record.chatId,
-                index: record.targetIndex,
-                messageId: record.messageId,
-                swipeId: record.initialSwipeId,
-                fingerprint: record.initialFingerprint,
-                contentFingerprint: record.initialContentFingerprint,
-                generationId: record.generationId,
-                branchId: record.branchId,
-            };
-            if (
-                context?.chatId !== record.chatId
-                || !current
-                || current.chatId !== expected.chatId
-                || current.index !== expected.index
-                || current.messageId !== expected.messageId
-                || current.swipeId !== expected.swipeId
-                || current.contentFingerprint !== (
-                    expected.contentFingerprint || record.initialContentFingerprint
-                )
-                || current.generationId !== expected.generationId
-                || current.branchId !== expected.branchId
-            ) {
-                return safeSettlementResult(record, 'stale', {
-                    messageId: record.messageId,
-                    swipeId: record.initialSwipeId,
-                    fingerprint: record.initialFingerprint,
-                    reason: '聊天、楼层或回复分支已经变化',
-                });
-            }
-            if (workflowResult?.status === 'stale') {
-                return safeSettlementResult(record, 'stale', {
-                    messageId: current.messageId,
-                    swipeId: current.swipeId,
-                    fingerprint: current.fingerprint,
-                    generationId: current.generationId,
-                    branchId: current.branchId,
-                    workflowStatus: workflowResult.status,
-                    reason: workflowResult.reason || '医生流程目标已经失效',
-                });
-            }
-            if (
-                ['failed', 'blocked', 'busy', 'timeout'].includes(workflowResult?.status)
-            ) {
-                return safeSettlementResult(record, 'failed', {
-                    messageId: current.messageId,
-                    swipeId: current.swipeId,
-                    fingerprint: current.fingerprint,
-                    generationId: current.generationId,
-                    branchId: current.branchId,
-                    workflowStatus: workflowResult.status,
-                    reason: workflowResult.reason || '医生流程未能安全完成',
-                });
-            }
-            return safeSettlementResult(record, 'settled', {
-                messageId: current.messageId,
-                swipeId: current.swipeId,
-                fingerprint: current.fingerprint,
-                generationId: current.generationId,
-                branchId: current.branchId,
-                contentChanged: (
-                    current.contentFingerprint !== record.initialContentFingerprint
-                ),
-                contentFingerprint: current.contentFingerprint,
-                workflowStatus: workflowResult?.status || 'completed',
-                reason: workflowResult?.reason || '',
-            });
-        })
-        .catch((error) => safeSettlementResult(record, 'failed', {
-            messageId: captureTarget(getContext(), record.targetIndex)?.messageId || record.messageId,
-            swipeId: captureTarget(getContext(), record.targetIndex)?.swipeId ?? record.initialSwipeId,
-            fingerprint: captureTarget(getContext(), record.targetIndex)?.fingerprint || '',
-            workflowStatus: 'failed',
-            reason: String(error?.message || error || '医生流程异常'),
-        }))
-        .then((result) => {
-            record.pending = false;
-            record.settledAt = Date.now();
-            record.result = result;
-            return transitionTargetSettlement(record, result.status, {
-                settledAt: record.settledAt,
-                messageId: result.messageId || record.messageId,
-                finalSwipeId: result.swipeId,
-                finalFingerprint: result.fingerprint || '',
-                finalContentFingerprint: result.contentFingerprint
-                    || record.initialContentFingerprint,
-                generationId: result.generationId || record.generationId,
-                branchId: result.branchId || record.branchId,
-                workflowStatus: result.workflowStatus || '',
-                terminalReason: result.reason || '',
-            }).then(async () => {
-                const protocol = currentDownstreamBarrierProtocol();
-                if (!protocol) return result;
-                try {
-                    const receipt = await protocol.issue({
-                        ...record.persisted,
-                        id: record.persisted?.id || `barrier:${record.serial}`,
-                        state: result.status,
-                    });
-                    return {
-                        ...result,
-                        receipt: receipt
-                            ? {
-                                id: receipt.id,
-                                barrierState: receipt.barrierState,
-                                targetDigest: receipt.targetDigest,
-                                permittedAction: receipt.permittedAction,
-                                writeAllowed: receipt.writeAllowed,
-                            }
-                            : null,
-                    };
-                } catch (error) {
-                    console.warn('[MVU Auto Doctor] 下游终态收据持久化失败：', error);
-                    return {
-                        ...result,
-                        receipt: null,
-                        receiptErrorCode: 'barrier.receipt_persist_failed',
-                    };
-                }
-            });
-        })
-        .then((result) => {
-            try {
-                window.dispatchEvent(new CustomEvent('mvu-auto-doctor-target-terminal', {
-                    detail: {
-                        status: result.status,
-                        chatId: result.chatId,
-                        targetIndex: result.targetIndex,
-                        serial: result.serial,
-                        messageId: result.messageId,
-                        swipeId: result.swipeId,
-                        fingerprint: result.fingerprint,
-                        contentFingerprint: result.contentFingerprint,
-                        generationId: result.generationId,
-                        branchId: result.branchId,
-                        contentChanged: result.contentChanged === true,
-                        workflowStatus: result.workflowStatus,
-                        receipt: result.receipt,
-                    },
-                }));
-                if (result.status === 'settled') {
-                    window.dispatchEvent(new CustomEvent('mvu-auto-doctor-target-settled', {
-                        detail: {
-                            status: result.status,
-                            chatId: result.chatId,
-                            targetIndex: result.targetIndex,
-                            serial: result.serial,
-                            messageId: result.messageId,
-                            swipeId: result.swipeId,
-                            fingerprint: result.fingerprint,
-                            contentFingerprint: result.contentFingerprint,
-                            generationId: result.generationId,
-                            branchId: result.branchId,
-                            contentChanged: result.contentChanged === true,
-                            workflowStatus: result.workflowStatus,
-                            receipt: result.receipt,
-                        },
-                    }));
-                }
-            } catch {}
-            return result;
-        });
-    return record;
-}
-
-async function registerTargetSettlement(captured, settlementPromise) {
-    return attachTargetSettlement(
-        await createTargetSettlementRecord(captured),
-        settlementPromise,
-    );
-}
-
-async function waitForTargetSettled(
-    targetIndex,
-    {
-        timeoutMs = 15000,
-        registrationGraceMs = 300,
-        waitForVariable = false,
-    } = {},
-) {
-    const startedAt = Date.now();
+async function waitForTargetSettled(targetIndex, _options = {}) {
     const context = getContext();
-    const resolved = Number(targetIndex);
-    if (!context?.chatId || !Number.isInteger(resolved) || resolved < 0) {
-        return {
-            status: 'unmanaged',
-            reason: '目标楼层不可用',
-            targetIndex: resolved,
-        };
-    }
-    const key = targetSettlementKey(context.chatId, resolved);
-    let record = targetSettlementRecords.get(key);
-    const grace = waitForVariable
-        ? Math.max(0, Number(registrationGraceMs) || 0)
-        : 0;
-    while (!record && Date.now() - startedAt < grace) {
-        await sleep(40);
-        record = targetSettlementRecords.get(key);
-    }
-    if (!record) {
-        const captured = captureTarget(context, resolved);
-        if (captured) {
-            const persisted = persistedTerminalBarrierForCaptured(captured);
-            if (persisted) {
-                return {
-                    status: persisted.state,
-                    chatId: captured.chatId,
-                    targetIndex: captured.index,
-                    serial: Number(String(persisted.id || '').split(':').at(-1)) || 0,
-                    messageId: persisted.messageId || captured.messageId,
-                    swipeId: persisted.finalSwipeId ?? captured.swipeId,
-                    fingerprint: persisted.finalFingerprint || captured.fingerprint,
-                    generationId: persisted.generationId || captured.generationId,
-                    branchId: persisted.branchId || captured.branchId,
-                    workflowStatus: 'recovered-terminal',
-                    reason: persisted.terminalReason || '',
-                };
-            }
-        }
-        return {
-            status: 'unmanaged',
-            chatId: context.chatId,
-            targetIndex: resolved,
-            reason: '该楼层没有医生自动处理任务',
-        };
-    }
-
-    if (!waitForVariable && record.pending) {
-        return safeSettlementResult(record, 'unmanaged', {
-            workflowStatus: 'independent-reader',
-            reason: '正文为只读事实源；数据库等独立读取器不等待变量医生结算',
-        });
-    }
-
-    const cap = Math.min(
-        15000,
-        Math.max(1000, Number(timeoutMs) || 15000),
-    );
-    while (record) {
-        const remaining = cap - (Date.now() - startedAt);
-        if (remaining <= 0) {
-            return safeSettlementResult(record, 'timeout', {
-                reason: `等待变量医生结算超过 ${cap}ms`,
-            });
-        }
-        const timeout = new Promise((resolve) => {
-            setTimeout(() => resolve(safeSettlementResult(record, 'timeout', {
-                reason: `等待变量医生结算超过 ${cap}ms`,
-            })), remaining);
-        });
-        const result = await Promise.race([record.promise, timeout]);
-        const latestRecord = targetSettlementRecords.get(key);
-        if (latestRecord && latestRecord.serial !== record.serial) {
-            record = latestRecord;
-            continue;
-        }
-        return result;
-    }
     return {
         status: 'unmanaged',
-        chatId: context.chatId,
-        targetIndex: resolved,
-        reason: '医生任务没有登记',
+        reason: 'independent_modules_no_global_settlement',
+        chatId: String(context?.chatId || ''),
+        targetIndex: Number.isInteger(Number(targetIndex)) ? Number(targetIndex) : -1,
     };
 }
 
-async function runAfterTargetSettled(targetIndex, reader, options = {}) {
-    if (typeof reader !== 'function') {
-        return {
-            status: 'unresolved',
-            reason: '下游读取器必须是显式函数。',
-        };
-    }
-    const barrier = await waitForTargetSettled(targetIndex, {
-        ...options,
-        waitForVariable: true,
-    });
-    if (barrier.status !== 'settled') {
-        return {
-            ...barrier,
-            status: ['stale', 'failed'].includes(barrier.status)
-                ? 'abandoned'
-                : barrier.status,
-        };
-    }
+async function runAfterTargetSettled(targetIndex, _reader, _options = {}) {
     const context = getContext();
-    const current = captureTarget(context, barrier.targetIndex);
-    if (
-        !current
-        || current.messageId !== barrier.messageId
-        || current.swipeId !== barrier.swipeId
-        || current.generationId !== barrier.generationId
-        || current.branchId !== barrier.branchId
-        || (
-            barrier.contentFingerprint
-                ? current.contentFingerprint !== barrier.contentFingerprint
-                : current.fingerprint !== barrier.fingerprint
-        )
-    ) {
-        return {
-            ...barrier,
-            status: 'abandoned',
-            reason: 'settled 后目标又发生变化；下游不得回退到旧正文。',
-        };
-    }
     return {
-        ...barrier,
-        status: 'completed',
-        value: await reader({
-            chatId: barrier.chatId,
-            targetIndex: barrier.targetIndex,
-            messageId: barrier.messageId,
-            swipeId: barrier.swipeId,
-            generationId: barrier.generationId,
-            branchId: barrier.branchId,
-            fingerprint: barrier.fingerprint,
-            contentFingerprint: barrier.contentFingerprint,
-            narrative: acceptedContentText(
-                context.chat[barrier.targetIndex]?.mes || '',
-            ),
-        }),
+        status: 'unmanaged',
+        reason: 'independent_modules_no_global_settlement',
+        chatId: String(context?.chatId || ''),
+        targetIndex: Number.isInteger(Number(targetIndex)) ? Number(targetIndex) : -1,
     };
 }
 
@@ -10138,14 +9583,16 @@ function enqueue(targetId, options = {}) {
     const queuedTarget = options.queuedTarget
         || (automatic ? captureTarget(context, resolved) : null);
     const dedupeKey = automatic ? capturedTargetKey(queuedTarget) : '';
-    if (
-        dedupeKey
-        && (
-            automaticPendingKeys.has(dedupeKey)
-            || automaticCompletedKeys.has(dedupeKey)
-        )
-    ) {
+    if (dedupeKey && automaticPendingKeys.has(dedupeKey)) {
         return Promise.resolve({ status: 'duplicate', reason: '同一楼层已处理' });
+    }
+    if (dedupeKey && automaticCompletedKeys.has(dedupeKey)) {
+        return Promise.resolve(settleEndedBusyStatus(
+            { status: 'duplicate', reason: '同一楼层已处理' },
+            latestStatusKind,
+            setStatus,
+            '变量检查',
+        ));
     }
     if (dedupeKey) automaticPendingKeys.add(dedupeKey);
     const queuedOptions = { ...options, queuedTarget };
@@ -10177,7 +9624,7 @@ function enqueue(targetId, options = {}) {
                 const landedKey = automaticTargetKey(targetId);
                 if (landedKey) automaticCompletedKeys.add(landedKey);
             }
-            return result;
+            return settleEndedBusyStatus(result, latestStatusKind, setStatus, '变量检查');
         })
         .catch((error) => {
             console.error('[MVU Auto Doctor] 自动处理异常：', error);
@@ -10240,9 +9687,8 @@ async function undoLastUnlocked() {
         )
     ) {
         const updatedNamespace = markRepairUndone(readChatNamespace(), record.id);
-        const marked = await writeChatNamespace(updatedNamespace, record.chatId, {
+        const marked = await writeRepairJournal(updatedNamespace.repairJournal, record.chatId, {
             force: true,
-            fields: ['repairJournal'],
         });
         if (!marked) {
             toast('warning', '变量无需撤销，但修复记录未能持久化；当前不会宣称撤销流程完整成功。');
@@ -10309,10 +9755,18 @@ async function undoLastUnlocked() {
         }
         updatedNamespace.openingResourceSync = state;
     }
-    const undoRecorded = await writeChatNamespace(updatedNamespace, record.chatId, {
-        force: true,
-        fields: ['repairJournal', 'openingResourceSync'],
-    });
+    const undoJournalRecorded = await writeRepairJournal(
+        updatedNamespace.repairJournal,
+        record.chatId,
+        { force: true },
+    );
+    const openingStateRecorded = record.repairKind !== 'opening-resource-sync'
+        ? true
+        : await writeChatNamespace(updatedNamespace, record.chatId, {
+            force: true,
+            fields: ['openingResourceSync'],
+        });
+    const undoRecorded = undoJournalRecorded && openingStateRecorded;
     if (!undoRecorded) {
         setStatus('变量已恢复，但撤销记录未能持久化；请勿重复操作。', 'error');
         toast('warning', '变量已恢复，但撤销记录未能持久化；当前不会宣称完整成功。');
@@ -10570,7 +10024,899 @@ function retireNpcDesignTicketInjection(captured) {
         || pendingNpcDesignTicketBatch.chatId !== captured?.chatId
     ) return false;
     pendingNpcDesignTicketBatch = null;
-    applySocialInjection();
+    return true;
+}
+
+function registerNextTurnConsumerProvider(provider) {
+    const id = String(provider?.id || '').trim();
+    if (
+        !id
+        || typeof provider?.precompose !== 'function'
+        || typeof provider?.cleanup !== 'function'
+        || nextTurnConsumerProviders.has(id)
+    ) {
+        return false;
+    }
+    nextTurnConsumerProviders.set(id, Object.freeze({
+        id,
+        label: String(provider?.label || id),
+        priority: Number.isFinite(Number(provider?.priority))
+            ? Number(provider.priority)
+            : 0,
+        enabled: provider?.enabled !== false,
+        precompose: provider.precompose,
+        cleanup: provider.cleanup,
+    }));
+    return true;
+}
+
+function selectNextTurnConsumerProvider() {
+    const settings = getSettings();
+    const configuredPriorities = isPlainObject(settings.nextTurnConsumerProviderPriorities)
+        ? settings.nextTurnConsumerProviderPriorities
+        : {};
+    const candidates = [...nextTurnConsumerProviders.values()]
+        .filter((provider) => provider.enabled)
+        .map((provider) => ({
+            ...provider,
+            priority: Number.isFinite(Number(configuredPriorities[provider.id]))
+                ? Number(configuredPriorities[provider.id])
+                : provider.priority,
+        }))
+        .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id));
+    if (!candidates.length) return { provider: null, conflict: false };
+    const preferredId = String(settings.nextTurnConsumerPreferredProvider || '').trim();
+    if (preferredId) {
+        const preferred = candidates.find((provider) => provider.id === preferredId);
+        return preferred
+            ? { provider: preferred, conflict: false }
+            : { provider: null, conflict: true };
+    }
+    const highest = candidates.filter((provider) => provider.priority === candidates[0].priority);
+    return highest.length === 1
+        ? { provider: highest[0], conflict: false }
+        : { provider: null, conflict: true };
+}
+
+function nextTurnConsumerProviderView() {
+    const settings = getSettings();
+    return {
+        preferredProviderId: String(settings.nextTurnConsumerPreferredProvider || ''),
+        priorities: deepClone(settings.nextTurnConsumerProviderPriorities || {}),
+        providers: [...nextTurnConsumerProviders.values()].map((provider) => ({
+            id: provider.id,
+            label: provider.label,
+            priority: provider.priority,
+            enabled: provider.enabled,
+        })),
+    };
+}
+
+function configureNextTurnConsumerProviderPreference({ preferredProviderId = '', priorities = {} } = {}) {
+    const settings = getSettings();
+    settings.nextTurnConsumerPreferredProvider = String(preferredProviderId || '').trim();
+    settings.nextTurnConsumerProviderPriorities = isPlainObject(priorities)
+        ? deepClone(priorities)
+        : {};
+    saveSettings();
+    return nextTurnConsumerProviderView();
+}
+
+function clearLegacyNextTurnSlots() {
+    const context = getContext();
+    if (typeof context?.setExtensionPrompt !== 'function') return false;
+    try {
+        for (const key of [
+            CONTINUITY_INJECTION_NAME,
+            SOCIAL_INJECTION_NAME,
+            SERENDIPITY_INJECTION_NAME,
+        ]) {
+            context.setExtensionPrompt(
+                key,
+                '',
+                IN_CHAT_POSITION,
+                IN_CHAT_DEPTH,
+                false,
+                0,
+            );
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function setNextTurnConsumerFallback(content) {
+    const context = getContext();
+    if (typeof context?.setExtensionPrompt !== 'function') return false;
+    try {
+        context.setExtensionPrompt(
+            NEXT_TURN_CONSUMER_INJECTION_NAME,
+            String(content || ''),
+            IN_CHAT_POSITION,
+            IN_CHAT_DEPTH,
+            false,
+            0,
+        );
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function clearNextTurnConsumerFallback() {
+    return setNextTurnConsumerFallback('') || setNextTurnConsumerFallback('');
+}
+
+function immutableNextTurnConsumerPayload(worldText, ticketText) {
+    const text = [worldText, ticketText].filter(Boolean).join('\n\n');
+    return Object.freeze({
+        world: Object.freeze({ text: String(worldText || '') }),
+        ticket: Object.freeze({ text: String(ticketText || '') }),
+        text,
+        digest: fingerprint(text),
+    });
+}
+
+function nextTurnLeaseMatches(lease, session) {
+    return lease?.state === 'reserved'
+        && nextTurnLeaseBelongsToSession(lease, session);
+}
+
+function nextTurnLeaseBelongsToSession(lease, session) {
+    return !!lease
+        && lease.state === 'reserved'
+        && lease.chatId === session?.chatId
+        && lease.generationId === session?.id
+        && Number(lease.generationSerial) === Number(session?.serial)
+        && lease.generationType === session?.type
+        && lease.scopeDigest === session?.frozenScopeDigest
+        && lease.expectedScopeDigest === session?.frozenScopeDigest;
+}
+
+function nextTurnLeaseCleanupBlocked(lease, session) {
+    return !!lease
+        && lease.state === 'cleanup_failed'
+        && lease.chatId === session?.chatId
+        && lease.generationId === session?.id
+        && Number(lease.generationSerial) === Number(session?.serial)
+        && lease.generationType === session?.type
+        && lease.scopeDigest === session?.frozenScopeDigest
+        && lease.expectedScopeDigest === session?.frozenScopeDigest;
+}
+
+function nextTurnConsumerLeaseToken(session) {
+    if (!session?.consumerLeaseToken) {
+        session.consumerLeaseToken = `p4:${fingerprint([
+            session.chatId,
+            session.id,
+            session.serial,
+            session.type,
+            session.frozenScopeDigest,
+        ].join('|'))}`;
+    }
+    return session.consumerLeaseToken;
+}
+
+function retireNextTurnConsumerForChat(active, reason = 'chat_changed') {
+    const chatId = String(
+        active?.chatId || active?.providerLease?.chatId || lastGeneration?.chatId || '',
+    );
+    if (!chatId || active?.fallback === true) return false;
+    retiredNextTurnConsumerTombstones.set(chatId, Object.freeze({
+        chatId,
+        generationId: String(active?.generationId || ''),
+        providerId: String(active?.providerId || ''),
+        reason: String(reason || 'chat_changed'),
+    }));
+    while (retiredNextTurnConsumerTombstones.size > 24) {
+        const oldest = retiredNextTurnConsumerTombstones.keys().next().value;
+        retiredNextTurnConsumerTombstones.delete(oldest);
+    }
+    return true;
+}
+
+function nextTurnConsumerTombstoneForChat(chatId) {
+    return retiredNextTurnConsumerTombstones.get(String(chatId || '')) || null;
+}
+
+async function writeNextTurnConsumerLease(session, scopeDigest, payload, provider, leaseToken = '') {
+    const context = getContext();
+    const namespace = readChatNamespace(context);
+    const packet = namespace?.continuity?.nextTurnInjection;
+    if (
+        !packet
+        || packet.consumeProof
+        || packet.consumerLease?.state === 'reserved'
+        || !session?.frozenScopeDigest
+        || scopeDigest !== session.frozenScopeDigest
+        || packet.producerTarget?.scopeDigest !== session.frozenScopeDigest
+    ) {
+        return { ok: !packet, packet: null };
+    }
+    const next = deepClone(namespace);
+    next.continuity = deepClone(namespace.continuity);
+    next.continuity.nextTurnInjection.consumerLease = {
+        state: 'reserved',
+        chatId: session.chatId,
+        generationId: session.id,
+        generationSerial: session.serial,
+        generationType: session.type,
+        scopeDigest,
+        expectedScopeDigest: session.frozenScopeDigest,
+        start: deepClone(session.start || {}),
+        consumerPayloadDigest: payload.digest,
+        providerId: provider?.id || 'sillytavern-fallback',
+        slotId: provider?.id || NEXT_TURN_CONSUMER_INJECTION_NAME,
+        providerCleanupToken: provider ? String(leaseToken || '') : '',
+        reservedAt: Date.now(),
+    };
+    const saved = await writeChatNamespace(next, session.chatId, {
+        fields: ['continuity'],
+        durable: true,
+        requireReadback: true,
+        precondition: () => (
+            activeGenerationSession?.id === session.id
+            && session.stopped !== true
+            && getContext()?.chatId === session.chatId
+            && actorSovereigntyScopeDigest(currentActorSovereigntyScope(getContext()))
+                === session.frozenScopeDigest
+            && readChatNamespace(getContext())?.continuity?.nextTurnInjection?.producerTarget?.scopeDigest
+                === session.frozenScopeDigest
+        ),
+        contentValidator: (persisted) => nextTurnLeaseMatches(
+            persisted?.continuity?.nextTurnInjection?.consumerLease,
+            session,
+        ) && persisted?.continuity?.nextTurnInjection?.consumerLease?.consumerPayloadDigest === payload.digest
+            && persisted?.continuity?.nextTurnInjection?.producerTarget?.scopeDigest
+                === session.frozenScopeDigest,
+    });
+    return { ok: saved, packet: saved ? next.continuity.nextTurnInjection : null };
+}
+
+async function cleanupNextTurnProvider(active, reason) {
+    if (typeof active?.providerCleanup !== 'function') return false;
+    try {
+        const receipt = await active.providerCleanup(Object.freeze({
+            ...(active.providerLease || {}),
+            cleanupToken: active.providerCleanupToken,
+            reason: String(reason || 'released'),
+        }));
+        return receipt?.cleanupConfirmed === true;
+    } catch {
+        return false;
+    }
+}
+
+function nextTurnProviderCleanupFlightKey(active) {
+    return active?.fallback ? '' : String(active?.providerCleanupToken || '');
+}
+
+function clearNextTurnProviderCleanupFlight(active) {
+    const key = nextTurnProviderCleanupFlightKey(active);
+    if (key) nextTurnProviderCleanupFlights.delete(key);
+}
+
+function persistedNextTurnConsumerCleanup(lease) {
+    if (!lease) return null;
+    if (lease.providerId === 'sillytavern-fallback') {
+        return {
+            fallback: true,
+            cleanupConfirmed: lease.cleanupConfirmed === true,
+        };
+    }
+    const provider = nextTurnConsumerProviders.get(lease.providerId);
+    if (!provider || typeof provider.cleanup !== 'function' || !lease.providerCleanupToken) {
+        return null;
+    }
+    return {
+        fallback: false,
+        providerLease: Object.freeze({
+            chatId: lease.chatId,
+            generationId: lease.generationId,
+            generationSerial: lease.generationSerial,
+            generationType: lease.generationType,
+            scopeDigest: lease.scopeDigest,
+            expectedScopeDigest: lease.expectedScopeDigest,
+            leaseToken: lease.providerCleanupToken,
+            cleanupRequired: true,
+        }),
+        providerCleanup: provider.cleanup,
+        providerCleanupToken: lease.providerCleanupToken,
+        cleanupConfirmed: lease.cleanupConfirmed === true,
+    };
+}
+
+async function markNextTurnConsumerCleanupFailed(session, lease, reason) {
+    lastInjectionInspection.status = 'blocked';
+    lastInjectionInspection.checkedAt = Date.now();
+    if (!nextTurnLeaseBelongsToSession(lease, session)) return false;
+    const context = getContext();
+    const namespace = readChatNamespace(context);
+    const currentLease = namespace?.continuity?.nextTurnInjection?.consumerLease;
+    if (!nextTurnLeaseBelongsToSession(currentLease, session)) return false;
+    const next = deepClone(namespace);
+    next.continuity.nextTurnInjection.consumerLease = {
+        ...currentLease,
+        state: 'cleanup_failed',
+        releaseReason: String(reason || 'cleanup_failed'),
+    };
+    try {
+        return await writeChatNamespace(next, session.chatId, {
+            fields: ['continuity'],
+            durable: true,
+            requireReadback: true,
+            precondition: () => (
+                getContext()?.chatId === session.chatId
+                && nextTurnLeaseBelongsToSession(
+                    readChatNamespace(getContext())?.continuity?.nextTurnInjection?.consumerLease,
+                    session,
+                )
+            ),
+            contentValidator: (persisted) => (
+                persisted?.continuity?.nextTurnInjection?.consumerLease?.state === 'cleanup_failed'
+                && nextTurnLeaseCleanupBlocked(
+                    persisted?.continuity?.nextTurnInjection?.consumerLease,
+                    session,
+                )
+            ),
+        });
+    } catch {
+        return false;
+    }
+}
+
+async function confirmNextTurnConsumerCleanup(session, active) {
+    const context = getContext();
+    const namespace = readChatNamespace(context);
+    const lease = namespace?.continuity?.nextTurnInjection?.consumerLease;
+    if (!lease) {
+        active.cleanupConfirmed = true;
+        return true;
+    }
+    if (!nextTurnLeaseMatches(lease, session)) return false;
+    const next = deepClone(namespace);
+    next.continuity.nextTurnInjection.consumerLease.cleanupConfirmed = true;
+    try {
+        const confirmed = await writeChatNamespace(next, session.chatId, {
+            fields: ['continuity'],
+            durable: true,
+            requireReadback: true,
+            precondition: () => (
+                getContext()?.chatId === session.chatId
+                && nextTurnLeaseMatches(
+                    readChatNamespace(getContext())?.continuity?.nextTurnInjection?.consumerLease,
+                    session,
+                )
+            ),
+            contentValidator: (persisted) => (
+                persisted?.continuity?.nextTurnInjection?.consumerLease?.cleanupConfirmed === true
+                && nextTurnLeaseMatches(
+                    persisted?.continuity?.nextTurnInjection?.consumerLease,
+                    session,
+                )
+            ),
+        });
+        if (confirmed) active.cleanupConfirmed = true;
+        return confirmed;
+    } catch {
+        return false;
+    }
+}
+
+async function ensureNextTurnConsumerSlotCleaned(session, active, reason) {
+    if (!active) return false;
+    const currentLease = readChatNamespace(getContext())?.continuity?.nextTurnInjection
+        ?.consumerLease;
+    if (nextTurnLeaseCleanupBlocked(currentLease, session)) {
+        lastInjectionInspection.status = 'blocked';
+        lastInjectionInspection.checkedAt = Date.now();
+        return false;
+    }
+    if (active.cleanupConfirmed === true) return true;
+    const cleanAndConfirm = async () => {
+        const cleaned = active.fallback
+            ? clearNextTurnConsumerFallback()
+            : await cleanupNextTurnProvider(active, reason);
+        if (!cleaned) {
+            const failedLease = readChatNamespace(getContext())?.continuity?.nextTurnInjection
+                ?.consumerLease;
+            await markNextTurnConsumerCleanupFailed(session, failedLease, reason);
+            return false;
+        }
+        if (await confirmNextTurnConsumerCleanup(session, active)) return true;
+        const failedLease = readChatNamespace(getContext())?.continuity?.nextTurnInjection
+            ?.consumerLease;
+        await markNextTurnConsumerCleanupFailed(session, failedLease, `${reason}_confirmation_failed`);
+        return false;
+    };
+    const key = nextTurnProviderCleanupFlightKey(active);
+    if (!key) return cleanAndConfirm();
+    const pending = nextTurnProviderCleanupFlights.get(key);
+    if (pending) return pending;
+    let settleFlight;
+    const flight = new Promise((resolve) => {
+        settleFlight = resolve;
+    });
+    nextTurnProviderCleanupFlights.set(key, flight);
+    void cleanAndConfirm().then(
+        (result) => settleFlight(result === true),
+        () => settleFlight(false),
+    );
+    return flight;
+}
+
+async function releaseNextTurnConsumer(session, reason = 'released', {
+    preserveTickets = false,
+    requireCurrentSession = true,
+    allowStoppedSession = false,
+} = {}) {
+    const context = getContext();
+    const stoppedSessionIsCurrent = !!(
+        allowStoppedSession
+        && session?.stopped === true
+        && Number(session.epoch) === Number(currentGenerationEpoch)
+        && Number(session.operationEpoch) === Number(operationEpoch)
+        && String(session.chatId || '') === String(context?.chatId || '')
+        && String(lastGeneration?.id || '') === String(session.id || '')
+    );
+    if (
+        requireCurrentSession
+        && !stoppedSessionIsCurrent
+        && !await acceptedFinalReleaseIsCurrent(session)
+    ) {
+        // A stale Doctor-owned fallback can be synchronously cleared without
+        // touching a provider or durable lease.  A provider slot stays blocked
+        // until its owning session can be safely reconciled.
+        if (
+            activeNextTurnConsumer?.generationId === session?.id
+            && activeNextTurnConsumer.fallback === true
+        ) {
+            clearNextTurnConsumerFallback();
+            activeNextTurnConsumer = null;
+        }
+        return false;
+    }
+    const namespace = readChatNamespace(context);
+    const lease = namespace?.continuity?.nextTurnInjection?.consumerLease;
+    if (nextTurnLeaseCleanupBlocked(lease, session)) {
+        lastInjectionInspection.status = 'blocked';
+        lastInjectionInspection.checkedAt = Date.now();
+        return false;
+    }
+    const matchingLease = nextTurnLeaseBelongsToSession(lease, session);
+    const active = activeNextTurnConsumer?.generationId === session?.id
+        ? activeNextTurnConsumer
+        : (matchingLease ? persistedNextTurnConsumerCleanup(lease) : null);
+    if (active) {
+        if (!await ensureNextTurnConsumerSlotCleaned(session, active, reason)) return false;
+    } else if (matchingLease) {
+        await markNextTurnConsumerCleanupFailed(session, lease, reason);
+        return false;
+    }
+    if (!matchingLease) {
+        if (activeNextTurnConsumer?.generationId === session?.id) {
+            clearNextTurnProviderCleanupFlight(activeNextTurnConsumer);
+            activeNextTurnConsumer = null;
+        }
+        if (!preserveTickets) {
+            retireNpcDesignTicketInjection(session);
+            npcDesignTicketBatches.delete(session?.id);
+        }
+        return true;
+    }
+    if (!context || context.chatId !== session.chatId) {
+        return false;
+    }
+    const next = deepClone(namespace);
+    next.continuity.nextTurnInjection.consumerLease = {
+        ...lease,
+        state: 'released',
+        cleanupConfirmed: active?.cleanupConfirmed === true || lease.cleanupConfirmed === true,
+        releaseReason: String(reason || 'released'),
+    };
+    try {
+        const saved = await writeChatNamespace(next, session.chatId, {
+            fields: ['continuity'],
+            durable: true,
+            requireReadback: true,
+            precondition: () => (
+                getContext()?.chatId === session.chatId
+                && (
+                    !requireCurrentSession
+                    || stoppedSessionIsCurrent
+                    || acceptedFinalSessionTargetIsCurrent(session)
+                )
+            ),
+            contentValidator: (persisted) => (
+                persisted?.continuity?.nextTurnInjection?.consumerLease?.state === 'released'
+                && persisted?.continuity?.nextTurnInjection?.consumerLease?.generationId === session.id
+                && persisted?.continuity?.nextTurnInjection?.consumerLease?.cleanupConfirmed
+                    === (active?.cleanupConfirmed === true || lease.cleanupConfirmed === true)
+            ),
+        });
+        if (!saved) return false;
+        if (activeNextTurnConsumer?.generationId === session?.id) {
+            clearNextTurnProviderCleanupFlight(activeNextTurnConsumer);
+            activeNextTurnConsumer = null;
+        }
+        if (!preserveTickets) {
+            retireNpcDesignTicketInjection(session);
+            npcDesignTicketBatches.delete(session?.id);
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function persistedStaleWorldLeaseOwnership(context, namespace) {
+    const packet = namespace?.continuity?.nextTurnInjection;
+    const lease = packet?.consumerLease;
+    const producer = stage3AcceptedTarget(packet?.producerTarget);
+    if (
+        !context
+        || !packet
+        || lease?.state !== 'reserved'
+        || !producer
+        || lease.chatId !== String(context.chatId || '')
+        || lease.chatId !== producer.chatId
+        || lease.scopeDigest !== producer.scopeDigest
+        || lease.expectedScopeDigest !== producer.scopeDigest
+        || !lease.generationId
+        || !Number.isFinite(Number(lease.generationSerial))
+        || !lease.generationType
+        || !lease.consumerPayloadDigest
+    ) return null;
+    return {
+        lease: deepClone(lease),
+        producer,
+        ownershipDigest: fingerprint(JSON.stringify({ lease, producer })),
+    };
+}
+
+async function convergePersistedStaleNextTurnWorldLease(session, reason) {
+    // This is deliberately not a late callback release.  It only retires an
+    // exact, fresh-read Doctor ST fallback lease before the current generation
+    // composes its own prompt.  Unknown external providers are never cleaned.
+    if (!await acceptedFinalReleaseIsCurrent(session)) return false;
+    const context = getContext();
+    const namespace = readChatNamespace(context);
+    const ownership = persistedStaleWorldLeaseOwnership(context, namespace);
+    if (
+        !ownership
+        || ownership.lease.providerId !== 'sillytavern-fallback'
+        || ownership.lease.slotId !== NEXT_TURN_CONSUMER_INJECTION_NAME
+        || ownership.lease.providerCleanupToken
+    ) return false;
+    if (!clearNextTurnConsumerFallback()) return false;
+    const next = deepClone(namespace);
+    next.continuity.nextTurnInjection.consumerLease = {
+        ...ownership.lease,
+        state: 'released',
+        cleanupConfirmed: true,
+        releaseReason: String(reason || 'stale_world_lease'),
+    };
+    try {
+        return await writeChatNamespace(next, session.chatId, {
+            fields: ['continuity'],
+            durable: true,
+            requireReadback: true,
+            precondition: () => {
+                if (!acceptedFinalSessionTargetIsCurrent(session)) return false;
+                const current = getContext();
+                const fresh = persistedStaleWorldLeaseOwnership(
+                    current,
+                    readChatNamespace(current),
+                );
+                return fresh?.ownershipDigest === ownership.ownershipDigest;
+            },
+            contentValidator: (persisted) => (
+                persisted?.continuity?.nextTurnInjection?.consumerLease?.state === 'released'
+                && persisted?.continuity?.nextTurnInjection?.consumerLease?.generationId
+                    === ownership.lease.generationId
+                && persisted?.continuity?.nextTurnInjection?.consumerLease?.cleanupConfirmed === true
+            ),
+        });
+    } catch {
+        return false;
+    }
+}
+
+function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope) {
+    const producer = packet?.producerTarget;
+    const scopeDigest = actorSovereigntyScopeDigest(frozenScope);
+    if (!producer || producer.scopeDigest !== scopeDigest) return null;
+    const captured = captureTarget(context, producer.index, { frozenScope });
+    if (!stage3AcceptedTargetsMatch(stage3AcceptedTarget(captured), producer)) return null;
+    const ledger = normalizeActorLedger(namespace?.actorLedger, {
+        chatId: producer.chatId,
+        identityScopeId: frozenIdentityScopeId(frozenScope),
+        scopeDigest,
+    });
+    const persisted = stage3PersistedPackageForTarget(
+        namespace?.continuity,
+        ledger,
+        captured,
+    );
+    return persisted ? { packet: persisted, captured } : null;
+}
+
+async function precomposeNextTurnConsumer(session) {
+    const context = getContext();
+    if (!session?.acceptedFinalEligible || !context || context.chatId !== session.chatId) return;
+    if (nextTurnConsumerTombstoneForChat(session.chatId)) {
+        lastInjectionInspection.status = 'blocked';
+        lastInjectionInspection.checkedAt = Date.now();
+        return;
+    }
+    if (!clearLegacyNextTurnSlots()) {
+        await releaseNextTurnConsumer(session, 'legacy_slots_clear_failed');
+        return;
+    }
+    let scopeResolution;
+    try {
+        scopeResolution = await resolveCurrentActorSovereigntyScope(context);
+    } catch {
+        await releaseNextTurnConsumer(session, 'scope_unavailable');
+        return;
+    }
+    if (!scopeResolution?.resolved || activeGenerationSession?.id !== session.id || session.stopped) {
+        await releaseNextTurnConsumer(session, 'scope_unavailable');
+        return;
+    }
+    const frozenScope = createActorSovereigntyScope(scopeResolution.scope);
+    const scopeDigest = actorSovereigntyScopeDigest(frozenScope);
+    if (session.frozenScopeDigest && session.frozenScopeDigest !== scopeDigest) {
+        await releaseNextTurnConsumer(session, 'generation_scope_changed');
+        return;
+    }
+    session.frozenScopeDigest = scopeDigest;
+    if (
+        activeNextTurnConsumer
+        && activeNextTurnConsumer.generationId !== session.id
+        && activeNextTurnConsumer.fallback !== true
+    ) {
+        lastInjectionInspection.status = 'blocked';
+        lastInjectionInspection.checkedAt = Date.now();
+        return;
+    }
+    const namespace = readChatNamespace(context);
+    let packet = namespace?.continuity?.nextTurnInjection || null;
+    let worldText = '';
+    if (packet?.consumerLease?.state === 'cleanup_failed') {
+        lastInjectionInspection.status = 'blocked';
+        lastInjectionInspection.checkedAt = Date.now();
+        return;
+    }
+    if (packet) {
+        const verified = verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope);
+        const projection = verified
+            ? buildContinuityConsumerPayload(namespace.continuity, verified.packet)
+            : { ok: false, reason: 'world_package_proof_invalid' };
+        if (!verified || !projection.ok || packet.consumeProof || packet.consumerLease?.state === 'reserved') {
+            await convergePersistedStaleNextTurnWorldLease(
+                session,
+                projection.reason || 'world_package_unavailable',
+            );
+            packet = null;
+        } else {
+            packet = verified.packet;
+            worldText = projection.text;
+        }
+    }
+    const ticketBatch = prepareNpcDesignTicketBatch();
+    const ticketText = npcDesignTicketPrompt(ticketBatch);
+    let payload = immutableNextTurnConsumerPayload(worldText, ticketText);
+    if (!payload.text) return;
+    const leaseToken = nextTurnConsumerLeaseToken(session);
+    let selected = packet
+        ? selectNextTurnConsumerProvider()
+        : { provider: null, conflict: false };
+    if (selected.conflict) {
+        await releaseNextTurnConsumer(session, 'provider_priority_conflict');
+        return;
+    }
+    const lease = packet
+        ? await writeNextTurnConsumerLease(
+            session,
+            scopeDigest,
+            payload,
+            selected.provider,
+            leaseToken,
+        )
+        : { ok: true };
+    if (!lease.ok && packet) {
+        const refreshedPacket = readChatNamespace(getContext())?.continuity?.nextTurnInjection;
+        if (refreshedPacket?.consumerLease?.state === 'cleanup_failed') {
+            lastInjectionInspection.status = 'blocked';
+            lastInjectionInspection.checkedAt = Date.now();
+            return;
+        }
+        if (refreshedPacket?.consumerLease?.state === 'reserved') {
+            await convergePersistedStaleNextTurnWorldLease(
+                session,
+                'world_lease_readback_failed',
+            );
+        }
+        packet = null;
+        worldText = '';
+        payload = immutableNextTurnConsumerPayload(worldText, ticketText);
+        if (!payload.text) return;
+        selected = { provider: null, conflict: false };
+    }
+    if (activeGenerationSession?.id !== session.id || session.stopped) {
+        await releaseNextTurnConsumer(session, 'lease_readback_failed');
+        return;
+    }
+    if (selected.provider) {
+        const providerLease = Object.freeze({
+            chatId: session.chatId,
+            generationId: session.id,
+            generationSerial: session.serial,
+            generationType: session.type,
+            scopeDigest,
+            expectedScopeDigest: session.frozenScopeDigest,
+            leaseToken,
+            cleanupRequired: true,
+        });
+        const tentative = {
+            generationId: session.id,
+            digest: payload.digest,
+            providerId: selected.provider.id,
+            slotId: selected.provider.id,
+            fallback: false,
+            pending: true,
+            providerLease,
+            providerCleanup: selected.provider.cleanup,
+            providerCleanupToken: leaseToken,
+        };
+        activeNextTurnConsumer = tentative;
+        let receipt;
+        try {
+            receipt = await selected.provider.precompose(payload, providerLease);
+        } catch {
+            await releaseNextTurnConsumer(session, 'provider_callback_failed');
+            return;
+        }
+        if (
+            activeNextTurnConsumer !== tentative
+            || session.stopped
+            || activeGenerationSession?.id !== session.id
+        ) {
+            const currentLease = readChatNamespace(getContext())?.continuity?.nextTurnInjection
+                ?.consumerLease;
+            if (
+                nextTurnLeaseCleanupBlocked(currentLease, session)
+                || currentLease?.state === 'released'
+                || tentative.cleanupConfirmed === true
+            ) return;
+            await releaseNextTurnConsumer(session, 'provider_receipt_stale');
+            return;
+        }
+        if (
+            receipt?.placementConfirmed !== true
+            || receipt?.consumerPayloadDigest !== payload.digest
+            || !receipt
+        ) {
+            await releaseNextTurnConsumer(session, 'provider_receipt_invalid');
+            return;
+        }
+        tentative.slotId = String(receipt.slotId || selected.provider.id);
+        tentative.pending = false;
+        session.p4PlacementScopeDigest = scopeDigest;
+        return;
+    }
+    if (!setNextTurnConsumerFallback(payload.text)) {
+        await releaseNextTurnConsumer(session, 'fallback_unavailable');
+        return;
+    }
+    activeNextTurnConsumer = {
+        generationId: session.id,
+        digest: payload.digest,
+        providerId: 'sillytavern-fallback',
+        slotId: NEXT_TURN_CONSUMER_INJECTION_NAME,
+        fallback: true,
+    };
+    // Ticket-only fallback is deliberately not a world-package lease.  It
+    // must not turn a P4 downgrade into an accepted-final scope barrier.
+    if (packet) session.p4PlacementScopeDigest = scopeDigest;
+}
+
+async function commitNextTurnConsumer(session, envelope) {
+    const active = activeNextTurnConsumer;
+    if (!active || active.generationId !== session?.id) return true;
+    if (!await ensureNextTurnConsumerSlotCleaned(session, active, 'accepted_final')) return false;
+    const context = getContext();
+    if (!acceptedFinalEnvelopeMatchesContext(context, envelope, session)) {
+        await releaseNextTurnConsumer(session, 'acceptance_target_mismatch');
+        return false;
+    }
+    let scopeResolution;
+    try {
+        scopeResolution = await resolveCurrentActorSovereigntyScope(context);
+    } catch {
+        await releaseNextTurnConsumer(session, 'acceptance_scope_unavailable');
+        return false;
+    }
+    if (
+        !scopeResolution?.resolved
+        || actorSovereigntyScopeDigest(scopeResolution.scope) !== envelope.scopeDigest
+    ) {
+        await releaseNextTurnConsumer(session, 'acceptance_scope_mismatch');
+        return false;
+    }
+    const namespace = readChatNamespace(context);
+    const lease = namespace?.continuity?.nextTurnInjection?.consumerLease;
+    if (!lease) {
+        clearNextTurnProviderCleanupFlight(active);
+        activeNextTurnConsumer = null;
+        return true;
+    }
+    if (
+        !nextTurnLeaseMatches(lease, session)
+        || lease.expectedScopeDigest !== envelope.scopeDigest
+        || namespace?.continuity?.nextTurnInjection?.producerTarget?.scopeDigest
+            !== envelope.scopeDigest
+    ) {
+        await releaseNextTurnConsumer(session, 'acceptance_scope_mismatch');
+        return false;
+    }
+    const next = deepClone(namespace);
+    next.continuity.nextTurnInjection.consumeProof = {
+        chatId: session.chatId,
+        generationId: session.id,
+        generationSerial: session.serial,
+        generationType: session.type,
+        scopeDigest: envelope.scopeDigest,
+        index: envelope.index,
+        messageId: envelope.messageId,
+        swipeId: envelope.swipeId,
+        contentFingerprint: envelope.contentFingerprint,
+        consumerPayloadDigest: active.digest,
+        providerId: active.providerId,
+        slotId: active.slotId,
+        committedAt: Date.now(),
+    };
+    let saved = false;
+    try {
+        saved = await writeChatNamespace(next, session.chatId, {
+            fields: ['continuity'],
+            durable: true,
+            requireReadback: true,
+            precondition: () => {
+                const current = getContext();
+                const currentPacket = readChatNamespace(current)?.continuity?.nextTurnInjection;
+                return acceptedFinalEnvelopeMatchesContext(current, envelope, session)
+                    && nextTurnLeaseMatches(currentPacket?.consumerLease, session)
+                    && currentPacket?.producerTarget?.scopeDigest === envelope.scopeDigest;
+            },
+            contentValidator: (persisted) => {
+                const proof = persisted?.continuity?.nextTurnInjection?.consumeProof;
+                return acceptedFinalEnvelopeMatchesContext(getContext(), envelope, session)
+                    && persisted?.continuity?.nextTurnInjection?.producerTarget?.scopeDigest
+                        === envelope.scopeDigest
+                    && proof?.chatId === envelope.chatId
+                    && proof?.generationId === session.id
+                    && proof?.generationSerial === session.serial
+                    && proof?.generationType === session.type
+                    && proof?.scopeDigest === envelope.scopeDigest
+                    && proof?.index === envelope.index
+                    && proof?.messageId === envelope.messageId
+                    && proof?.swipeId === envelope.swipeId
+                    && proof?.contentFingerprint === envelope.contentFingerprint
+                    && proof?.consumerPayloadDigest === active.digest;
+            },
+        });
+    } catch {
+        saved = false;
+    }
+    if (!saved) {
+        await releaseNextTurnConsumer(session, 'consume_readback_failed');
+        return false;
+    }
+    clearNextTurnProviderCleanupFlight(active);
+    activeNextTurnConsumer = null;
     return true;
 }
 
@@ -11530,9 +11876,7 @@ function continuityBase(namespace, captured) {
 
 function checkpointMatchesTarget(checkpoint, captured) {
     if (!checkpoint || !captured) return false;
-    const expectedScopeDigest = actorSovereigntyScopeDigest(
-        currentActorSovereigntyScope(getContext()),
-    );
+    const expectedScopeDigest = captured.scopeDigest;
     return checkpoint.compatibilityOnly !== true
         && checkpoint.restorable !== false
         && checkpoint.scopeDigest === expectedScopeDigest
@@ -11542,9 +11886,7 @@ function checkpointMatchesTarget(checkpoint, captured) {
 function checkpointLogicalReplyMatches(checkpoint, captured) {
     if (!checkpoint || !captured) return false;
     const target = normalizeActorActionTarget(checkpoint.target);
-    const expectedScopeDigest = actorSovereigntyScopeDigest(
-        currentActorSovereigntyScope(getContext()),
-    );
+    const expectedScopeDigest = captured.scopeDigest;
     const exactLogicalMessage = target?.messageId === captured.messageId;
     const explicitReplacement = ['swipe', 'regenerate'].includes(captured.generationType)
         && target?.chatId === captured.chatId
@@ -11970,7 +12312,7 @@ function buildContinuityMessages({
         '输出格式：',
         jsonOnly ? '' : '<ContinuityState>',
         '{"turn":本轮整数,"lastTick":{"turn":本轮整数,"action":"created|advanced|manifested|resolved|dormant|held","threadId":"稳定ID或WORLD","reason":"不少于8字的具体依据"},',
-        '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","actorRef":{"kind":"actor_ref","actorId":"输入原值","displayName":"输入原值","aliases":[]},"target":{"chatId":"输入原值","logicalIndex":0,"index":0,"messageId":"输入原值","swipeId":0,"generation":0,"generationId":"输入原值","generationType":"输入原值","branchId":"输入原值","contentHash":"输入原值","hash":"输入原值"},"status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],',
+        '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","actorRef":{"kind":"actor_ref","actorId":"输入原值","displayName":"输入原值","aliases":[]},"target":{"chatId":"输入原值","logicalIndex":0,"index":0,"messageId":"输入原值","swipeId":0,"generation":0,"generationId":"输入原值","generationType":"输入原值","branchId":"输入原值","scopeDigest":"输入原值","contentHash":"输入原值","hash":"输入原值"},"status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],',
         '"threads":[{"id":"旧ID或null","title":"短标题","kind":"parallel|personal|promise|enemy|mystery","eventType":"conflict|progress","level":2,"origin":"main_derivative|setting_linked|setting_independent|ambient","relation":"linked|latent|independent|converging","stage":"seeded|advancing|manifested|resolved|dormant","stageProgress":3,"evolveResult":"success|hold|setback","stalled":false,"outcome":"","summary":"已成立事实","offscreenBeat":"本轮实际变化或空","nextBeat":"未来可能的一拍","trigger":"可验证条件","intersection":"交联复核","convergence": {"score": 0,"channels":[],"evidence":[],"entryBeat":"","lastCheckedTurn":1},"seedBasis":"依据","causedBy":[],"effects":[],"rumors":[],"resolution":"","actors":[],"locations":[],"knowledge":"hidden|rumor|observed","urgency":1,"createdTurn":1,"lastAdvancedTurn":1}],',
         '"scenarioPlan":{"baselineEvidence":[],"amendments":[]},',
         '"world":{"digest":"本轮变化或空","trends":[{"id":null,"sourceThreads": ["来源事件ID"]}],"factions":[],"winds":[],"reputation":{},"environment":{},"shadows":{"enemies":[],"secrets":[]},"influences":[]}}',
@@ -11985,7 +12327,7 @@ function buildContinuityMessages({
 async function generateWorldContinuitySingleBatch(messages, {
     captured,
     settings,
-    runUntilCancelled = true,
+    runUntilCancelled = false,
     deadlineAt = 0,
     signal = null,
     pendingActorAttempts = [],
@@ -11994,6 +12336,12 @@ async function generateWorldContinuitySingleBatch(messages, {
     const current = () => typeof isCurrent !== 'function' || isCurrent() === true;
     if (!current()) {
         const error = new Error('world.target_stale_before_call');
+        error.code = 'WORLD_TARGET_STALE';
+        throw error;
+    }
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) {
+        const error = new Error(scopeGuard.reason || 'world.scope_stale_before_call');
         error.code = 'WORLD_TARGET_STALE';
         throw error;
     }
@@ -12055,6 +12403,7 @@ function actorShardLeaseFingerprint(captured) {
         generationId: String(captured?.generationId || ''),
         generationType: String(captured?.generationType || ''),
         branchId: String(captured?.branchId || ''),
+        scopeDigest: String(captured?.scopeDigest || ''),
         parentHash: fingerprint(String(captured?.generationId || captured?.branchId || 'root')),
         contentHash: String(captured?.contentFingerprint || ''),
     };
@@ -12068,9 +12417,22 @@ async function collectActorShardProposals(captured, {
     token,
     excludedActorNames = [],
     signal = null,
+    isCurrent = null,
 } = {}) {
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) {
+        return { status: 'stale', candidates: null, reason: scopeGuard.reason };
+    }
     const settings = getSettings();
-    const runUntilCancelled = settings.sovereigntyRunUntilCancelled !== false;
+    // P3 supplies an accepted-final/operation guard without using the
+    // actor-shard lease branch as a world identity. Existing callers retain
+    // the legacy actor-shard target guard.
+    const current = () => (
+        typeof isCurrent === 'function'
+            ? isCurrent() === true
+            : continuityTargetIsCurrent(captured, token).ok
+    );
+    const runUntilCancelled = false;
     if (settings.actorShardMode === 'off') {
         latestActorShardDiagnostics = {
             status: 'disabled',
@@ -12125,18 +12487,21 @@ async function collectActorShardProposals(captured, {
             : Date.now() + settings.actorShardTimeoutMs + 5000,
     });
     await actorShardLeaseManager.start(leaseId, 'single-batch-proposals');
-    setContinuityStatus(
-        `世界连续性：人物行动提案 0/${candidates.length}（一次隔离批处理）`,
-        'busy',
-    );
+    if (current()) {
+        setContinuityStatus(
+            `世界连续性：人物行动提案 0/${candidates.length}（一次隔离批处理）`,
+            'busy',
+        );
+    }
     const actorDeadlineAt = runUntilCancelled
         ? 0
         : Date.now() + settings.actorShardTimeoutMs;
     const result = await runActorShardProposalBatch({
         candidates,
         signal,
-        isCurrent: () => continuityTargetIsCurrent(captured, token).ok,
+        isCurrent: current,
         onProgress(progress) {
+            if (!current()) return;
             latestActorShardDiagnostics = {
                 status: 'running',
                 selected: progress.total,
@@ -12149,12 +12514,15 @@ async function collectActorShardProposals(captured, {
                 'busy',
             );
         },
-        callBatch: async (batchCandidates, { signal }) => callModel(
-            buildActorShardBatchMessages(batchCandidates, {
+        callBatch: async (batchCandidates, { signal }) => {
+            const freshScope = await freshFrozenScopeGuard(captured);
+            if (!freshScope.ok) {
+                throw new Error(freshScope.reason || 'actor.scope_stale_before_call');
+            }
+            return callModel(buildActorShardBatchMessages(batchCandidates, {
                 target,
                 customPrompt: settings.actorShardPromptAddon,
-            }),
-            {
+            }), {
                 maxTokens: settings.actorShardMaxTokens,
                 timeoutMs: settings.actorShardTimeoutMs,
                 task: '活世界人物行动分析',
@@ -12167,21 +12535,23 @@ async function collectActorShardProposals(captured, {
                 maxFailovers: 0,
                 ...(actorDeadlineAt ? { deadlineAt: actorDeadlineAt } : {}),
                 runUntilCancelled,
-            },
-        ),
+            });
+        },
     });
-    latestActorShardDiagnostics = {
-        status: result.status,
-        ...result.diagnostics,
-        failureCodes: [...new Set(
-            [
-                ...(result.status === 'semantic-failed'
-                    ? ['actor_shard.batch_semantic_zero']
-                    : []),
-                ...(result.failures || []).map((item) => String(item.code || '')),
-            ].filter(Boolean),
-        )].slice(0, 8),
-    };
+    if (current()) {
+        latestActorShardDiagnostics = {
+            status: result.status,
+            ...result.diagnostics,
+            failureCodes: [...new Set(
+                [
+                    ...(result.status === 'semantic-failed'
+                        ? ['actor_shard.batch_semantic_zero']
+                        : []),
+                    ...(result.failures || []).map((item) => String(item.code || '')),
+                ].filter(Boolean),
+            )].slice(0, 8),
+        };
+    }
     if (result.status === 'stale') {
         await actorShardLeaseManager.markStale(leaseId, 'target identity changed');
         return { status: 'stale', candidates: null };
@@ -12194,12 +12564,15 @@ async function collectActorShardProposals(captured, {
             label: 'actor proposals',
         },
     });
-    const fresh = captureTarget(getContext(), captured.index);
+    const fresh = captureTarget(getContext(), captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    });
     const accepted = fresh && await actorShardLeaseManager.acceptsResult(leaseId, {
         fingerprint: actorShardLeaseFingerprint(fresh),
         branch: { id: fresh.branchId, status: 'active' },
     });
-    if (!accepted || !continuityTargetIsCurrent(captured, token).ok) {
+    if (!accepted || !current()) {
         await actorShardLeaseManager.markStale(leaseId, 'final target identity changed');
         latestActorShardDiagnostics.status = 'stale';
         return { status: 'stale', candidates: null };
@@ -12226,11 +12599,31 @@ async function persistActorRegistryForTurn(captured, {
     nextLedger,
     actorIds = [],
     token = null,
+    expectedState = null,
 } = {}) {
-    const previousDigest = actorRegistryDigest(previousLedger?.actorRegistry);
-    const digest = actorRegistryDigest(nextLedger?.actorRegistry);
-    if (previousDigest === digest) {
-        return { ok: true, ledger: nextLedger, persistenceMeta: null, reason: '' };
+    const registryDigest = actorRegistryDigest(nextLedger?.actorRegistry);
+    const previousLedgerDigest = actorLedgerDigest(previousLedger);
+    const nextLedgerDigest = actorLedgerDigest(nextLedger);
+    if (previousLedgerDigest === nextLedgerDigest) {
+        return {
+            ok: true,
+            ledger: previousLedger,
+            persistenceMeta: null,
+            snapshot: deepClone(expectedState || {
+                fieldRevision: 0,
+                digest: previousLedgerDigest,
+            }),
+            reason: '',
+        };
+    }
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) {
+        return {
+            ok: false,
+            ledger: previousLedger,
+            persistenceMeta: null,
+            reason: scopeGuard.reason || 'actor_registry.scope_stale',
+        };
     }
     if (token && !continuityTargetIsCurrent(captured, token).ok) {
         return {
@@ -12242,8 +12635,9 @@ async function persistActorRegistryForTurn(captured, {
     }
     const expected = {
         chatId: captured.chatId,
+        scopeDigest: captured.scopeDigest,
         actorIds,
-        digest,
+        digest: registryDigest,
     };
     const namespace = readChatNamespace(getContext());
     namespace.actorLedger = nextLedger;
@@ -12259,7 +12653,13 @@ async function persistActorRegistryForTurn(captured, {
         contentValidator: (persisted) => actorRegistryMatchesLedger(
             persisted?.actorLedger,
             expected,
-        ).ok,
+        ).ok && actorLedgerDigest(persisted?.actorLedger) === nextLedgerDigest,
+        expectedFieldStates: {
+            actorLedger: {
+                revision: Math.max(0, Number(expectedState?.fieldRevision) || 0),
+                digest: String(expectedState?.digest || previousLedgerDigest),
+            },
+        },
         precondition: () => (
             !token || continuityTargetIsCurrent(captured, token).ok
         ),
@@ -12269,10 +12669,12 @@ async function persistActorRegistryForTurn(captured, {
             ? 'actor_registry.readback_unsupported'
             : failureSink.code === 'host_save_readback_mismatch'
                 ? 'actor_registry.readback_mismatch'
-                : [
+            : [
                     'chat_context_changed',
                     'chat_context_changed_after_save',
                     'write_precondition_failed',
+                    'field_state_mismatch',
+                    'stale_namespace_revision',
                 ].includes(failureSink.code)
                     ? 'actor_registry.target_stale'
                     : 'actor_registry.commit_rejected';
@@ -12280,9 +12682,12 @@ async function persistActorRegistryForTurn(captured, {
     }
     const persistedLedger = normalizeActorLedger(
         successSink.readbackNamespace?.actorLedger,
-        { chatId: captured.chatId },
+        { chatId: captured.chatId, scopeDigest: captured.scopeDigest },
     );
-    if (!actorRegistryMatchesLedger(persistedLedger, expected).ok) {
+    if (
+        !actorRegistryMatchesLedger(persistedLedger, expected).ok
+        || actorLedgerDigest(persistedLedger) !== nextLedgerDigest
+    ) {
         return {
             ok: false,
             ledger: previousLedger,
@@ -12296,6 +12701,15 @@ async function persistActorRegistryForTurn(captured, {
         persistenceMeta: {
             rev: successSink.namespace?.rev,
             fieldRevisions: deepClone(successSink.namespace?.fieldRevisions || {}),
+        },
+        snapshot: {
+            fieldRevision: Math.max(
+                0,
+                Number(successSink.readbackNamespace?.fieldRevisions?.actorLedger)
+                    || Number(successSink.namespace?.fieldRevisions?.actorLedger)
+                    || 0,
+            ),
+            digest: actorLedgerDigest(persistedLedger),
         },
         reason: '',
     };
@@ -12311,7 +12725,17 @@ async function persistActorActionAttemptsForTurn(captured, {
     if (!attempts.length) {
         return { ok: true, ledger: nextLedger, persistenceMeta: null, reason: '' };
     }
-    if (token && !continuityTargetIsCurrent(captured, token).ok) {
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) {
+        return {
+            ok: false,
+            ledger: previousLedger,
+            persistenceMeta: null,
+            reason: scopeGuard.reason || 'action_attempt.scope_stale',
+        };
+    }
+    const current = () => !token || continuityTargetIsCurrent(captured, token).ok;
+    if (!current()) {
         return {
             ok: false,
             ledger: previousLedger,
@@ -12339,9 +12763,7 @@ async function persistActorActionAttemptsForTurn(captured, {
             persisted?.actorLedger,
             expected,
         ).ok,
-        precondition: () => (
-            !token || continuityTargetIsCurrent(captured, token).ok
-        ),
+        precondition: current,
     });
     if (!saved) {
         const reason = failureSink.code === 'host_save_readback_unsupported'
@@ -12359,7 +12781,7 @@ async function persistActorActionAttemptsForTurn(captured, {
     }
     const persistedLedger = normalizeActorLedger(
         successSink.readbackNamespace?.actorLedger,
-        { chatId: captured.chatId },
+        { chatId: captured.chatId, scopeDigest: captured.scopeDigest },
     );
     if (!actorActionAttemptsMatchLedger(persistedLedger, expected).ok) {
         return {
@@ -12382,34 +12804,44 @@ async function persistActorActionAttemptsForTurn(captured, {
 
 async function completeActorProfilesForTurn(captured, {
     actorLedger,
+    persistenceBaseLedger = actorLedger,
     userText = '',
-    acceptedNarrative = '',
     worldContext = '',
     stateAnchors = '',
     turn = 0,
     token = null,
-    priorityActorIds = [],
+    initialActorIds = [],
+    includeMaintenance = false,
+    discoveryContext = null,
+    resolveDiscoveries = null,
 } = {}) {
     const settings = getSettings();
     const candidates = selectActorProfileCompletionCandidates(actorLedger, {
-        maxActors: settings.actorProfileBatchCapacity,
+        initialActorIds,
+        maintenanceMaxActors: includeMaintenance
+            ? settings.actorProfileBatchCapacity
+            : 0,
         turn,
-        priorityActorIds,
+        readinessForActor: (actor) => actorProfileReadinessInLedger(
+            actorLedger,
+            actor?.id,
+        ),
     });
-    if (!candidates.length || settings.actorProfileCompletionMode === 'off') {
+    if (settings.actorProfileCompletionMode === 'off') {
         return {
-            ledger: actorLedger,
+            ledger: persistenceBaseLedger,
             candidates,
             accepted: [],
             rejected: [],
             failures: [],
             persistenceMeta: null,
             modelCalls: 0,
+            persistenceStatus: 'not_completed',
+            readbackVerified: false,
         };
     }
     const evidenceText = [
         userText,
-        acceptedNarrative,
         typeof worldContext === 'object' && worldContext !== null
             ? worldContext.text
             : worldContext,
@@ -12417,6 +12849,7 @@ async function completeActorProfilesForTurn(captured, {
     ].filter(Boolean).join('\n\n');
     return completeActorProfileBatchTransaction({
         ledger: actorLedger,
+        persistenceBaseLedger,
         candidates,
         evidenceText: cropText(evidenceText, 42000, '人物档案材料'),
         turn,
@@ -12425,26 +12858,48 @@ async function completeActorProfilesForTurn(captured, {
             messageId: captured.messageId,
             swipeId: captured.swipeId,
             generationId: captured.generationId,
+            scopeDigest: captured.scopeDigest,
             sourceRef: sourceRefOf(captured),
         },
         semanticRetry: settings.actorProfileSemanticRetries > 0,
+        allowDiscovery: true,
+        discoveryContext: {
+            ...(discoveryContext || {}),
+        },
+        resolveDiscoveries,
         isTargetCurrent: () => (
             !token || continuityTargetIsCurrent(captured, token).ok
         ),
-        requestBatch: ({ messages, attempt }) => callModel(messages, {
-            // Zero delegates the output ceiling to the selected connection.
-            // Profile batches do not borrow the actor action worker token cap.
-            maxTokens: 0,
-            task: attempt === 0 ? '人物完整档案批量生成' : '缺失人物档案批量替换补填',
-            channel: 'fast',
-            instructionModule: 'profile',
-            targetIndex: captured.index,
-            jsonMode: false,
-            failover: true,
-            maxFailovers: 1,
-            runUntilCancelled: settings.sovereigntyRunUntilCancelled !== false,
-        }),
-        persistBatch: async ({ ledger, expectedCommits }) => {
+        requestBatch: async ({ messages, attempt }) => {
+            const freshScope = await freshFrozenScopeGuard(captured);
+            if (!freshScope.ok) {
+                throw new Error(freshScope.reason || 'profile.scope_stale_before_call');
+            }
+            const output = await callModel(messages, {
+                // Zero delegates the output ceiling to the selected connection.
+                // Profile batches do not borrow the actor action worker token cap.
+                maxTokens: 0,
+                task: attempt === 0 ? '人物完整档案批量生成' : '缺失人物档案批量替换补填',
+                channel: 'fast',
+                instructionModule: 'profile',
+                targetIndex: captured.index,
+                jsonMode: false,
+                failover: true,
+                maxFailovers: 1,
+                runUntilCancelled: false,
+            });
+            const afterModelScope = await freshFrozenScopeGuard(captured);
+            if (!afterModelScope.ok) {
+                throw new Error(afterModelScope.reason || 'profile.scope_stale_after_call');
+            }
+            if (token && !continuityTargetIsCurrent(captured, token).ok) {
+                throw new Error('profile.target_stale_after_call');
+            }
+            return output;
+        },
+        persistPendingBatch: async ({ ledger, expectedCommits, expectedState }) => {
+            const freshScope = await freshFrozenScopeGuard(captured);
+            if (!freshScope.ok) return { ok: false, reason: freshScope.reason };
             const namespace = readChatNamespace(getContext());
             namespace.actorLedger = ledger;
             const failureSink = {};
@@ -12456,162 +12911,208 @@ async function completeActorProfilesForTurn(captured, {
                 failureSink,
                 successSink,
                 requireReadback: true,
-                readbackAttempts: 1,
+                readbackAttempts: 3,
                 contentValidator: (persisted) => expectedCommits.every((expected) => (
                     actorProfileCommitMatchesLedger(
                         persisted?.actorLedger,
-                        expected,
+                        { ...expected, phase: 'pending' },
                     ).ok
-                )),
+                )) && actorLedgerDigest(persisted?.actorLedger) === actorLedgerDigest(ledger),
+                expectedFieldStates: {
+                    actorLedger: {
+                        revision: Math.max(0, Number(expectedState?.fieldRevision) || 0),
+                        digest: String(expectedState?.digest || ''),
+                    },
+                },
                 precondition: () => (
                     !token || continuityTargetIsCurrent(captured, token).ok
                 ),
             });
             if (!saved) return { ok: false, reason: failureSink.code || 'host_save_rejected' };
+            const readbackLedger = normalizeActorLedger(
+                successSink.readbackNamespace?.actorLedger,
+                { chatId: captured.chatId, scopeDigest: captured.scopeDigest },
+            );
             return {
                 ok: true,
-                ledger: normalizeActorLedger(
-                    successSink.readbackNamespace?.actorLedger,
-                    { chatId: captured.chatId },
-                ),
+                ledger: readbackLedger,
                 persistenceMeta: {
                     rev: successSink.namespace?.rev,
                     fieldRevisions: deepClone(successSink.namespace?.fieldRevisions || {}),
+                },
+                snapshot: {
+                    fieldRevision: Math.max(
+                        0,
+                        Number(successSink.readbackNamespace?.fieldRevisions?.actorLedger)
+                            || Number(successSink.namespace?.fieldRevisions?.actorLedger)
+                            || 0,
+                    ),
+                    digest: actorLedgerDigest(readbackLedger),
+                },
+            };
+        },
+        persistFinalizedBatch: async ({ ledger, readShadowLedger, expectedCommits, expectedState }) => {
+            const freshScope = await freshFrozenScopeGuard(captured);
+            if (!freshScope.ok) return { ok: false, reason: freshScope.reason };
+            setActorProfileReadShadow(captured, readShadowLedger || ledger);
+            const namespace = readChatNamespace(getContext());
+            namespace.actorLedger = ledger;
+            const failureSink = {};
+            const successSink = {};
+            const saved = await writeChatNamespace(namespace, captured.chatId, {
+                fields: ['actorLedger'],
+                durable: true,
+                force: true,
+                failureSink,
+                successSink,
+                requireReadback: true,
+                readbackAttempts: 3,
+                contentValidator: (persisted) => expectedCommits.every((expected) => (
+                    actorProfileCommitMatchesLedger(
+                        persisted?.actorLedger,
+                        { ...expected, phase: 'final' },
+                    ).ok
+                )) && actorLedgerDigest(persisted?.actorLedger) === actorLedgerDigest(ledger),
+                expectedFieldStates: {
+                    actorLedger: {
+                        revision: Math.max(0, Number(expectedState?.fieldRevision) || 0),
+                        digest: String(expectedState?.digest || ''),
+                    },
+                },
+                precondition: () => (
+                    !token || continuityTargetIsCurrent(captured, token).ok
+                ),
+            });
+            if (!saved) return { ok: false, reason: failureSink.code || 'host_save_rejected' };
+            clearActorProfileReadShadow(captured);
+            const readbackLedger = normalizeActorLedger(
+                successSink.readbackNamespace?.actorLedger,
+                { chatId: captured.chatId, scopeDigest: captured.scopeDigest },
+            );
+            return {
+                ok: true,
+                ledger: readbackLedger,
+                persistenceMeta: {
+                    rev: successSink.namespace?.rev,
+                    fieldRevisions: deepClone(successSink.namespace?.fieldRevisions || {}),
+                },
+                snapshot: {
+                    fieldRevision: Math.max(
+                        0,
+                        Number(successSink.readbackNamespace?.fieldRevisions?.actorLedger)
+                            || Number(successSink.namespace?.fieldRevisions?.actorLedger)
+                            || 0,
+                    ),
+                    digest: actorLedgerDigest(readbackLedger),
                 },
             };
         },
     });
 }
 
-async function runContinuityTarget(captured, { force = false } = {}) {
+function actorProfileTransientResult(status, detail = {}) {
+    return {
+        module: 'actor_profiles',
+        status,
+        worldStatus: 'deferred_stage3',
+        ...detail,
+    };
+}
+
+function actorProfileTargetStateIsCurrent(epoch, chatId) {
+    return epoch === operationEpoch
+        && String(getContext()?.chatId || '') === String(chatId || '');
+}
+
+function publicActorLedgerWithoutPending(value, context = getContext()) {
+    const shadow = actorProfileReadShadow
+        && actorProfileReadShadow.epoch === operationEpoch
+        && String(actorProfileReadShadow.chatId || '') === String(context?.chatId || '')
+        ? actorProfileReadShadow.ledger
+        : value;
+    const ledger = normalizeActorLedger(shadow, { chatId: context?.chatId || '' });
+    ledger.actors = ledger.actors.map((actor) => {
+        const pending = Boolean(actor.pendingProfile);
+        const next = { ...actor };
+        delete next.pendingProfile;
+        if (pending) next.profilePending = true;
+        return next;
+    });
+    return ledger;
+}
+
+function setActorProfileReadShadow(captured, ledger) {
+    if (!captured || captured.epoch !== operationEpoch) return;
+    actorProfileReadShadow = {
+        epoch: captured.epoch,
+        chatId: captured.chatId,
+        ledger: deepClone(ledger),
+    };
+}
+
+function clearActorProfileReadShadow(captured = null) {
+    if (
+        captured
+        && actorProfileReadShadow
+        && (actorProfileReadShadow.epoch !== captured.epoch
+            || String(actorProfileReadShadow.chatId || '') !== String(captured.chatId || ''))
+    ) return;
+    actorProfileReadShadow = null;
+}
+
+async function runActorProfileTarget(captured, {
+    force = false,
+    includeMaintenance = false,
+} = {}) {
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) {
+        return actorProfileTransientResult('stale', { reason: scopeGuard.reason });
+    }
     const token = operationToken(captured);
     let guard = continuityTargetIsCurrent(captured, token);
-    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    if (!guard.ok) return actorProfileTransientResult('stale', { reason: guard.reason });
     const settings = getSettings();
-    const isReroll = ['swipe', 'regenerate'].includes(captured.generationType);
-    const context = getContext();
-    const message = context.chat[captured.index];
-    const messageText = String(message?.mes || '');
-    const acceptedNarrative = acceptedContentText(messageText);
-    const markers = extractContinuityMarkers(messageText);
-    if (settings.continuityMode === 'auto' && !markers.hasPresetParallel) {
-        markers.hasPresetParallel = await activePresetHasContinuityPrompt();
-        guard = continuityTargetIsCurrent(captured, token);
-        if (!guard.ok) return { status: 'stale', reason: guard.reason };
-    }
-    let namespace = readChatNamespace(context);
-    let sovereigntyRuntime = sovereigntyRuntimeFromNamespace(namespace, settings);
-    let sovereigntyTasks = {};
-    let worldTaskAlreadyCommitted = false;
-    if (settings.sovereigntyMode !== 'legacy') {
-        const migration = await ensureActorSovereigntyMigrationPersisted(context);
-        if (!migration.ok) {
-            return {
-                status: 'failed',
-                reason: migration.reason || 'migration.persistence_failed',
-            };
-        }
-        namespace = migration.namespace || readChatNamespace(context);
-        const replay = await replayPendingSovereigntyObservations(namespace, context);
-        if (!replay.ok) {
-            return {
-                status: 'failed',
-                reason: replay.reason || 'observation_wal.persistence_failed',
-            };
-        }
-        namespace = replay.namespace;
-        sovereigntyRuntime = normalizeSovereigntyRuntime(replay.runtime, {
-            chatId: captured.chatId,
-            scopeDigest: actorSovereigntyScopeDigest(namespace.actorSovereigntyScope),
+    if (settings.actorProfileCompletionMode === 'off') {
+        return actorProfileTransientResult('disabled', {
+            reason: 'actor_profile_completion_disabled',
         });
-        const sourceRef = sovereigntySourceRefOf(captured);
-        const sourceKey = sovereigntySourceKey(sourceRef);
-        const alreadyObserved = sovereigntyRuntime.observations.some((entry) => (
-            entry.sourceKey === sourceKey
-        ));
-        if (!alreadyObserved) {
-            const observed = observeSovereigntyTurn(sovereigntyRuntime, {
-                sourceRef,
-                modules: [
-                    'profile',
-                    'actor',
-                    'world',
-                    ...(settings.actorProfileCompletionMode === 'full_adult'
-                        ? ['physiology']
-                        : []),
-                ],
-            });
-            sovereigntyRuntime = observed.runtime;
-            const walSaved = await persistSovereigntyRuntime(sovereigntyRuntime, captured.chatId, {
-                durable: true,
-                force: true,
-            });
-            if (!walSaved) {
-                const failureCode = lastChatNamespaceWriteFailureCode
-                    || 'observation.persistence_failed';
-                const pending = await queuePendingSovereigntyObservation(
-                    captured,
-                    failureCode,
-                    { failureStage: 'observation_commit' },
-                );
-                // The rejected candidate contains the observation only in the
-                // failed write attempt. Render from the authoritative readback
-                // plus the session WAL overlay; never let that candidate hide
-                // the durable=false technical failure.
-                renderSovereigntyHealth();
-                return {
-                    status: 'failed',
-                    persistenceCommitted: false,
-                    persistenceFailureStage: 'observation_commit',
-                    persistenceFailureCode: failureCode,
-                    failureStatePersisted: pending.persisted,
-                    observationPendingInMemory: pending.queued,
-                    reason: failureCode,
-                };
-            }
-            namespace = readChatNamespace(context);
-        }
-        const claimed = await claimSovereigntyModules(namespace, captured, [
-            'profile',
-            ...(settings.actorProfileCompletionMode === 'full_adult'
-                ? ['physiology']
-                : []),
-            'actor',
-            'world',
-        ]);
-        sovereigntyRuntime = claimed.runtime;
-        sovereigntyTasks = claimed.claimed;
-        if (claimed.migrationBlocked) {
-            return {
-                status: 'failed',
-                reason: claimed.reason || 'migration.persistence_failed',
-            };
-        }
-        worldTaskAlreadyCommitted = worldSovereigntyTaskAlreadyCommitted(
-            sovereigntyRuntime,
-            sovereigntyTasks.world,
-            captured,
-        );
-        namespace.sovereigntyRuntime = sovereigntyRuntime;
     }
-    try {
-    const checkpointBase = continuityBase(namespace, captured);
-    const supersededContinuityTarget = isReroll
-        && checkpointLogicalReplyMatches(namespace.continuityCheckpoint, captured)
-        ? normalizeActorActionTarget(namespace.continuityCheckpoint?.target)
-        : null;
-    let base = checkpointBase;
-    base = mergeMarkerRecords(base, markers.records, {
-        chatId: captured.chatId,
-        maxThreads: settings.continuityMaxThreads,
-    });
+    const context = getContext();
+    const message = context?.chat?.[captured.index];
+    const messageText = String(message?.mes || '');
+    if (!sovereigntyNarrativeEligible(messageText)) {
+        return actorProfileTransientResult('not_completed', {
+            reason: 'accepted_narrative_ineligible',
+            eligible: false,
+        });
+    }
+    const acceptedNarrative = acceptedContentText(messageText);
+    if (!acceptedNarrative) {
+        return actorProfileTransientResult('not_completed', {
+            reason: 'accepted_narrative_empty',
+            eligible: false,
+        });
+    }
+    const migration = await ensureActorSovereigntyMigrationPersisted(
+        context,
+        captured.actorSovereigntyScope,
+    );
+    if (!migration.ok) {
+        return actorProfileTransientResult('not_completed', {
+            reason: migration.reason || 'migration.persistence_failed',
+        });
+    }
+    let namespace = migration.namespace || readChatNamespace(context);
+    guard = continuityTargetIsCurrent(captured, token);
+    if (!guard.ok) return actorProfileTransientResult('stale', { reason: guard.reason });
     const character = currentCharacter(context);
     const worldContext = await collectContinuityWorldContext(context, character);
-    guard = continuityTargetIsCurrent(captured, token);
-    if (!guard.ok) {
-        await requeueClaimedSovereigntyTasks(sovereigntyTasks, captured, 'target_advanced');
-        return { status: 'stale', reason: guard.reason };
+    const worldContextGuard = await freshFrozenScopeGuard(captured);
+    if (!worldContextGuard.ok) {
+        return actorProfileTransientResult('stale', { reason: worldContextGuard.reason });
     }
+    guard = continuityTargetIsCurrent(captured, token);
+    if (!guard.ok) return actorProfileTransientResult('stale', { reason: guard.reason });
     let stateAnchors = '未读取到当前 MVU 锚点。';
     let currentMvuData = null;
     try {
@@ -12619,302 +13120,439 @@ async function runContinuityTarget(captured, { force = false } = {}) {
         currentMvuData = Mvu ? await mvuDataAt(Mvu, captured.index) : null;
         stateAnchors = continuityAnchorState(currentMvuData);
     } catch (error) {
-        console.warn('[MVU Auto Doctor] 读取活世界时间/地点锚点失败：', error);
+        console.warn('[MVU Auto Doctor] 读取人物档案状态锚点失败：', error);
+    }
+    const stateGuard = await freshFrozenScopeGuard(captured);
+    if (!stateGuard.ok) {
+        return actorProfileTransientResult('stale', { reason: stateGuard.reason });
     }
     guard = continuityTargetIsCurrent(captured, token);
-    if (!guard.ok) {
-        await requeueClaimedSovereigntyTasks(sovereigntyTasks, captured, 'target_advanced');
-        return { status: 'stale', reason: guard.reason };
-    }
-    if (
-        settings.sovereigntyMode === 'legacy'
-        && !continuityFeatureActive(settings, markers, base, worldContext, force)
-    ) {
-        await applyContinuityInjection();
-        return { status: 'disabled' };
-    }
-    const director = detectContinuityDirector(context, messageText, markers);
-    setContinuityStatus('世界连续性：正在整理因果…', 'busy');
-    const sourcePlan = continuityTickPlan(context, base, captured, namespace);
-    const ticksDue = sourcePlan.ticksDue;
-    namespace.continuitySourceReceipts = [
-        ...sourcePlan.receipts.map((receipt) => ({
-            ...receipt,
-            targetIndex: captured.index,
-            checkedAt: Date.now(),
-        })),
-        ...(Array.isArray(namespace.continuitySourceReceipts)
-            ? namespace.continuitySourceReceipts
-            : []),
-    ].filter((receipt, index, list) => (
-        list.findIndex((candidate) => (
-            candidate.sourceIndex === receipt.sourceIndex
-            && candidate.targetIndex === receipt.targetIndex
-            && candidate.barrierId === receipt.barrierId
-        )) === index
-    )).slice(0, 500);
-    // Source receipts join the final world transaction. Persisting them alone
-    // forced a full host save even though the observation WAL already keeps the
-    // accepted source recoverable after refresh/restart.
-    if (sourcePlan.skippedCount > 0) {
-        setContinuityStatus(
-            `世界连续性：永久跳过 ${sourcePlan.skippedCount} 个 failed/stale 来源，正在处理 ${ticksDue} 个可用回合…`,
-            'busy',
-        );
-    }
-    if (ticksDue > 1) {
-        setContinuityStatus(`世界连续性：正在补记 ${ticksDue} 个尚未落账的 AI 回合…`, 'busy');
-    }
-    let scheduledBase = base;
-    const changedClockThreads = new Set();
-    for (let tick = 1; tick <= ticksDue; tick += 1) {
-        const tickPlan = advanceContinuityClocks(scheduledBase, {
-            chatId: captured.chatId,
-            maxThreads: settings.continuityMaxThreads,
-        });
-        scheduledBase = tickPlan.state;
-        scheduledBase.turn = base.turn + tick;
-        for (const id of tickPlan.changedThreadIds) changedClockThreads.add(id);
-    }
-    const clockPlan = {
-        state: scheduledBase,
-        changedThreadIds: [...changedClockThreads],
-    };
-    const tickTurn = base.turn + ticksDue;
-    const worldClockChanged = continuityWorldDigest(base)
-        !== continuityWorldDigest(scheduledBase);
-    const actorCheckpoint = namespace.actorLedgerCheckpoint;
-    const actorCheckpointState = isReroll
-        ? await actorLedgerCheckpointState(namespace, actorCheckpoint)
-        : null;
-    const rerollActorBase = isReroll
-        && actorCheckpointState
-        && checkpointLogicalReplyMatches(actorCheckpoint, captured)
-        ? actorCheckpointState
-        : namespace.actorLedger;
-    const storedActorLedger = normalizeActorLedger(
-        rerollActorBase,
-        {
-            chatId: captured.chatId,
-            excludedActorNames: currentPlayerActorNames(context),
-        },
-    );
-    const storedWorldPressure = normalizeWorldPressureState(namespace.worldPressure);
-    const knownThreatPressure = scheduledBase.threads
-        .filter((thread) => (
-            thread.kind === 'enemy'
-            && !['resolved', 'dormant'].includes(thread.stage)
-        ))
-        .reduce((total, thread) => total + Math.min(3, Math.max(1, Number(thread.level) || 1)), 0)
-        + (scheduledBase.world?.shadows?.enemies || [])
-            .filter((enemy) => !['resolved', 'dormant'].includes(enemy.status))
-            .reduce((total, enemy) => (
-                total + (/boss|首领/iu.test(`${enemy.name || ''} ${enemy.summary || ''}`) ? 3 : 1)
-            ), 0);
-    let worldPressure = observeAcceptedContentPressure(storedWorldPressure, {
-        turn: tickTurn,
-        content: acceptedNarrative,
-        sameSceneBossCap: settings.worldSameSceneBossCap,
-        pressureCap: settings.worldPressureCap,
-        knownThreatPressure,
-    });
+    if (!guard.ok) return actorProfileTransientResult('stale', { reason: guard.reason });
+
+    namespace = readChatNamespace(getContext());
     const excludedActorNames = currentPlayerActorNames(context);
-    const preRegistryLedger = normalizeActorLedger(storedActorLedger, {
+    const storedActorLedger = normalizeActorLedger(namespace.actorLedger, {
         chatId: captured.chatId,
         identityScopeId: captured.identityScopeId,
         excludedActorNames,
     });
-    // readChatNamespace has already completed the only compatibility
-    // migration. Accepted continuity is not an ActorRegistry/profile writer.
-    let actorLedger = normalizeActorLedger(storedActorLedger, {
+    const persistedRegistryScopeDigest = String(
+        storedActorLedger?.actorRegistry?.scopeDigest || '',
+    ).trim();
+    if (persistedRegistryScopeDigest && persistedRegistryScopeDigest !== captured.scopeDigest) {
+        return actorProfileTransientResult('not_completed', {
+            reason: 'actor_registry.scope_digest_mismatch',
+            registryReadback: false,
+        });
+    }
+    const s0Ledger = normalizeActorLedger(storedActorLedger, {
         chatId: captured.chatId,
         identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+        allowScopeDigestFill: true,
         excludedActorNames,
     });
-    actorLedger.turn = tickTurn;
-    const actorDiscovery = discoverActorsFromTurnSources(actorLedger, {
-        userText: previousUserMessageText(context, captured.index),
-        acceptedContent: acceptedNarrative,
-        knownActorNames: actorNamesFromMvuData(currentMvuData),
-        excludedActorNames,
-        sourceRef: sourceRefOf(captured),
-        turn: tickTurn,
-    });
-    const actorCandidateUpsert = runActorRegistryUpsert(
-        actorDiscovery.ledger,
-        actorDiscovery.candidates,
-        {
-            chatId: captured.chatId,
-            identityScopeId: captured.identityScopeId,
-            expectedSourceRef: sourceRefOf(captured),
-            turn: tickTurn,
-            excludedActorNames,
-        },
+    const turn = Math.max(
+        1,
+        Number(s0Ledger.turn) || 0,
+        Number(captured.index) + 1,
     );
-    const actorRegistration = promoteActorCandidatesToRegistry(
-        actorCandidateUpsert.ledger,
-        actorCandidatesForRegistryPromotion(
-            actorDiscovery.candidates,
-            actorCandidateUpsert,
+    const sourceRef = sourceRefOf(captured);
+    const s0Snapshot = {
+        fieldRevision: Math.max(
+            0,
+            Number(namespace.fieldRevisions?.actorLedger) || 0,
         ),
-        {
+        // CAS is against the canonical form of the value actually persisted by
+        // the host. The scoped transaction candidate may fill a legacy empty
+        // scopeDigest, but that fill must not poison the pre-write comparison.
+        digest: actorLedgerDigest(namespace.actorLedger),
+    };
+    // A sealed Phase-1 batch is recoverable only by an explicit current-source
+    // force/retry.  It is never sent through the normal model path again.
+    const pendingRecovery = actorProfilePendingTransactionForSource(s0Ledger, {
+        sourceRef,
+        scopeDigest: captured.scopeDigest,
+    });
+    if (pendingRecovery.present) {
+        if (!force) {
+            return actorProfileTransientResult('not_completed', {
+                target: sourceRef,
+                eligible: true,
+                reason: 'pending_profile_manual_recovery_required',
+                pending: true,
+                modelCalls: 0,
+            });
+        }
+        if (!pendingRecovery.valid) {
+            return actorProfileTransientResult('not_completed', {
+                target: sourceRef,
+                eligible: true,
+                reason: 'pending_profile_recovery_mismatch',
+                pending: true,
+                modelCalls: 0,
+                recovery: { valid: false, reasons: pendingRecovery.reasons || [] },
+            });
+        }
+        const finalizedRecovery = finalizeActorProfileBaselinesInLedger(
+            s0Ledger,
+            pendingRecovery.writeSet,
+            {
+                preparedLedgerDigest: pendingRecovery.preparedLedgerDigest,
+                preparedFieldRevision: pendingRecovery.preparedFieldRevision,
+                transactionId: pendingRecovery.transactionId,
+                writeSetDigest: pendingRecovery.writeSetDigest,
+            },
+        );
+        if (!finalizedRecovery.finalized) {
+            return actorProfileTransientResult('not_completed', {
+                target: sourceRef,
+                eligible: true,
+                reason: finalizedRecovery.reason || 'pending_profile_recovery_rejected',
+                pending: true,
+                modelCalls: 0,
+            });
+        }
+        const recoveryFresh = await freshFrozenScopeGuard(captured);
+        if (!recoveryFresh.ok) {
+            return actorProfileTransientResult('stale', { reason: recoveryFresh.reason });
+        }
+        const recoveryNamespace = readChatNamespace(getContext());
+        recoveryNamespace.actorLedger = finalizedRecovery.ledger;
+        const recoveryFailureSink = {};
+        const recoverySuccessSink = {};
+        const recoveryExpected = pendingRecovery.writeSet.map((entry) => ({
+            ...entry,
+            phase: 'final',
+        }));
+        const savedRecovery = await writeChatNamespace(recoveryNamespace, captured.chatId, {
+            fields: ['actorLedger'],
+            durable: true,
+            force: true,
+            failureSink: recoveryFailureSink,
+            successSink: recoverySuccessSink,
+            requireReadback: true,
+            readbackAttempts: 3,
+            contentValidator: (persisted) => recoveryExpected.every((expected) => (
+                actorProfileCommitMatchesLedger(persisted?.actorLedger, expected).ok
+            )) && actorLedgerDigest(persisted?.actorLedger)
+                === actorLedgerDigest(finalizedRecovery.ledger),
+            expectedFieldStates: {
+                actorLedger: {
+                    revision: s0Snapshot.fieldRevision,
+                    digest: s0Snapshot.digest,
+                },
+            },
+            precondition: () => !token || continuityTargetIsCurrent(captured, token).ok,
+        });
+        if (!savedRecovery) {
+            return actorProfileTransientResult('not_completed', {
+                target: sourceRef,
+                eligible: true,
+                reason: recoveryFailureSink.code || 'host_save_readback_mismatch',
+                pending: true,
+                modelCalls: 0,
+            });
+        }
+        return actorProfileTransientResult('atomic_readback', {
+            target: sourceRef,
+            eligible: true,
+            force: true,
+            modelCalls: 0,
+            recoveredPending: true,
+            profileBatch: {
+                initial: pendingRecovery.actorIds.length,
+                maintenance: 0,
+                modelCalls: 0,
+                committed: pendingRecovery.actorIds,
+                failed: [],
+                readbackVerified: true,
+            },
+        });
+    }
+    const characterCreationTicketBatch = npcDesignTicketBatchForTarget(captured);
+    const currentSourceIncompleteActorIds = Object.values(
+        s0Ledger.actorRegistry?.registered || {},
+    )
+        .filter((entry) => (entry.sourceRefs || []).some((entrySourceRef) => (
+            acceptedActorSourceRefMatches(entrySourceRef, sourceRef)
+        )))
+        .map((entry) => entry.actorRef?.actorId)
+        .filter((actorId) => {
+            if (!actorId) return false;
+            return actorProfileReadinessInLedger(s0Ledger, actorId).ready !== true;
+        });
+    const profilePreparation = prepareActorLedgerProfilesV6(s0Ledger, {
+        mode: settings.actorProfileCompletionMode,
+        turn,
+    });
+    const promptLedger = profilePreparation.ledger;
+    const registeredActorIndex = Object.values(s0Ledger.actorRegistry?.registered || {})
+        .map((entry) => ({
+            kind: 'actor_ref',
+            actorId: entry.actorRef?.actorId,
+            displayName: entry.actorRef?.displayName,
+            aliases: deepClone(entry.actorRef?.aliases || []),
+        }))
+        .filter((entry) => entry.actorId && entry.displayName)
+        .sort((left, right) => left.actorId.localeCompare(right.actorId));
+    const protectedActorNames = [
+        ...excludedActorNames,
+        ...actorNamesFromMvuData(currentMvuData),
+        character?.name,
+        context?.name2,
+        context?.characterName,
+    ].filter(Boolean);
+    const resolveProfileDiscoveries = async ({ discoveries = [] } = {}) => {
+        const beforeRegistryGuard = await freshFrozenScopeGuard(captured);
+        if (!beforeRegistryGuard.ok) {
+            return { ok: false, ledger: s0Ledger, reason: beforeRegistryGuard.reason };
+        }
+        const liveNamespace = readChatNamespace(getContext());
+        const liveLedger = normalizeActorLedger(liveNamespace.actorLedger, {
             chatId: captured.chatId,
             identityScopeId: captured.identityScopeId,
-            expectedSourceRef: sourceRefOf(captured),
-            turn: tickTurn,
+            scopeDigest: captured.scopeDigest,
+            allowScopeDigestFill: true,
             excludedActorNames,
-        },
-    );
-    actorRegistration.quarantined = [
-        ...actorCandidateUpsert.quarantined,
-        ...actorRegistration.quarantined,
-    ];
-    actorLedger = actorRegistration.ledger;
-    const characterCreationTicketBatch = npcDesignTicketBatchForTarget(captured);
-    const characterCreationTicketBinding = characterCreationTicketBatch
-        ? bindCharacterCreationTicketsToRegisteredActors(actorLedger, {
-            registration: actorRegistration,
-            candidates: actorDiscovery.candidates,
-            batch: characterCreationTicketBatch,
-            target: {
-                ...sourceRefOf(captured),
-                generationId: captured.generationId,
-                generationType: captured.generationType,
+        });
+        const liveSnapshot = {
+            fieldRevision: Math.max(
+                0,
+                Number(liveNamespace.fieldRevisions?.actorLedger) || 0,
+            ),
+            digest: actorLedgerDigest(liveNamespace.actorLedger),
+        };
+        if (
+            liveSnapshot.fieldRevision !== s0Snapshot.fieldRevision
+            || liveSnapshot.digest !== s0Snapshot.digest
+        ) {
+            return { ok: false, ledger: liveLedger, reason: 'actor_profile.target_stale' };
+        }
+        const actorDiscovery = discoverActorsFromTurnSources(s0Ledger, {
+            acceptedContent: acceptedNarrative,
+            excludedActorNames,
+            sourceRef,
+            turn,
+            modelProfileDiscoveries: discoveries,
+        });
+        const localFailures = [...(actorDiscovery.unresolved || [])];
+        const registeredNames = new Set(Object.values(
+            s0Ledger.actorRegistry?.registered || {},
+        ).flatMap((entry) => [
+            entry.actorRef?.displayName,
+            ...(entry.actorRef?.aliases || []),
+        ]).filter(Boolean));
+        const eligibleCandidates = actorDiscovery.candidates.filter((candidate) => {
+            if (!registeredNames.has(candidate.name)) return true;
+            localFailures.push({
+                candidateId: candidate.candidateId,
+                name: candidate.name,
+                reason: 'actor_profile.discovery_already_registered',
+            });
+            return false;
+        });
+        const eligibleCandidateIds = new Set(eligibleCandidates.map((entry) => entry.candidateId));
+        const acceptedProfileDiscoveries = (actorDiscovery.modelProfileDiscoveries || [])
+            .filter((entry) => eligibleCandidateIds.has(entry.candidateId));
+        if (!eligibleCandidates.length) {
+            return {
+                ok: true,
+                ledger: s0Ledger,
+                snapshot: s0Snapshot,
+                candidates: [],
+                entries: [],
+                failures: localFailures,
+                registry: {
+                    mutated: false,
+                    readback: false,
+                    promotedActorIds: [],
+                    quarantined: [],
+                    unresolved: deepClone(actorDiscovery.unresolved || []),
+                    ticketPoolExhausted: [],
+                    ticketProducer: 'stage4_required',
+                },
+            };
+        }
+        const actorCandidateUpsert = runActorRegistryUpsert(
+            actorDiscovery.ledger,
+            eligibleCandidates,
+            {
+                chatId: captured.chatId,
+                identityScopeId: captured.identityScopeId,
+                scopeDigest: captured.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: sourceRef,
+                turn,
+                excludedActorNames,
             },
-            protectedActorNames: [
-                ...excludedActorNames,
-                ...actorNamesFromMvuData(currentMvuData),
-                character?.name,
-                context?.name2,
-                context?.characterName,
-            ],
-            authorityText: worldContext.text,
-        })
-        : null;
-    if (characterCreationTicketBinding?.matched) {
-        actorLedger = characterCreationTicketBinding.ledger;
-    }
-    const ticketBindingFailures = (characterCreationTicketBinding?.skipped || [])
-        .filter((entry) => /:(?:ticket_pool_exhausted|ticket_bind_rejected)$/u.test(entry));
-    for (const failure of ticketBindingFailures) {
-        const text = String(failure);
-        const code = text.slice(text.lastIndexOf(':') + 1) || 'ticket_bind_rejected';
-        recordModelDiagnostic({
-            phase: 'validation',
-            task: '原创人物生成前票据绑定',
-            channel: 'local',
-            status: 'failed',
-            targetIndex: captured.index,
-            failureKind: code === 'ticket_pool_exhausted'
-                ? 'ticket-pool-exhausted'
-                : 'ticket-bind-rejected',
-            validationCode: code,
-            reason: failure,
-            outputChars: 0,
-        });
-    }
-    if (actorRegistration.quarantined.length) {
-        recordModelDiagnostic({
-            phase: 'identity',
-            task: '人物候选登记',
-            channel: 'local',
-            status: 'quarantined',
-            targetIndex: captured.index,
-            failureKind: 'actor-candidate-quarantined',
-            reason: [...new Set(actorRegistration.quarantined.map((entry) => entry.reason))]
-                .join(','),
-            outputChars: 0,
-        });
-    }
-    actorLedger = reconcileActorIdentityRevealsFromAcceptedContent(actorLedger, {
-        content: acceptedNarrative,
-        sourceRef: sourceRefOf(captured),
-    });
-    actorLedger = reconcileActorMutationLineageFromAcceptedContent(actorLedger, {
-        content: acceptedNarrative,
-        sourceRef: sourceRefOf(captured),
-    });
-    actorLedger = reconcileActorLifecycleFromAcceptedContent(actorLedger, {
-        content: acceptedNarrative,
-        sourceRef: sourceRefOf(captured),
-    });
-    const observerActorIds = inferObserverActorIds(actorLedger, acceptedNarrative);
-    actorLedger = applyAcceptedContentObservations(actorLedger, {
-        content: acceptedNarrative,
-        sourceRef: sourceRefOf(captured),
-        observerActorIds,
-    });
-    const registryPersistence = await persistActorRegistryForTurn(captured, {
-        previousLedger: preRegistryLedger,
-        nextLedger: actorLedger,
-        actorIds: actorRegistration.promoted.map((entry) => entry.actorRef.actorId),
-        token,
-    });
-    if (!registryPersistence.ok) {
-        await requeueClaimedSovereigntyTasks(
-            sovereigntyTasks,
-            captured,
-            registryPersistence.reason,
         );
-        return { status: 'failed', reason: registryPersistence.reason };
-    }
-    actorLedger = registryPersistence.ledger;
-    if (characterCreationTicketBinding?.matched) {
-        npcDesignTicketBatches.delete(characterCreationTicketBatch.generationId);
-        if (characterCreationTicketBinding.bindings.length) {
+        const actorRegistration = promoteActorCandidatesToRegistry(
+            actorCandidateUpsert.ledger,
+            actorCandidatesForRegistryPromotion(eligibleCandidates, actorCandidateUpsert),
+            {
+                chatId: captured.chatId,
+                identityScopeId: captured.identityScopeId,
+                scopeDigest: captured.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: sourceRef,
+                turn,
+                excludedActorNames,
+            },
+        );
+        actorRegistration.quarantined = [
+            ...actorCandidateUpsert.quarantined,
+            ...actorRegistration.quarantined,
+        ];
+        localFailures.push(...actorRegistration.quarantined);
+        let nextLedger = actorRegistration.ledger;
+        const ticketBinding = characterCreationTicketBatch
+            ? bindCharacterCreationTicketsToRegisteredActors(nextLedger, {
+                registration: actorRegistration,
+                candidates: eligibleCandidates,
+                batch: characterCreationTicketBatch,
+                target: {
+                    ...sourceRef,
+                    generationId: captured.generationId,
+                    generationType: captured.generationType,
+                },
+                protectedActorNames,
+                authorityText: worldContext.text,
+            })
+            : null;
+        if (ticketBinding?.matched) nextLedger = ticketBinding.ledger;
+        const ticketRejected = (ticketBinding?.skipped || [])
+            .filter((entry) => /:ticket_bind_rejected$/u.test(entry))
+            .map((reason) => ({ reason }));
+        localFailures.push(...ticketRejected);
+        const registryPersistence = await persistActorRegistryForTurn(captured, {
+            previousLedger: s0Ledger,
+            nextLedger,
+            actorIds: actorRegistration.promoted.map((entry) => entry.actorRef.actorId),
+            token,
+            expectedState: s0Snapshot,
+        });
+        if (!registryPersistence.ok) {
+            return {
+                ok: false,
+                ledger: registryPersistence.ledger || s0Ledger,
+                reason: registryPersistence.reason,
+                failures: localFailures,
+            };
+        }
+        const s1Ledger = registryPersistence.ledger;
+        const promotedActorIds = actorRegistration.promoted
+            .map((entry) => entry.actorRef.actorId)
+            .filter(Boolean);
+        const preparedS1 = prepareActorLedgerProfilesV6(s1Ledger, {
+            mode: settings.actorProfileCompletionMode,
+            turn,
+        }).ledger;
+        const discoveryCandidates = selectActorProfileCompletionCandidates(preparedS1, {
+            initialActorIds: promotedActorIds,
+            maintenanceMaxActors: 0,
+            turn,
+            readinessForActor: (actor) => actorProfileReadinessInLedger(
+                s1Ledger,
+                actor?.id,
+            ),
+        });
+        const discoveryByCandidateId = new Map(acceptedProfileDiscoveries.map((entry) => [
+            entry.candidateId,
+            entry,
+        ]));
+        const candidateByActorId = new Map(discoveryCandidates.map((entry) => [
+            entry.actorRef.actorId,
+            entry,
+        ]));
+        const entries = [];
+        for (const promotion of actorRegistration.promoted) {
+            const discovery = discoveryByCandidateId.get(promotion.candidateId);
+            const candidate = candidateByActorId.get(promotion.actorRef.actorId);
+            if (!discovery || !candidate) {
+                localFailures.push({
+                    candidateId: promotion.candidateId,
+                    actorId: promotion.actorRef.actorId,
+                    reason: 'actor_profile.discovery_promotion_mapping_missing',
+                });
+                continue;
+            }
+            entries.push({
+                candidateId: promotion.candidateId,
+                actorRef: {
+                    actorId: promotion.actorRef.actorId,
+                    name: promotion.actorRef.displayName,
+                },
+                candidate: discovery.candidate,
+                repairs: discovery.repairs || [],
+            });
+        }
+        if (ticketBinding?.matched && ticketBinding.ticketPool?.eligible > 0) {
+            npcDesignTicketBatches.delete(characterCreationTicketBatch.generationId);
+        }
+        if (ticketBinding?.bindings?.length) {
             recordOperation(
                 '原创人物骰票',
-                `已将 ${characterCreationTicketBinding.bindings.length} 张生成前人物票随身份注册原子保存`,
+                `已条件消费 ${ticketBinding.bindings.length} 张 Stage4 生成前人物票`,
                 'ok',
             );
         }
-        if (characterCreationTicketBinding.ticketPool?.exhausted) {
+        if (ticketBinding?.ticketPool?.exhausted) {
             recordOperation(
                 '原创人物骰票',
-                `生成前票据池已耗尽：${characterCreationTicketBinding.ticketPool.exhaustedActorRefs.length} 名原创人物不事后重掷；仍按权威事实与已接受正文完成整档`,
+                `票据池耗尽：${ticketBinding.ticketPool.exhaustedActorRefs.length} 人不重掷，继续 hypothesis 整档`,
                 'warn',
             );
         }
-    }
-    if (registryPersistence.persistenceMeta) {
-        namespace.rev = registryPersistence.persistenceMeta.rev;
-        namespace.fieldRevisions = registryPersistence.persistenceMeta.fieldRevisions;
-    }
-    let profilePreparation = prepareActorLedgerProfilesV6(actorLedger, {
-        mode: settings.actorProfileCompletionMode,
-        turn: tickTurn,
-    });
-    actorLedger = profilePreparation.ledger;
-    const createdActorIds = actorRegistration.promoted
-        .filter((entry) => entry.created === true)
-        .map((entry) => entry.actorRef.actorId);
-    const createdActorIdSet = new Set(createdActorIds);
-    const ticketedCreatedActorIds = (characterCreationTicketBinding?.bindings || [])
-        .map((entry) => entry.actorRef.actorId)
-        .filter((actorId) => createdActorIdSet.has(actorId));
-    const priorityActorIds = [
-        ...ticketedCreatedActorIds,
-        ...createdActorIds.filter((actorId) => !ticketedCreatedActorIds.includes(actorId)),
-    ];
+        return {
+            ok: true,
+            ledger: s1Ledger,
+            snapshot: registryPersistence.snapshot || s0Snapshot,
+            candidates: discoveryCandidates,
+            entries,
+            failures: localFailures,
+            registry: {
+                mutated: actorLedgerDigest(s1Ledger) !== s0Snapshot.digest,
+                readback: Boolean(registryPersistence.persistenceMeta),
+                promotedActorIds,
+                quarantined: deepClone(actorRegistration.quarantined),
+                unresolved: deepClone(actorDiscovery.unresolved || []),
+                ticketPoolExhausted: deepClone(
+                    ticketBinding?.ticketPool?.exhaustedActorRefs || [],
+                ),
+                ticketProducer: 'stage4_required',
+            },
+        };
+    };
+    const initialActorIds = [...currentSourceIncompleteActorIds];
     const profileCompletion = await completeActorProfilesForTurn(captured, {
-        actorLedger,
+        actorLedger: promptLedger,
+        persistenceBaseLedger: s0Ledger,
         userText: playerAuthoredTextFromCompiledMessage(
             previousUserMessageText(context, captured.index),
         ),
-        acceptedNarrative,
         worldContext,
         stateAnchors,
-        turn: tickTurn,
+        turn,
         token,
-        priorityActorIds,
+        initialActorIds,
+        includeMaintenance,
+        discoveryContext: {
+            completionMode: settings.actorProfileCompletionMode,
+            acceptedNarrative,
+            registeredActorIndex,
+            characterCreationTickets: deepClone(
+                characterCreationTicketBatch?.tickets || [],
+            ),
+            ticketProducer: 'stage4_required',
+        },
+        resolveDiscoveries: resolveProfileDiscoveries,
     });
-    actorLedger = profileCompletion.ledger;
+    const actorLedger = profileCompletion.ledger;
     for (const failure of [
-        ...ticketBindingFailures.map((reason) => ({ reason })),
         ...(profileCompletion.failures || []),
         ...(profileCompletion.rejected || []),
     ]) {
-        if (ticketBindingFailures.includes(failure.reason)) continue;
         recordModelDiagnostic({
             phase: 'validation',
             task: '人物完整档案批次',
@@ -12932,1259 +13570,666 @@ async function runContinuityTarget(captured, { force = false } = {}) {
             outputChars: 0,
         });
     }
-    if (profileCompletion.persistenceMeta) {
-        namespace.rev = profileCompletion.persistenceMeta.rev;
-        namespace.fieldRevisions = profileCompletion.persistenceMeta.fieldRevisions;
-    }
-    const profileViews = actorLedger.actors.map((actor) => ({
-        actorId: actor.id,
-        view: actorProfileV6View(actor),
+    const currentSourceActorIds = Object.values(actorLedger.actorRegistry?.registered || {})
+        .filter((entry) => (entry.sourceRefs || []).some((entrySourceRef) => (
+            acceptedActorSourceRefMatches(entrySourceRef, sourceRef)
+        )))
+        .map((entry) => entry.actorRef?.actorId)
+        .filter(Boolean);
+    const allInitialActorIds = [
+        ...initialActorIds,
+        ...(profileCompletion.registry?.promotedActorIds || []),
+    ].filter((actorId, index, list) => actorId && list.indexOf(actorId) === index);
+    const initialReadiness = allInitialActorIds.map((actorId) => ({
+        actorId,
+        ...actorProfileReadinessInLedger(actorLedger, actorId),
     }));
-    profilePreparation = {
-        ledger: actorLedger,
-        prepared: profileViews
-            .filter((entry) => entry.view.preparedForAction)
-            .map((entry) => entry.actorId),
-        deferred: profileViews
-            .filter((entry) => !entry.view.preparedForAction)
-            .map((entry) => entry.actorId),
-        coverage: profileViews.length
-            ? Math.round(profileViews.reduce((sum, entry) => sum + entry.view.coverage, 0)
-                / profileViews.length)
-            : 100,
+    const unfinishedInitial = initialReadiness.filter((entry) => entry.ready !== true);
+    const unfinishedCurrentSource = currentSourceActorIds
+        .map((actorId) => ({
+            actorId,
+            ...actorProfileReadinessInLedger(actorLedger, actorId),
+        }))
+        .filter((entry) => entry.ready !== true);
+    const selectedInitial = profileCompletion.candidates
+        .filter((entry) => entry.batchClass === 'initial').length;
+    const selectedMaintenance = profileCompletion.candidates
+        .filter((entry) => entry.batchClass === 'maintenance').length;
+    const failures = [
+        ...(profileCompletion.failures || []),
+        ...(profileCompletion.rejected || []),
+    ];
+    const quarantined = profileCompletion.registry?.quarantined || [];
+    const unresolved = profileCompletion.registry?.unresolved || [];
+    const hasCandidates = profileCompletion.candidates.length > 0;
+    const atomicallyReadBack = hasCandidates
+        && profileCompletion.persistenceStatus === 'atomic_readback'
+        && profileCompletion.readbackVerified === true
+        && failures.length === 0
+        && unfinishedInitial.length === 0
+        && unfinishedCurrentSource.length === 0
+        && quarantined.length === 0
+        && unresolved.length === 0;
+    const noCandidates = profileCompletion.persistenceStatus === 'no_candidates'
+        && profileCompletion.modelCalls === 1
+        && profileCompletion.explicitEmpty === true
+        && !hasCandidates
+        && unfinishedCurrentSource.length === 0
+        && unfinishedInitial.length === 0
+        && failures.length === 0
+        && quarantined.length === 0
+        && unresolved.length === 0;
+    const status = atomicallyReadBack
+        ? 'atomic_readback'
+        : noCandidates
+            ? 'no_candidates'
+            : 'not_completed';
+    if (actorProfileTargetStateIsCurrent(captured.epoch, captured.chatId)) {
+        renderActorProfiles({ ...namespace, actorLedger });
+    }
+    return actorProfileTransientResult(status, {
+        target: sourceRef,
+        eligible: true,
+        force: force === true,
+        registryReadback: profileCompletion.registry?.readback === true,
+        profileBatch: {
+            initial: selectedInitial,
+            maintenance: selectedMaintenance,
+            modelCalls: profileCompletion.modelCalls,
+            committed: profileCompletion.accepted.map((entry) => entry.actorId),
+            failed: failures,
+            readbackVerified: profileCompletion.readbackVerified === true,
+        },
+        ticketPoolExhausted: deepClone(
+            profileCompletion.registry?.ticketPoolExhausted || [],
+        ),
+        unfinishedInitial,
+        unfinishedCurrentSource,
+        reason: status === 'not_completed'
+            ? failures[0]?.reason
+                || unfinishedCurrentSource[0]?.reason
+                || unfinishedInitial[0]?.reason
+                || quarantined[0]?.reason
+                || unresolved[0]?.reason
+                || 'profile_batch_incomplete'
+            : '',
+    });
+}
+
+function stage3AcceptedTarget(captured) {
+    if (!captured) return null;
+    const target = {
+        chatId: String(captured.chatId || ''),
+        index: Math.max(0, Number(captured.index) || 0),
+        messageId: String(captured.messageId || ''),
+        swipeId: Math.max(0, Number(captured.swipeId) || 0),
+        generationSerial: Math.max(0, Number(captured.generationSerial) || 0),
+        scopeDigest: String(captured.scopeDigest || ''),
+        contentFingerprint: String(captured.contentFingerprint || captured.fingerprint || ''),
     };
-    const persistedProfileNames = new Set(
-        profileCompletion.accepted.map((entry) => entry.name),
+    return target.chatId && target.messageId && target.scopeDigest && target.contentFingerprint
+        ? target
+        : null;
+}
+
+function stage3AcceptedTargetsMatch(left, right) {
+    return !!(
+        left
+        && right
+        && left.chatId === right.chatId
+        && left.index === right.index
+        && left.messageId === right.messageId
+        && left.swipeId === right.swipeId
+        && left.generationSerial === right.generationSerial
+        && left.scopeDigest === right.scopeDigest
+        && left.contentFingerprint === right.contentFingerprint
     );
-    let actorSchedule = scheduleActorTurns(actorLedger, {
-        turn: tickTurn,
-        maxActors: settings.actorLedgerMaxActorsPerTurn,
-        explorationSlots: settings.actorLedgerExplorationSlots,
-        excludedActorNames,
-        requireProfileReady: true,
+}
+
+function stage3AcceptedTargetKey(captured) {
+    const target = stage3AcceptedTarget(captured);
+    return target ? [
+        target.chatId,
+        target.index,
+        target.messageId,
+        target.swipeId,
+        target.generationSerial,
+        target.scopeDigest,
+        target.contentFingerprint,
+    ].join(':') : '';
+}
+
+function stage3TargetIsCurrent(captured, token) {
+    const strict = targetIsCurrent(captured, token);
+    if (strict.ok || token?.epoch !== operationEpoch) return strict;
+    const fresh = captureTarget(getContext(), captured?.index, {
+        frozenScope: captured?.actorSovereigntyScope,
+        unscoped: !captured?.scopeDigest,
     });
-    const retryActorIds = Object.keys(sovereigntyTasks.actorById || {});
-    if (retryActorIds.length) {
-        const retrySet = new Set(retryActorIds);
-        const durableRetries = actorLedger.actors
-            .filter((actor) => retrySet.has(actor.id) && actorProfileReadyForAction(actor))
-            .map((actor) => ({
-                actorId: actor.id,
-                actorName: actor.name,
-                slot: 'priority',
-                score: Number.MAX_SAFE_INTEGER,
-                reasons: ['durable-actor-retry'],
-            }));
-        actorSchedule = {
-            ...actorSchedule,
-            selected: [
-                ...durableRetries,
-                ...actorSchedule.selected.filter((entry) => !retrySet.has(entry.actorId)),
-            ].slice(0, settings.actorLedgerMaxActorsPerTurn),
-        };
-    }
-    const recoveredActorAttemptBatch = planActorAttemptRecovery(actorLedger, {
-        target: actorActionTargetOf(captured),
-        scheduledActorIds: actorSchedule.selected.map((item) => item.actorId),
+    return stage3AcceptedTargetsMatch(stage3AcceptedTarget(captured), stage3AcceptedTarget(fresh))
+        ? { ok: true }
+        : strict;
+}
+
+function stage3TaskOwnsCurrent(captured, token) {
+    return token?.epoch === operationEpoch && captured?.chatId === getContext()?.chatId;
+}
+
+function stage3ContinuityDigestWithoutInjection(state) {
+    const copy = deepClone(state || {});
+    copy.nextTurnInjection = null;
+    return continuityContentDigest(copy);
+}
+
+function stage3CanonicalSettlementProof(ledger, results = []) {
+    const orderedResults = results.map((result) => ({
+        attemptId: String(result?.attemptId || ''),
+        status: String(result?.status || ''),
+        id: String(result?.id || ''),
+        actorRef: deepClone(result?.actorRef || null),
+        worldAdjudicationResult: deepClone(result),
+    })).sort((left, right) => left.attemptId.localeCompare(right.attemptId));
+    return {
+        actorLedgerDigest: actorLedgerDigest(ledger),
+        orderedResults,
+        digest: fingerprint(JSON.stringify(orderedResults)),
+    };
+}
+
+function stage3SettlementProofMatchesLedger(proof, ledger, target) {
+    if (!proof || actorLedgerDigest(ledger) !== proof.actorLedgerDigest) return false;
+    const canonicalize = (attempt, result) => ({
+        attemptId: String(attempt?.id || result?.attemptId || ''),
+        status: String(result?.status || ''),
+        id: String(result?.id || ''),
+        actorRef: deepClone(result?.actorRef || null),
+        worldAdjudicationResult: deepClone(result || null),
     });
-    if (recoveredActorAttemptBatch.mode === 'resume') {
-        const authoritativeActorIds = new Set(recoveredActorAttemptBatch.actorIds);
-        for (const [actorId, task] of Object.entries(sovereigntyTasks.actorById || {})) {
-            if (authoritativeActorIds.has(actorId)) continue;
-            sovereigntyRuntime = cancelSovereigntyTaskAsStale(sovereigntyRuntime, {
-                taskId: task.id,
-                reason: 'actor_recovery_scope_superseded',
-            }).runtime;
-            activeSovereigntyTaskIds.delete(task.id);
-            delete sovereigntyTasks.actorById[actorId];
-        }
-    }
-    if (sovereigntyTasks.actor && recoveredActorAttemptBatch.actorIds.length) {
-        const alreadyClaimedActorIds = new Set(
-            Object.keys(sovereigntyTasks.actorById || {}),
-        );
-        const materialized = materializeSovereigntyActorTasks(sovereigntyRuntime, {
-            parentTaskId: sovereigntyTasks.actor.id,
-            actorIds: recoveredActorAttemptBatch.actorIds
-                .filter((actorId) => !alreadyClaimedActorIds.has(actorId)),
+    const expected = (proof.orderedResults || [])
+        .map((entry) => canonicalize({ id: entry?.attemptId }, entry?.worldAdjudicationResult || entry))
+        .sort((left, right) => left.attemptId.localeCompare(right.attemptId));
+    const rebuilt = ledger.actionAttempts
+        .filter((attempt) => (
+            actorActionTargetMatches(attempt?.target, target)
+            && attempt?.worldAdjudicationResult
+        ))
+        .map((attempt) => canonicalize(attempt, attempt.worldAdjudicationResult))
+        .sort((left, right) => left.attemptId.localeCompare(right.attemptId));
+    const results = rebuilt.map((item) => item.worldAdjudicationResult);
+    return fingerprint(JSON.stringify(expected)) === proof.digest
+        && fingerprint(JSON.stringify(rebuilt)) === proof.digest
+        && JSON.stringify(rebuilt) === JSON.stringify(expected)
+        && actorActionSettlementsMatchLedger(ledger, { target, results }).ok
+        && pendingActorActionAttempts(ledger, { target }).attempts.length === 0;
+}
+
+function stage3PersistedPackageForTarget(state, ledger, captured) {
+    const normalized = normalizeContinuityState(state, {
+        chatId: captured?.chatId || '',
+        maxThreads: getSettings().continuityMaxThreads,
+    });
+    const packet = normalized.nextTurnInjection;
+    return packet
+        && stage3AcceptedTargetsMatch(packet.producerTarget, stage3AcceptedTarget(captured))
+        && packet.sourceContinuityDigest === stage3ContinuityDigestWithoutInjection(normalized)
+        && stage3SettlementProofMatchesLedger(
+            packet.settlementProof,
+            ledger,
+            actorActionTargetOf(captured),
+        )
+        ? packet
+        : null;
+}
+
+function stage3NoActorPermitMatches(permit, captured) {
+    const target = permit?.target?.target || permit?.target || {};
+    return permit?.status === 'no_candidates'
+        && permit?.eligible === true
+        && permit?.profileBatch?.readbackVerified === true
+        && stage3AcceptedTargetsMatch(stage3AcceptedTarget(captured), {
+            chatId: String(target.chatId || ''),
+            index: Math.max(0, Number(target.logicalIndex ?? target.index) || 0),
+            messageId: String(target.messageId || ''),
+            swipeId: Math.max(0, Number(target.swipeId) || 0),
+            generationSerial: Math.max(0, Number(target.generation ?? target.generationSerial) || 0),
+            scopeDigest: String(target.scopeDigest || ''),
+            contentFingerprint: String(target.contentHash || target.hash || ''),
         });
-        sovereigntyRuntime = materialized.runtime;
-        sovereigntyTasks.actorById = {
-            ...(sovereigntyTasks.actorById || {}),
-            ...Object.fromEntries(
-                materialized.tasks.map((task) => [task.metadata.actorId, task]),
-            ),
-        };
-        for (const task of materialized.tasks) activeSovereigntyTaskIds.add(task.id);
-        namespace.sovereigntyRuntime = sovereigntyRuntime;
-        // The durable parent actor task is already present in the observation
-        // WAL. A crash before final commit safely rematerializes these actor
-        // children from latest state, so an extra full save here adds latency
-        // without adding recoverability.
+}
+
+function stage3LedgerReadbackGate(captured, noActorPermit = null) {
+    const ledger = normalizeActorLedger(readChatNamespace().actorLedger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const source = sourceRefOf(captured);
+    const sourceActorIds = Object.values(ledger.actorRegistry?.registered || {})
+        .filter((entry) => (entry.sourceRefs || []).some((entrySource) => (
+            acceptedActorSourceRefMatches(entrySource, source)
+        )))
+        .map((entry) => entry.actorRef?.actorId)
+        .filter(Boolean);
+    if (!sourceActorIds.length) return stage3NoActorPermitMatches(noActorPermit, captured)
+        ? { ok: true, reason: 'no_candidates', actorLedger: ledger, noActorPermit: true }
+        : { ok: false, reason: 'actor_registry_awaiting_p2' };
+    const incomplete = sourceActorIds.find((actorId) => (
+        !actorProfileReadinessInLedger(ledger, actorId).ready
+    ));
+    return incomplete
+        ? { ok: false, reason: `actor_profile.not_ready:${incomplete}` }
+        : { ok: true, reason: 'atomic_readback', actorLedger: ledger };
+}
+
+async function runContinuityTarget(captured, {
+    force = false,
+    noActorPermit = null,
+} = {}) {
+    const token = operationToken(captured);
+    if (!stage3TaskOwnsCurrent(captured, token)) {
+        return { status: 'stale', reason: 'world_task_owner_changed' };
     }
-    const provisionalWorldLaneSchedule = scheduleWorldLanes(scheduledBase, {
-        turn: tickTurn,
-        maxLanes: settings.worldFactionSlots + settings.worldEnvironmentSlots,
-        factionSlots: settings.worldFactionSlots,
-        environmentSlots: settings.worldEnvironmentSlots,
-        receiptScope: [
-            captured.chatId,
-            captured.messageId,
-            `swipe-${captured.swipeId}`,
-            `generation-${captured.generationSerial}`,
-            captured.branchId,
-        ].join(':'),
-    });
-    const sovereigntyBlackboard = createSovereigntyBlackboard({
-        turn: tickTurn,
-        sourceRef: sovereigntySourceRefOf(captured),
-    });
-    const runUntilCancelled = settings.sovereigntyRunUntilCancelled !== false;
-    const sovereigntyDeadlineAt = runUntilCancelled
-        ? 0
-        : Date.now() + settings.sovereigntyHardTimeoutMs;
-    const sovereigntyAgentPool = await runSovereigntyAgentPool({
-        blackboard: sovereigntyBlackboard,
-        timeoutMs: runUntilCancelled ? 0 : settings.sovereigntyHardTimeoutMs,
-        limits: { profile: 1, actor: 1, world: 1 },
-        jobs: [
-            {
-                agentType: 'profile',
-                agentId: `profile-${tickTurn}`,
-                input: {
-                    coverage: profilePreparation.coverage,
-                    generated: profileCompletion.accepted.length,
-                    failed: profileCompletion.failures.length,
-                },
-            },
-            ...(recoveredActorAttemptBatch.shouldRunActorWorker ? [{
-                agentType: 'actor',
-                agentId: `actor-pool-${tickTurn}`,
-                input: { selected: recoveredActorAttemptBatch.actorIds.length },
-            }] : []),
-            ...(recoveredActorAttemptBatch.actorIds.length || worldTaskAlreadyCommitted
-                ? [] : [{
-                agentType: 'world',
-                agentId: `world-${tickTurn}`,
-                input: { lanes: provisionalWorldLaneSchedule.selected.length },
-            }]),
-        ],
-        runAgent: async (job, { signal } = {}) => {
-            if (job.agentType === 'profile') {
-                return {
-                    coverage: profilePreparation.coverage,
-                    prepared: profilePreparation.prepared.length,
-                    deferred: profilePreparation.deferred.length,
-                    generated: profileCompletion.accepted.length,
-                    failed: profileCompletion.failures.length,
-                };
-            }
-            if (job.agentType === 'actor') {
-                const actorBatch = await collectActorShardProposals(captured, {
-                    base: scheduledBase,
-                    actorLedger,
-                    actorSchedule,
-                    messageText: acceptedNarrative,
-                    token,
-                    excludedActorNames,
-                    signal,
-                });
-                if (actorBatch.status === 'semantic-failed' || actorBatch.status === 'failed') {
-                    const error = new Error('人物提案批次没有产生可裁决语义');
-                    error.code = actorBatch.status === 'semantic-failed'
-                        ? 'ACTOR_BATCH_SEMANTIC_FAILED'
-                        : 'ACTOR_BATCH_FAILED';
-                    throw error;
-                }
-                return actorBatch;
-            }
-            const messages = buildContinuityMessages({
-                context,
-                captured,
-                base: scheduledBase,
-                director,
-                markers,
-                worldContext,
-                stateAnchors,
-                retryReason: '',
-                excludedSourceIndexes: sourcePlan.skippedIndexes,
-                actorShardCandidates: null,
-                actorLedger,
-                worldLaneSchedule: provisionalWorldLaneSchedule,
-            });
-            return generateWorldContinuitySingleBatch(messages, {
-                captured,
-                settings,
-                runUntilCancelled,
-                signal,
-                deadlineAt: sovereigntyDeadlineAt,
-                isCurrent: () => continuityTargetIsCurrent(captured, token).ok,
-            });
-        },
-    });
-    const adjudicatedBlackboard = adjudicateSovereigntyBlackboard(
-        sovereigntyAgentPool.blackboard,
-        {
-            acceptCandidate: (candidate) => ({
-                accepted: ['profile', 'actor', 'world'].includes(candidate.agentType),
-            }),
-        },
+    let guard = stage3TargetIsCurrent(captured, token);
+    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    if (!sovereigntyNarrativeEligible(getContext()?.chat?.[captured.index]?.mes || '')) {
+        return { status: 'disabled', reason: 'mechanism_only_narrative' };
+    }
+    const profileGate = stage3LedgerReadbackGate(captured, noActorPermit);
+    if (!profileGate.ok) {
+        return { status: 'blocked', reason: profileGate.reason, module: 'world' };
+    }
+    const settings = getSettings();
+    const context = getContext();
+    const messageText = String(context?.chat?.[captured.index]?.mes || '');
+    let namespace = readChatNamespace(context);
+    if (
+        namespace?.continuityCheckpoint?.stage3Phase === 'world_call_reserved'
+        && stage3AcceptedTargetsMatch(
+            namespace.continuityCheckpoint.stage3ProducerTarget,
+            stage3AcceptedTarget(captured),
+        )
+    ) {
+        return { status: 'failed', reason: 'world_call_reserved_manual_reconciliation', module: 'world' };
+    }
+    const existingPacket = stage3PersistedPackageForTarget(
+        namespace?.continuity,
+        profileGate.actorLedger,
+        captured,
     );
-    const pooledCandidate = (agentType) => adjudicatedBlackboard.adjudication.accepted
-        .find((candidate) => candidate.agentType === agentType)?.payload;
-    const pooledActorShardResult = recoveredActorAttemptBatch.attempts.length
-        ? {
-            status: 'resumed',
-            candidates: {
-                proposals: [],
-                failures: [],
-                recoveredAttempts: recoveredActorAttemptBatch.attempts,
-                recoveredCandidates: recoveredActorAttemptBatch.candidates,
-            },
-        }
-        : pooledCandidate('actor') || null;
-    const prefetchedWorldOutput = typeof pooledCandidate('world') === 'string'
-        ? pooledCandidate('world')
-        : '';
-    const worldPrefetchAttempted = !worldTaskAlreadyCommitted
-        && !recoveredActorAttemptBatch.actorIds.length;
-    const prefetchedWorldFailure = worldPrefetchAttempted
-        && !prefetchedWorldOutput
-        ? adjudicatedBlackboard.failures.find((entry) => entry.agentType === 'world')?.code
-            || 'world.agent_output_missing'
-        : '';
-    let actorShardCandidates = null;
-    let actorSettlement = {
-        ledger: actorLedger,
-        accepted: [],
-        rejected: [],
-        worldEvents: [],
-        receipts: [],
-        technicalFailures: [],
-    };
-    let actorSettlementFinalized = false;
-    let pendingActorActionCandidates = [];
-    let pendingActorAttempts = [];
-    let actorShardStatus = 'not-run';
-    let actorTechnicalFailure = '';
-    // In recovery mode the persisted exact-target journal is authoritative.
-    // A fresh scheduler result cannot substitute different actors into the
-    // already-created attempt/receipt chain.
-    const scheduledActorIds = recoveredActorAttemptBatch.actorIds;
-    try {
-        const actorShardResult = pooledActorShardResult || {
-            status: ['semantic-failed', 'failed'].includes(latestActorShardDiagnostics.status)
-                ? latestActorShardDiagnostics.status
-                : 'completed',
-            candidates: null,
+    if (existingPacket) {
+        return {
+            status: 'applied',
+            recovered: true,
+            worldModelCalls: 0,
+            worldWrites: 0,
+            nextTurnInjection: deepClone(existingPacket),
         };
-        actorShardStatus = actorShardResult.status;
-        if (actorShardResult.status === 'stale') {
-            await requeueClaimedSovereigntyTasks(
-                sovereigntyTasks,
-                captured,
-                'actor_target_advanced',
-            );
-            return { status: 'stale', reason: '人物行动分析期间目标身份已经变化' };
-        }
-        actorShardCandidates = actorShardResult.candidates;
-        actorSettlement.technicalFailures = actorShardResult.candidates?.failures || [];
-        if (actorShardResult.candidates?.recoveredAttempts?.length) {
-            pendingActorAttempts = actorShardResult.candidates.recoveredAttempts;
-            pendingActorActionCandidates = actorShardResult.candidates.recoveredCandidates;
-            actorSettlement = {
-                ledger: actorLedger,
-                accepted: [],
-                rejected: [],
-                worldEvents: [],
-                receipts: [],
-                attempts: pendingActorAttempts,
-                pendingWorld: pendingActorAttempts.map((attempt) => ({
-                    actorId: attempt.actorId,
-                    attempt,
-                    failureCode: 'world_adjudication_pending',
-                })),
-                technicalFailures: [],
-            };
-            actorShardCandidates = {
-                ...actorShardResult.candidates,
-                actionAttempts: pendingActorAttempts,
-                acceptedActions: [],
-                rejectedActions: [],
-                worldEvents: [],
-                receiptIds: [],
-            };
-            latestActorShardDiagnostics = {
-                ...latestActorShardDiagnostics,
-                status: 'resumed',
-                proposedActions: pendingActorAttempts.length,
-                acceptedActions: 0,
-                semanticActions: 0,
-                heldActions: 0,
-                rejectedActions: 0,
-                worldEvents: 0,
-            };
-            recordOperation(
-                '人物尝试',
-                `已从持久账本恢复 ${pendingActorAttempts.length} 项同一尝试；未重新生成或改写候选`,
-                'ok',
-            );
-        } else if (actorShardResult.candidates?.proposals?.length) {
-            const actionCandidates = actorActionCandidatesFromShard(
-                actorLedger,
-                actorShardResult.candidates.proposals,
-                {
-                    turn: tickTurn,
-                    collisionIntensity: settings.actorLedgerCollisionIntensity,
-                },
-            );
-            const actorPressureDecision = admitDoctorWorldCandidates(
-                worldPressure,
-                actionCandidates.map((candidate) => (
-                    classifyDoctorPressureCandidate(candidate, {
-                        id: `actor:${candidate.actorId}:${fingerprint(candidate.action)}`,
-                        channel: 'actor',
-                        sameScene: !!candidate.contact,
-                    })
-                )),
-                {
-                    turn: tickTurn,
-                    phase: worldPressurePhase(scheduledBase, worldPressure),
-                    pressureCap: settings.worldPressureCap,
-                    sameSceneBossCap: settings.worldSameSceneBossCap,
-                    recoveryCadence: settings.worldRecoveryCadence,
-                    injectionLimit: settings.actorLedgerMaxActorsPerTurn,
-                },
-            );
-            worldPressure = actorPressureDecision.state;
-            const preparedActorAttempts = prepareActorActionAttempts(
-                actorLedger,
-                actorPressureDecision.admitted.map((item) => item.source),
-                {
-                    turn: tickTurn,
-                    playerNames: excludedActorNames,
-                    sourceRef: actorActionTargetOf(captured),
-                    target: actorActionTargetOf(captured),
-                },
-            );
-            const recordedActorAttempts = recordActorActionAttempts(
-                preparedActorAttempts.ledger,
-                preparedActorAttempts.attempts,
-                { target: actorActionTargetOf(captured) },
-            );
-            const attemptPersistence = await persistActorActionAttemptsForTurn(captured, {
-                previousLedger: actorLedger,
-                nextLedger: recordedActorAttempts.ledger,
-                attempts: recordedActorAttempts.recorded,
-                target: actorActionTargetOf(captured),
-                token,
-            });
-            if (!attemptPersistence.ok && attemptPersistence.reason === 'action_attempt.target_stale') {
-                await requeueClaimedSovereigntyTasks(
-                    sovereigntyTasks,
-                    captured,
-                    attemptPersistence.reason,
-                );
-                return { status: 'stale', reason: attemptPersistence.reason };
-            }
-            if (!attemptPersistence.ok) {
-                actorTechnicalFailure = attemptPersistence.reason;
-                recordOperation(
-                    '人物尝试',
-                    '人物尝试未通过原子持久化与内容读回；未发送世界裁决，结构世界轨继续运行',
-                    'warn',
-                );
-            } else {
-                actorLedger = attemptPersistence.ledger;
-                if (attemptPersistence.persistenceMeta) {
-                    namespace.rev = attemptPersistence.persistenceMeta.rev;
-                    namespace.fieldRevisions = attemptPersistence.persistenceMeta.fieldRevisions;
-                }
-            }
-            const recordedAttemptIds = new Set(
-                (attemptPersistence.ok ? recordedActorAttempts.recorded : [])
-                    .map((attempt) => attempt.id),
-            );
-            pendingActorActionCandidates = preparedActorAttempts.admittedCandidates
-                .filter((candidate) => recordedAttemptIds.has(candidate.attemptId));
-            pendingActorAttempts = (attemptPersistence.ok
-                ? recordedActorAttempts.recorded
-                : []);
-            actorSettlement = {
-                ledger: actorLedger,
-                accepted: [],
-                rejected: [
-                    ...preparedActorAttempts.rejected,
-                    ...recordedActorAttempts.rejected.map((entry) => ({
-                        actorId: entry.actorId,
-                        reasons: [entry.reason],
-                    })),
-                    ...(!attemptPersistence.ok ? preparedActorAttempts.attempts.map((attempt) => ({
-                        actorId: attempt.actorId,
-                        reasons: [attemptPersistence.reason],
-                    })) : []),
-                ],
-                worldEvents: [],
-                receipts: [],
-                attempts: pendingActorAttempts,
-                pendingWorld: pendingActorAttempts.map((attempt) => ({
-                    actorId: attempt.actorId,
-                    attempt,
-                    failureCode: 'world_adjudication_pending',
-                })),
-                technicalFailures: actorShardResult.candidates?.failures || [],
-            };
-            for (const delayed of actorPressureDecision.delayed) {
-                actorSettlement.rejected.push({
-                    actorId: delayed.source?.actorId || '',
-                    reasons: [`world-pressure:${delayed.decisionReason}`],
-                });
-            }
-            actorShardCandidates = {
-                ...actorShardResult.candidates,
-                actionAttempts: pendingActorAttempts,
-                acceptedActions: [],
-                rejectedActions: actorSettlement.rejected,
-                worldEvents: [],
-                receiptIds: [],
-            };
-            latestActorShardDiagnostics = {
-                ...latestActorShardDiagnostics,
-                proposedActions: pendingActorAttempts.length,
-                acceptedActions: 0,
-                semanticActions: 0,
-                heldActions: 0,
-                rejectedActions: actorSettlement.rejected.length,
-                rejectionReasons: [...new Set(
-                    actorSettlement.rejected.flatMap((item) => item.reasons || []),
-                )].slice(0, 12),
-                worldEvents: 0,
-            };
-            if (actorSettlement.receipts.length || actorSettlement.rejected.length) {
-                recordOperation(
-                    '人物行动',
-                    `计划 ${actionCandidates.length} 人；合法结算 ${actorSettlement.accepted.length}；`
-                    + `拒绝 ${actorSettlement.rejected.length}；可观察后果 ${actorSettlement.worldEvents.length}`
-                    + (actorSettlement.rejected.length
-                        ? `；原因：${latestActorShardDiagnostics.rejectionReasons
-                            .map((code) => ACTOR_ACTION_ERROR_LABELS[code] || code)
-                            .join('、')}`
-                        : ''),
-                    actorSettlement.accepted.length ? 'ok' : '',
-                );
-            }
-        }
-    } catch (error) {
-        latestActorShardDiagnostics = {
-            status: 'failed',
-            selected: 0,
-            completed: 0,
-            succeeded: 0,
-            failed: 1,
-        };
-        actorTechnicalFailure = 'actor_shard.transport_failed';
-        console.warn('[MVU Auto Doctor] 人物行动分析失败，世界模块继续独立运行：', error);
     }
     if (
-        !actorSettlementFinalized
-        && actorShardStatus !== 'disabled'
-        && scheduledActorIds.length
-        && !pendingActorAttempts.length
+        namespace?.continuityCheckpoint?.stage3Phase === 'world_committed'
+        && stage3AcceptedTargetsMatch(
+            namespace.continuityCheckpoint.stage3ProducerTarget,
+            stage3AcceptedTarget(captured),
+        )
     ) {
-        const workerFailureCode = latestActorShardDiagnostics.failed > 0
-            ? String(latestActorShardDiagnostics.failureCodes?.[0] || 'worker_failed')
-            : 'output_missing';
-        actorTechnicalFailure ||= workerFailureCode.startsWith('actor_shard.')
-            ? workerFailureCode
-            : `actor_shard.${workerFailureCode}`;
-        latestActorShardDiagnostics = {
-            ...latestActorShardDiagnostics,
-            semanticActions: 0,
-            heldActions: 0,
-            scheduledTechnicalFailure: scheduledActorIds.length,
+        return {
+            status: 'failed',
+            reason: 'world_committed_manual_reconciliation',
+            module: 'world',
         };
-        recordOperation(
-            '人物行动',
-            `本轮 ${scheduledActorIds.length} 名到期人物遇到技术失败；人物语义状态未改变，已进入自动恢复队列`,
-            'warn',
-        );
     }
-
-    let worldLaneSchedule = scheduleWorldLanes(scheduledBase, {
-        turn: tickTurn,
+    const markers = extractContinuityMarkers(messageText);
+    if (settings.continuityMode === 'auto' && !markers.hasPresetParallel) {
+        markers.hasPresetParallel = await activePresetHasContinuityPrompt();
+        guard = stage3TargetIsCurrent(captured, token);
+        if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    }
+    const checkpointBase = continuityBase(namespace, captured);
+    const base = mergeMarkerRecords(checkpointBase, markers.records, {
+        chatId: captured.chatId,
+        maxThreads: settings.continuityMaxThreads,
+    });
+    const worldContext = await collectContinuityWorldContext(
+        context,
+        currentCharacter(context),
+    );
+    guard = stage3TargetIsCurrent(captured, token);
+    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    if (!continuityFeatureActive(settings, markers, base, worldContext, force)) {
+        return { status: 'disabled', reason: 'continuity_disabled' };
+    }
+    const clockPlan = advanceContinuityClocks(base, {
+        chatId: captured.chatId,
+        maxThreads: settings.continuityMaxThreads,
+    });
+    const scheduledBase = clockPlan.state;
+    const nextTurn = Math.max(base.turn + 1, Number(scheduledBase.turn) || 0);
+    scheduledBase.turn = nextTurn;
+    const worldLaneSchedule = scheduleWorldLanes(scheduledBase, {
+        turn: nextTurn,
         maxLanes: settings.worldFactionSlots + settings.worldEnvironmentSlots,
         factionSlots: settings.worldFactionSlots,
         environmentSlots: settings.worldEnvironmentSlots,
-        receiptScope: [
-            captured.chatId,
-            captured.messageId,
-            `swipe-${captured.swipeId}`,
-            `generation-${captured.generationSerial}`,
-            captured.branchId,
-        ].join(':'),
+        receiptScope: stage3AcceptedTargetKey(captured),
     });
-    const worldLanePressureDecision = admitDoctorWorldCandidates(
-        worldPressure,
-        worldLaneSchedule.selected.map((candidate) => (
-            classifyDoctorPressureCandidate(candidate, {
-                id: `lane:${candidate.laneType}:${candidate.sourceId}`,
-                channel: candidate.channel,
-                sameScene: false,
-            })
-        )),
-        {
-            turn: tickTurn,
-            phase: worldPressurePhase(scheduledBase, worldPressure),
-            pressureCap: settings.worldPressureCap,
-            sameSceneBossCap: settings.worldSameSceneBossCap,
-            recoveryCadence: settings.worldRecoveryCadence,
-            injectionLimit: settings.worldFactionSlots + settings.worldEnvironmentSlots,
-        },
-    );
-    const allowedWorldLaneIds = new Set(
-        worldLanePressureDecision.admitted.map((item) => item.id),
-    );
-    const delayedWorldLaneReasons = new Map(
-        worldLanePressureDecision.delayed.map((item) => [item.id, item.decisionReason]),
-    );
-    worldLaneSchedule = {
-        ...worldLaneSchedule,
-        selected: worldLaneSchedule.selected.filter((candidate) => (
-            allowedWorldLaneIds.has(`lane:${candidate.laneType}:${candidate.sourceId}`)
-        )),
-        receipts: worldLaneSchedule.receipts.map((receipt) => {
-            const reason = delayedWorldLaneReasons.get(
-                `lane:${receipt.laneType}:${receipt.sourceId}`,
-            );
-            return reason
-                ? { ...receipt, status: 'delayed', pressureReason: reason }
-                : receipt;
-        }),
-        pressureDecision: {
-            admitted: worldLanePressureDecision.admitted.length,
-            delayed: worldLanePressureDecision.delayed.length,
-            retained: worldLanePressureDecision.retained.length,
-        },
+    if (
+        stage3TaskOwnsCurrent(captured, token)
+        && stage3TargetIsCurrent(captured, token).ok
+    ) {
+        latestWorldLaneDiagnostics = deepClone(worldLaneSchedule);
+    }
+    const director = detectContinuityDirector(context, messageText, markers);
+    const actionTarget = actorActionTargetOf(captured);
+    let actionLedger = profileGate.actorLedger;
+    let pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
+    if (!profileGate.noActorPermit && !pendingActions.attempts.length) {
+        const actorSchedule = scheduleActorTurns(actionLedger, {
+            turn: nextTurn,
+            maxActors: Math.min(6, Math.max(1, Number(settings.actorLedgerMaxActorsPerTurn) || 1)),
+            explorationSlots: 1,
+            requireProfileReady: true,
+        });
+        if (!actorSchedule.selected.length) {
+            return { status: 'failed', reason: 'actor_schedule_empty', module: 'world' };
+        }
+        const proposalBatch = await collectActorShardProposals(captured, {
+            base: scheduledBase,
+            actorLedger: actionLedger,
+            actorSchedule,
+            messageText,
+            token,
+            isCurrent: () => (
+                stage3TaskOwnsCurrent(captured, token)
+                && stage3TargetIsCurrent(captured, token).ok
+            ),
+        });
+        const proposals = proposalBatch?.candidates?.proposals || [];
+        const proposalFailures = proposalBatch?.candidates?.failures || [];
+        if (proposalBatch?.status === 'stale') {
+            return { status: 'stale', reason: 'actor_proposal_target_stale', module: 'world' };
+        }
+        if (
+            proposalBatch?.status !== 'completed'
+            || proposalFailures.length
+            || proposals.length !== actorSchedule.selected.length
+        ) {
+            return { status: 'failed', reason: 'actor_proposal_batch_incomplete', module: 'world' };
+        }
+        const candidates = actorActionCandidatesFromShard(actionLedger, proposals, {
+            turn: nextTurn,
+        });
+        const prepared = prepareActorActionAttempts(actionLedger, candidates, {
+            turn: nextTurn,
+            sourceRef: actorActionTargetOf(captured),
+            target: actionTarget,
+        });
+        if (
+            prepared.rejected.length
+            || prepared.attempts.length !== actorSchedule.selected.length
+        ) {
+            return { status: 'failed', reason: 'actor_attempt_prepare_incomplete', module: 'world' };
+        }
+        const recorded = recordActorActionAttempts(prepared.ledger, prepared.attempts, {
+            target: actionTarget,
+        });
+        if (
+            recorded.rejected.length
+            || recorded.recorded.length !== prepared.attempts.length
+        ) {
+            return { status: 'failed', reason: 'actor_attempt_record_incomplete', module: 'world' };
+        }
+        const persisted = await persistActorActionAttemptsForTurn(captured, {
+            previousLedger: actionLedger,
+            nextLedger: recorded.ledger,
+            attempts: recorded.recorded,
+            target: actionTarget,
+            token,
+        });
+        if (!persisted.ok) {
+            return { status: 'failed', reason: persisted.reason, module: 'world' };
+        }
+        actionLedger = persisted.ledger;
+        pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
+        if (pendingActions.attempts.length !== recorded.recorded.length) {
+            return { status: 'failed', reason: 'actor_attempt_readback_incomplete', module: 'world' };
+        }
+        if (!stage3TaskOwnsCurrent(captured, token)) {
+            return { status: 'stale', reason: 'world_task_owner_changed' };
+        }
+    } else if (profileGate.noActorPermit && pendingActions.attempts.length) {
+        return { status: 'blocked', reason: 'no_candidates_with_pending_attempts', module: 'world' };
+    }
+    if (!stage3TaskOwnsCurrent(captured, token)) {
+        return { status: 'stale', reason: 'world_task_owner_changed' };
+    }
+    guard = stage3TargetIsCurrent(captured, token);
+    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    namespace.continuityCheckpoint = {
+        targetIndex: captured.index,
+        messageId: captured.messageId,
+        swipeId: captured.swipeId,
+        scopeDigest: captured.scopeDigest,
+        stage3ProducerTarget: stage3AcceptedTarget(captured),
+        stage3Phase: 'world_call_reserved',
+        state: checkpointBase,
     };
-    latestWorldLaneDiagnostics = {
-        turn: worldLaneSchedule.turn,
-        maxLanes: worldLaneSchedule.maxLanes,
-        selected: worldLaneSchedule.selected.map((item) => ({
-            laneType: item.laneType,
-            sourceId: item.sourceId,
-            due: item.due,
-            score: item.score,
-            independentOfActors: true,
-        })),
-    };
-    const clockOnlyProgressed = (
-        clockPlan.changedThreadIds.length > 0
-        || worldClockChanged
-    );
-    let localProgressed = actorSettlement.accepted.some(
-        (item) => item.semanticProgress === true,
-    );
-    let localStateChanged = clockOnlyProgressed || localProgressed;
-    let next = worldTaskAlreadyCommitted
-        ? deepClone(base)
-        : localStateChanged ? scheduledBase : base;
-    let retryReason = '';
-    let progressed = worldTaskAlreadyCommitted;
-    let modelValidated = worldTaskAlreadyCommitted;
-    let modelFailure = '';
-    // World/world-engine-evolution.js uses one generation over one packed
-    // snapshot. P3 keeps that boundary: parsing and punctuation repair are
-    // local, never a second world-model request for the same accepted target.
-    const maxAttempts = worldTaskAlreadyCommitted ? 0 : 1;
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        const messages = buildContinuityMessages({
+    const reservationSaved = await writeChatNamespace(namespace, captured.chatId, {
+        fields: ['continuityCheckpoint'],
+        durable: true,
+        requireReadback: true,
+        precondition: () => (
+            stage3TaskOwnsCurrent(captured, token)
+            && stage3TargetIsCurrent(captured, token).ok
+        ),
+        contentValidator: (persisted) => (
+            persisted?.continuityCheckpoint?.stage3Phase === 'world_call_reserved'
+            && stage3AcceptedTargetsMatch(
+                persisted?.continuityCheckpoint?.stage3ProducerTarget,
+                stage3AcceptedTarget(captured),
+            )
+        ),
+    });
+    if (!reservationSaved) {
+        return { status: 'failed', reason: 'world_call_reservation_failed', module: 'world' };
+    }
+    if (!stage3TaskOwnsCurrent(captured, token) || !stage3TargetIsCurrent(captured, token).ok) {
+        return { status: 'stale', reason: 'world_task_owner_changed' };
+    }
+    setContinuityStatus('世界连续性：正在整理本回合因果…', 'busy');
+    let output = '';
+    try {
+        output = await generateWorldContinuitySingleBatch(buildContinuityMessages({
             context,
             captured,
             base: scheduledBase,
             director,
             markers,
             worldContext,
-            stateAnchors,
-            retryReason,
-            excludedSourceIndexes: sourcePlan.skippedIndexes,
-            actorShardCandidates,
-            actorLedger,
+            stateAnchors: 'MVU 仍由其自身独立维护；本阶段不读取或写入 MVU。',
+            actorLedger: actionLedger,
+            actorShardCandidates: pendingActions.attempts.length ? {
+                proposals: pendingActions.candidates,
+                actionAttempts: pendingActions.attempts,
+                rejectedActions: [],
+            } : null,
             worldLaneSchedule,
+        }), {
+            captured,
+            settings,
+            pendingActorAttempts: pendingActions.attempts,
+            isCurrent: () => (
+                stage3TaskOwnsCurrent(captured, token)
+                && stage3TargetIsCurrent(captured, token).ok
+            ),
         });
-        let output = '';
-        let validOutput = false;
-        if (attempt === 0 && !pendingActorAttempts.length && worldPrefetchAttempted) {
-            output = prefetchedWorldOutput;
-            if (!output && prefetchedWorldFailure) {
-                modelFailure = prefetchedWorldFailure;
-                retryReason = `世界模型调用失败：${modelFailure}`;
-            }
-        } else {
-            try {
-                output = await generateWorldContinuitySingleBatch(messages, {
-                    captured,
-                    settings,
-                    runUntilCancelled,
-                    deadlineAt: sovereigntyDeadlineAt,
-                    pendingActorAttempts,
-                    isCurrent: () => continuityTargetIsCurrent(captured, token).ok,
-                });
-            } catch (error) {
-                if (error?.code === 'MODEL_OUTPUT_INVALID') {
-                    retryReason = String(
-                        error.validationReason || error.message || 'world.output_invalid',
-                    );
-                    modelFailure = '';
-                } else {
-                    modelFailure = String(error.message || error);
-                    retryReason = `世界模型调用失败：${modelFailure}`;
-                    console.warn('[MVU Auto Doctor] 世界连续性模型调用失败：', error);
-                }
-            }
+    } catch (error) {
+        if (error?.code === 'WORLD_TARGET_STALE') {
+            return { status: 'stale', reason: String(error.message || error) };
         }
-        guard = continuityTargetIsCurrent(captured, token);
-        if (!guard.ok) {
-            await requeueClaimedSovereigntyTasks(sovereigntyTasks, captured, 'target_advanced');
-            return { status: 'stale', reason: guard.reason };
-        }
-
-        let candidate = scheduledBase;
-        let explicitHeldTick = null;
-        if (output) {
-            const parsed = parseContinuityOutput(output, {
-                chatId: captured.chatId,
-                maxThreads: settings.continuityMaxThreads,
-            });
-            if (parsed.state) {
-                if (pendingActorAttempts.length) {
-                    const settledActorAttempts = settleActorActionCandidates(
-                        actorLedger,
-                        pendingActorActionCandidates,
-                        {
-                            turn: tickTurn,
-                            attemptedActorIds: scheduledActorIds,
-                            playerNames: excludedActorNames,
-                            attempts: pendingActorAttempts,
-                            target: actorActionTargetOf(captured),
-                            worldAdjudications: parsed.raw?.actionAdjudications,
-                        },
-                    );
-                    if (settledActorAttempts.pendingWorld.length) {
-                        actorTechnicalFailure = 'actor.world_adjudication_invalid';
-                        retryReason = `人物行动世界裁决缺失或无效：${settledActorAttempts.pendingWorld
-                            .map((entry) => `${entry.actorId}:${entry.failureCode}`)
-                            .join(', ')}`;
-                        recordModelDiagnostic({
-                            phase: 'validation',
-                            task: '活世界整理',
-                            channel: 'fast',
-                            status: 'failed',
-                            attempt: attempt + 1,
-                            targetIndex: captured.index,
-                            failureKind: 'world-adjudication-invalid',
-                            reason: retryReason,
-                            outputChars: String(output || '').length,
-                        });
-                        continue;
-                    }
-                    actorSettlement = settledActorAttempts;
-                    actorSettlement.technicalFailures = actorShardCandidates?.failures || [];
-                    actorSettlementFinalized = true;
-                    actorLedger = actorSettlement.ledger;
-                    localProgressed = actorSettlement.accepted.some(
-                        (item) => item.semanticProgress === true,
-                    );
-                    localStateChanged = clockOnlyProgressed || localProgressed;
-                    actorShardCandidates = {
-                        ...actorShardCandidates,
-                        acceptedActions: actorSettlement.accepted,
-                        rejectedActions: actorSettlement.rejected,
-                        worldEvents: actorSettlement.worldEvents,
-                        receiptIds: actorSettlement.receipts.map((item) => item.receiptId),
-                    };
-                    latestActorShardDiagnostics = {
-                        ...latestActorShardDiagnostics,
-                        acceptedActions: actorSettlement.accepted.length,
-                        semanticActions: actorSettlement.accepted.filter(
-                            (item) => item.semanticProgress === true,
-                        ).length,
-                        heldActions: actorSettlement.accepted.filter(
-                            (item) => item.semanticProgress !== true,
-                        ).length,
-                        rejectedActions: actorSettlement.rejected.length,
-                        worldEvents: actorSettlement.worldEvents.length,
-                    };
-                }
-                const rawTick = parsed.raw?.lastTick;
-                const heldThread = scheduledBase.threads.find(
-                    (thread) => thread.id === rawTick?.threadId,
-                );
-                if (
-                    rawTick?.action === 'held'
-                    && String(rawTick.reason || '').trim().length >= 8
-                    && heldThread
-                    && heldThread.stage !== 'resolved'
-                ) {
-                    explicitHeldTick = {
-                        turn: tickTurn,
-                        action: 'held',
-                        threadId: heldThread.id,
-                        reason: String(rawTick.reason).trim(),
-                    };
-                }
-                candidate = parsed.state;
-                candidate.world = applyWorldUpdate(
-                    scheduledBase.world,
-                    parsed.raw?.world,
-                    { turn: tickTurn },
-                );
-                // The local chat index is the only authority for world time.
-                // Models occasionally echo a guessed future turn; accepting it
-                // made rerolls drift to state.turn=N+1 while lastTick stayed N.
-                candidate.turn = tickTurn;
-                candidate = preserveMissingThreadClockFields(
-                    scheduledBase,
-                    candidate,
-                    parsed.raw?.threads,
-                );
-                if (actorSettlement.worldEvents.length) {
-                    candidate = normalizeContinuityState(
-                        mergeActorWorldEventsIntoContinuity(
-                            candidate,
-                            actorSettlement.worldEvents,
-                        ),
-                        {
-                            chatId: captured.chatId,
-                            maxThreads: settings.continuityMaxThreads,
-                        },
-                    );
-                }
-                validOutput = true;
-            }
-            else {
-                retryReason = parsed.error;
-                recordModelDiagnostic({
-                    phase: 'parse',
-                    task: '活世界整理',
-                    channel: 'fast',
-                    status: 'failed',
-                    attempt: attempt + 1,
-                    targetIndex: captured.index,
-                    failureKind: 'invalid-continuity',
-                    reason: parsed.error,
-                    outputChars: String(output || '').length,
-                    ...structuredOutputShape(output),
-                });
-            }
-        } else {
-            retryReason = '模型没有返回账本JSON';
-        }
-        candidate = preserveMissingThreads(scheduledBase, candidate, {
-            supersededTarget: supersededContinuityTarget,
-        });
-        // `enforceContinuityPolicy` stamps accepted changes at
-        // `previous.turn + 1`. The deterministic scheduler has already moved
-        // `scheduledBase.turn` to the current tick, so expose the immediately
-        // preceding turn as the policy baseline. Otherwise every lastTick is
-        // written one turn into the future and a later valid held tick can be
-        // mistaken for stale data.
-        const policyBase = {
-            ...scheduledBase,
-            turn: Math.max(0, tickTurn - 1),
-        };
-        candidate = enforceContinuityPolicy(policyBase, candidate, {
-            autonomy: settings.continuityAutonomy,
-            allowAutonomous: worldContext.hasSetting,
-            maxThreads: settings.continuityMaxThreads,
-        });
-        // The deterministic clock may update hidden progress fields even when
-        // the model correctly says that the narrative trigger is not mature.
-        // Keep those local clock changes, but preserve the explicit held
-        // scheduler result instead of relabelling it as an advanced beat.
-        if (explicitHeldTick) candidate.lastTick = explicitHeldTick;
-        const lifecycle = continuityLifecycleStats(scheduledBase, candidate);
-        const worldChanged = continuityWorldDigest(scheduledBase)
-            !== continuityWorldDigest(candidate);
-        const scenarioChanged = continuityScenarioDigest(scheduledBase)
-            !== continuityScenarioDigest(candidate);
-        const modelProgressed = validOutput && (
-            localProgressed
-            || worldChanged
-            || scenarioChanged
-            || lifecycle.changedExisting > 0
-            || lifecycle.added > 0
-            || (lifecycle.schedulerAdvanced && lifecycle.tickAction === 'held')
-        );
-        if (modelProgressed) {
-            next = candidate;
-            progressed = true;
-            modelValidated = true;
-            break;
-        }
-        // World uses World.evolve's backup/rollback contract. Local clocks are
-        // only part of the candidate pack; an unrecoverable or semantically
-        // empty batch retains the old state and the existing durable task.
-        if (localStateChanged || modelFailure) break;
-        retryReason ||= lifecycle.activeBefore > 0
-            ? '已有未结事件，但既没有实质变化，也没有给出指向具体事件与未满足条件的held调度记录'
-            : '没有新建事件，也没有产生有依据的分类世界变化';
+        return { status: 'failed', reason: String(error?.message || error), module: 'world' };
     }
-    if (!progressed) {
-        const heldThread = scheduledBase.threads.find((thread) => thread.stage !== 'resolved');
-        next = deepClone(scheduledBase);
-        next.turn = tickTurn;
-        next.lastTick = {
-            turn: tickTurn,
-            action: 'held',
-            threadId: heldThread?.id || 'WORLD',
-            reason: modelFailure
-                ? '世界模型本轮不可用；本地仅保存观察与稳定时钟，未生成或补造新的世界事实'
-                : '世界候选未通过结构或因果校验；本地保留已确认状态，等待后台自动重试',
-        };
-        progressed = true;
+    const parsed = parseContinuityOutput(output, {
+        chatId: captured.chatId,
+        maxThreads: settings.continuityMaxThreads,
+    });
+    if (!parsed.state) {
+        return { status: 'failed', reason: parsed.error || 'continuity_output_invalid', module: 'world' };
     }
-    const degradedModelReason = modelFailure
-        ? '模型调用失败'
-        : '模型返回未通过账本校验';
+    const adjudicationBatch = pendingActions.attempts.length
+        ? validateWorldAdjudicationBatch(parsed.raw?.actionAdjudications, pendingActions.attempts)
+        : { valid: true, decisions: [] };
+    if (!adjudicationBatch.valid) {
+        return { status: 'failed', reason: 'world_adjudication_invalid', module: 'world' };
+    }
+    const actionSettlement = pendingActions.attempts.length
+        ? settleActorActionCandidates(actionLedger, pendingActions.candidates, {
+            turn: nextTurn,
+            attempts: pendingActions.attempts,
+            target: actionTarget,
+            worldAdjudications: adjudicationBatch.decisions,
+        })
+        : null;
     if (
-        next.lastTick?.turn <= (base.lastTick?.turn || 0)
-        && clockPlan.changedThreadIds.length
+        actionSettlement
+        && (
+            actionSettlement.pendingWorld.length
+            || actionSettlement.results.length !== pendingActions.attempts.length
+            || !actorActionSettlementsMatchLedger(actionSettlement.ledger, {
+                chatId: captured.chatId,
+                target: actionTarget,
+                results: actionSettlement.results,
+            }).ok
+        )
     ) {
-        const clockThread = next.threads.find(
-            (thread) => thread.id === clockPlan.changedThreadIds[0],
-        );
-        const semanticActorEvent = actorSettlement.worldEvents.at(-1);
-        next.lastTick = {
-            turn: tickTurn,
-            action: !modelValidated && !localProgressed
-                ? 'held'
-                : clockThread?.stage === 'resolved'
-                ? 'resolved'
-                : clockThread?.stage === 'manifested'
-                    ? 'manifested'
-                    : 'advanced',
-            threadId: semanticActorEvent
-                ? `ACTOR-${semanticActorEvent.id}`
-                : clockThread?.id || clockPlan.changedThreadIds[0],
-            reason: modelValidated
-                ? clockThread?.evolveResult === 'success'
-                    ? '本地事件时钟成功推进，模型已完成因果复核'
-                    : clockThread?.evolveResult === 'setback'
-                        ? '本地事件时钟受挫回退，模型已完成因果复核'
-                        : '本地事件时钟本轮保持，模型已完成因果复核'
-                : localProgressed
-                    ? `${degradedModelReason}；已提交NPC语义行动，但宏观连续性仍标记为降级`
-                    : `${degradedModelReason}；仅保存本地时钟，未产生可验证的新世界事实`,
-        };
-    } else if (
-        next.lastTick?.turn <= (base.lastTick?.turn || 0)
-        && continuityWorldDigest(base) !== continuityWorldDigest(next)
-    ) {
-        next.lastTick = {
-            turn: tickTurn,
-            action: modelValidated || localProgressed ? 'advanced' : 'held',
-            threadId: 'WORLD',
-            reason: modelValidated
-                ? '分类世界状态或本地传播时钟发生变化，模型已完成因果复核'
-                : localProgressed
-                    ? `${degradedModelReason}；NPC语义行动已提交，分类世界复核仍待补全`
-                    : `${degradedModelReason}；只保存分类世界时钟，没有语义推进`,
-        };
+        return { status: 'failed', reason: 'world_adjudication_settlement_failed', module: 'world' };
     }
-    next.turn = Math.max(tickTurn, Number(next.turn) || 0);
+    let next = preserveMissingThreads(scheduledBase, parsed.state);
+    next.world = applyWorldUpdate(scheduledBase.world, parsed.raw?.world, { turn: nextTurn });
+    if (actionSettlement?.worldEvents?.length) {
+        next = mergeActorWorldEventsIntoContinuity(next, actionSettlement.worldEvents);
+    }
+    next = enforceContinuityPolicy(scheduledBase, next, {
+        autonomy: settings.continuityAutonomy,
+        allowAutonomous: worldContext.hasSetting,
+        maxThreads: settings.continuityMaxThreads,
+    });
+    const lifecycle = continuityLifecycleStats(scheduledBase, next);
+    const progressed = lifecycle.changedExisting > 0
+        || lifecycle.added > 0
+        || (lifecycle.schedulerAdvanced && lifecycle.tickAction === 'held')
+        || continuityWorldDigest(scheduledBase) !== continuityWorldDigest(next);
+    if (!progressed) {
+        return { status: 'failed', reason: 'world_semantic_progress_missing', module: 'world' };
+    }
+    next.turn = nextTurn;
     next.updatedAt = Date.now();
-    next = attachChangedSourceRefs(base, next, sourceRefOf(captured));
+    next = attachChangedSourceRefs(scheduledBase, next, sourceRefOf(captured));
     next.lastSource = sourceRefOf(captured);
     next = normalizeContinuityState(next, {
         chatId: captured.chatId,
         maxThreads: settings.continuityMaxThreads,
     });
-
-    if (settings.sovereigntyMode === 'shadow') {
-        sovereigntyRuntime = await completeSovereigntyCycle({
-            runtime: sovereigntyRuntime,
-            tasks: sovereigntyTasks,
-            captured,
-            turn: tickTurn,
-            profilePreparation,
-            actorSettlement,
-            actorFailure: actorTechnicalFailure,
-            worldSuccess: modelValidated,
-            worldFailure: modelFailure
-                ? 'world.transport_failed'
-                : modelValidated ? '' : 'world.output_not_committed',
-            persistenceSuccess: true,
-            actorLedger,
-            continuity: next,
-            worldPressure,
-        });
-        setContinuityStatus(
-            `世界连续性：Shadow 回放完成；候选已进检查点，未改写活动账本（档案覆盖 ${profilePreparation.coverage}%）`,
-            modelValidated ? 'ok' : 'warn',
-        );
-        return {
-            status: 'shadow',
-            active: next.threads.filter((thread) => thread.stage !== 'resolved').length,
-            actorActions: actorSettlement.accepted.length,
-            worldValidated: modelValidated,
-        };
-    }
-
-    // World.evolve compatibility contract: the deep-copied `base` is the
-    // rollback state; one validated candidate owns one atomic world-domain
-    // namespace save and one required readback. Profile and actor persistence
-    // remain separate and cannot roll this commit back.
-    let worldStateCommitted = worldTaskAlreadyCommitted;
-    let worldPersistenceFailureCode = modelFailure
-        ? 'world.transport_failed'
-        : 'world.output_not_committed';
-    let remainingSovereigntyTasks = worldTaskAlreadyCommitted
-        ? { ...sovereigntyTasks, world: null }
-        : sovereigntyTasks;
-    const checkpointScopeDigest = actorSovereigntyScopeDigest(
-        namespace.actorSovereigntyScope,
+    guard = stage3TargetIsCurrent(captured, token);
+    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    const sourceContinuityDigest = stage3ContinuityDigestWithoutInjection(next);
+    const settlementLedger = actionSettlement ? actionSettlement.ledger : actionLedger;
+    const settlementProof = stage3CanonicalSettlementProof(
+        settlementLedger,
+        actionSettlement?.results || [],
     );
-    guard = continuityTargetIsCurrent(captured, token);
-    if (!guard.ok) {
-        await requeueClaimedSovereigntyTasks(sovereigntyTasks, captured, 'target_advanced');
-        return { status: 'stale', reason: guard.reason };
-    }
-    if (modelValidated && !worldTaskAlreadyCommitted) {
-        namespace.continuity = next;
-        namespace.worldPressure = worldPressure;
-        namespace.continuityWorldLaneReceipts = [
-            ...(Array.isArray(namespace.continuityWorldLaneReceipts)
-                ? namespace.continuityWorldLaneReceipts
-                : []),
-            ...worldLaneSchedule.receipts.map((receipt) => ({
-                ...receipt,
-                status: receipt.status === 'delayed'
-                    ? 'delayed'
-                    : receipt.due ? 'settled' : 'retained',
-                settledAt: Date.now(),
-            })),
-        ].slice(-80);
-        namespace.continuityDirector = director;
-        namespace.continuityDetected = true;
-        if (!isReroll && !checkpointMatchesTarget(namespace.continuityCheckpoint, captured)) {
-            namespace.continuityCheckpoint = {
-                version: 2,
-                scopeDigest: checkpointScopeDigest,
-                target: actorActionTargetOf(captured),
-                compatibilityOnly: false,
-                restorable: true,
-                state: checkpointBase,
-            };
-        }
-        const worldRuntime = settleWorldSovereigntyTask(
-            sovereigntyRuntime,
-            sovereigntyTasks.world,
-            {
-                captured,
-                turn: tickTurn,
-                success: true,
-                continuity: next,
-                worldPressure,
-            },
-        );
-        namespace.sovereigntyRuntime = worldRuntime;
-        const worldFields = [
-            'sovereigntyRuntime',
+    const injectionText = buildContinuityInjection(next, {
+        director,
+        maxVisible: settings.continuityMaxVisible,
+    }).trim();
+    next.nextTurnInjection = {
+        version: 1,
+        status: 'pending',
+        producerTarget: stage3AcceptedTarget(captured),
+        sourceContinuityDigest,
+        payload: {
+            text: injectionText,
+            visibleThreadIds: next.threads
+                .filter((thread) => thread.stage !== 'resolved' && thread.relation === 'converging')
+                .slice(0, Math.max(0, Number(settings.continuityMaxVisible) || 0))
+                .map((thread) => thread.id),
+        },
+        settlementProof,
+        createdAt: Date.now(),
+    };
+    next = normalizeContinuityState(next, {
+        chatId: captured.chatId,
+        maxThreads: settings.continuityMaxThreads,
+    });
+    namespace.continuity = next;
+    namespace.continuityCheckpoint = {
+        targetIndex: captured.index,
+        messageId: captured.messageId,
+        swipeId: captured.swipeId,
+        scopeDigest: captured.scopeDigest,
+        stage3ProducerTarget: stage3AcceptedTarget(captured),
+        stage3Phase: 'world_committed',
+        state: checkpointBase,
+    };
+    if (actionSettlement) namespace.actorLedger = settlementLedger;
+    namespace.continuityDirector = director;
+    namespace.continuityDetected = true;
+    const failureSink = {};
+    const successSink = {};
+    const saved = await writeChatNamespace(namespace, captured.chatId, {
+        fields: [
             'continuity',
             'continuityCheckpoint',
-            'worldPressure',
-            'continuityWorldLaneReceipts',
+            ...(actionSettlement ? ['actorLedger'] : []),
             'continuityDirector',
             'continuityDetected',
-            'continuitySourceReceipts',
-        ];
-        const worldFailureSink = {};
-        const worldSuccessSink = {};
-        const expectedWorldDigest = continuityContentDigest(next);
-        const worldRebase = rebaseIdenticalNamespaceFields(
-            namespace,
-            readChatNamespace(context),
-            worldFields,
-        );
-        namespace = worldRebase.namespace;
-        worldStateCommitted = await writeChatNamespace(namespace, captured.chatId, {
-            fields: worldFields,
-            durable: true,
-            force: true,
-            failureSink: worldFailureSink,
-            successSink: worldSuccessSink,
-            requireReadback: true,
-            readbackAttempts: 1,
-            contentValidator: (persisted) => {
-                const persistedWorldTask = (
-                    persisted?.sovereigntyRuntime?.backlog || []
-                ).find((task) => task.id === sovereigntyTasks.world?.id);
-                return continuityContentDigest(persisted?.continuity) === expectedWorldDigest
-                    && (!sovereigntyTasks.world || persistedWorldTask?.status === 'committed');
-            },
-            precondition: () => continuityTargetIsCurrent(captured, token).ok,
-        });
-        if (worldStateCommitted) {
-            namespace = worldSuccessSink.namespace || readChatNamespace(context);
-            sovereigntyRuntime = worldRuntime;
-            remainingSovereigntyTasks = { ...sovereigntyTasks, world: null };
-        } else {
-            worldPersistenceFailureCode = worldFailureSink.code
-                || lastChatNamespaceWriteFailureCode
-                || 'world.persistence_failed';
-            if ([
-                'chat_context_changed',
-                'chat_context_changed_after_save',
-                'write_precondition_failed',
-            ].includes(worldPersistenceFailureCode)) {
-                await requeueClaimedSovereigntyTasks(
-                    sovereigntyTasks,
-                    captured,
-                    'target_advanced',
-                );
-                return { status: 'stale', reason: worldPersistenceFailureCode };
-            }
-            namespace = readChatNamespace(context);
-            sovereigntyRuntime = sovereigntyRuntimeFromNamespace(namespace, settings);
-        }
-    }
-    if (!worldStateCommitted) {
-        sovereigntyRuntime = settleWorldSovereigntyTask(
-            sovereigntyRuntime,
-            sovereigntyTasks.world,
-            {
-                captured,
-                turn: tickTurn,
-                success: false,
-                failureCode: worldPersistenceFailureCode,
-            },
-        );
-        namespace = readChatNamespace(context);
-        namespace.sovereigntyRuntime = sovereigntyRuntime;
-        remainingSovereigntyTasks = { ...sovereigntyTasks, world: null };
-    }
-
-    namespace.actorLedger = actorLedger;
-    if (!isReroll && !checkpointMatchesTarget(namespace.actorLedgerCheckpoint, captured)) {
-        const encodedActorCheckpoint = await encodeContentAddressedJson(storedActorLedger);
-        namespace.actorLedgerCheckpoint = {
-            version: 2,
-            scopeDigest: checkpointScopeDigest,
-            target: actorActionTargetOf(captured),
-            compatibilityOnly: false,
-            restorable: true,
-            stateRef: encodedActorCheckpoint.ref,
-        };
-        namespace.actorLedgerCheckpointBlobs = {
-            [encodedActorCheckpoint.ref]: encodedActorCheckpoint.blob,
-        };
-    }
-    const runtimeBeforeCompletion = deepClone(sovereigntyRuntime);
-    sovereigntyRuntime = await completeSovereigntyCycle({
-        runtime: sovereigntyRuntime,
-        tasks: remainingSovereigntyTasks,
-        captured,
-        turn: tickTurn,
-        profilePreparation,
-        actorSettlement,
-        actorFailure: actorTechnicalFailure,
-        worldSuccess: modelValidated,
-        worldFailure: modelFailure
-            ? 'world.transport_failed'
-            : modelValidated ? '' : 'world.output_not_committed',
-        persistenceSuccess: true,
-        actorLedger,
-        continuity: next,
-        worldPressure,
-        persist: false,
-    });
-    namespace.sovereigntyRuntime = sovereigntyRuntime;
-    const cycleFields = [
-        'sovereigntyRuntime',
-        'actorLedger',
-        'actorLedgerCheckpoint',
-        'actorLedgerCheckpointBlobs',
-    ];
-    const settlementReadbackRequired = actorSettlementFinalized
-        && Array.isArray(actorSettlement.results)
-        && actorSettlement.results.length > 0;
-    const settlementFailureSink = {};
-    const identicalRebase = rebaseIdenticalNamespaceFields(
-        namespace,
-        readChatNamespace(context),
-        cycleFields,
-    );
-    namespace = identicalRebase.namespace;
-    const stateCommitted = await writeChatNamespace(namespace, captured.chatId, {
-        fields: cycleFields,
+        ],
         durable: true,
-        force: true,
-        failureSink: settlementFailureSink,
-        requireReadback: settlementReadbackRequired,
-        contentValidator: settlementReadbackRequired
-            ? (persisted) => actorActionSettlementsMatchLedger(
-                persisted?.actorLedger,
-                {
-                    chatId: captured.chatId,
-                    target: actorActionTargetOf(captured),
-                    results: actorSettlement.results,
-                },
-            ).ok
-            : null,
-        precondition: () => continuityTargetIsCurrent(captured, token).ok,
+        requireReadback: true,
+        readbackAttempts: 1,
+        failureSink,
+        successSink,
+        precondition: () => (
+            stage3TaskOwnsCurrent(captured, token)
+            && stage3TargetIsCurrent(captured, token).ok
+        ),
+        contentValidator: (persisted) => (
+            !!stage3PersistedPackageForTarget(
+                persisted?.continuity,
+                persisted?.actorLedger || settlementLedger,
+                captured,
+            )
+            && (!actionSettlement || actorActionSettlementsMatchLedger(persisted?.actorLedger, {
+                chatId: captured.chatId,
+                target: actionTarget,
+                results: actionSettlement.results,
+            }).ok)
+        ),
     });
-    const cycleCommitFailureCode = stateCommitted
-        ? ''
-        : settlementFailureSink.code
-            || lastChatNamespaceWriteFailureCode
-            || 'continuity.persistence_failed';
-    let failureStatePersisted = null;
-    if (!stateCommitted && settlementReadbackRequired) {
-        actorTechnicalFailure = settlementFailureSink.code === 'host_save_readback_unsupported'
-            ? 'actor_adjudication.readback_unsupported'
-            : settlementFailureSink.code === 'host_save_readback_mismatch'
-                ? 'actor_adjudication.readback_mismatch'
-                : [
-                    'chat_context_changed',
-                    'chat_context_changed_after_save',
-                    'write_precondition_failed',
-                ].includes(settlementFailureSink.code)
-                    ? 'actor_adjudication.target_stale'
-                    : 'actor_adjudication.commit_rejected';
+    if (!saved) {
+        return {
+            status: 'failed',
+            reason: failureSink.code || 'world.persistence_readback_failed',
+            module: 'world',
+        };
     }
-    if (stateCommitted) {
-        if (actorRegistration.discovered.length) {
-            recordOperation(
-                '人物档案',
-                `已登记 ${actorRegistration.discovered.map((item) => item.name).join('、')}；等待证据化档案后才允许自主行动`,
-                'ok',
-            );
-        }
-        if (persistedProfileNames.size) {
-            recordOperation(
-                '人物档案',
-                `已持久化 ${[...persistedProfileNames].join('、')} 的证据化人物档案`,
-                'ok',
-            );
-        }
-        if (profilePreparation.deferred.length) {
-            recordOperation(
-                '人物档案',
-                `${profilePreparation.deferred.length} 名人物档案仍未就绪；已禁止其自主行动并保留重试`,
-                'warn',
-            );
-        }
+    guard = stage3TargetIsCurrent(captured, token);
+    if (!guard.ok || !stage3TaskOwnsCurrent(captured, token)) {
+        return { status: 'stale', reason: guard.reason || 'world_task_owner_changed' };
     }
-    if (!stateCommitted) {
-        // The actor/profile transaction may fail independently after the world
-        // domain has passed readback. Reload the authoritative namespace so its
-        // successful world commit is never restored to the pre-P3 backup.
-        namespace = readChatNamespace(context);
-        sovereigntyRuntime = await completeSovereigntyCycle({
-            runtime: runtimeBeforeCompletion,
-            tasks: remainingSovereigntyTasks,
-            captured,
-            turn: tickTurn,
-            profilePreparation,
-            actorSettlement,
-            actorFailure: actorTechnicalFailure,
-            worldSuccess: modelValidated,
-            worldFailure: modelFailure
-                ? 'world.transport_failed'
-                : modelValidated ? '' : 'world.output_not_committed',
-            persistenceSuccess: false,
-            actorLedger,
-            continuity: next,
-            worldPressure,
-            persist: false,
-        });
-        namespace.sovereigntyRuntime = sovereigntyRuntime;
-        const failureStateSaved = await writeChatNamespace(namespace, captured.chatId, {
-            fields: ['sovereigntyRuntime'],
-            durable: true,
-            force: true,
-            retainOnFailure: true,
-        });
-        failureStatePersisted = failureStateSaved;
-        if (!failureStateSaved) {
-            recordOperation(
-                '人物主权',
-                worldStateCommitted
-                    ? '人物档案或人物结算保存失败；世界账本已独立通过读回且不会重算，人物域保留可恢复失败态'
-                    : '人物档案或人物结算保存失败；世界批次也未提交，两个域均保留各自可恢复失败态',
-                'error',
-            );
-        }
-    }
-    guard = continuityTargetIsCurrent(captured, token);
-    if (!guard.ok) return { status: 'stale', reason: guard.reason };
-    if (worldStateCommitted) await applyContinuityInjection();
-    const committedWorldState = worldStateCommitted ? next : base;
-    const active = committedWorldState.threads
-        .filter((thread) => thread.stage !== 'resolved').length;
-    const held = committedWorldState.lastTick?.action === 'held';
-    if (!worldStateCommitted) {
-        setContinuityStatus(
-            '世界连续性：单批结果未通过校验或持久化读回；旧世界状态保持不变，已保留恢复任务',
-            'error',
-        );
-    } else if (!stateCommitted) {
-        setContinuityStatus(
-            '世界连续性：世界账本已持久化并通过读回；人物档案或人物结算仍待独立恢复，世界不会因此重算',
-            'warn',
-        );
-    } else if (!modelValidated) {
-        setContinuityStatus(
-            localProgressed
-                ? `世界连续性：宏观模型未通过，但已提交 ${actorSettlement.accepted.filter((item) => item.semanticProgress).length} 项NPC语义行动；本轮降级，不计为完整通过`
-                : clockOnlyProgressed
-                    ? `世界连续性：${degradedModelReason}；仅保存 ${clockPlan.changedThreadIds.length || 1} 项时钟变化，没有语义推进，已排队自动恢复`
-                    : `世界连续性：${degradedModelReason}；已保留全部确认状态，没有补造新事实，已排队自动恢复`,
-            'warn',
-        );
-    } else {
-        setContinuityStatus(
-            held
-                ? `世界连续性：已审计 ${active} 条未结事件，本轮条件未成熟`
-                : `世界连续性：已记录 ${active} 条未结事件`,
-            'ok',
-        );
-    }
-    const persistenceOutcome = worldContinuityPersistenceOutcome({
-        worldCommitted: worldStateCommitted,
-        actorProfileCommitted: stateCommitted,
-        worldFailureCode: worldPersistenceFailureCode,
-        actorProfileFailureCode: cycleCommitFailureCode,
-    });
+    const active = next.threads.filter((thread) => thread.stage !== 'resolved').length;
+    setContinuityStatus(
+        `世界连续性：已独立保存并回读 ${active} 条未结事件；下回合注入包仅等待阶段四唯一入口`,
+        'ok',
+    );
     return {
-        ...persistenceOutcome,
+        status: 'applied',
         active,
         director,
-        held,
-        degraded: !modelValidated,
-        clockOnly: !modelValidated && clockOnlyProgressed && !localProgressed,
-        actorActions: actorSettlement.accepted.filter(
-            (item) => item.semanticProgress === true,
-        ).length,
-        actorHeld: actorSettlement.accepted.filter(
-            (item) => item.semanticProgress !== true,
-        ).length,
-        actorActionRejected: actorSettlement.rejected.length,
-        failureStatePersisted: !worldStateCommitted
-            ? stateCommitted || failureStatePersisted
-            : failureStatePersisted,
-        persistenceFailureFields: stateCommitted
-            ? []
-            : settlementFailureSink.staleFields || [],
+        worldModelCalls: 1,
+        worldWrites: 1,
+        nextTurnInjection: deepClone(next.nextTurnInjection),
+        readbackVerified: !!successSink.readbackNamespace,
     };
-    } finally {
-        for (const task of [
-            ...Object.values(sovereigntyTasks || {}),
-            ...Object.values(sovereigntyTasks?.actorById || {}),
-        ]) {
-            if (task?.id) activeSovereigntyTaskIds.delete(task.id);
-        }
-    }
 }
 
 function sameTargetExceptContent(left, right) {
@@ -14211,76 +14256,228 @@ function sameAcceptedNarrativeTarget(left, right) {
 function continuityTargetIsCurrent(captured, token) {
     const strict = targetIsCurrent(captured, token);
     if (strict.ok || token?.epoch !== operationEpoch) return strict;
-    const fresh = captureTarget(getContext(), captured?.index);
+    const fresh = captureTarget(getContext(), captured?.index, {
+        frozenScope: captured?.actorSovereigntyScope,
+        unscoped: !captured?.scopeDigest,
+    });
     return sameAcceptedNarrativeTarget(captured, fresh)
         ? { ok: true }
         : strict;
 }
 
-function enqueueContinuity(targetId, {
-    after = Promise.resolve(),
+async function enqueueContinuity(targetId, {
     force = false,
+    expectedTarget = null,
+    noActorPermit = null,
+} = {}) {
+    const context = getContext();
+    const latest = latestAiMessage(context);
+    const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
+    const expected = expectedTarget || captureTarget(context, resolved);
+    if (!expected) return { status: 'stale', reason: 'current_source_unavailable' };
+    const dedupeKey = stage3AcceptedTargetKey(expected);
+    if (!dedupeKey) return { status: 'stale', reason: 'current_source_key_missing' };
+    if (continuityPendingKeys.has(dedupeKey)) {
+        return { status: 'duplicate', reason: 'world_target_pending' };
+    }
+    if (!force && continuityCompletedKeys.has(dedupeKey)) {
+        return { status: 'duplicate', reason: 'world_target_completed' };
+    }
+    continuityPendingKeys.add(dedupeKey);
+    const taskEpoch = expected.epoch;
+    const taskChatId = expected.chatId;
+    const storedRetrySignal = continuityProfileRetrySignals.get(dedupeKey) || null;
+    const retrySignal = storedRetrySignal?.epoch === taskEpoch
+        && storedRetrySignal?.chatId === taskChatId
+        ? storedRetrySignal
+        : null;
+    if (storedRetrySignal && !retrySignal) continuityProfileRetrySignals.delete(dedupeKey);
+    const effectiveNoActorPermit = noActorPermit || retrySignal?.noActorPermit || null;
+    if (retrySignal) continuityProfileRetrySignals.delete(dedupeKey);
+    const task = continuityChain
+        .catch(() => undefined)
+        .then(async () => {
+            const fresh = captureTarget(getContext(), expected.index, {
+                frozenScope: expected.actorSovereigntyScope,
+                unscoped: !expected.scopeDigest,
+            });
+            if (!stage3AcceptedTargetsMatch(
+                stage3AcceptedTarget(expected),
+                stage3AcceptedTarget(fresh),
+            )) {
+                return { status: 'stale', reason: 'current_source_identity_changed' };
+            }
+            return runContinuityTarget(fresh, { force, noActorPermit: effectiveNoActorPermit });
+        })
+        .then((result) => {
+            const ownsCurrentTask = (
+                taskEpoch === operationEpoch
+                && taskChatId === getContext()?.chatId
+            );
+            if (!ownsCurrentTask) return result;
+            if (result?.status === 'applied') {
+                continuityCompletedKeys.add(dedupeKey);
+                continuityProfileRetrySignals.delete(dedupeKey);
+            }
+            if (result?.status === 'blocked') {
+                setContinuityStatus(`世界连续性未启动：${safeDiagnosticReason(result.reason)}`, '');
+            } else if (result?.status === 'failed') {
+                setContinuityStatus(`世界连续性未完成：${safeDiagnosticReason(result.reason)}`, 'error');
+            } else if (result?.status === 'stale') {
+                setContinuityStatus('世界连续性：目标已变化，本次未写入。', '');
+            } else if (result?.status === 'disabled') {
+                setContinuityStatus('世界连续性：当前正文不启用世界轨。', '');
+            }
+            return result;
+        })
+        .catch((error) => {
+            const result = { status: 'failed', reason: String(error?.message || error) };
+            if (taskEpoch === operationEpoch && taskChatId === getContext()?.chatId) {
+                setContinuityStatus(`世界连续性未完成：${safeDiagnosticReason(result.reason)}`, 'error');
+            }
+            return result;
+        })
+        .finally(() => {
+            continuityPendingKeys.delete(dedupeKey);
+            if (taskEpoch === operationEpoch && taskChatId === getContext()?.chatId) {
+                renderSovereigntyHealth();
+                syncTaskCancelButtons();
+                const deferredRetry = continuityProfileRetrySignals.get(dedupeKey);
+                if (
+                    deferredRetry?.epoch === taskEpoch
+                    && deferredRetry?.chatId === taskChatId
+                ) {
+                    void enqueueContinuity(expected.index, {
+                        expectedTarget: expected,
+                        noActorPermit: deferredRetry.noActorPermit || null,
+                    });
+                } else if (deferredRetry) {
+                    continuityProfileRetrySignals.delete(dedupeKey);
+                }
+            }
+        });
+    continuityChain = task.catch(() => undefined);
+    return task;
+}
+
+async function enqueueActorProfiles(targetId, {
+    force = false,
+    includeMaintenance = false,
     expectedTarget = null,
 } = {}) {
     const context = getContext();
     const latest = latestAiMessage(context);
     const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
     const expected = expectedTarget || captureTarget(context, resolved);
-    // P3 binds the one world batch to the complete accepted narrative target,
-    // including generation, branch, swipe, and accepted-content fingerprint.
-    // A changed body is stale; it cannot share or inherit another batch key.
-    const dedupeKey = capturedTargetKey(expected);
-    if (
-        dedupeKey
-        && (
-            continuityPendingKeys.has(dedupeKey)
-            || (!force && continuityCompletedKeys.has(dedupeKey))
-        )
-    ) {
-        return Promise.resolve({ status: 'duplicate' });
+    if (!expected) {
+        return actorProfileTransientResult('stale', { reason: 'current_source_unavailable' });
     }
-    if (dedupeKey) continuityPendingKeys.add(dedupeKey);
-
-    continuityChain = continuityChain
+    const scopeGuard = await freshFrozenScopeGuard(expected);
+    if (!scopeGuard.ok) {
+        return actorProfileTransientResult('stale', { reason: scopeGuard.reason });
+    }
+    const initialGuard = continuityTargetIsCurrent(expected, operationToken(expected));
+    if (!initialGuard.ok) {
+        return actorProfileTransientResult('stale', { reason: initialGuard.reason });
+    }
+    const fresh = captureTarget(getContext(), expected.index, {
+        frozenScope: expected.actorSovereigntyScope,
+        unscoped: !expected.scopeDigest,
+    });
+    if (!sameAcceptedNarrativeTarget(expected, fresh)) {
+        return actorProfileTransientResult('stale', {
+            reason: 'current_source_identity_changed',
+        });
+    }
+    const dedupeKey = capturedTargetKey(expected);
+    if (!dedupeKey) {
+        return actorProfileTransientResult('stale', { reason: 'current_source_key_missing' });
+    }
+    if (actorProfilePendingKeys.has(dedupeKey)) {
+        return actorProfileTransientResult('duplicate', { reason: 'profile_batch_pending' });
+    }
+    if (!force && actorProfileCompletedKeys.has(dedupeKey)) {
+        return actorProfileTransientResult('duplicate', { reason: 'profile_batch_completed' });
+    }
+    const taskEpoch = expected.epoch;
+    const taskChatId = expected.chatId;
+    const owner = Symbol(dedupeKey);
+    actorProfilePendingKeys.set(dedupeKey, owner);
+    if (actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
+        setActorProfileStatus('人物档案：正在登记本回合人物并准备一次批量整档…', 'busy');
+        renderSovereigntyHealth();
+        syncTaskCancelButtons();
+    }
+    const task = actorProfileChain
         .catch(() => undefined)
-        .then(() => after.catch?.(() => undefined) ?? after)
-        .then(() => {
-            if (!expected || expected.epoch !== operationEpoch) {
-                return { status: 'stale', reason: '任务已被新的生成作废' };
+        .then(async () => {
+            if (!actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
+                return actorProfileTransientResult('stale', {
+                    reason: 'profile_epoch_or_chat_changed',
+                });
             }
             const freshContext = getContext();
-            const fresh = captureTarget(freshContext, expected.index);
-            if (!sameAcceptedNarrativeTarget(expected, fresh)) {
-                return { status: 'stale', reason: '目标回复身份或已接受正文已经变化' };
+            const current = captureTarget(freshContext, expected.index, {
+                frozenScope: expected.actorSovereigntyScope,
+                unscoped: !expected.scopeDigest,
+            });
+            if (!sameAcceptedNarrativeTarget(expected, current)) {
+                return actorProfileTransientResult('stale', {
+                    reason: 'current_source_identity_changed',
+                });
             }
-            return runContinuityTarget(fresh, { force });
+            const freshScope = await freshFrozenScopeGuard(current);
+            if (!freshScope.ok) {
+                return actorProfileTransientResult('stale', { reason: freshScope.reason });
+            }
+            return runActorProfileTarget(current, { force, includeMaintenance });
         })
         .then((result) => {
-            if (dedupeKey && ['applied', 'disabled', 'shadow'].includes(result?.status)) {
-                continuityCompletedKeys.add(dedupeKey);
+            if (!actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) return result;
+            if (['atomic_readback', 'no_candidates'].includes(result?.status)) {
+                actorProfileCompletedKeys.add(dedupeKey);
+            }
+            if (result?.status === 'atomic_readback') {
+                const committed = result.profileBatch?.committed?.length || 0;
+                setActorProfileStatus(
+                    `人物档案：${committed} 人整档已原子保存并回读验证`,
+                    'ok',
+                );
+            } else if (result?.status === 'no_candidates') {
+                setActorProfileStatus('人物档案：当前正文没有未完成的初始人物档案', '');
+            } else if (result?.status === 'disabled') {
+                setActorProfileStatus('人物档案：当前已停用', '');
+            } else if (result?.status === 'stale') {
+                setActorProfileStatus('人物档案：目标已变化，本次未提交', '');
+            } else {
+                setActorProfileStatus(
+                    `人物档案未完成：${safeDiagnosticReason(result?.reason || '批次未能原子回读')}`,
+                    'error',
+                );
             }
             return result;
         })
         .catch((error) => {
-            console.error('[MVU Auto Doctor] 世界连续性处理异常：', error);
-            setContinuityStatus(`世界连续性异常：${error.message || error}`, 'error');
-            return { status: 'failed', reason: String(error.message || error) };
+            console.error('[MVU Auto Doctor] 人物档案处理异常：', error);
+            const result = actorProfileTransientResult('not_completed', {
+                reason: String(error.message || error),
+            });
+            if (actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
+                setActorProfileStatus(`人物档案未完成：${error.message || error}`, 'error');
+            }
+            return result;
         })
         .finally(() => {
-            if (dedupeKey) continuityPendingKeys.delete(dedupeKey);
-            if (expected?.epoch === operationEpoch) {
-                const freshContext = getContext();
-                const freshLatest = latestAiMessage(freshContext);
-                const fresh = captureTarget(freshContext, freshLatest.index);
-                scheduleSovereigntyAutoRetry(
-                    fresh,
-                    sovereigntyRuntimeFromNamespace(readChatNamespace(freshContext)),
-                );
+            if (actorProfilePendingKeys.get(dedupeKey) === owner) {
+                actorProfilePendingKeys.delete(dedupeKey);
             }
-            renderSovereigntyHealth();
-            syncTaskCancelButtons();
+            if (actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
+                renderSovereigntyHealth();
+                syncTaskCancelButtons();
+            }
         });
-    return continuityChain;
+    actorProfileChain = task.catch(() => undefined);
+    return task;
 }
 
 async function confirmDangerousAction(message) {
@@ -14378,7 +14575,7 @@ function forumBase(namespace, captured) {
     if (
         isReroll
         && checkpoint?.state
-        && checkpoint.targetIndex === captured.index
+        && checkpointLogicalReplyMatches(checkpoint, captured)
     ) {
         return normalizeForumState(checkpoint.state, {
             chatId: captured.chatId,
@@ -14547,6 +14744,8 @@ async function runForumTarget(captured, {
     force = false,
     manual = false,
 } = {}) {
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
     const token = operationToken(captured);
     let guard = targetIsCurrent(captured, token);
     if (!guard.ok) return { status: 'stale', reason: guard.reason };
@@ -14576,6 +14775,8 @@ async function runForumTarget(captured, {
     }
 
     const worldContext = await collectContinuityWorldContext(context, currentCharacter(context));
+    const refreshedScope = await freshFrozenScopeGuard(captured);
+    if (!refreshedScope.ok) return { status: 'stale', reason: refreshedScope.reason };
     guard = targetIsCurrent(captured, token);
     if (!guard.ok) return { status: 'stale', reason: guard.reason };
     setForumStatus('论坛：正在刷新帖子…', 'busy');
@@ -14596,6 +14797,8 @@ async function runForumTarget(captured, {
         let output = '';
         let rateLimited = false;
         try {
+            const attemptScope = await freshFrozenScopeGuard(captured);
+            if (!attemptScope.ok) return { status: 'stale', reason: attemptScope.reason };
             output = await callModel(messages, {
                 maxTokens: settings.forumMaxTokens,
                 task: '内置论坛刷新',
@@ -14656,6 +14859,9 @@ async function runForumTarget(captured, {
         index: captured.index,
         messageId: captured.messageId,
         swipeId: String(captured.swipeId),
+        generationId: captured.generationId,
+        generationType: captured.generationType,
+        scopeDigest: captured.scopeDigest,
     };
     namespace = readChatNamespace(context);
     namespace.forum = next;
@@ -14666,9 +14872,11 @@ async function runForumTarget(captured, {
         && !checkpointMatchesTarget(namespace.forumCheckpoint, captured)
     ) {
         namespace.forumCheckpoint = {
-            targetIndex: captured.index,
-            messageId: captured.messageId,
-            swipeId: captured.swipeId,
+            version: 2,
+            scopeDigest: captured.scopeDigest,
+            target: actorActionTargetOf(captured),
+            compatibilityOnly: false,
+            restorable: true,
             state: base,
         };
     }
@@ -14693,8 +14901,7 @@ async function runForumTarget(captured, {
     };
 }
 
-function enqueueForum(targetId, {
-    after = Promise.resolve(),
+async function enqueueForum(targetId, {
     force = false,
     manual = false,
     expectedTarget = null,
@@ -14704,31 +14911,35 @@ function enqueueForum(targetId, {
     const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
     const expected = expectedTarget || captureTarget(context, resolved);
     if (!expected) return Promise.resolve({ status: 'missing' });
+    const scopeGuard = await freshFrozenScopeGuard(expected);
+    if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
     // A continued generation is still the same displayed AI floor. Refreshing
     // the optional forum twice for one floor wastes a second model call and can
     // leak an intermediate branch, so share the same branch-level key as the
     // continuity ledger.
     const dedupeKey = capturedBranchKey(expected);
-    if (
-        !force
-        && dedupeKey
-        && (forumPendingKeys.has(dedupeKey) || forumCompletedKeys.has(dedupeKey))
-    ) {
+    if (!force && dedupeKey && forumPendingKeys.has(dedupeKey)) {
         return Promise.resolve({ status: 'duplicate' });
+    }
+    if (!force && dedupeKey && forumCompletedKeys.has(dedupeKey)) {
+        return Promise.resolve(settleEndedBusyStatus(
+            { status: 'duplicate' },
+            latestForumKind,
+            setForumStatus,
+            '论坛',
+        ));
     }
     if (dedupeKey) forumPendingKeys.add(dedupeKey);
     forumChain = forumChain
         .catch(() => undefined)
         .then(() => {
-            setForumStatus('论坛：刷新队列已取得执行权，等待世界结算确认…', 'busy');
-            return after.catch?.(() => undefined) ?? after;
-        })
-        .then(() => {
-            setForumStatus('论坛：世界结算已确认，正在校验刷新目标…', 'busy');
             if (expected.epoch !== operationEpoch) {
                 return { status: 'stale', reason: '任务已被新的生成作废' };
             }
-            const fresh = captureTarget(getContext(), expected.index);
+            const fresh = captureTarget(getContext(), expected.index, {
+                frozenScope: expected.actorSovereigntyScope,
+                unscoped: !expected.scopeDigest,
+            });
             if (!sameTargetExceptContent(expected, fresh)) {
                 return { status: 'stale', reason: '目标回复身份已经变化' };
             }
@@ -14738,7 +14949,7 @@ function enqueueForum(targetId, {
             if (dedupeKey && ['applied', 'disabled', 'external', 'held', 'manual'].includes(result?.status)) {
                 forumCompletedKeys.add(dedupeKey);
             }
-            return result;
+            return settleEndedBusyStatus(result, latestForumKind, setForumStatus, '论坛');
         })
         .catch((error) => {
             console.error('[MVU Auto Doctor] 内置论坛处理异常：', error);
@@ -15645,6 +15856,7 @@ async function applyActorProfileUiMutation(actorId, mutate, successMessage) {
             module_invalid: '档案模块无效',
             profile_invalid: '档案结构无效',
             chat_missing: '当前聊天尚未就绪',
+            actor_profile_pending_transaction: '该人物档案正在等待整批认证；请先使用本回合“重试人物档案”完成认证，期间不能手动覆盖或重生成',
         }[result?.reason] || result?.reason || '修改未保存';
         toast('warning', reason);
         renderActorProfiles();
@@ -15912,7 +16124,9 @@ function renderActorProfiles(namespace = null) {
     const actors = ledger.actors;
     if (ui.floatingActorTabCount) ui.floatingActorTabCount.textContent = String(actors.length);
     if (ui.floatingActorSummary) {
-        const ready = actors.filter((actor) => actorProfileReadyForAction(actor)).length;
+        const ready = actors.filter((actor) => (
+            actorProfileReadinessInLedger(ledger, actor.id).ready
+        )).length;
         const coverage = actors.length
             ? Math.round(actors.reduce((sum, actor) => (
                 sum + actorProfileV6View(actor).coverage
@@ -15945,9 +16159,10 @@ function renderActorProfiles(namespace = null) {
     select?.replaceChildren();
     for (const actor of actors) {
         const profileView = actorProfileV6View(actor);
+        const ledgerReadiness = actorProfileReadinessInLedger(ledger, actor.id);
         const option = document.createElement('option');
         option.value = actor.id;
-        option.textContent = `${actor.name} · ${ACTOR_PROFILE_STATUS_LABELS[actor.status] || actor.status} · ${profileView.coverage}% · ${profileView.preparedForAction ? '已就绪' : '未就绪'}`;
+        option.textContent = `${actor.name} · ${ACTOR_PROFILE_STATUS_LABELS[actor.status] || actor.status} · ${profileView.coverage}% · ${ledgerReadiness.ready ? '已就绪' : '未就绪'}`;
         select.appendChild(option);
     }
     const selectedActor = actors.find((actor) => actor.id === previousSelection) || actors[0] || null;
@@ -15962,6 +16177,7 @@ function renderActorProfiles(namespace = null) {
 
     const profile = selectedActor.profileV6;
     const profileView = actorProfileV6View(selectedActor);
+    const selectedReadiness = actorProfileReadinessInLedger(ledger, selectedActor.id);
     const runtime = normalizeSovereigntyRuntime(state.sovereigntyRuntime, {
         chatId: context?.chatId || '',
     });
@@ -16004,7 +16220,7 @@ function renderActorProfiles(namespace = null) {
     for (const text of [
         ACTOR_PROFILE_STATUS_LABELS[selectedActor.status] || selectedActor.status,
         `覆盖 ${profileView.coverage}%`,
-        profileView.preparedForAction ? '行动前真实就绪' : '未达到行动就绪',
+        selectedReadiness.ready ? '行动前真实就绪' : '未达到行动就绪',
         `V${profile.version}`,
     ]) {
         const badge = document.createElement('span');
@@ -16022,7 +16238,7 @@ function renderActorProfiles(namespace = null) {
     const progressBar = document.createElement('span');
     progressBar.style.setProperty('--mvuad-profile-progress', `${profileView.coverage}%`);
     const progressText = document.createElement('b');
-    progressText.textContent = profileView.preparedForAction
+    progressText.textContent = selectedReadiness.ready
         ? `档案覆盖 ${profileView.coverage}% · 可进入行动调度`
         : `档案覆盖 ${profileView.coverage}% · 空值或 unknown 不算就绪`;
     progress.append(progressBar, progressText);
@@ -16737,7 +16953,6 @@ function refreshForumManual() {
         return Promise.resolve({ status: 'missing' });
     }
     return enqueueForum(latest.index, {
-        after: continuityChain,
         force: true,
         manual: true,
     });
@@ -17124,15 +17339,14 @@ function buildFloatingUi() {
                     <div class="mvuad-floating-statuses">
                         <div class="mvuad-floating-sovereignty-health" role="status"></div>
                         <div class="mvuad-floating-repair-status" role="status"></div>
-                        <div class="mvuad-floating-hard-contract-status" role="status"></div>
+                        <div class="mvuad-floating-actor-profile-status" role="status"></div>
                         <div class="mvuad-floating-continuity-status" role="status"></div>
                         <div class="mvuad-floating-forum-status" role="status"></div>
                     </div>
                     <div class="mvuad-floating-actions">
                         <button class="menu_button mvuad-floating-director" type="button">打开导演台</button>
                         <button class="menu_button mvuad-floating-repair" type="button">检查变量</button>
-                        <button class="menu_button mvuad-floating-protocol" type="button">检查硬规则</button>
-                        <button class="menu_button mvuad-floating-world" type="button">整理世界</button>
+                    <button class="menu_button mvuad-floating-world" type="button">补全人物档案（含历史欠账）</button>
                         <button class="menu_button mvuad-floating-sovereignty-retry" type="button">立即恢复</button>
                         <button class="menu_button mvuad-floating-sovereignty-restore" type="button">恢复检查点</button>
                         <button class="menu_button mvuad-floating-cancel-task" type="button" hidden>停止当前后台任务</button>
@@ -17152,8 +17366,8 @@ function buildFloatingUi() {
         floatingPanel: panel,
         floatingClose: panel.querySelector('.mvuad-floating-close'),
         floatingRepairStatus: panel.querySelector('.mvuad-floating-repair-status'),
+        floatingActorProfileStatus: panel.querySelector('.mvuad-floating-actor-profile-status'),
         floatingSovereigntyHealth: panel.querySelector('.mvuad-floating-sovereignty-health'),
-        floatingHardContractStatus: panel.querySelector('.mvuad-floating-hard-contract-status'),
         floatingContinuityStatus: panel.querySelector('.mvuad-floating-continuity-status'),
         floatingForumStatus: panel.querySelector('.mvuad-floating-forum-status'),
         floatingCount: orb.querySelector('.mvuad-orb-count'),
@@ -17205,14 +17419,11 @@ function buildFloatingUi() {
         const repair = enqueue(null, { manual: true });
         repair.then(() => enqueueOpeningResourceSync(null, { manual: true }));
     });
-    panel.querySelector('.mvuad-floating-protocol').addEventListener('click', () => {
-        enqueueHardContractAudit(null, { manual: true });
-    });
     panel.querySelector('.mvuad-floating-director').addEventListener('click', (event) => {
         openDualSurfacePanel(event.currentTarget);
     });
     panel.querySelector('.mvuad-floating-world').addEventListener('click', () => {
-        enqueueContinuity(null, { force: true });
+        enqueueActorProfiles(null, { force: true, includeMaintenance: true });
     });
     panel.querySelector('.mvuad-floating-sovereignty-retry').addEventListener(
         'click',
@@ -17239,7 +17450,7 @@ function buildFloatingUi() {
         trapDialogFocus(panel, event);
     });
     setStatus(latestStatus, latestStatusKind, { record: false });
-    setHardContractStatus(latestHardContractStatus, latestHardContractKind, { record: false });
+    setActorProfileStatus(latestActorProfileStatus, latestActorProfileKind, { record: false });
     setContinuityStatus(latestContinuityStatus, latestContinuityKind, { record: false });
     renderSovereigntyHealth();
     setForumStatus(latestForumStatus, latestForumKind, { record: false });
@@ -17257,16 +17468,8 @@ function makeCheckbox(label, key) {
     input.addEventListener('change', () => {
         getSettings()[key] = input.checked;
         saveSettings();
-        if (key === 'preventDoubleWrite' && input.checked) {
-            disableStoryOracleAutoIfNeeded();
-        }
         if (key === 'hideContinuitySpoilers') renderContinuityLedger();
         if (key === 'floatingOrbEnabled') syncFloatingUiVisibility();
-        if (key === 'socialNarrativeGuardEnabled') applySocialInjection();
-        if (key === 'hardContractAuditEnabled') {
-            if (input.checked) enqueueHardContractAudit(null, { manual: true });
-            else setHardContractStatus('硬合同：自动检查已关闭');
-        }
         if (key === 'builtInForumEnabled') {
             const settings = getSettings();
             setForumStatus(
@@ -17972,30 +18175,11 @@ function buildSettingsPanel() {
                             <div class="mvuad-status" role="status"></div>
                         </div>
                     </details>
-                    <details class="mvuad-settings-fold mvuad-settings-section">
-                        <summary>正文与装备硬合同</summary>
-                        <div class="mvuad-settings-fold-body">
-                            <div class="mvuad-description">
-                                本地检查字数、结构标签、四选项、骰后改判、场景时间、技能资源、背包与装备字段合同。
-                                自动修正版复用变量诊断的同一次模型请求，并作为新 swipe 写入；原文可左滑恢复。
-                                玩家新增行动、对白、技能或检定会被本地守卫拦截。
-                            </div>
-                            <div class="mvuad-protocol-options"></div>
-                            <div class="mvuad-actions">
-                                <button class="menu_button mvuad-protocol-run" type="button">检查正文硬规则</button>
-                            </div>
-                            <div class="mvuad-status mvuad-protocol-status" role="status"></div>
-                            <details class="mvuad-protocol-details">
-                                <summary class="mvuad-protocol-summary">查看硬合同明细</summary>
-                                <ul class="mvuad-protocol-list"></ul>
-                            </details>
-                        </div>
-                    </details>
                     <details class="mvuad-settings-fold mvuad-settings-section mvuad-social-section">
                         <summary>人物动机、自主性与关系二审</summary>
                         <div class="mvuad-settings-fold-body">
                             <div class="mvuad-description">
-                                正文生成前注入当前动机与活人感合同，并从真实聊天模型上下文移除未选择的候选选项。
+                                人物动机与活人感合同的旧预生成注入在阶段一暂时停用；现有配置仅保留，等待后续批准阶段通过唯一入口重接。
                                 只有出现关系变化、极端标签、玩家隐藏动机归因或强制/自愿冲突时，才用轻量通道做结构化二审；
                                 二审不能重写正文文风，只能放行或撤回本轮持久关系变化。
                             </div>
@@ -18003,7 +18187,7 @@ function buildSettingsPanel() {
                             <label class="mvuad-select">
                                 <span>关系二审模式</span>
                                 <select class="text_pole mvuad-social-audit-mode">
-                                    <option value="off">关闭二审（仍可保留正文合同）</option>
+                                    <option value="off">关闭二审（预生成注入当前停用）</option>
                                     <option value="balanced">平衡·按风险触发（推荐）</option>
                                     <option value="strict">严格·所有关系变化都审</option>
                                 </select>
@@ -18016,7 +18200,7 @@ function buildSettingsPanel() {
                                 <button class="menu_button mvuad-social-run" type="button">二审最新回复</button>
                             </div>
                             <div class="mvuad-status mvuad-social-status" role="status"></div>
-                            <details class="mvuad-protocol-details mvuad-social-details">
+                            <details class="mvuad-audit-details mvuad-social-details">
                                 <summary>查看最近二审追溯</summary>
                                 <ul class="mvuad-social-audit-list"></ul>
                             </details>
@@ -18026,8 +18210,8 @@ function buildSettingsPanel() {
                         <summary>世界惊喜与偶发事件</summary>
                         <div class="mvuad-settings-fold-body">
                             <div class="mvuad-description">
-                                医生在后台给主模型签发一次性“偶发许可证”。它允许没有前兆但不矛盾的惊喜，
-                                不碰角色卡骰池、不改正文、不替玩家行动；重复搜索同一对象不会重复开奖。
+                                阶段一已停用旧偶发许可证预生成注入。现有设置只兼容读取并保持禁用，
+                                等待后续批准阶段通过唯一提示词入口重接；当前不会签发、注册或保存新许可证。
                             </div>
                             <label class="mvuad-select">
                                 <span>世界惊喜频率</span>
@@ -18093,7 +18277,7 @@ function buildSettingsPanel() {
                             </div>
                             <div class="mvuad-sovereignty-health" role="status"></div>
                             <div class="mvuad-actions">
-                                <button class="menu_button mvuad-sovereignty-retry" type="button">立即重试技术任务</button>
+                                <button class="menu_button mvuad-sovereignty-retry" type="button">重试当前正文人物档案</button>
                                 <button class="menu_button mvuad-sovereignty-restore" type="button">恢复稳定检查点</button>
                             </div>
                             <label class="mvuad-select">
@@ -18104,13 +18288,6 @@ function buildSettingsPanel() {
                                     <option value="active">Active·正式运行（推荐）</option>
                                 </select>
                             </label>
-                            <label class="mvuad-check">
-                                <input class="mvuad-sovereignty-run-until-cancelled" type="checkbox">
-                                <span>医生模型任务持续运行，直到完成或我主动取消</span>
-                            </label>
-                            <div class="mvuad-description">
-                                开启后变量、人物、世界、关系与论坛模型都不会被固定秒数掐断；正文无需等待后台完成，运行中可用“停止当前后台任务”安全取消。
-                            </div>
                             <label class="mvuad-select">
                                 <span>人物档案自动补全</span>
                                 <select class="text_pole mvuad-profile-completion-mode">
@@ -18130,13 +18307,13 @@ function buildSettingsPanel() {
                                 不预猜人物数，不限制正文出场人数，也不与完整档案批量容量绑定。
                             </div>
                             <label class="mvuad-number">
-                                <span>每批完整档案容量</span>
+                                <span>历史档案手动维护预算</span>
                                 <input class="text_pole mvuad-profile-batch-capacity"
                                     type="number" min="1" max="24" step="1">
                             </label>
                             <div class="mvuad-description">
-                                默认8，可设1—24。它只决定一次完整档案模型批次的容量，
-                                不改变生成前票据池、正文人物数或后台行动人数。
+                                默认8，可设1–24。当前正文新登记的人物不受此预算截断，始终进入同一初始批；
+                                只有手动补全历史欠账时才使用这里的容量。
                             </div>
                             <label class="mvuad-select">
                                 <span>缺失人物批量补填</span>
@@ -18167,7 +18344,7 @@ function buildSettingsPanel() {
                                     type="number" min="0" max="4" step="1">
                             </label>
                             <div class="mvuad-description">
-                                默认2，可设0—4；主回复仍可采用0条。多个事件只有在各自触发条件已经成熟，
+                                此配置在阶段一仅兼容保留，旧平行注入当前不会执行。重接后默认2，可设0—4；主回复仍可采用0条。多个事件只有在各自触发条件已经成熟，
                                 或共享同一时间、地点、人物、势力、资源或因果簇时才可共同爆发，并继续受注入预算限制。
                                 人物行动与势力、环境、经济等结构世界过程分轨调度；关闭逐人物行动分析不会停止后者。
                             </div>
@@ -18284,10 +18461,11 @@ function buildSettingsPanel() {
                             <div class="mvuad-continuity-options"></div>
                             <div class="mvuad-actions">
                                 <button class="menu_button mvuad-continuity-open" type="button">打开世界、人物与事件面板</button>
-                                <button class="menu_button mvuad-continuity-run" type="button">立即整理世界</button>
+                                <button class="menu_button mvuad-continuity-run" type="button">补全人物档案（含历史欠账）</button>
                                 <button class="menu_button mvuad-continuity-clear mvuad-danger" type="button">清空世界账本</button>
                             </div>
                             <div class="mvuad-status mvuad-continuity-status" role="status"></div>
+                            <div class="mvuad-status mvuad-actor-profile-status" role="status"></div>
                         </div>
                     </details>
                     <details class="mvuad-settings-fold mvuad-settings-section">
@@ -18351,19 +18529,22 @@ function buildSettingsPanel() {
     options.append(
         makeCheckbox('自动检查每条新回复', 'enabled'),
         makeCheckbox('开局自动补满初始化失配的资源', 'normalizeOpeningResources'),
-        makeCheckbox('自动关闭故事神谕 AUTO，避免双写', 'preventDoubleWrite'),
         makeCheckbox('无需修正时也弹提示', 'notifyNoChange'),
     );
     wrapper.querySelector('.mvuad-fast-options').append(
         makeCheckbox('独立轻量 API 使用 JSON 模式（DS 推荐）', 'fastApiJsonMode'),
     );
     bindModelConnectionManager(wrapper.querySelector('.mvuad-connection-manager'));
-    wrapper.querySelector('.mvuad-protocol-options').append(
-        makeCheckbox('自动本地检查正文与装备硬合同（0次模型调用）', 'hardContractAuditEnabled'),
+    const socialNarrativeGuardOption = makeCheckbox(
+        '正文动机与人物自主性预生成合同（阶段一停用）',
+        'socialNarrativeGuardEnabled',
     );
-    wrapper.querySelector('.mvuad-social-options').append(
-        makeCheckbox('启用正文动机与人物自主性合同', 'socialNarrativeGuardEnabled'),
-    );
+    const originalSocialNarrativeGuardInput = socialNarrativeGuardOption.querySelector('input');
+    const socialNarrativeGuardInput = originalSocialNarrativeGuardInput.cloneNode(true);
+    originalSocialNarrativeGuardInput.replaceWith(socialNarrativeGuardInput);
+    socialNarrativeGuardInput.disabled = true;
+    socialNarrativeGuardOption.title = '旧配置只兼容保留，等待后续唯一注入入口重接';
+    wrapper.querySelector('.mvuad-social-options').append(socialNarrativeGuardOption);
     const socialAuditMode = wrapper.querySelector('.mvuad-social-audit-mode');
     socialAuditMode.value = getSettings().socialAuditMode;
     socialAuditMode.addEventListener('change', () => {
@@ -18384,15 +18565,8 @@ function buildSettingsPanel() {
     ]) {
         const control = wrapper.querySelector(selector);
         control.value = getSettings()[key];
-        control.addEventListener('change', () => {
-            getSettings()[key] = control.value;
-            saveSettings();
-            if (key === 'serendipityFrequency' && control.value === 'off') {
-                pendingSerendipityDraft = null;
-                pendingSerendipityBaseline = null;
-                registerSerendipityInjection('');
-            }
-        });
+        control.disabled = true;
+        control.title = '阶段一停用旧偶发预生成注入；当前值只兼容保留';
     }
     const variableMaxTokens = wrapper.querySelector('.mvuad-variable-max-tokens');
     variableMaxTokens.value = String(getSettings().maxTokens);
@@ -18477,13 +18651,9 @@ function buildSettingsPanel() {
     wrapper.querySelector('.mvuad-run').addEventListener('click', () => {
         const repair = enqueue(null, { manual: true });
         repair.then(() => enqueueOpeningResourceSync(null, { manual: true }));
-        enqueueHardContractAudit(null, { manual: true });
     });
     wrapper.querySelector('.mvuad-undo').addEventListener('click', undoLast);
     wrapper.querySelector('.mvuad-cancel-task').addEventListener('click', cancelCurrentOperations);
-    wrapper.querySelector('.mvuad-protocol-run').addEventListener('click', () => {
-        enqueueHardContractAudit(null, { manual: true });
-    });
     wrapper.querySelector('.mvuad-surface-open').addEventListener('click', (event) => {
         openDualSurfacePanel(event.currentTarget);
     });
@@ -18499,20 +18669,6 @@ function buildSettingsPanel() {
         await persistSovereigntyRuntime(runtime, getContext()?.chatId || '', {
             durable: true,
         });
-    });
-    const sovereigntyRunUntilCancelled = wrapper.querySelector(
-        '.mvuad-sovereignty-run-until-cancelled',
-    );
-    sovereigntyRunUntilCancelled.checked = getSettings().sovereigntyRunUntilCancelled !== false;
-    sovereigntyRunUntilCancelled.addEventListener('change', () => {
-        getSettings().sovereigntyRunUntilCancelled = sovereigntyRunUntilCancelled.checked;
-        saveSettings();
-        toast(
-            'info',
-            sovereigntyRunUntilCancelled.checked
-                ? '后台任务已改为持续运行；你可以随时主动取消。'
-                : '后台任务将重新使用兼容时限。',
-        );
     });
     const profileCompletionMode = wrapper.querySelector('.mvuad-profile-completion-mode');
     profileCompletionMode.value = getSettings().actorProfileCompletionMode;
@@ -18541,16 +18697,8 @@ function buildSettingsPanel() {
     characterTicketPoolCapacity.value = String(
         getSettings().characterCreationTicketPoolCapacity,
     );
-    characterTicketPoolCapacity.addEventListener('change', () => {
-        const requested = Number(characterTicketPoolCapacity.value);
-        const normalized = Math.min(
-            64,
-            Math.max(1, Number.isFinite(requested) ? Math.floor(requested) : 32),
-        );
-        getSettings().characterCreationTicketPoolCapacity = normalized;
-        characterTicketPoolCapacity.value = String(normalized);
-        saveSettings();
-    });
+    characterTicketPoolCapacity.disabled = true;
+    characterTicketPoolCapacity.title = '阶段一不生成预生成 NPC 骰票；当前值只兼容保留';
     const profileBatchCapacity = wrapper.querySelector('.mvuad-profile-batch-capacity');
     profileBatchCapacity.value = String(getSettings().actorProfileBatchCapacity);
     profileBatchCapacity.addEventListener('change', () => {
@@ -18576,32 +18724,17 @@ function buildSettingsPanel() {
     continuityMode.addEventListener('change', () => {
         getSettings().continuityMode = continuityMode.value;
         saveSettings();
-        void applyContinuityInjection();
     });
     const continuityAutonomy = wrapper.querySelector('.mvuad-continuity-autonomy');
     continuityAutonomy.value = getSettings().continuityAutonomy;
     continuityAutonomy.addEventListener('change', () => {
         getSettings().continuityAutonomy = continuityAutonomy.value;
         saveSettings();
-        void applyContinuityInjection();
     });
     const continuityMaxVisible = wrapper.querySelector('.mvuad-continuity-max-visible');
     continuityMaxVisible.value = String(getSettings().continuityMaxVisible);
-    continuityMaxVisible.addEventListener('change', () => {
-        const normalized = Math.min(
-            4,
-            Math.max(
-                0,
-                Number.isFinite(Number(continuityMaxVisible.value))
-                    ? Math.round(Number(continuityMaxVisible.value))
-                    : 2,
-            ),
-        );
-        getSettings().continuityMaxVisible = normalized;
-        continuityMaxVisible.value = String(normalized);
-        saveSettings();
-        void applyContinuityInjection();
-    });
+    continuityMaxVisible.disabled = true;
+    continuityMaxVisible.title = '阶段一停用旧平行注入；当前值只兼容保留';
     const actorShardMode = wrapper.querySelector('.mvuad-actor-shard-mode');
     actorShardMode.value = getSettings().actorShardMode;
     actorShardMode.addEventListener('change', () => {
@@ -18801,7 +18934,7 @@ function buildSettingsPanel() {
         makeCheckbox('显示可贴边隐藏的悬浮球', 'floatingOrbEnabled'),
     );
     wrapper.querySelector('.mvuad-continuity-run').addEventListener('click', () => {
-        enqueueContinuity(null, { force: true });
+        enqueueActorProfiles(null, { force: true, includeMaintenance: true });
     });
     wrapper.querySelector('.mvuad-continuity-open').addEventListener('click', () => {
         showFloatingPanel();
@@ -18810,14 +18943,13 @@ function buildSettingsPanel() {
     wrapper.querySelector('.mvuad-continuity-clear').addEventListener('click', clearContinuityState);
     Object.assign(ui, {
         wrapper,
-        status: wrapper.querySelector('.mvuad-status:not(.mvuad-continuity-status)'),
-        hardContractStatus: wrapper.querySelector('.mvuad-protocol-status'),
-        hardContractDetails: wrapper.querySelector('.mvuad-protocol-details'),
-        hardContractSummary: wrapper.querySelector('.mvuad-protocol-summary'),
-        hardContractList: wrapper.querySelector('.mvuad-protocol-list'),
+        status: wrapper.querySelector(
+            '.mvuad-status:not(.mvuad-continuity-status):not(.mvuad-actor-profile-status)',
+        ),
         socialStatus: wrapper.querySelector('.mvuad-social-status'),
         socialAuditList: wrapper.querySelector('.mvuad-social-audit-list'),
         continuityStatus: wrapper.querySelector('.mvuad-continuity-status'),
+        actorProfileStatus: wrapper.querySelector('.mvuad-actor-profile-status'),
         sovereigntyHealth: wrapper.querySelector('.mvuad-sovereignty-health'),
         sovereigntyRetry: wrapper.querySelector('.mvuad-sovereignty-retry'),
         sovereigntyRestore: wrapper.querySelector('.mvuad-sovereignty-restore'),
@@ -18868,8 +19000,8 @@ function buildSettingsPanel() {
     ui.forumSettingsStatus = wrapper.querySelector('.mvuad-settings-forum-status');
     ui.forumSettingsOpen = wrapper.querySelector('.mvuad-forum-open');
     setStatus(latestStatus, latestStatusKind, { record: false });
-    setHardContractStatus(latestHardContractStatus, latestHardContractKind, { record: false });
     setSocialStatus(latestSocialStatus, latestSocialKind, { record: false });
+    setActorProfileStatus(latestActorProfileStatus, latestActorProfileKind, { record: false });
     setContinuityStatus(latestContinuityStatus, latestContinuityKind, { record: false });
     setForumStatus(latestForumStatus, latestForumKind, { record: false });
     renderOperationLog();
@@ -18929,7 +19061,7 @@ async function restoreBranchCheckpointsForSwipe(value, { force = false } = {}) {
     );
     const forumMatches = !!(
         forumCheckpoint?.state
-        && forumCheckpoint.targetIndex === resolved
+        && checkpointLogicalReplyMatches(forumCheckpoint, captured)
         && (
             force
             || (
@@ -18960,7 +19092,6 @@ async function restoreBranchCheckpointsForSwipe(value, { force = false } = {}) {
     const saved = await writeChatNamespace(namespace, context.chatId, { fields });
     if (!saved) return false;
     if (continuityMatches) {
-        await applyContinuityInjection({ isReroll: true });
         setContinuityStatus('世界连续性：已恢复到本楼生成前存档点，等待当前 swipe 重新结算');
     }
     if (forumMatches) {
@@ -18977,45 +19108,82 @@ function bindEvents() {
         return;
     }
     const types = context.eventTypes || context.event_types || {};
-    const injectionInspectionEvents = new Set([
-        types.CHAT_COMPLETION_PROMPT_READY || 'chat_completion_prompt_ready',
-        types.GENERATE_AFTER_COMBINE_PROMPTS || 'generate_after_combine_prompts',
-    ]);
-    for (const eventName of injectionInspectionEvents) {
-        context.eventSource.on(eventName, sanitizeSocialPromptEvent);
-        context.eventSource.on(eventName, inspectContinuityInjectionEvent);
-    }
     context.eventSource.on(
         types.GENERATION_STARTED || 'generation_started',
-        async (type, _options, dryRun) => {
-            if (dryRun) {
-                console.info('[MVU Auto Doctor] 已忽略数据库/算量 dryRun。');
+        async (type, params = {}, dryRun) => {
+            if (activeGenerationSession) {
+                activeGenerationSession.observedNestedStart = true;
+                activeGenerationSession.startedCount = Math.min(
+                    1024,
+                    Math.max(1, Number(activeGenerationSession.startedCount) || 1) + 1,
+                );
                 return;
             }
-            const generationType = String(type || 'normal');
-            if (generationType === 'continue') {
-                const current = getContext();
-                const latest = latestAiMessage(current);
-                continuationIdentityHint = latest.message
-                    ? {
-                        chatId: current.chatId,
-                        index: latest.index,
-                        swipeId: Number(latest.message.swipe_id) || 0,
-                        messageId: ensureMessageStableId(current, latest.message, latest.index),
-                    }
-                    : null;
-            } else {
-                continuationIdentityHint = null;
+            // P0 owns the host generation lifecycle.  A stale P4 lease or an
+            // old provider cleanup failure may block only next-turn placement;
+            // it must never erase the session that ENDED needs to fresh-read
+            // the natural final response.  precomposeNextTurnConsumer owns
+            // that P4-only fail-closed decision after this session exists.
+            currentGenerationEpoch += 1;
+            const epoch = currentGenerationEpoch;
+            if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
+            pendingAcceptedFinalTimer = null;
+            const candidate = generationCandidateAllowed(type, params, dryRun);
+            const generationType = candidate.generationType;
+            const oldOperationEpoch = operationEpoch;
+            if (['swipe', 'regenerate'].includes(generationType)) {
+                invalidateOperations('generation_replaced', { persistProgress: false });
             }
+            const current = getContext();
+            continuationIdentityHint = null;
+            recordGenerationLifecycleTrace('started', {
+                chatId: String(current?.chatId || ''),
+                epoch,
+                operation: operationEpoch,
+                type: generationType,
+                allowed: candidate.allowed,
+                oldOperation: oldOperationEpoch,
+                newOperation: operationEpoch,
+            });
             generationSerial += 1;
+            const baseline = acceptedFinalSnapshot(current);
             lastGeneration = {
                 serial: generationSerial,
                 id: `generation:${Date.now().toString(36)}:${generationSerial.toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
                 type: generationType,
-                dryRun: false,
+                dryRun: dryRun === true,
+                epoch,
+                operationEpoch,
+                chatId: String(current?.chatId || ''),
+                start: baseline,
+                stopped: false,
+                acceptedFinalEligible: candidate.allowed,
+                observedNestedStart: false,
+                startedCount: 1,
             };
+            activeGenerationSession = lastGeneration;
+            const session = lastGeneration;
+            const sessionIsCurrent = () => {
+                const liveContext = getContext();
+                return String(session.chatId || '') === String(liveContext?.chatId || '')
+                    && Number(session.epoch) === Number(currentGenerationEpoch)
+                    && Number(session.operationEpoch) === Number(operationEpoch)
+                    && String(lastGeneration?.id || '') === String(session.id || '');
+            };
+            recordGenerationLifecycleTrace('session_created', {
+                chatId: session.chatId,
+                epoch,
+                operation: session.operationEpoch,
+                type: generationType,
+                serial: session.serial,
+                baselinePresent: !!baseline?.contentFingerprint,
+            });
+            if (!candidate.allowed) {
+                recordAcceptedFinalRejection(session, 'type');
+                return;
+            }
             lastInjectionInspection = {
-                status: 'not-yet',
+                status: 'disabled',
                 checkedAt: 0,
                 registered: false,
                 landed: false,
@@ -19024,215 +19192,156 @@ function bindEvents() {
                 serendipityRegistered: false,
                 serendipityLanded: false,
                 apiType: '',
-                generationId: lastGeneration.id,
+                generationId: session.id,
                 generationSerial,
             };
             resetCurrentModelCallStats(generationType);
-            if (['swipe', 'regenerate'].includes(lastGeneration.type)) {
-                invalidateOperations(`开始新的${lastGeneration.type}生成`);
+            try {
+                await precomposeNextTurnConsumer(session);
+                if (!sessionIsCurrent()) return;
+                recordGenerationLifecycleTrace('p4', {
+                    chatId: session.chatId,
+                    epoch,
+                    operation: session.operationEpoch,
+                    serial: session.serial,
+                    p4: session.p4PlacementScopeDigest
+                        ? 'placed'
+                        : lastInjectionInspection.status === 'blocked'
+                            ? 'blocked'
+                            : 'ticket_only',
+                });
+            } catch {
+                if (!sessionIsCurrent()) return;
+                lastInjectionInspection.status = 'blocked';
+                lastInjectionInspection.checkedAt = Date.now();
+                recordGenerationLifecycleTrace('p4', {
+                    chatId: session.chatId,
+                    epoch,
+                    operation: session.operationEpoch,
+                    serial: session.serial,
+                    p4: 'exception',
+                });
             }
-            await restoreBranchCheckpointsForSwipe(undefined);
-            prepareNpcDesignTicketBatch();
-            applySocialInjection();
-            prepareSerendipityGeneration(generationType);
-            await applyContinuityInjection({
-                isReroll: ['swipe', 'regenerate'].includes(lastGeneration.type),
-            });
         },
     );
     context.eventSource.on(
-        types.MESSAGE_RECEIVED || 'message_received',
-        async (value) => {
-            const index = resolveMessageId(value);
-            let current = getContext();
-            const latest = latestAiMessage(current);
-            const resolved = index < 0 ? latest.index : index;
-            await sanitizePlanningLeakOnReceivedMessage(current, resolved);
-            current = getContext();
-            const captured = captureTarget(current, resolved);
-            if (!captured) return;
-            // Observation is local and durable. It deliberately runs before any
-            // model, MVU, relation, or world wait so a total API outage cannot
-            // make an accepted reply disappear from the doctor's backlog.
-            const narrativeEligible = sovereigntyNarrativeEligible(
-                current.chat?.[resolved]?.mes || '',
-            );
-            const sovereigntyObservation = narrativeEligible
-                ? await observeSovereigntyTarget(captured)
-                : {
-                    persisted: true,
-                    observed: false,
-                    skipped: true,
-                    reason: 'narrative_empty',
-                };
-            if (!sovereigntyObservation.persisted) {
-                recordOperation(
-                    '人物主权',
-                    `本地观察写前日志未能持久化（${sovereigntyObservation.failureCode}）；本轮人物/世界后台结算已隔离，正文与变量医生继续运行`,
-                    'error',
-                );
-            }
-            if (sovereigntyObservation.persisted) {
-                retireNpcDesignTicketInjection(captured);
-            }
-            await settleContinuityInjectionReceipts(captured);
-            await settleActorLedgerInjectionReceipts(captured);
-            const existingSettlement = existingTargetSettlementRecord(captured);
-            if (existingSettlement) {
-                return waitExistingTargetSettlement(existingSettlement);
-            }
-            const barrierRecord = await createTargetSettlementRecord(captured);
-            if (barrierRecord.recoveredTerminal) return barrierRecord.result;
-            // The accepted narrative is now locally observed, its injection
-            // receipts are settled, the fresh captured-barrier persistence has
-            // started, and duplicate or reloaded terminal targets have already
-            // short-circuited. Start the existing continuity queue from this
-            // exact snapshot without waiting for barrier persistence, MVU
-            // stability, variable repair, opening sync, or final commitment.
-            const continuity = narrativeEligible && sovereigntyObservation.persisted
-                ? enqueueContinuity(resolved, {
-                    expectedTarget: captured,
-                })
-                : Promise.resolve({
-                    status: 'failed',
-                    reason: sovereigntyObservation.failureCode
-                        || 'observation.persistence_failed',
+        types.GENERATION_STOPPED || 'generation_stopped',
+        async () => {
+            const stoppedSession = activeGenerationSession;
+            activeGenerationSession = null;
+            if (stoppedSession) {
+                stoppedSession.stopped = true;
+                stoppedSession.acceptedFinalEligible = false;
+                if (lastGeneration?.epoch === stoppedSession.epoch) {
+                    lastGeneration.stopped = true;
+                    lastGeneration.acceptedFinalEligible = false;
+                }
+                recordAcceptedFinalRejection(stoppedSession, 'stopped');
+                await releaseNextTurnConsumer(stoppedSession, 'generation_stopped', {
+                    requireCurrentSession: true,
+                    allowStoppedSession: true,
                 });
-            let settledTarget = null;
-            const settled = barrierRecord.ready
-                .then(() => waitAutomaticTargetSettled(captured))
-                .then((result) => {
-                if (result.status === 'settled') {
-                    settledTarget = result.captured;
-                    return result;
-                }
-                if (result.status === 'stale') {
-                    setStatus(`已取消未稳定回复的变量审计：${result.reason}`, '');
-                } else {
-                    setStatus(result.reason || '本回合尚未稳定', 'busy');
-                }
-                return result;
-            });
-            const stateCommitting = settled.then(async (result) => {
-                if (result.status !== 'settled') return result;
-                // A license is audit-only and may settle only after this exact
-                // generation/branch/message/swipe identity becomes current.
-                // A late task therefore cannot write against an older swipe.
-                await settlePendingSerendipity(result.captured);
-                await transitionTargetSettlement(barrierRecord, 'repairing');
-                await transitionTargetSettlement(barrierRecord, 'state-committing');
-                return result;
-            });
-            const hardAudit = stateCommitting.then((result) => (
-                result.status === 'settled'
-                    ? enqueueHardContractAudit(resolved, {
-                        queuedTarget: result.captured,
-                        skipDelay: true,
-                    })
-                    : result
-            ));
-            // The variable doctor is the one automatic primary task for this
-            // turn. Read-only audits and world processing run beside it; none
-            // may delay or suppress the validated MVU patch.
-            const repair = stateCommitting.then((result) => (
-                result.status === 'settled'
-                    ? enqueue(resolved, {
-                        queuedTarget: result.captured,
-                        skipDelay: true,
-                        skipStabilityWait: true,
-                    })
-                    : result
-            ));
-            const openingSync = repair.then((repairResult) => (
-                ['stale', 'failed', 'blocked', 'busy'].includes(repairResult?.status)
-                    ? repairResult
-                    : enqueueOpeningResourceSync(resolved)
-            ));
-            // Relationship review is a secondary writer. It starts only after
-            // the primary variable and deterministic opening writes have
-            // released the MVU path, and is not part of their settlement gate.
-            const socialAudit = openingSync.then((openingResult) => {
-                if (['stale', 'failed', 'blocked', 'busy'].includes(openingResult?.status)) {
-                    return openingResult;
-                }
-                const currentTarget = captureTarget(getContext(), resolved);
-                return currentTarget
-                    ? runSocialAuditTarget(currentTarget)
-                    : { status: 'stale', reason: '人物关系二审目标已经变化' };
-            });
-            const finalReplySettlement = Promise.all([repair, openingSync])
-                .then(([repairResult, openingResult]) => {
-                    const statuses = [repairResult?.status, openingResult?.status];
-                    const status = statuses.includes('stale')
-                        ? 'stale'
-                        : statuses.find((value) => (
-                            ['failed', 'blocked', 'busy', 'timeout'].includes(value)
-                        )) || 'completed';
-                    return {
-                        status,
-                        reason: repairResult?.reason || openingResult?.reason || '',
-                        correctedTarget: repairResult?.correctedTarget || null,
-                        finalTarget: repairResult?.finalTarget
-                            || repairResult?.correctedTarget
-                            || captureTarget(getContext(), resolved),
-                    };
-                });
-            attachTargetSettlement(barrierRecord, finalReplySettlement);
-            // World settlement consumes the accepted <content> independently.
-            // It does not wait for MVU, social, or read-only contract reports.
-            socialAudit.then((socialAuditResult) => {
-                if (socialAuditResult?.status !== 'failed') return;
-                const auditReason = socialAuditResult.reason
-                    || socialAuditResult.correction?.reason
-                    || '人物关系二审未能完成';
-                recordOperation(
-                    '人物关系',
-                    `${auditReason}；已按失败零写入处理，不阻塞变量或世界结算`,
-                    'error',
-                );
-            });
-            continuity.then((continuityResult) => {
-                if (['blocked', 'stale', 'failed'].includes(continuityResult?.status)) {
-                    setForumStatus('论坛：世界结算本轮不可用，自动刷新已跳过', '');
-                    return continuityResult;
-                }
-                setForumStatus(`论坛：世界结算 ${continuityResult?.status || '完成'}，正在安排刷新…`, 'busy');
-                return enqueueForum(resolved, {
-                    after: continuity,
-                    expectedTarget: captureTarget(getContext(), resolved)
-                        || settledTarget
-                        || captured,
-                });
-            });
+            }
+            if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
+            pendingAcceptedFinalTimer = null;
+            currentGenerationEpoch += 1;
         },
     );
     context.eventSource.on(
-        types.MESSAGE_SWIPED || 'message_swiped',
-        (value) => {
-            return restoreBranchCheckpointsForSwipe(value, { force: true }).catch((error) => {
-                console.warn('[MVU Auto Doctor] swipe 存档点恢复失败：', error);
+        types.GENERATION_ENDED || 'generation_ended',
+        () => {
+            const session = activeGenerationSession;
+            activeGenerationSession = null;
+            if (!session) {
+                const context = getContext();
+                const knownLifecycle = lastGeneration?.id
+                    && String(lastGeneration.chatId || '') === String(context?.chatId || '')
+                    && Number(lastGeneration.epoch) === Number(currentGenerationEpoch)
+                    && Number(lastGeneration.operationEpoch) === Number(operationEpoch);
+                // An ENDED from the old chat has no generation identity after
+                // CHAT_CHANGED installs its empty sentinel.  Only diagnose a
+                // known current-chat lifecycle, and keep that diagnostic
+                // purely in memory: no identity, task, operation, namespace
+                // write, or P4 release may be created without a session.
+                if (knownLifecycle) {
+                    setStatus('最终正文未进入医生：no_generation_session', '', {
+                        record: false,
+                    });
+                }
+                return;
+            }
+            const rootEpoch = session.epoch;
+            if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
+            recordGenerationLifecycleTrace('ended', {
+                chatId: session.chatId,
+                epoch: rootEpoch,
+                operation: session.operationEpoch,
+                serial: session.serial,
             });
+            if (session.stopped || session.acceptedFinalEligible !== true) {
+                pendingAcceptedFinalTimer = null;
+                return;
+            }
+            pendingAcceptedFinalTimer = setTimeout(() => {
+                pendingAcceptedFinalTimer = null;
+                if (rootEpoch === currentGenerationEpoch) {
+                    void acceptFinalGeneration(session).then((accepted) => {
+                        recordGenerationLifecycleTrace('timer', {
+                            chatId: session.chatId,
+                            epoch: rootEpoch,
+                            operation: session.operationEpoch,
+                            serial: session.serial,
+                            reason: accepted === true
+                                ? 'accepted'
+                                : fixedGenerationLifecycleReason(session.acceptedFinalOutcome),
+                        });
+                    });
+                }
+            }, 500);
         },
     );
     const onChatChanged = async () => {
+        clearActorProfileReadShadow();
+            generationLifecycleTrace = [];
             clearTimeout(pendingChatSaveTimer);
             pendingChatSaveTimer = null;
             clearTimeout(pendingOperationLogSaveTimer);
             pendingOperationLogSaveTimer = null;
+            clearTimeout(pendingAcceptedFinalTimer);
+            pendingAcceptedFinalTimer = null;
+            const previousGenerationSession = activeGenerationSession
+                || (activeNextTurnConsumer && lastGeneration?.id ? lastGeneration : null);
+            activeGenerationSession = null;
+            if (previousGenerationSession) {
+                // The host has already changed chat when this event arrives.
+                // Do not let a stale callback mutate the old namespace or stop
+                // the new-chat reset.  Doctor-owned fallback text is safe to
+                // clear locally; an external provider remains fail-closed.
+                if (activeNextTurnConsumer?.fallback === true) {
+                    clearNextTurnConsumerFallback();
+                } else if (activeNextTurnConsumer) {
+                    retireNextTurnConsumerForChat(activeNextTurnConsumer, 'chat_changed');
+                }
+                activeNextTurnConsumer = null;
+            } else if (activeNextTurnConsumer?.fallback) {
+                if (!clearNextTurnConsumerFallback()) return;
+                activeNextTurnConsumer = null;
+            } else if (activeNextTurnConsumer) {
+                retireNextTurnConsumerForChat(activeNextTurnConsumer, 'chat_changed');
+                activeNextTurnConsumer = null;
+            }
+            currentGenerationEpoch += 1;
+            invalidateOperations('聊天已经切换', { persistProgress: false });
             resetChatScopedRuntimeDiagnostics();
-            invalidateOperations('聊天已经切换');
             continuationIdentityHint = null;
             automaticPendingKeys.clear();
             automaticCompletedKeys.clear();
             openingSyncPendingKeys.clear();
             openingSyncCompletedKeys.clear();
-            hardContractPendingKeys.clear();
-            hardContractCompletedKeys.clear();
-            continuityPendingKeys.clear();
-            continuityCompletedKeys.clear();
+            actorProfilePendingKeys.clear();
+            actorProfileCompletedKeys.clear();
             forumPendingKeys.clear();
             forumCompletedKeys.clear();
-            targetSettlementRecords.clear();
             currentPendingSovereigntyObservationRecords(getContext());
             pendingSerendipityDraft = null;
             pendingSerendipityBaseline = null;
@@ -19248,6 +19357,9 @@ function bindEvents() {
                 dryRun: false,
             };
             presetContinuityCache = { checkedAt: 0, active: false };
+            const current = getContext();
+            const currentChatId = String(current?.chatId || '');
+            actorSovereigntyScopeSelectorCache.delete(currentChatId);
             lastUndo = latestUndoRecord(readChatNamespace());
             lastInjectionInspection = {
                 status: 'not-yet',
@@ -19261,23 +19373,13 @@ function bindEvents() {
                 apiType: '',
             };
             setStatus('等待新的 AI 回复', '', { record: false });
-            latestHardContractAudit = null;
-            setHardContractStatus('硬合同：等待检查', '', { record: false });
             latestSocialAudit = null;
             setSocialStatus('人物关系：等待检查', '', { record: false });
+            setActorProfileStatus('人物档案：等待新的最终正文', '', { record: false });
+            setContinuityStatus('世界连续性：等待新的 AI 回复', '', { record: false });
             setForumStatus('论坛：等待世界消息', '', { record: false });
             loadOperationLogFromChat();
-            applySocialInjection();
-            await applyContinuityInjection();
-            registerSerendipityInjection('');
             renderForum();
-            disableStoryOracleAutoIfNeeded();
-            scheduleOpeningResourceSync();
-            scheduleLatestHardContractAudit();
-            inspectEnvironment({ waitForMvu: true });
-            await recoverSovereigntyOnChatLoad().catch((error) => {
-                console.warn('[MVU Auto Doctor] 人物主权积压恢复失败：', error);
-            });
         };
     const chatEvents = new Set([
         types.CHAT_CHANGED || 'chat_changed',
@@ -19288,12 +19390,6 @@ function bindEvents() {
     }
     context.eventSource.on('global_Mvu_initialized', () => {
         mvuPromise = null;
-        Promise.resolve()
-            .then(() => inspectEnvironment({ waitForMvu: true }))
-            .then(() => recoverSovereigntyOnChatLoad())
-            .catch((error) => {
-                console.warn('[MVU Auto Doctor] MVU 初始化事件后的环境自检刷新失败：', error);
-            });
     });
 }
 
@@ -19457,6 +19553,20 @@ async function mutateActorProfileV6(actorId, mutate) {
     const context = getContext();
     const chatId = context?.chatId || '';
     if (!chatId || typeof mutate !== 'function') return { applied: false, reason: 'chat_missing' };
+    // This preflight is deliberately read-only.  Migration may durably write
+    // its namespace, so a sealed S2 row must be rejected before it runs.
+    const preflightLedger = normalizeActorLedger(readChatNamespace(context).actorLedger, { chatId });
+    const preflightActor = preflightLedger.actors
+        .find((actor) => actor.id === String(actorId || ''));
+    if (preflightActor?.pendingProfile) {
+        return {
+            applied: false,
+            saved: false,
+            pending: true,
+            reason: 'actor_profile_pending_transaction',
+            transactionId: preflightActor.pendingProfile.transactionId || '',
+        };
+    }
     const migration = await ensureActorSovereigntyMigrationPersisted(context);
     if (!migration.ok) return { applied: false, reason: migration.reason };
     const namespace = migration.namespace || readChatNamespace(context);
@@ -19464,6 +19574,18 @@ async function mutateActorProfileV6(actorId, mutate) {
     const index = ledger.actors.findIndex((actor) => actor.id === String(actorId || ''));
     if (index < 0) return { applied: false, reason: 'actor_missing' };
     const actor = ledger.actors[index];
+    // A sealed Phase-1 candidate must be finalized as its complete batch or
+    // remain pending.  Writing a live manual override beside it would let the
+    // later recovery replace the user's edit with pending.profileV6.
+    if (actor.pendingProfile) {
+        return {
+            applied: false,
+            saved: false,
+            pending: true,
+            reason: 'actor_profile_pending_transaction',
+            transactionId: actor.pendingProfile.transactionId || '',
+        };
+    }
     const result = mutate(actor.profileV6, actor, ledger);
     if (!result?.profile) return { applied: false, reason: result?.reason || 'profile_invalid' };
     ledger.actors[index] = { ...actor, profileV6: result.profile };
@@ -19476,25 +19598,20 @@ async function mutateActorProfileV6(actorId, mutate) {
     return { ...result, applied: result.applied !== false && saved, saved };
 }
 
-function initialize() {
+async function initialize() {
     if (window.__MVU_AUTO_DOCTOR_INITIALIZED__) return;
     window.__MVU_AUTO_DOCTOR_INITIALIZED__ = true;
-    getSettings();
+    getSettings({ persistMigrations: false });
+    const initialContext = getContext();
+    const initialChatId = String(initialContext?.chatId || '');
+    actorSovereigntyScopeSelectorCache.delete(initialChatId);
     loadOperationLogFromChat();
     buildFloatingUi();
     buildForumUi();
     buildSettingsPanel();
     installDualSurface();
     bindEvents();
-    disableStoryOracleAutoIfNeeded();
     lastUndo = latestUndoRecord(readChatNamespace());
-    applySocialInjection();
-    void applyContinuityInjection();
-    registerSerendipityInjection('');
-    scheduleOpeningResourceSync();
-    scheduleLatestHardContractAudit();
-    inspectEnvironment({ waitForMvu: true });
-    document.addEventListener('story-oracle-ready', disableStoryOracleAutoIfNeeded);
     window.MvuAutoDoctorAPI = Object.freeze({
         version: VERSION,
         apiVersion: 8,
@@ -19506,8 +19623,6 @@ function initialize() {
         acknowledgeBarrierReceipt,
         executeBarrieredDomainTransaction: executeDualSurfacePlan,
         runLatest: () => enqueue(null, { manual: true }),
-        auditHardContracts: () => enqueueHardContractAudit(null, { manual: true }),
-        getHardContractAudit: () => deepClone(latestHardContractAudit),
         auditSocialRelations: () => {
             const context = getContext();
             const latest = latestAiMessage(context);
@@ -19525,16 +19640,25 @@ function initialize() {
         getPendingSerendipityLicense: () => deepClone(pendingSerendipityDraft),
         syncOpeningResources: () => enqueueOpeningResourceSync(null, { manual: true }),
         runContinuity: () => enqueueContinuity(null, { force: true }),
+        runActorProfiles: () => enqueueActorProfiles(null, {
+            force: true,
+            includeMaintenance: true,
+        }),
         getContinuityState: () => deepClone(readChatNamespace().continuity),
-        getActorLedger: () => deepClone(normalizeActorLedger(
+        getActorLedger: () => deepClone(publicActorLedgerWithoutPending(
             readChatNamespace().actorLedger,
-            { chatId: getContext()?.chatId || '' },
         )),
-        getActorLedgerView: () => deepClone(actorLedgerView(readChatNamespace().actorLedger)),
+        getActorLedgerView: () => deepClone(actorLedgerView(
+            publicActorLedgerWithoutPending(readChatNamespace().actorLedger),
+        )),
         getActorProfileV6: (actorId) => {
-            const actor = normalizeActorLedger(readChatNamespace().actorLedger).actors
+            const ledger = normalizeActorLedger(readChatNamespace().actorLedger);
+            const actor = ledger.actors
                 .find((entry) => entry.id === String(actorId || ''));
-            return actor ? deepClone(actorProfileV6View(actor)) : null;
+            return actor ? deepClone({
+                ...actorProfileV6View(actor),
+                preparedForAction: actorProfileReadinessInLedger(ledger, actor.id).ready,
+            }) : null;
         },
         openActorProfiles: () => {
             showFloatingPanel();
@@ -19592,7 +19716,6 @@ function initialize() {
             currentPendingSovereigntyObservationRecords(getContext()),
         ),
         getSovereigntyHealth: () => deepClone(sovereigntyHealthWithScheduler()),
-        ensureSovereigntyMigration: () => ensureActorSovereigntyMigrationPersisted(getContext()),
         getPersistenceMetrics: persistenceMetricsSnapshot,
         getLastPersistenceFailureCode: () => lastChatNamespaceWriteFailureCode,
         resetPersistenceMetrics,
@@ -19617,6 +19740,9 @@ function initialize() {
         inspectEnvironment: () => inspectEnvironment({ waitForMvu: true }),
         getEnvironmentReport: () => deepClone(lastEnvironmentReport),
         getInjectionInspection: () => deepClone(lastInjectionInspection),
+        registerNextTurnConsumerProvider,
+        getNextTurnConsumerProviders: nextTurnConsumerProviderView,
+        configureNextTurnConsumerProviderPreference,
         getModelCallStats: () => deepClone(normalizedModelCallStats(modelCallStats)),
         getModelDiagnostics: () => deepClone(modelDiagnosticsForChat(modelDiagnostics)),
         probeModelChannelConnections,
@@ -19635,22 +19761,16 @@ function initialize() {
             : null,
         exportDiagnosticPackage,
     });
-    // The userscript can initialize after SillyTavern has already emitted its
-    // first CHAT_LOADED event. Recover durable backlog once at bootstrap as
-    // well as from the event handler so an old running task or migrated pending
-    // work cannot remain asleep until the next user message.
-    Promise.resolve()
-        .then(() => recoverSovereigntyOnChatLoad())
-        .catch((error) => {
-            console.warn('[MVU Auto Doctor] initial sovereignty backlog recovery failed:', error);
-        });
     try {
         window.dispatchEvent(new CustomEvent('mvu-auto-doctor-barrier-protocol-ready', {
             detail: {
                 protocolVersion: 1,
                 apiVersion: 5,
-                settledOnly: true,
-                terminalReceipts: true,
+                status: 'unmanaged',
+                reason: 'independent_modules_no_global_settlement',
+                independentModules: true,
+                settledOnly: false,
+                terminalReceipts: false,
             },
         }));
     } catch {}

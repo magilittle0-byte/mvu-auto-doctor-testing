@@ -6,6 +6,40 @@ export interface ActorProfileBatchTransactionResult {
     failures: object[];
     persistenceMeta: object | null;
     modelCalls: number;
+    persistenceStatus?: 'pending_readback' | 'atomic_readback' | 'not_completed' | string;
+    readbackVerified?: boolean;
+    transactionId?: string;
+    writeSetDigest?: string;
+    preparedLedgerDigest?: string;
+    preparedFieldRevision?: number;
+    pendingLedger?: Record<string, unknown> | null;
+    finalLedger?: Record<string, unknown> | null;
 }
 
-export function completeActorProfileBatchTransaction(options?: object): Promise<ActorProfileBatchTransactionResult>;
+export interface ActorProfileBatchPersistenceContext {
+    ledger: Record<string, unknown>;
+    expectedCommits: object[];
+    expectedState: object | null;
+    transactionId?: string;
+    writeSetDigest?: string;
+    preparedLedgerDigest?: string;
+    preparedFieldRevision?: number;
+    readShadowLedger?: Record<string, unknown> | null;
+}
+
+export type ActorProfileBatchPersistenceCallback =
+    (context: ActorProfileBatchPersistenceContext) => Promise<{
+        ok: boolean;
+        ledger?: Record<string, unknown>;
+        snapshot?: object | null;
+        persistenceMeta?: object | null;
+        reason?: string;
+    }>;
+
+export function completeActorProfileBatchTransaction(options?: {
+    persistPendingBatch?: ActorProfileBatchPersistenceCallback;
+    persistFinalizedBatch?: ActorProfileBatchPersistenceCallback;
+    requestBatch?: (context: object) => Promise<unknown>;
+    resolveDiscoveries?: (context: object) => Promise<object>;
+    [key: string]: unknown;
+}): Promise<ActorProfileBatchTransactionResult>;

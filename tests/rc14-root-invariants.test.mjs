@@ -50,7 +50,7 @@ import {
     selectContinuityInjectionCandidates,
     settleContinuityNarrativeReceipts,
 } from '../continuity-core.mjs';
-import { makeActionReadyActor } from './helpers/actor-action-ready-fixture.mjs';
+import { makeActionReadyLedger } from './helpers/actor-action-ready-fixture.mjs';
 
 test('all namespace field writers share one migration guard and raw commits stay private', () => {
     const sourceText = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
@@ -108,16 +108,18 @@ test('旧路径与迁移收敛 leaves one production continuity migration owner 
     assert.match(batchText, /parseActorProfileCompletionBatchOutput/u);
     assert.match(batchText, /materializeActorProfileBaseline/u);
     assert.match(batchText, /replaceActorProfileBaselineInLedger/u);
-    assert.match(batchText, /persistBatch/u);
+    assert.match(batchText, /persistPendingBatch/u);
+    assert.match(batchText, /persistFinalizedBatch/u);
     assert.match(batchText, /actorProfileCommitMatchesLedger/u);
     assert.match(indexText, /async function completeActorProfilesForTurn/u);
     assert.match(indexText, /completeActorProfileBatchTransaction/u);
-    assert.match(indexText, /persistBatch:\s*async/u);
+    assert.match(indexText, /persistPendingBatch:\s*async/u);
+    assert.match(indexText, /persistFinalizedBatch:\s*async/u);
     assert.match(indexText, /actorProfileCommitMatchesLedger/u);
-    assert.match(indexText, /scheduleActorTurns\(actorLedger,\s*\{[\s\S]*?requireProfileReady:\s*true/u);
+    assert.match(indexText, /scheduleActorTurns\(actionLedger,\s*\{[\s\S]*?requireProfileReady:\s*true/u);
     assert.match(
         indexText,
-        /const fresh = emptyChatNamespace\(context\);[\s\S]*?const archive = archivedActorSovereigntyScope\(value, migrated\.report\);[\s\S]*?fresh\.compatibilityScopeArchives = archives;[\s\S]*?migrateActorSovereigntyNamespace\(fresh/u,
+        /source = emptyChatNamespace\(context\);[\s\S]*?const archive = archivedActorSovereigntyScope\(stored, report\);[\s\S]*?source\.compatibilityScopeArchives = archives;[\s\S]*?ensureActorSovereigntyMigration\(source/u,
         'scope mismatch must archive the old namespace before creating the empty active scope',
     );
 });
@@ -142,13 +144,18 @@ function identitySourceRef(chatId, generation = 5, cardId = 'card-main') {
         chatId,
         messageId: `identity-message-${generation}`,
         index: generation,
+        logicalIndex: generation,
         swipeId: 0,
         generation,
+        generationSerial: generation,
         generationId: `identity-generation-${generation}`,
         generationType: 'normal',
         branchId: 'identity-branch-main',
         identityScopeId: `${chatId}|character:${cardId}`,
+        scopeDigest: `scope:${chatId}|character:${cardId}`,
         hash: `identity-hash-${chatId}-${generation}`,
+        contentHash: `identity-hash-${chatId}-${generation}`,
+        contentFingerprint: `identity-fingerprint-${chatId}-${generation}`,
     };
 }
 
@@ -214,6 +221,8 @@ function runIdentityRegistryChain(ledger, acceptedContent, ref, expectedSourceRe
     const upsert = runActorRegistryUpsert(discovery.ledger, discovery.candidates, {
         chatId: ledger.chatId,
         identityScopeId: expectedSourceRef.identityScopeId,
+        scopeDigest: expectedSourceRef.scopeDigest,
+        allowScopeDigestFill: true,
         expectedSourceRef,
         turn: ref.generation,
     });
@@ -224,6 +233,8 @@ function runIdentityRegistryChain(ledger, acceptedContent, ref, expectedSourceRe
         {
             chatId: ledger.chatId,
             identityScopeId: expectedSourceRef.identityScopeId,
+            scopeDigest: expectedSourceRef.scopeDigest,
+            allowScopeDigestFill: true,
             expectedSourceRef,
             turn: ref.generation,
         },
@@ -276,12 +287,17 @@ test('typed ActorRef preserves internal ids and never hashes an id as a name', (
     const migrated = migrateActorLedgerFromContinuity(existing, continuity);
     assert.equal(migrated.actors.filter((actor) => actor.id === actorId).length, 1);
     assert.equal(migrated.actors.some((actor) => actor.name === actorId), false);
+    const ref = identitySourceRef(migrated.chatId, 8);
     const candidates = selectActorShardCandidates({
         continuity,
-        actorLedger: {
+        actorLedger: makeActionReadyLedger(normalizeActorLedger({
             ...migrated,
-            actors: migrated.actors.map((item) => makeActionReadyActor(item, { turn: 8 })),
-        },
+        }, {
+            chatId: migrated.chatId,
+            identityScopeId: ref.identityScopeId,
+            scopeDigest: ref.scopeDigest,
+            allowScopeDigestFill: true,
+        }), { sourceRef: ref, turn: 8 }),
         maxWorkers: 1,
     });
     assert.equal(candidates[0].id, actorId);
@@ -527,7 +543,7 @@ test('repeating one explicit accepted recovery event is idempotent', () => {
     assert.deepEqual(repeated.registration.ledger.actors[0].actionHistory, snapshot.actionHistory);
 });
 
-test('runContinuityTarget wiring persists mixed new and quarantine-restored actors once before profiles', () => {
+test('runActorProfileTarget wiring persists mixed new and quarantine-restored actors once before profiles', () => {
     const { orphanId, migrated } = quarantinedIdentityFixture('identity-mixed-persist');
     const ref = identitySourceRef(migrated.chatId, 5);
     const chain = runIdentityRegistryChain(
@@ -549,23 +565,23 @@ test('runContinuityTarget wiring persists mixed new and quarantine-restored acto
     );
 
     const runtimeSource = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-    const runtime = runtimeSource.slice(
-        runtimeSource.indexOf('async function runContinuityTarget'),
-        runtimeSource.indexOf('async function confirmDangerousAction'),
-    );
+    const profileStart = runtimeSource.indexOf('async function runActorProfileTarget');
+    const continuityStart = runtimeSource.indexOf('async function runContinuityTarget');
+    assert.ok(profileStart >= 0 && continuityStart > profileStart);
+    const runtime = runtimeSource.slice(profileStart, continuityStart);
     const discoveryAt = runtime.indexOf('discoverActorsFromTurnSources');
     const upsertAt = runtime.indexOf('runActorRegistryUpsert');
     const promotionAt = runtime.indexOf('promoteActorCandidatesToRegistry');
-    const registrationLedgerAt = runtime.indexOf('actorLedger = actorRegistration.ledger');
+    const registrationLedgerAt = runtime.indexOf('let nextLedger = actorRegistration.ledger');
     const persistAt = runtime.indexOf('persistActorRegistryForTurn');
-    const persistedLedgerAt = runtime.indexOf('actorLedger = registryPersistence.ledger');
+    const persistedLedgerAt = runtime.indexOf('const s1Ledger = registryPersistence.ledger');
     const profileAt = runtime.indexOf('completeActorProfilesForTurn');
     assert.ok(discoveryAt >= 0 && upsertAt > discoveryAt && promotionAt > upsertAt);
     assert.ok(registrationLedgerAt > promotionAt && persistAt > registrationLedgerAt);
     assert.ok(persistedLedgerAt > persistAt && profileAt > persistedLedgerAt);
     assert.match(
         runtime.slice(persistAt, persistedLedgerAt),
-        /previousLedger: preRegistryLedger[\s\S]*nextLedger: actorLedger[\s\S]*actorIds: actorRegistration\.promoted/u,
+        /previousLedger: s0Ledger[\s\S]*nextLedger[\s\S]*actorIds: actorRegistration\.promoted/u,
     );
     const persistence = runtimeSource.slice(
         runtimeSource.indexOf('async function persistActorRegistryForTurn'),
@@ -575,6 +591,18 @@ test('runContinuityTarget wiring persists mixed new and quarantine-restored acto
     assert.match(persistence, /requireReadback: true/u);
     assert.match(persistence, /if \(!saved\)[\s\S]*ledger: previousLedger/u);
     assert.match(persistence, /actor_registry\.readback_mismatch'[\s\S]*ledger: previousLedger/u);
+
+    const continuityRuntime = runtimeSource.slice(
+        continuityStart,
+        runtimeSource.indexOf('async function confirmDangerousAction', continuityStart),
+    );
+    for (const p1Step of [
+        'discoverActorsFromTurnSources',
+        'runActorRegistryUpsert',
+        'promoteActorCandidatesToRegistry',
+        'persistActorRegistryForTurn',
+        'completeActorProfilesForTurn',
+    ]) assert.doesNotMatch(continuityRuntime, new RegExp(p1Step, 'u'));
 
     let actorLedgerWrites = 0;
     const expected = {
@@ -643,12 +671,17 @@ test('durable and live copies of one stimulus converge to one decision item', ()
         }],
     };
     const migrated = migrateActorLedgerFromContinuity(ledger, continuity);
+    const ref = identitySourceRef(migrated.chatId, 8);
     const [candidate] = selectActorShardCandidates({
         continuity,
-        actorLedger: {
+        actorLedger: makeActionReadyLedger(normalizeActorLedger({
             ...migrated,
-            actors: migrated.actors.map((item) => makeActionReadyActor(item, { turn: 8 })),
-        },
+        }, {
+            chatId: migrated.chatId,
+            identityScopeId: ref.identityScopeId,
+            scopeDigest: ref.scopeDigest,
+            allowScopeDigestFill: true,
+        }), { sourceRef: ref, turn: 8 }),
         maxWorkers: 1,
     });
     assert.equal(candidate.stimuli.length, 1);

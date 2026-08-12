@@ -92,6 +92,7 @@ function normalizeActorActionTargetInternal(value, { legacy = false } = {}) {
     const chatId = cleanText(value.chatId, 180);
     const messageId = cleanText(value.messageId, 180);
     const branchId = cleanText(value.branchId, 180);
+    const scopeDigest = cleanText(value.scopeDigest, 180);
     const contentHash = cleanText(value.contentHash || value.hash, 120);
     const generationId = cleanText(value.generationId, 180);
     const generationType = cleanText(value.generationType, 80);
@@ -105,6 +106,7 @@ function normalizeActorActionTargetInternal(value, { legacy = false } = {}) {
         || !messageId
         || !branchId
         || !contentHash
+        || (!legacy && !scopeDigest)
         || (!legacy && (!generationId || !generationType))
         || (!legacy && (!Number.isInteger(logicalIndexValue) || logicalIndexValue < 0))
         || (legacy && hasLogicalIndex
@@ -125,8 +127,10 @@ function normalizeActorActionTargetInternal(value, { legacy = false } = {}) {
         generationId,
         generationType,
         branchId,
+        scopeDigest,
         contentHash,
         hash: contentHash,
+        compatibilityOnly: legacy && !scopeDigest,
     };
 }
 
@@ -153,6 +157,7 @@ export function actorActionTargetMatches(left, right) {
         'generationId',
         'generationType',
         'branchId',
+        'scopeDigest',
         'contentHash',
     ].every((field) => first[field] === second[field]);
 }

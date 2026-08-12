@@ -31,7 +31,9 @@ function sourceRef(chatId, generation = 1) {
         generationType: 'normal',
         branchId: 'branch-main',
         identityScopeId: `${chatId}|character:card-main`,
+        scopeDigest: `scope:${chatId}|character:card-main`,
         hash: `hash-${chatId}-${generation}`,
+        compatibilityOnly: false,
     };
 }
 
@@ -44,6 +46,8 @@ function registerNames(ledger, names, ref = sourceRef(ledger.chatId)) {
     const upsert = runActorRegistryUpsert(discovery.ledger, discovery.candidates, {
         chatId: ledger.chatId,
         identityScopeId: ref.identityScopeId,
+        scopeDigest: ref.scopeDigest,
+        allowScopeDigestFill: true,
         expectedSourceRef: ref,
         turn: ref.generation,
     });
@@ -53,6 +57,8 @@ function registerNames(ledger, names, ref = sourceRef(ledger.chatId)) {
         {
             chatId: ledger.chatId,
             identityScopeId: ref.identityScopeId,
+            scopeDigest: ref.scopeDigest,
+            allowScopeDigestFill: true,
             expectedSourceRef: ref,
             turn: ref.generation,
         },
@@ -89,7 +95,7 @@ function ticketBatch(ref, count) {
 function completeCandidate(candidate) {
     const actorId = candidate.actorRef.actorId;
     const name = candidate.actorRef.name;
-    return {
+    const profile = {
         actorRef: { actorId, name },
         identity: {
             role: '在社区里承担具体职责的普通成员',
@@ -165,6 +171,34 @@ function completeCandidate(candidate) {
             resourcesCapabilities: 'hypothesis',
         },
     };
+    // This synthetic row remains subject to the same production quality floor
+    // as real batch output; the long fields make that floor explicit.
+    return {
+        ...profile,
+        identity: {
+            ...profile.identity,
+            pastExperience: `${name} has spent several years reconciling community supplies, routes, handovers, and the consequences of missed commitments.`,
+        },
+        personality: {
+            ...profile.personality,
+            biography: `${name} starts by sorting evidence, names the cost of each option, and changes course openly when a small test contradicts an earlier assumption. This habit grew from repeated responsibility for shared work, not from a claim to control anyone else.`,
+            primaryDerivatives: [
+                'This person compares people, time, resources, and a reversible exit before committing.',
+                'This person offers bounded work and leaves every partner free to choose.',
+            ],
+            baseDerivatives: [
+                'This person checks hidden cost, missing evidence, and a practical revision.',
+                'This person corrects the record and next step without denying a mistake.',
+            ],
+            accentDerivatives: [
+                'This person makes a small joke, then returns to evidence and responsibility.',
+                'This person lets a failed joke go without turning embarrassment into anger.',
+            ],
+            primarySentence: 'I will first separate what we know from what still needs a small, checkable test.',
+            baseSentence: 'I can listen to every view, but the final choice must still follow the available evidence.',
+            accentSentence: 'At least this list did not lose me too, so we can fix the next line together.',
+        },
+    };
 }
 
 function prepareRegisteredBatch(count, {
@@ -229,11 +263,14 @@ async function runBatch(fixture, {
 } = {}) {
     let saveCount = 0;
     let readbackCount = 0;
-    const persisted = persistBatch || (async ({ ledger }) => {
+    const persistencePayloads = [];
+    const persisted = async (payload) => {
+        persistencePayloads.push(structuredClone(payload));
+        if (persistBatch) return persistBatch(payload);
         saveCount += 1;
         readbackCount += 1;
-        return { ok: true, ledger: structuredClone(ledger), persistenceMeta: { rev: 1 } };
-    });
+        return { ok: true, ledger: structuredClone(payload.ledger), persistenceMeta: { rev: 1 } };
+    };
     const result = await completeActorProfileBatchTransaction({
         ledger: fixture.ledger,
         candidates: fixture.candidates,
@@ -242,10 +279,21 @@ async function runBatch(fixture, {
         target: { ...fixture.ref, sourceRef: fixture.ref },
         semanticRetry,
         requestBatch,
-        persistBatch: persisted,
+        resolveDiscoveries: async () => ({
+            ok: true,
+            ledger: structuredClone(fixture.ledger),
+            candidates: [],
+            entries: [],
+            rejected: [],
+            failures: [],
+            registry: fixture.registration,
+            snapshot: { fieldRevision: 0 },
+        }),
+        persistPendingBatch: persisted,
+        persistFinalizedBatch: persisted,
         isTargetCurrent,
     });
-    return { result, saveCount, readbackCount };
+    return { result, saveCount, readbackCount, persistencePayloads };
 }
 
 for (const count of [0, 1, 3, 6, 8]) {
@@ -261,9 +309,72 @@ for (const count of [0, 1, 3, 6, 8]) {
             },
         });
         assert.equal(calls.length, count ? 1 : 0);
-        assert.equal(run.saveCount, count ? 1 : 0);
-        assert.equal(run.readbackCount, count ? 1 : 0);
+        assert.equal(run.saveCount, count ? 2 : 0);
+        assert.equal(run.readbackCount, count ? 2 : 0);
         assert.equal(run.result.accepted.length, count);
+        if (count) {
+            assert.equal(run.persistencePayloads.length, 2);
+            const [pendingSave, finalSave] = run.persistencePayloads;
+            const pendingProfiles = pendingSave.ledger.actors.map((actor) => actor.pendingProfile);
+            const pending = pendingProfiles[0];
+            assert.equal(pendingProfiles.length, count);
+            assert.ok(pending?.transactionId, 'pending transaction must have an identity');
+            assert.ok(pending?.writeSetDigest, 'pending transaction must bind its full write set');
+            assert.ok(pending?.preparedLedgerDigest, 'pending transaction must bind its prepared ledger');
+            assert.equal(pending?.writeSet.length, count, 'pending transaction must carry the full batch');
+            assert.deepEqual(
+                pending?.writeSet.map((entry) => entry.actorRef.actorId).sort(),
+                pendingSave.ledger.actors.map((actor) => actor.id).sort(),
+                'pending write set must cover every staged actor exactly once',
+            );
+            for (const [index, actor] of pendingSave.ledger.actors.entries()) {
+                const staged = actor.pendingProfile;
+                assert.ok(
+                    staged
+                    && staged.readbackVerified === false
+                    && actor.profileV6.preparedForAction === false
+                    && actor.profileV6.baselineCommit === null,
+                    'first persistence is the sealed pending projection, never a live profile replacement',
+                );
+                assert.equal(staged.transactionId, pending.transactionId);
+                assert.equal(staged.writeSetDigest, pending.writeSetDigest);
+                assert.equal(staged.preparedLedgerDigest, pending.preparedLedgerDigest);
+                assert.equal(staged.preparedFieldRevision, pending.preparedFieldRevision);
+                assert.deepEqual(staged.writeSet, pending.writeSet);
+                assert.equal(staged.actorRef.actorId, actor.id);
+                for (const entry of staged.writeSet) {
+                    assert.ok(entry.sourceRef, `pending write set ${index} must retain its source ref`);
+                    assert.ok(entry.scopeDigest, `pending write set ${index} must retain its scope digest`);
+                    assert.deepEqual(
+                        entry.sourceRef,
+                        fixture.ref,
+                        `pending write set ${index} must retain the complete canonical source ref`,
+                    );
+                    assert.equal(entry.sourceRef.scopeDigest, entry.scopeDigest);
+                    assert.equal(entry.scopeDigest, fixture.ref.scopeDigest);
+                }
+            }
+            for (const actor of finalSave.ledger.actors) {
+                const finalCommit = actor.profileV6.baselineCommit;
+                const verification = finalCommit?.verification;
+                const staged = pendingProfiles.find((entry) => entry?.actorRef.actorId === actor.id);
+                assert.ok(
+                    actor.pendingProfile === null
+                    && actor.profileV6.preparedForAction === true
+                    && finalCommit?.readbackVerified === true
+                    && actorProfileReadyForAction(actor),
+                    'only the second readback publishes the finalized action-ready profile',
+                );
+                assert.ok(verification, 'final baseline commit must retain pending verification metadata');
+                assert.equal(verification.transactionId, staged.transactionId);
+                assert.equal(verification.writeSetDigest, staged.writeSetDigest);
+                assert.equal(verification.preparedLedgerDigest, staged.preparedLedgerDigest);
+                assert.equal(verification.preparedFieldRevision, staged.preparedFieldRevision);
+                assert.equal(verification.commitId, staged.commitId);
+                assert.equal(verification.profileDigest, staged.profileDigest);
+                assert.deepEqual(verification.writeSet, staged.writeSet);
+            }
+        }
         const refreshed = normalizeActorLedger(structuredClone(run.result.ledger), {
             chatId: fixture.ledger.chatId,
         });
@@ -299,7 +410,7 @@ test('P1 completes the exhausted actor from accepted evidence without a post-gen
 
     const run = await runBatch(fixture);
     assert.equal(run.result.accepted.length, 3);
-    assert.equal(run.saveCount, 1, 'all three complete profiles commit atomically in one batch save');
+    assert.equal(run.saveCount, 2, 'all three complete profiles commit through pending and final atomic readbacks');
     const refreshed = normalizeActorLedger(run.result.ledger, {
         chatId: fixture.ledger.chatId,
     });
@@ -355,7 +466,7 @@ test('a locally repairable batch needs one model call', async () => {
     });
     assert.equal(calls, 1);
     assert.equal(run.result.accepted.length, 3);
-    assert.equal(run.saveCount, 1);
+    assert.equal(run.saveCount, 2);
 });
 
 test('one incomplete actor gets one subset replacement while valid peers stay accepted', async () => {
@@ -372,8 +483,8 @@ test('one incomplete actor gets one subset replacement while valid peers stay ac
     assert.equal(calls.length, 2);
     assert.deepEqual(calls[1], [fixture.candidates[1].actorId]);
     assert.equal(run.result.accepted.length, 3);
-    assert.equal(run.saveCount, 1);
-    assert.equal(run.readbackCount, 1);
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.readbackCount, 2);
 });
 
 test('duplicate output retries only that ActorRef and unknown output never blocks valid saves', async () => {
@@ -394,7 +505,7 @@ test('duplicate output retries only that ActorRef and unknown output never block
     assert.deepEqual(calls[1], [fixture.candidates[0].actorId]);
     assert.equal(run.result.accepted.length, 2);
     assert.equal(run.result.rejected[0].reason, 'actor_profile.actor_ref_unknown');
-    assert.equal(run.saveCount, 1);
+    assert.equal(run.saveCount, 2);
 });
 
 test('duplicate input ActorIds fail closed instead of being swallowed by Map', async () => {
@@ -414,7 +525,7 @@ test('duplicate input ActorIds fail closed instead of being swallowed by Map', a
     assert.deepEqual(calls, [[fixture.candidates[2].actorId]]);
     assert.equal(run.result.accepted.length, 1);
     assert.equal(run.result.failures[0].reason, 'actor_profile.input_actor_ref_duplicate');
-    assert.equal(run.saveCount, 1);
+    assert.equal(run.saveCount, 2);
 });
 
 test('one unrecoverable actor does not block another valid actor', async () => {
@@ -430,7 +541,7 @@ test('one unrecoverable actor does not block another valid actor', async () => {
     });
     assert.equal(run.result.accepted.length, 1);
     assert.equal(run.result.failures[0].reason, 'actor_profile.actor_ref_mismatch');
-    assert.equal(run.saveCount, 1);
+    assert.equal(run.saveCount, 2);
 });
 
 test('transport failure has no outer retry and performs no save', async () => {
@@ -458,7 +569,7 @@ test('partial validation still saves once, while save/readback failure claims no
         },
     });
     assert.equal(partial.result.accepted.length, 1);
-    assert.equal(partial.saveCount, 1);
+    assert.equal(partial.saveCount, 2);
 
     for (const persistBatch of [
         async () => ({ ok: false, reason: 'host_save_rejected' }),
@@ -494,19 +605,19 @@ test('stale target before or after model response performs zero writes', async (
     assert.equal(after.saveCount, 0);
 });
 
-test('capacity overflow keeps every actor registered and leaves overflow pending', async () => {
+test('ticket overflow keeps every actor registered and still completes the exhausted profile from accepted evidence', async () => {
     const fixture = prepareRegisteredBatch(9, { capacity: 8 });
     assert.equal(fixture.registration.promoted.length, 9);
     assert.equal(fixture.binding.bindings.length, 8);
     assert.ok(fixture.binding.skipped.some((entry) => entry.endsWith(':ticket_pool_exhausted')));
-    assert.equal(fixture.candidates.length, 8);
+    assert.equal(fixture.candidates.length, 9);
     const overflowId = fixture.registration.promoted[8].actorRef.actorId;
     const run = await runBatch(fixture);
     const refreshed = normalizeActorLedger(run.result.ledger, { chatId: fixture.ledger.chatId });
     assert.equal(refreshed.actors.length, 9);
     const overflow = refreshed.actors.find((actor) => actor.id === overflowId);
-    assert.equal(actorProfileReadyForAction(overflow), false);
-    assert.equal(overflow.profileV6.backgroundPending, true);
+    assert.equal(actorProfileReadyForAction(overflow), true);
+    assert.equal(overflow.profileV6.backgroundPending, false);
 });
 
 test('newly created actors outrank historical profile backlog at limited capacity', () => {
@@ -525,7 +636,13 @@ test('newly created actors outrank historical profile backlog at limited capacit
         priorityActorIds,
         turn: 2,
     });
-    assert.deepEqual(selected.map((entry) => entry.name), ['新一', '新二']);
+    assert.deepEqual(selected.map((entry) => entry.name), [
+        '新一',
+        '新二',
+        '新三',
+        '旧二',
+        '旧一',
+    ]);
 });
 
 test('shared narrative and worldbook evidence appears once for an eight-actor batch', () => {
@@ -536,7 +653,7 @@ test('shared narrative and worldbook evidence appears once for an eight-actor ba
     });
     const userPrompt = messages.find((message) => message.role === 'user').content;
     assert.equal(userPrompt.split(sentinel).length - 1, 1);
-    assert.ok(userPrompt.includes('本批共享正文、世界观与高优先级锚点'));
+    assert.ok(userPrompt.includes('共享权威资料、世界观与状态锚点（仅一次）'));
     assert.ok(userPrompt.length < 70000, '公共证据不得按8个人物线性复制');
 });
 
@@ -592,22 +709,47 @@ test('legacy colon ActorId keeps its full identity in ticket exhaustion diagnost
     assert.deepEqual(result.skipped, [`${actorId}:ticket_pool_exhausted`]);
 });
 
-test('production path uses independent capacity, created-only priority and one batch save/readback', async () => {
+test('production path keeps current-source profiles untruncated and commits through pending plus final readbacks', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-    const profileFunction = source.slice(
-        source.indexOf('async function completeActorProfilesForTurn'),
+    const entryFunction = source.slice(
+        source.indexOf('async function runActorProfileTarget'),
         source.indexOf('async function runContinuityTarget'),
     );
-    assert.match(profileFunction, /maxActors: settings\.actorProfileBatchCapacity/u);
+    const profileFunction = source.slice(
+        source.indexOf('async function completeActorProfilesForTurn'),
+        source.indexOf('async function runActorProfileTarget'),
+    );
+    const continuityFunction = source.slice(
+        source.indexOf('async function runContinuityTarget'),
+        source.indexOf('async function confirmDangerousAction'),
+    );
+    assert.match(profileFunction, /initialActorIds,/u);
+    assert.match(profileFunction, /maintenanceMaxActors: includeMaintenance/u);
     assert.match(profileFunction, /completeActorProfileBatchTransaction/u);
     assert.match(profileFunction, /maxTokens: 0/u);
-    assert.match(profileFunction, /readbackAttempts: 1/u);
+    assert.match(profileFunction, /readbackAttempts: 3/u);
+    assert.match(profileFunction, /persistPendingBatch/u);
+    assert.match(profileFunction, /persistFinalizedBatch/u);
     assert.doesNotMatch(profileFunction, /Promise\.all\(candidates\.map|parallelLane|actorShardMaxTokens/u);
-    const transaction = source.slice(source.indexOf('const characterCreationTicketBinding'));
-    assert.match(transaction, /actorRegistration\.promoted\s*\.filter\(\(entry\) => entry\.created === true\)/u);
-    assert.match(transaction, /priorityActorIds,/u);
-    assert.match(transaction, /ticket_pool_exhausted/u);
+    const transaction = source.slice(source.indexOf('const promotedActorIds = actorRegistration.promoted'));
+    assert.match(transaction, /actorRegistration\.promoted\s*\.map\(\(entry\) => entry\.actorRef\.actorId\)/u);
+    assert.match(transaction, /initialActorIds: promotedActorIds/u);
+    assert.match(transaction, /ticketPoolExhausted/u);
     assert.match(transaction, /recordModelDiagnostic/u);
     assert.match(profileFunction, /worldContext\.text/u);
-    assert.match(transaction, /lastIndexOf\(':'\)/u);
+    assert.match(profileFunction, /scopeDigest: captured\.scopeDigest/u);
+    for (const p1Step of [
+        'discoverActorsFromTurnSources',
+        'runActorRegistryUpsert',
+        'promoteActorCandidatesToRegistry',
+        'persistActorRegistryForTurn',
+        'completeActorProfilesForTurn',
+    ]) assert.match(entryFunction, new RegExp(p1Step, 'u'));
+    for (const p1Step of [
+        'discoverActorsFromTurnSources',
+        'runActorRegistryUpsert',
+        'promoteActorCandidatesToRegistry',
+        'persistActorRegistryForTurn',
+        'completeActorProfilesForTurn',
+    ]) assert.doesNotMatch(continuityFunction, new RegExp(p1Step, 'u'));
 });

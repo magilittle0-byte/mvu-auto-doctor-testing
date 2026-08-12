@@ -693,7 +693,7 @@ export function normalizeWorldState(value, { turn = 0 } = {}) {
 
 export function emptyContinuityState(chatId = '') {
     return {
-        version: 5,
+        version: 6,
         chatId: cleanText(chatId, 180),
         turn: 0,
         lastTick: {
@@ -706,7 +706,200 @@ export function emptyContinuityState(chatId = '') {
         threads: [],
         world: emptyWorldState(),
         scenarioPlan: emptyScenarioPlan(),
+        nextTurnInjection: null,
         updatedAt: 0,
+    };
+}
+
+function normalizeNextTurnInjectionTarget(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const chatId = cleanText(source.chatId, 180);
+    const messageId = cleanText(source.messageId, 180);
+    const scopeDigest = cleanText(source.scopeDigest, 180);
+    const contentFingerprint = cleanText(source.contentFingerprint, 180);
+    if (!chatId || !messageId || !scopeDigest || !contentFingerprint) return null;
+    return {
+        chatId,
+        index: boundedInteger(source.index, 0, Number.MAX_SAFE_INTEGER, 0),
+        messageId,
+        swipeId: boundedInteger(source.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
+        generationSerial: boundedInteger(
+            source.generationSerial,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            0,
+        ),
+        scopeDigest,
+        contentFingerprint,
+    };
+}
+
+function normalizeNextTurnInjectionConsumer(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const chatId = cleanText(source.chatId, 180);
+    const generationId = cleanText(source.generationId, 180);
+    if (!chatId || !generationId) return null;
+    return {
+        chatId,
+        generationId,
+        generationSerial: boundedInteger(
+            source.generationSerial,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            0,
+        ),
+    };
+}
+
+function normalizeNextTurnInjectionStartSnapshot(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    return {
+        index: boundedInteger(source.index, -1, Number.MAX_SAFE_INTEGER, -1),
+        swipeId: boundedInteger(source.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
+        contentFingerprint: cleanText(source.contentFingerprint, 180),
+    };
+}
+
+function normalizeNextTurnInjectionLease(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const state = ['reserved', 'released', 'cleanup_failed'].includes(source.state)
+        ? source.state
+        : 'reserved';
+    const chatId = cleanText(source.chatId, 180);
+    const generationId = cleanText(source.generationId, 180);
+    const generationType = cleanText(source.generationType, 80);
+    const scopeDigest = cleanText(source.scopeDigest, 180);
+    const expectedScopeDigest = cleanText(source.expectedScopeDigest, 180);
+    const consumerPayloadDigest = cleanText(source.consumerPayloadDigest, 240);
+    if (
+        !chatId
+        || !generationId
+        || !generationType
+        || !scopeDigest
+        || !expectedScopeDigest
+        || scopeDigest !== expectedScopeDigest
+        || !consumerPayloadDigest
+    ) {
+        return null;
+    }
+    return {
+        state,
+        chatId,
+        generationId,
+        generationSerial: boundedInteger(source.generationSerial, 0, Number.MAX_SAFE_INTEGER, 0),
+        generationType,
+        scopeDigest,
+        expectedScopeDigest,
+        consumerPayloadDigest,
+        providerId: cleanText(source.providerId, 180),
+        slotId: cleanText(source.slotId, 180),
+        providerCleanupToken: cleanText(source.providerCleanupToken, 1200),
+        cleanupConfirmed: source.cleanupConfirmed === true,
+        start: normalizeNextTurnInjectionStartSnapshot(source.start),
+        reservedAt: boundedInteger(source.reservedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+        ...(state === 'released' || state === 'cleanup_failed'
+            ? { releaseReason: cleanText(source.releaseReason, 180) }
+            : {}),
+    };
+}
+
+function normalizeNextTurnInjectionConsumeProof(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const chatId = cleanText(source.chatId, 180);
+    const generationId = cleanText(source.generationId, 180);
+    const generationType = cleanText(source.generationType, 80);
+    const scopeDigest = cleanText(source.scopeDigest, 180);
+    const messageId = cleanText(source.messageId, 180);
+    const contentFingerprint = cleanText(source.contentFingerprint, 180);
+    const consumerPayloadDigest = cleanText(source.consumerPayloadDigest, 240);
+    if (
+        !chatId || !generationId || !generationType || !scopeDigest
+        || !messageId || !contentFingerprint || !consumerPayloadDigest
+    ) return null;
+    return {
+        chatId,
+        generationId,
+        generationSerial: boundedInteger(source.generationSerial, 0, Number.MAX_SAFE_INTEGER, 0),
+        generationType,
+        scopeDigest,
+        index: boundedInteger(source.index, 0, Number.MAX_SAFE_INTEGER, 0),
+        messageId,
+        swipeId: boundedInteger(source.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
+        contentFingerprint,
+        consumerPayloadDigest,
+        providerId: cleanText(source.providerId, 180),
+        slotId: cleanText(source.slotId, 180),
+        committedAt: boundedInteger(source.committedAt, 0, Number.MAX_SAFE_INTEGER, 0),
+    };
+}
+
+function normalizeNextTurnSettlementProof(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const actorLedgerDigest = cleanText(source.actorLedgerDigest, 240);
+    const digest = cleanText(source.digest, 240);
+    if (!actorLedgerDigest || !digest || !Array.isArray(source.orderedResults)) return null;
+    const seen = new Set();
+    const orderedResults = [];
+    for (const raw of source.orderedResults.slice(0, 6)) {
+        const attemptId = cleanText(raw?.attemptId, 180);
+        const id = cleanText(raw?.id, 180);
+        const status = cleanText(raw?.status, 80);
+        const actorRef = normalizeActorRefs([raw?.actorRef])[0] || null;
+        const worldAdjudicationResult = raw?.worldAdjudicationResult;
+        if (
+            !attemptId
+            || !id
+            || !status
+            || !actorRef
+            || !worldAdjudicationResult
+            || typeof worldAdjudicationResult !== 'object'
+            || Array.isArray(worldAdjudicationResult)
+            || seen.has(attemptId)
+        ) return null;
+        seen.add(attemptId);
+        orderedResults.push({
+            attemptId,
+            id,
+            status,
+            actorRef,
+            worldAdjudicationResult: clone(worldAdjudicationResult),
+        });
+    }
+    orderedResults.sort((left, right) => left.attemptId.localeCompare(right.attemptId));
+    return { actorLedgerDigest, digest, orderedResults };
+}
+
+function normalizeNextTurnInjection(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const producerTarget = normalizeNextTurnInjectionTarget(source.producerTarget);
+    if (!producerTarget) return null;
+    const status = ['pending', 'reserved', 'consumed'].includes(source.status)
+        ? source.status
+        : 'pending';
+    const payload = source.payload && typeof source.payload === 'object'
+        ? source.payload
+        : {};
+    const reservedFor = normalizeNextTurnInjectionConsumer(source.reservedFor);
+    const consumedBy = normalizeNextTurnInjectionConsumer(source.consumedBy);
+    const consumerLease = normalizeNextTurnInjectionLease(source.consumerLease);
+    const consumeProof = normalizeNextTurnInjectionConsumeProof(source.consumeProof);
+    if (status === 'reserved' && !reservedFor) return null;
+    if (status === 'consumed' && !consumedBy) return null;
+    return {
+        version: boundedInteger(source.version, 1, 1, 1),
+        status,
+        producerTarget,
+        sourceContinuityDigest: cleanText(source.sourceContinuityDigest, 16000),
+        payload: {
+            text: cleanText(payload.text, 12000),
+            visibleThreadIds: cleanList(payload.visibleThreadIds, 4, 90),
+        },
+        settlementProof: normalizeNextTurnSettlementProof(source.settlementProof),
+        createdAt: boundedInteger(source.createdAt, 0, Number.MAX_SAFE_INTEGER, 0),
+        ...(reservedFor ? { reservedFor } : {}),
+        ...(consumedBy ? { consumedBy } : {}),
+        ...(consumerLease ? { consumerLease } : {}),
+        ...(consumeProof ? { consumeProof } : {}),
     };
 }
 
@@ -878,7 +1071,7 @@ export function normalizeContinuityState(value, {
         ))
         .slice(0, resolvedLimit);
     return {
-        version: 5,
+        version: 6,
         chatId: cleanText(chatId || source.chatId, 180),
         turn,
         lastTick: normalizeTick(source.lastTick, turn),
@@ -886,6 +1079,7 @@ export function normalizeContinuityState(value, {
         threads: [...active, ...dormant, ...resolved],
         world: normalizeWorldState(source.world, { turn }),
         scenarioPlan: normalizeScenarioPlan(source.scenarioPlan, { turn }),
+        nextTurnInjection: normalizeNextTurnInjection(source.nextTurnInjection),
         droppedCount: overflow.length,
         deferredCount: dormant.length,
         updatedAt: boundedInteger(source.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
@@ -2714,6 +2908,111 @@ export function buildContinuityInjection(state, {
         ...aftermathRows,
         '</Parallel_Continuity_Bridge>',
     ].join('\n');
+}
+
+const LEGACY_CONSUMER_DIRECTORS = Object.freeze([
+    'stitches',
+    'world',
+    'world_preset',
+    'preset',
+    'mixed',
+    'standalone',
+]);
+
+const LEGACY_CONSUMER_RAW_MAX_VISIBLE = Object.freeze([0, 1, 2, 3, 4]);
+
+function exactLegacyVisibleProjection(state, rawMaxVisible) {
+    const normalized = normalizeContinuityState(state, { maxThreads: 12 });
+    return normalized.threads
+        .filter((thread) => (
+            thread.stage !== 'resolved'
+            && thread.relation === 'converging'
+        ))
+        .slice(0, Math.max(0, Number(rawMaxVisible) || 0))
+        .map((thread) => thread.id);
+}
+
+function exactStringListMatches(left, right) {
+    return Array.isArray(left)
+        && Array.isArray(right)
+        && left.length === right.length
+        && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * Strictly projects the already-persisted P3 legacy text into the sole P4
+ * consumer carrier. It never repairs, reorders, rewrites, or persists the
+ * P3 payload: a packet must exactly replay the known legacy renderer first.
+ */
+export function buildContinuityConsumerPayload(state, packet) {
+    const rawPacket = packet && typeof packet === 'object' ? packet : {};
+    const normalizedState = normalizeContinuityState(state, { maxThreads: 12 });
+    const normalizedPacket = normalizeNextTurnInjection(rawPacket);
+    const rawText = typeof rawPacket?.payload?.text === 'string'
+        ? rawPacket.payload.text
+        : '';
+    if (
+        !normalizedPacket
+        || normalizedPacket.version !== 1
+        || !rawText
+        || !normalizedPacket.settlementProof
+        || rawText !== normalizedPacket.payload.text
+    ) return { ok: false, reason: 'legacy_packet_invalid' };
+
+    const matches = [];
+    for (const director of LEGACY_CONSUMER_DIRECTORS) {
+        for (const rawMaxVisible of LEGACY_CONSUMER_RAW_MAX_VISIBLE) {
+            const legacyText = buildContinuityInjection(normalizedState, {
+                director,
+                maxVisible: rawMaxVisible,
+            });
+            const visibleProjection = exactLegacyVisibleProjection(
+                normalizedState,
+                rawMaxVisible,
+            );
+            if (
+                legacyText === rawText
+                && exactStringListMatches(
+                    visibleProjection,
+                    normalizedPacket.payload.visibleThreadIds,
+                )
+            ) {
+                matches.push({ director, rawMaxVisible, legacyText });
+            }
+        }
+    }
+    if (matches.length !== 1) {
+        return {
+            ok: false,
+            reason: matches.length ? 'legacy_projection_ambiguous' : 'legacy_projection_mismatch',
+        };
+    }
+
+    const lines = rawText.split('\n');
+    if (
+        lines.length < 4
+        || lines[0] !== '<Parallel_Continuity_Bridge>'
+        || lines.at(-1) !== '</Parallel_Continuity_Bridge>'
+        || lines.slice(2, -1).some((line) => line.includes('Parallel_Continuity_Bridge'))
+    ) return { ok: false, reason: 'legacy_projection_structure_invalid' };
+
+    const expectedDirectorLine = matches[0].legacyText.split('\n')[1];
+    if (!expectedDirectorLine || lines[1] !== expectedDirectorLine) {
+        return { ok: false, reason: 'legacy_projection_director_invalid' };
+    }
+
+    return {
+        ok: true,
+        text: [
+            '<World_Continuity_Package>',
+            ...lines.slice(2, -1),
+            '</World_Continuity_Package>',
+        ].join('\n'),
+        legacy: {
+            director: matches[0].director,
+            rawMaxVisible: matches[0].rawMaxVisible,
+        },
+    };
 }
 
 export function continuityContentDigest(state) {

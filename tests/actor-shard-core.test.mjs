@@ -16,12 +16,41 @@ import {
 import { actorIdFromName } from '../actor-ref-core.mjs';
 import { makeActionReadyActor } from './helpers/actor-action-ready-fixture.mjs';
 
+const ACTOR_SHARD_CHAT_ID = 'actor-shard-test';
+
+function canonicalActorShardTarget(turn = 1) {
+    return {
+        chatId: ACTOR_SHARD_CHAT_ID,
+        messageId: `actor-shard-message-${turn}`,
+        logicalIndex: turn,
+        index: turn,
+        swipeId: 0,
+        generation: turn,
+        generationSerial: turn,
+        generationId: `actor-shard-generation-${turn}`,
+        generationType: 'normal',
+        identityScopeId: `${ACTOR_SHARD_CHAT_ID}|character:fixture`,
+        scopeDigest: `${ACTOR_SHARD_CHAT_ID}|scope:fixture`,
+        contentHash: `actor-shard-content-${turn}`,
+        contentFingerprint: `actor-shard-content-${turn}`,
+        hash: `actor-shard-content-${turn}`,
+        compatibilityOnly: false,
+    };
+}
+
 function actionReadyLedgerForContinuity(continuity = {}) {
     const names = [...new Set((continuity?.threads || [])
-        .flatMap((entry) => Array.isArray(entry?.actors) ? entry.actors : [])
+        .flatMap((entry) => entry?.actorEligible === false
+            ? []
+            : (Array.isArray(entry?.actors) ? entry.actors : []))
         .filter((entry) => typeof entry === 'string' && entry.trim()))];
-    const actors = names.map((name) => makeActionReadyActor({
-        id: actorIdFromName(name),
+    const target = canonicalActorShardTarget();
+    const actors = names.map((name) => {
+        const actorId = actorIdFromName(name);
+        if (!actorId) return null;
+        return makeActionReadyActor({
+        chatId: ACTOR_SHARD_CHAT_ID,
+        id: actorId,
         name,
         status: 'active',
         tier: 'secondary',
@@ -37,12 +66,15 @@ function actionReadyLedgerForContinuity(continuity = {}) {
         hidden: { emotionalInertia: [], innerConflicts: [], privateIntentions: [] },
         plan: { summary: '调查当前线索', steps: [], status: 'active' },
         evidence: ['fixture'],
-    }));
+        }, { sourceRef: target });
+    }).filter(Boolean);
     return {
-        chatId: 'actor-shard-test',
+        chatId: ACTOR_SHARD_CHAT_ID,
         actorRegistry: {
             version: 1,
-            chatId: 'actor-shard-test',
+            chatId: ACTOR_SHARD_CHAT_ID,
+            identityScopeId: target.identityScopeId,
+            scopeDigest: target.scopeDigest,
             characters: {},
             registered: Object.fromEntries(actors.map((actor) => [actor.name, {
                 actorRef: {
@@ -51,6 +83,18 @@ function actionReadyLedgerForContinuity(continuity = {}) {
                     displayName: actor.name,
                     aliases: actor.identity.aliases,
                 },
+                sourceRefs: (() => {
+                    const sourceRef = actor.profileV6?.baselineCommit?.sourceRef;
+                    const writeSetEntry = actor.profileV6?.baselineCommit?.verification?.writeSet
+                        ?.find((entry) => entry?.actorRef?.actorId === actor.id);
+                    assert.ok(sourceRef, 'every action-ready actor must retain its baseline sourceRef');
+                    assert.deepEqual(
+                        writeSetEntry?.sourceRef,
+                        sourceRef,
+                        'Registry sourceRef must exactly reuse its ActorRef write-set sourceRef',
+                    );
+                    return [structuredClone(sourceRef)];
+                })(),
             }])),
         },
         identityQuarantine: [],
@@ -126,7 +170,7 @@ test('deterministic selector handles 0/1/3/6 limits without excluding present ac
             thread('T4', '多恩', { urgency: 1 }),
             thread('T5', '伊芙', { urgency: 0 }),
             thread('T6', '菲恩', { urgency: 0 }),
-            thread('T7', '港口巡逻队', { urgency: 3 }),
+            thread('T7', '港口巡逻队', { urgency: 3, actorEligible: false }),
         ],
     };
     assert.equal(selectActorShardCandidates({ continuity: { threads: [] } }).length, 0);

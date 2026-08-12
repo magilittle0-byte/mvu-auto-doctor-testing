@@ -367,6 +367,83 @@ export function normalizeActorProfileV6(value, {
             ),
             readbackVerified: source.baselineCommit.readbackVerified === true,
             status: cleanText(source.baselineCommit.status, 60),
+            verification: source.baselineCommit.verification
+                && typeof source.baselineCommit.verification === 'object'
+                && !Array.isArray(source.baselineCommit.verification)
+                ? {
+                    version: integer(
+                        source.baselineCommit.verification.version,
+                        1,
+                        Number.MAX_SAFE_INTEGER,
+                        1,
+                    ),
+                    preparedLedgerDigest: cleanText(
+                        source.baselineCommit.verification.preparedLedgerDigest,
+                        180,
+                    ),
+                    transactionId: cleanText(
+                        source.baselineCommit.verification.transactionId,
+                        180,
+                    ),
+                    writeSetDigest: cleanText(
+                        source.baselineCommit.verification.writeSetDigest,
+                        180,
+                    ),
+                    preparedFieldRevision: integer(
+                        source.baselineCommit.verification.preparedFieldRevision,
+                        0,
+                        Number.MAX_SAFE_INTEGER,
+                        0,
+                    ),
+                    commitId: cleanText(
+                        source.baselineCommit.verification.commitId,
+                        180,
+                    ),
+                    profileDigest: cleanText(
+                        source.baselineCommit.verification.profileDigest,
+                        120,
+                    ),
+                    writeSet: (Array.isArray(source.baselineCommit.verification.writeSet)
+                        ? source.baselineCommit.verification.writeSet
+                        : []).map((entry) => ({
+                        actorRef: {
+                            actorId: cleanText(entry?.actorRef?.actorId, 120),
+                            name: cleanText(entry?.actorRef?.name, 160),
+                        },
+                        schemaVersion: integer(
+                            entry?.schemaVersion,
+                            1,
+                            Number.MAX_SAFE_INTEGER,
+                            0,
+                        ),
+                        commitId: cleanText(entry?.commitId, 180),
+                        profileDigest: cleanText(entry?.profileDigest, 120),
+                        sourceRef: entry?.sourceRef
+                            && typeof entry.sourceRef === 'object'
+                            && !Array.isArray(entry.sourceRef)
+                            ? clone(entry.sourceRef)
+                            : null,
+                        scopeDigest: cleanText(
+                            entry?.scopeDigest || entry?.sourceRef?.scopeDigest,
+                            180,
+                        ),
+                        locks: entry?.locks
+                            && typeof entry.locks === 'object'
+                            && !Array.isArray(entry.locks)
+                            ? clone(entry.locks)
+                            : {},
+                        manualOverrides: entry?.manualOverrides
+                            && typeof entry.manualOverrides === 'object'
+                            && !Array.isArray(entry.manualOverrides)
+                            ? clone(entry.manualOverrides)
+                            : {},
+                    })).filter((entry) => (
+                        entry.actorRef.actorId
+                        && entry.commitId
+                        && entry.profileDigest
+                    )),
+                }
+                : null,
         }
         : null;
     if (
@@ -380,6 +457,7 @@ export function normalizeActorProfileV6(value, {
             digest: '',
             readbackVerified: false,
             status: 'legacy_persisted',
+            verification: null,
         };
     } else if (!output.baselineCommit?.commitId || !output.baselineCommit.actorRef.actorId) {
         output.baselineCommit = null;
@@ -394,6 +472,7 @@ export function normalizeActorProfileV6(value, {
             committedTurn: integer(source.updatedTurn),
             readbackVerified: false,
             status: 'legacy_persisted',
+            verification: null,
         };
     }
     output.updatedTurn = integer(source.updatedTurn);
@@ -1291,6 +1370,7 @@ export function actorProfileBaselineDigest(value) {
 
 function baselineCommitReady(profile) {
     const commit = profile?.baselineCommit;
+    const verification = commit?.verification;
     return calculateCoverage(profile) === 100
         && profile.preparedForAction === true
         && commit?.readbackVerified === true
@@ -1299,7 +1379,15 @@ function baselineCommitReady(profile) {
         && commit.schemaVersion === profile.version
         && commit.actorRef?.actorId === profile.actorId
         && !!cleanText(commit.digest, 120)
-        && commit.digest === actorProfileBaselineDigest(profile);
+        && commit.digest === actorProfileBaselineDigest(profile)
+        && !!cleanText(verification?.preparedLedgerDigest, 180)
+        && cleanText(verification?.commitId, 180) === commit.commitId
+        && cleanText(verification?.profileDigest, 120) === commit.digest
+        && (verification?.writeSet || []).some((entry) => (
+            entry.actorRef?.actorId === profile.actorId
+            && entry.commitId === commit.commitId
+            && entry.profileDigest === commit.digest
+        ));
 }
 
 export function actorProfileActionReadiness(actor) {
@@ -1332,6 +1420,22 @@ export function actorProfileActionReadiness(actor) {
     }
     if (profile.preparedForAction !== true) {
         return { ready: false, reason: 'actor_profile.not_prepared', migrationRequired: false };
+    }
+    if (
+        !commit.verification?.preparedLedgerDigest
+        || commit.verification.commitId !== commit.commitId
+        || commit.verification.profileDigest !== commit.digest
+        || !(commit.verification.writeSet || []).some((entry) => (
+            entry.actorRef?.actorId === profile.actorId
+            && entry.commitId === commit.commitId
+            && entry.profileDigest === commit.digest
+        ))
+    ) {
+        return {
+            ready: false,
+            reason: 'actor_profile.ledger_verification_required',
+            migrationRequired: false,
+        };
     }
     return { ready: true, reason: '', migrationRequired: false };
 }
@@ -2013,57 +2117,84 @@ export function actorProfileReadyForAction(actor) {
 }
 
 export function selectActorProfileCompletionCandidates(value, {
-    maxActors = 8,
+    initialActorIds = [],
+    maintenanceMaxActors = null,
+    // Compatibility input for callers older than the Stage-2 split. It is
+    // maintenance-only and never truncates current-source initial actors.
+    maxActors = null,
     turn: _turn = null,
     priorityActorIds = [],
+    readinessForActor = null,
 } = {}) {
     const actors = Array.isArray(value?.actors) ? value.actors : [];
-    const priority = new Map(cleanList(priorityActorIds, 24, 120)
+    const suppliedInitialActorIds = Array.isArray(initialActorIds)
+        ? initialActorIds
+        : [];
+    const initialIds = cleanList(
+        suppliedInitialActorIds.length ? suppliedInitialActorIds : priorityActorIds,
+        Math.max(24, actors.length),
+        120,
+    );
+    const initial = new Map(initialIds
         .map((actorId, index) => [actorId, index]));
+    const maintenanceBudget = integer(
+        maintenanceMaxActors ?? maxActors ?? 0,
+        0,
+        24,
+        0,
+    );
+    const compareMaintenance = (left, right) => {
+        const leftProfile = normalizeActorProfileV6(left?.profileV6, {
+            actorId: left?.id,
+            name: left?.name,
+        });
+        const rightProfile = normalizeActorProfileV6(right?.profileV6, {
+            actorId: right?.id,
+            name: right?.name,
+        });
+        const leftCoverage = calculateCoverage(leftProfile);
+        const rightCoverage = calculateCoverage(rightProfile);
+        if (rightCoverage !== leftCoverage) return rightCoverage - leftCoverage;
+        const leftHistory = Array.isArray(left?.actionHistory) ? left.actionHistory.length : 0;
+        const rightHistory = Array.isArray(right?.actionHistory) ? right.actionHistory.length : 0;
+        if (rightHistory !== leftHistory) return rightHistory - leftHistory;
+        const leftEvidence = cleanList(left?.evidence, 64, 300).length;
+        const rightEvidence = cleanList(right?.evidence, 64, 300).length;
+        if (rightEvidence !== leftEvidence) return rightEvidence - leftEvidence;
+        return cleanText(left?.id, 120).localeCompare(cleanText(right?.id, 120), 'zh-CN');
+    };
     const incomplete = actors
+        .filter((actor) => !actor?.pendingProfile)
         .filter((actor) => {
-            if (!actorProfileReadyForAction(actor)) return true;
+            const ready = typeof readinessForActor === 'function'
+                ? readinessForActor(actor)?.ready === true
+                : actorProfileReadyForAction(actor);
+            if (!ready) return true;
             const profile = normalizeActorProfileV6(actor?.profileV6, {
                 actorId: actor?.id,
                 name: actor?.name,
             });
             return profile.completionMode === 'full_adult'
                 && calculateOptionalCoverage(profile) < 100;
-        })
-        .sort((left, right) => {
-            const leftPriority = priority.has(cleanText(left?.id, 120))
-                ? priority.get(cleanText(left?.id, 120))
-                : Number.MAX_SAFE_INTEGER;
-            const rightPriority = priority.has(cleanText(right?.id, 120))
-                ? priority.get(cleanText(right?.id, 120))
-                : Number.MAX_SAFE_INTEGER;
-            if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-            const leftProfile = normalizeActorProfileV6(left?.profileV6, {
-                actorId: left?.id,
-                name: left?.name,
-            });
-            const rightProfile = normalizeActorProfileV6(right?.profileV6, {
-                actorId: right?.id,
-                name: right?.name,
-            });
-            const leftCoverage = calculateCoverage(leftProfile);
-            const rightCoverage = calculateCoverage(rightProfile);
-            if (rightCoverage !== leftCoverage) return rightCoverage - leftCoverage;
-            const leftHistory = Array.isArray(left?.actionHistory) ? left.actionHistory.length : 0;
-            const rightHistory = Array.isArray(right?.actionHistory) ? right.actionHistory.length : 0;
-            if (rightHistory !== leftHistory) return rightHistory - leftHistory;
-            const leftEvidence = cleanList(left?.evidence, 64, 300).length;
-            const rightEvidence = cleanList(right?.evidence, 64, 300).length;
-            if (rightEvidence !== leftEvidence) return rightEvidence - leftEvidence;
-            return cleanText(left?.id, 120).localeCompare(cleanText(right?.id, 120), 'zh-CN');
         });
-    return incomplete
-        .slice(0, integer(maxActors, 1, 24, 8))
+    const initialCandidates = incomplete
+        .filter((actor) => initial.has(cleanText(actor?.id, 120)))
+        .sort((left, right) => (
+            initial.get(cleanText(left?.id, 120)) - initial.get(cleanText(right?.id, 120))
+        ));
+    const maintenanceCandidates = incomplete
+        .filter((actor) => !initial.has(cleanText(actor?.id, 120)))
+        .sort(compareMaintenance)
+        .slice(0, maintenanceBudget);
+    return [...initialCandidates, ...maintenanceCandidates]
         .map((actor) => ({
             actorRef: {
                 actorId: cleanText(actor?.id, 120),
                 name: cleanText(actor?.name, 160),
             },
+            batchClass: initial.has(cleanText(actor?.id, 120))
+                ? 'initial'
+                : 'maintenance',
             actorId: cleanText(actor?.id, 120),
             name: cleanText(actor?.name, 160),
             identity: clone(actor?.identity || {}),
@@ -2217,42 +2348,68 @@ export function buildActorProfileCompletionMessages(candidates, {
     evidenceText = '',
     customPrompt = '',
     validationFeedback = [],
+    discoveryContext = null,
+    discoveryRetryTargets = [],
 } = {}) {
     const selected = Array.isArray(candidates) ? candidates : [];
+    const discovery = isRecord(discoveryContext) ? discoveryContext : {};
+    const retryDiscoveries = Array.isArray(discoveryRetryTargets)
+        ? discoveryRetryTargets
+        : [];
     const includesPhysiology = selected.some((candidate) => (
         modeOf(candidate?.completionMode) === 'full_adult'
-    ));
+    )) || modeOf(discovery.completionMode) === 'full_adult';
+    const batchFieldGuide = actorProfileFieldGuide({
+        completionMode: includesPhysiology ? 'full_adult' : 'full',
+    });
     const system = [
-        '你是数据库式NPC人物档案生成器，也是一名只负责填表的表格填写器。根据材料把同一个角色的碎片整理成自然、连贯、可直接阅读的人物档案；只填表，不续写剧情。',
-        '人物数据分为 confirmedAnchors 与 editableDraft：数据库、角色卡或正文明确事实属于确认硬锚点，必须逐项保留；草稿只是以前的创作补全，可以重写，不能反过来冒充正文事实。材料没有设定的字段不是“待确认”，而是创作空间，直接补成可长期使用的设定。',
-        '输入优先级固定为：数据库/角色卡/原著硬设定 > 已接受正文事实 > 缝合怪已经明确给出的该人物设定 > 已保存档案 > characterCreationTicket人物票。低层不得改写高层；某个票据轴冲突时只把该轴记入discardedAxes并停止采用，不折中出第三种设定。缝合怪的剧情建议若尚未成为正文，只能约束创作方向，不能伪装成角色已经做过的事。',
-        '【追踪角色表】填写性别、年龄、外貌、身份、简介、关系、对主角态度和过去经历。外貌只写长期物理特征；本轮衣着、姿势、伤势、恐惧和高压反应只属于当前状态，不能写成一生不变的人格与身体特征。',
-        '【追踪人设基线】按数据库调色盘填写：主色优先从原文中提取，原文没有时使用生成前同票绑定的characterCreationTicket；底色和点缀用其余不冲突票据轴组合。票据内的骰子由脚本选择并在正文前锁定，你只负责融合成一个自洽的人，不能重掷、换票或改成更熟悉的冷酷、怯懦、绝望、完美面具模板。每种颜色都写清对什么对象生效、何时活跃、何时消退的具体行为，不能只堆标签；每组衍生写2-3条，每条30-100字。',
-        'characterCreationTicket是创作底稿而非正文证据。将基础气质、核心欲望、价值观、思考方式、关系与社交动机、利益取向、冲突方式、压力与恢复、道德边界、表达与行动习惯、弱点偏见与自我欺骗、非极端日常特征交叉组合；不要逐项照抄成属性表，也不要让职业决定全部轴。',
-        '履历用角色第一人称写遇到主角之前也成立的普通完整人生，把身份、外貌、经历和人际关系写成人话。不要自动发明秘密组织、系统底层身份、漫长受难、隐藏虐杀癖、人格崩坏或与主角的命定关系；只有确认锚点明确提供时才沿用。',
-        '他者声部写4-7句有视角差、落到具体轶事的旁人议论，允许互相矛盾和看不懂。作者声部用第一人称陈列“越写越不确定”的困惑，不替角色下最终结论，控制在200字以内。',
-        '【长期行动基线】只写人物长期目标、稳定追求原则和通常采用的策略；本轮当前目标、即时计划、下一行动窗口、地点、情绪、伤势和执行进度属于动态状态，不得写进这张基线表。',
-        'relationships、knowledge、resourcesCapabilities 必须整段返回且各自至少有一项可用内容。已确认条目逐项保留；没有确认条目时，结合世界观、身份、生活常识和同一张characterCreationTicket补成可修订的日常关系模式、常识、普通资源与实际能力，并使用对应 no_confirmed_* coverageState，sources 标为 hypothesis 或 designed_seed。不得凭空授予秘密知识、稀有物品或超常能力。',
+        '你是只负责从最终自然正文决定新增人物行并填写完整NPC档案的表格填写器。一次响应同时完成“正文中有哪些尚未登记的新人物”与“这些人物的整张档案”，不续写剧情。',
+        discovery.discoveryEnabled === false || discovery.discoveryRetryOnly === true
+            ? '这是失败子集替换调用：不得重新发现正文人物。只返回输入中明确列出的 actorRef，或 discoveryRetryTargets 中明确列出的 candidateRef；不能新增其他行。'
+            : '输入中明确给出 actorRef 的目标，是本次获准整档的人物：返回 actorRef 完整档案行。正文里自然出现、且不在 registeredActorIndex 中的新人物：返回 candidateRef{name,sourceAnchor} 完整档案行。registeredActorIndex 覆盖当前作用域全部已登记 ActorRef，只用于精确去重，不代表本次要重写这些历史人物。不要把群体、系统、旁白、玩家或仅被提及但未作为人物出场的名称建档。',
+        'candidateRef.name 必须逐字出现在 candidateRef.sourceAnchor 内；sourceAnchor 必须是从“共享最终正文”原样复制、在该正文中只出现一次的短片段。不得改写、概括或拼接锚点，也不要输出偏移量；脚本会从未改写正文计算唯一真实偏移，并按偏移顺序完成 Registry promotion 与票据绑定。',
+        'confirmedAnchors 是角色卡、原著、数据库或已接受正文中的权威事实，只能补空缺，不能改写。editableDraft 可以在不冲突时润色或替换。characterCreationTicket 已在正文生成前由脚本锁定：只能使用输入中的同一票，不重掷、不换票；票据缺失或耗尽时依据权威事实、正文和世界观创作补全。',
+        '没有明说的内容要合理补全，并把来源标为 hypothesis；来自同票的创作标为 designed_seed。不要用“未知、待确认、暂无、不详”或空值逃避填写，也不要把推断伪称为正文事实。人物应有普通生活、欲望、偏见、弱点、关系距离和压力后的恢复方式，不默认冷酷、疯癫、绝望、敌对或命定关系。',
+        '质量下限：每组人格衍生写2-3条、每条30-100个中文字符；他者声部写4-7句有不同视角和具体轶事的话；作者声部不超过200字。履历、外貌、关系、目标、知识、资源与能力都用完整中文句子。只写长期基线，不把本轮衣着、伤势、情绪、即时计划或执行结果固化为终身设定。',
+        'relationships、knowledge、resourcesCapabilities 都必须完整返回。没有确认条目时，补成可修订的日常关系模式、生活常识、普通资源和实际能力，使用对应 no_confirmed_* coverageState；不得凭空授予秘密知识、稀有物品或超常能力。',
         ...(includesPhysiology ? [
-            '【追踪身体基线】按相貌、口腔、发型、肩颈腋窝、身高体重、身材与特异性征、肌肤、气味、三围、胸部、腰腹、外阴、阴道、菊穴、臀部、腿部、足码脚型、足部、泌乳与特殊体液、敏感部位填写长期稳定的客观身体特征。只写物理白描，不写性格、态度、衣物、性经历或本轮临时状态；材料未写的项目自行创作补全，但不能与已有数据库事实冲突。',
+            '生理档案已启用：逐字段填写长期稳定、符合物种与世界观的客观身体特征。确实不适用时写“本物种不适用：具体原因”，不能只写“不适用”，也不写性格、态度、衣物、经历或本轮临时状态。',
         ] : []),
-        '把下方列出的字段一次填全。不要输出“未知”“待确认”“暂无”“不详”、空字符串或程序占位词；确无原设定时就合理创作。创作补全是档案设定，不要伪称它来自正文证据。',
+        '格式只负责运输：按字段说明返回完整对象；脚本会处理围栏、轻微标点、引号、逗号、括号、字段别名和类型问题。不要输出SQL、审查说明、拒绝说明或额外包裹。',
         customPrompt
             ? `【用户自定义人物档案/破限提示】\n${customPrompt}\n【用户自定义提示结束】`
             : '',
-        `只返回一个 JSON array，不加 envelope、不解释；数组必须恰好包含 ${selected.length} 个完整 ProfileInsertCandidate 对象，每个对象只用输入中给出的 actorRef.actorId 与 actorRef.name。不得按姓名、顺序或猜测改配 ActorRef。顶层必须含 actorRef、identity、personality、relationships、goals、knowledge、resourcesCapabilities、sources；full_adult 还必须含 physiology。JSON 只是传输格式，内容仍需自然完整。`,
         ...(cleanList(validationFeedback, 64, 240).length ? [
-            `上一批中的这些候选没有通过本地验证：${cleanList(validationFeedback, 64, 240).join('；')}。本次数组只返回这些缺失人物的整张完整替换候选；不得只补缺列，也不得引用或合并上一张输出。`,
+            `上一批中的这些候选没有通过本地验证：${cleanList(validationFeedback, 64, 240).join('；')}。本次数组只返回这些失败子集的整张完整替换候选；不得只补缺列，也不得引用或合并上一张输出。`,
         ] : []),
+        `【本批完整字段指南（只列一次）】\n${batchFieldGuide}`,
     ].filter(Boolean).join('\n\n');
     const actorRows = selected.map((candidate) => [
-        `人物与数据库锚点：${JSON.stringify(actorProfilePromptContext(candidate))}`,
+        `人物 ActorRef、权威锚点、可编辑草稿与同票：${JSON.stringify(actorProfilePromptContext(candidate))}`,
         `该人物专属证据：\n${cleanList(candidate.evidence, 16, 300).join('\n') || '无额外专属片段；按共享材料与锚点补全。'}`,
-        `完整候选字段：\n${actorProfileFieldGuide(candidate)}`,
     ].join('\n\n')).join('\n\n');
+    const discoveryRows = retryDiscoveries.length
+        ? `本次仅重新填写以下 candidateRef 失败子集（name 与 sourceAnchor 原样返回）：\n${JSON.stringify(retryDiscoveries)}`
+        : discovery.discoveryEnabled === false
+            ? ''
+        : [
+            `当前作用域全部 registered ActorRef 紧凑去重索引（仅 identity/aliases；不要据此重写历史欠档）：\n${JSON.stringify(
+                Array.isArray(discovery.registeredActorIndex)
+                    ? discovery.registeredActorIndex
+                    : [],
+            )}`,
+            `当前 generation 已存在的生成前票据池（只供本正文新原创人物按 sourceAnchor 偏移顺序条件消费；没有票据或票据耗尽仍须完整 hypothesis 建档）：\n${JSON.stringify(
+                Array.isArray(discovery.characterCreationTickets)
+                    ? discovery.characterCreationTickets
+                    : [],
+            )}`,
+        ].join('\n\n');
     const user = [
-        `本批共享正文、世界观与高优先级锚点（只提供一次，适用于全部目标）：\n${cleanText(evidenceText, 42000)}`,
         actorRows,
+        discoveryRows,
+        `共享最终正文（原样，仅一次；candidateRef.sourceAnchor 必须从这里逐字复制）：\n${String(discovery.acceptedNarrative || '').slice(0, 42000)}`,
+        `共享权威资料、世界观与状态锚点（仅一次）：\n${cleanText(evidenceText, 42000)}`,
+        '只返回一个简单 JSON array。每行必须是完整 ProfileInsertCandidate，并且二选一：已有目标原样返回 actorRef；正文新人物返回 candidateRef{name,sourceAnchor}。每行都必须含 identity、personality、relationships、goals、knowledge、resourcesCapabilities、sources；full_adult 另含 physiology。没有已有待填目标、也没有正文新人物时明确返回 []。不得按姓名或数组位置猜 ActorRef。',
     ].filter(Boolean).join('\n\n');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
@@ -2762,6 +2919,16 @@ function normalizeProfileInsertCandidate(raw) {
     const rawRef = isRecord(raw.actorRef) ? raw.actorRef
         : isRecord(raw.actor_ref) ? raw.actor_ref
             : {};
+    const rawCandidateRef = isRecord(raw.candidateRef) ? raw.candidateRef
+        : isRecord(raw.candidate_ref) ? raw.candidate_ref
+            : {};
+    const candidateName = cleanText(
+        rawCandidateRef.name || rawCandidateRef.displayName,
+        160,
+    );
+    const sourceAnchor = String(
+        rawCandidateRef.sourceAnchor || rawCandidateRef.source_anchor || '',
+    ).trim().slice(0, 1200);
     const identity = normalizeLooseProfileSection(raw, 'identity');
     const personality = {
         ...normalizeLooseProfileSection(raw, 'personality'),
@@ -2782,8 +2949,16 @@ function normalizeProfileInsertCandidate(raw) {
     return {
         actorRef: {
             actorId: cleanText(rawRef.actorId || rawRef.actor_id || raw.actorId || raw.actor_id, 120),
-            name: cleanText(rawRef.name || rawRef.displayName || raw.name || raw.姓名, 160),
+            name: cleanText(
+                rawRef.name
+                    || rawRef.displayName
+                    || (!candidateName ? raw.name || raw.姓名 : ''),
+                160,
+            ),
         },
+        candidateRef: candidateName || sourceAnchor
+            ? { name: candidateName, sourceAnchor }
+            : null,
         identity,
         personality,
         relationships: Array.isArray(relationshipsRaw)
@@ -2921,6 +3096,98 @@ const INSERT_PERSONALITY_LIST_FIELDS = Object.freeze({
     othersVoices: 4,
 });
 
+function profileTextLength(value) {
+    return Array.from(meaningfulProfileText(value, 4000)).length;
+}
+
+function profileTextMeetsQuality(candidate, path, minimum, maximum = Infinity) {
+    const length = profileTextLength(getCandidatePath(candidate, path));
+    if (!length) return false;
+    if (sourceAtPath(candidate, path) === 'confirmed') return true;
+    return length >= minimum && length <= maximum;
+}
+
+function repairProfileCandidateMetadata(candidate, context = {}, {
+    allowActorRefFill = false,
+} = {}) {
+    const repaired = clone(candidate);
+    const repairs = [];
+    if (!isRecord(repaired.actorRef)) repaired.actorRef = {};
+    if (allowActorRefFill && !cleanText(repaired.actorRef.actorId, 120)) {
+        repaired.actorRef.actorId = cleanText(
+            context?.actorRef?.actorId || context?.actorId,
+            120,
+        );
+        if (repaired.actorRef.actorId) repairs.push('actor_ref_id_filled_from_target');
+    }
+    if (allowActorRefFill && !cleanText(repaired.actorRef.name, 160)) {
+        repaired.actorRef.name = cleanText(context?.actorRef?.name || context?.name, 160);
+        if (repaired.actorRef.name) repairs.push('actor_ref_name_filled_from_target');
+    }
+    if (!isRecord(repaired.sources)) repaired.sources = {};
+    if (!isRecord(repaired.relationships)) repaired.relationships = {};
+    if (!isRecord(repaired.knowledge)) repaired.knowledge = {};
+    if (!isRecord(repaired.resourcesCapabilities)) repaired.resourcesCapabilities = {};
+    const coverageRepairs = [
+        ['relationships', 'entries', 'confirmed_entries', 'no_confirmed_relationships'],
+        ['knowledge', 'entries', 'confirmed_entries', 'no_confirmed_knowledge'],
+        [
+            'resourcesCapabilities',
+            'resources',
+            'confirmed_entries',
+            'no_confirmed_resources_or_capabilities',
+        ],
+    ];
+    for (const [section, field, confirmedState, emptyState] of coverageRepairs) {
+        if (cleanText(repaired[section]?.coverageState, 80)) continue;
+        const path = `${section}.${field}`;
+        repaired[section].coverageState = sourceAtPath(repaired, path) === 'confirmed'
+            ? confirmedState
+            : emptyState;
+        repairs.push(`${section}_coverage_state_normalized`);
+    }
+    if (repaired.knowledge.unknownRemainsUnknown !== true) {
+        repaired.knowledge.unknownRemainsUnknown = true;
+        repairs.push('knowledge_unknown_guard_normalized');
+    }
+    if (repaired.resourcesCapabilities.noUnconfirmedAbilityGranted !== true) {
+        repaired.resourcesCapabilities.noUnconfirmedAbilityGranted = true;
+        repairs.push('capability_guard_normalized');
+    }
+    const sourcePaths = [
+        ...INSERT_IDENTITY_FIELDS.map((field) => `identity.${field}`),
+        ...INSERT_PERSONALITY_TEXT_FIELDS.map((field) => `personality.${field}`),
+        ...Object.keys(INSERT_PERSONALITY_LIST_FIELDS)
+            .map((field) => `personality.${field}`),
+        'relationships.entries',
+        'relationships.patterns',
+        'goals.longTerm',
+        'goals.pursuitPrinciples',
+        'goals.strategy.summary',
+        'goals.strategy.steps',
+        'goals.strategy.reviewConditions',
+        'knowledge.entries',
+        'resourcesCapabilities.resources',
+        'resourcesCapabilities.capabilities',
+        ...(modeOf(context?.completionMode) === 'full_adult'
+            ? PHYSIOLOGY_CONTENT_FIELDS.map((field) => `physiology.${field}`)
+            : []),
+    ];
+    for (const path of sourcePaths) {
+        if (sourceAtPath(repaired, path)) continue;
+        const value = getCandidatePath(repaired, path);
+        const present = Array.isArray(value)
+            ? value.length > 0
+            : isRecord(value)
+                ? Object.keys(value).length > 0
+                : Boolean(meaningfulProfileText(value, 4000));
+        if (!present) continue;
+        repaired.sources[path] = 'hypothesis';
+        repairs.push(`source_inferred:${path}`);
+    }
+    return { candidate: repaired, repairs };
+}
+
 function existingProfileCandidateFactLayers(previousProfile) {
     if (!previousProfile || typeof previousProfile !== 'object') return {};
     const profile = normalizeActorProfileV6(previousProfile, {
@@ -3002,12 +3269,24 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
             resolutions: [],
         };
     }
+    const sourceCandidate = clone(candidate);
+    if (
+        context?.deferTicketSourceNormalization !== true
+        && !normalizeActorProfileDesignRolls(context?.designRolls)
+    ) {
+        sourceCandidate.sources = Object.fromEntries(Object.entries(
+            sourceCandidate.sources || {},
+        ).map(([path, source]) => [
+            path,
+            source === 'designed_seed' ? 'hypothesis' : source,
+        ]));
+    }
     const expectedActorId = cleanText(
         context?.actorRef?.actorId || context?.actorId,
         120,
     );
-    const actualActorId = cleanText(candidate.actorRef?.actorId, 120);
-    const actualName = cleanText(candidate.actorRef?.name, 160);
+    const actualActorId = cleanText(sourceCandidate.actorRef?.actorId, 120);
+    const actualName = cleanText(sourceCandidate.actorRef?.name, 160);
     const expectedName = cleanText(context?.actorRef?.name || context?.name, 160);
     if (
         (expectedActorId && actualActorId && expectedActorId !== actualActorId)
@@ -3023,7 +3302,7 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
         };
     }
     if (context.__candidateOnly !== true) {
-        const candidateOnly = validateActorProfileInsertCandidate(candidate, {
+        const candidateOnly = validateActorProfileInsertCandidate(sourceCandidate, {
             actorRef: context.actorRef,
             actorId: context.actorId,
             name: context.name,
@@ -3033,8 +3312,8 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
         if (!candidateOnly.ok) return candidateOnly;
     }
     const reconciled = context.__candidateOnly === true
-        ? { candidate, resolutions: [] }
-        : reconcileProfileFactLayers(candidate, {
+        ? { candidate: sourceCandidate, resolutions: [] }
+        : reconcileProfileFactLayers(sourceCandidate, {
             ...context,
             factLayers: profileFactLayersForContext(context),
         });
@@ -3045,14 +3324,44 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
     for (const field of INSERT_IDENTITY_FIELDS) {
         if (!meaningfulProfileText(value.identity?.[field], 4000)) missing.push(`identity.${field}`);
     }
+    for (const [field, minimum] of [
+        ['briefIntro', 12],
+        ['appearance', 20],
+        ['identityText', 16],
+        ['pastExperience', 30],
+    ]) {
+        if (!profileTextMeetsQuality(value, `identity.${field}`, minimum)) {
+            missing.push(`identity.${field}:quality`);
+        }
+    }
     for (const field of INSERT_PERSONALITY_TEXT_FIELDS) {
         if (!meaningfulProfileText(value.personality?.[field], 4000)) {
             missing.push(`personality.${field}`);
         }
     }
     for (const [field, minimum] of Object.entries(INSERT_PERSONALITY_LIST_FIELDS)) {
-        if (meaningfulProfileList(value.personality?.[field], 12, 700).length < minimum) {
+        const items = meaningfulProfileList(value.personality?.[field], 12, 700);
+        const itemQuality = sourceAtPath(value, `personality.${field}`) === 'confirmed'
+            ? true
+            : field === 'othersVoices'
+            ? items.every((item) => profileTextLength(item) >= 12)
+            : items.every((item) => {
+                const length = profileTextLength(item);
+                return length >= 30 && length <= 100;
+            });
+        if (items.length < minimum || !itemQuality) {
             missing.push(`personality.${field}`);
+        }
+    }
+    for (const [field, minimum, maximum] of [
+        ['biography', 80, Infinity],
+        ['primarySentence', 16, Infinity],
+        ['baseSentence', 16, Infinity],
+        ['accentSentence', 16, Infinity],
+        ['authorVoice', 12, 200],
+    ]) {
+        if (!profileTextMeetsQuality(value, `personality.${field}`, minimum, maximum)) {
+            missing.push(`personality.${field}:quality`);
         }
     }
     if (!meaningfulProfileEntries(value.relationships?.entries).length) {
@@ -3104,7 +3413,11 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
         if (!isRecord(value.physiology)) missing.push('physiology');
         for (const field of PHYSIOLOGY_CONTENT_FIELDS) {
             const text = meaningfulProfileText(value.physiology?.[field], 4000);
-            if (!text || (/^不适用[。.!！]?$/u.test(text))) missing.push(`physiology.${field}`);
+            if (
+                !text
+                || (/^不适用[。.!！]?$/u.test(text))
+                || !profileTextMeetsQuality(value, `physiology.${field}`, 8)
+            ) missing.push(`physiology.${field}`);
         }
     }
     const sourcePaths = [
@@ -3171,10 +3484,17 @@ export function repairActorProfileInsertLocally(output, context = {}) {
             missingFields: [],
         };
     }
-    const validation = validateActorProfileInsertCandidate(candidate, context);
+    const local = repairProfileCandidateMetadata(candidate, context, {
+        allowActorRefFill: true,
+    });
+    const validation = validateActorProfileInsertCandidate(local.candidate, context);
     return {
         ...validation,
-        repairs: [...new Set([...repairs, ...(validation.repairs || [])])],
+        repairs: [...new Set([
+            ...repairs,
+            ...local.repairs,
+            ...(validation.repairs || []),
+        ])],
     };
 }
 
@@ -3317,18 +3637,31 @@ function parseProfileObjectsLocally(output) {
     const repairs = [];
     const source = String(output || '').trim();
     const parsedValues = [];
+    let explicitEmpty = false;
     const addParsed = (value) => {
+        if (Array.isArray(value) && value.length === 0) explicitEmpty = true;
+        if (
+            value
+            && typeof value === 'object'
+            && !Array.isArray(value)
+            && ['actorProfiles', 'actor_profiles', 'profiles', '人物档案', '角色档案']
+                .some((key) => Array.isArray(value[key]) && value[key].length === 0)
+        ) explicitEmpty = true;
         for (const object of profileObjectsFromParsed(value)) {
             if (isRecord(object)) parsedValues.push(object);
         }
     };
     try {
-        addParsed(JSON.parse(source));
+        const parsed = JSON.parse(source);
+        explicitEmpty = Array.isArray(parsed) && parsed.length === 0;
+        addParsed(parsed);
     } catch {
         const repaired = normalizeJsonLikeText(source, repairs);
         if (repaired) {
             try {
-                addParsed(JSON.parse(repaired));
+                const parsed = JSON.parse(repaired);
+                explicitEmpty = Array.isArray(parsed) && parsed.length === 0;
+                addParsed(parsed);
             } catch {
                 // Continue with independent balanced values / JSONL so one bad
                 // row cannot erase otherwise usable rows.
@@ -3365,12 +3698,77 @@ function parseProfileObjectsLocally(output) {
             repairs.push('loose_profile_table_parsed');
         }
     }
-    return { objects: parsedValues, repairs: [...new Set(repairs)] };
+    return { objects: parsedValues, repairs: [...new Set(repairs)], explicitEmpty };
+}
+
+const DISCOVERY_NAME_VAGUE_TERMS = new Set([
+    '他', '她', '它', '牠', '他们', '她们', '它们', '你', '你们', '您', '我', '我们',
+    '咱', '咱们', '俺', '俺们', '其', '其等', '之', '自己', '本人', '人家',
+    '对方', '旁人', '别人', '他人', '某人', '某某', '某甲', '某乙', '谁', '谁人', '何人',
+    '大家', '众人', '人们', '群众', '群体', '各位', '诸位',
+    '这人', '那人', '此人', '其人', '这个人', '那个人', '这个', '那个', '这位', '那位',
+    '男人', '女人', '男子', '女子', '男孩', '女孩', '男生', '女生', '男士', '女士',
+    '老人', '老者', '老头', '老翁', '老妇', '老妪', '少年', '少女', '小孩', '孩子',
+    '孩童', '儿童', '婴儿', '青年', '中年人', '成年人',
+    '家伙', '角色', '人物', '路人', '陌生人', '过客', '行人', '无名氏',
+    'i', 'me', 'we', 'us', 'you', 'he', 'him', 'she', 'her', 'it', 'they', 'them',
+    'someone', 'somebody', 'anyone', 'anybody', 'everyone', 'everybody', 'nobody', 'noone',
+    'person', 'people', 'man', 'woman', 'boy', 'girl', 'guy', 'gal', 'lady', 'gentleman',
+    'stranger', 'passerby', 'pedestrian', 'bystander', 'character', 'figure',
+    'someoneelse', 'somebodyelse', 'other', 'others', 'another', 'thisone', 'thatone',
+    'theman', 'thewoman', 'theboy', 'thegirl', 'theperson', 'thestranger',
+    'aman', 'awoman', 'aboy', 'agirl', 'aperson',
+]);
+
+function isVagueDiscoveryName(name) {
+    const compact = String(name || '')
+        .toLowerCase()
+        .replace(/[\s\p{P}\p{S}]+/gu, '');
+    if (!compact) return true;
+    return DISCOVERY_NAME_VAGUE_TERMS.has(compact);
+}
+
+export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative) {
+    const name = cleanText(candidateRef?.name, 160);
+    const sourceAnchor = String(candidateRef?.sourceAnchor || '').trim().slice(0, 1200);
+    const narrative = String(acceptedNarrative || '');
+    const failure = (reason) => ({
+        ok: false,
+        reason,
+        retryable: true,
+        offset: -1,
+        name,
+        sourceAnchor,
+    });
+    if (!name) return failure('actor_profile.discovery_name_missing');
+    if (isVagueDiscoveryName(name)) return failure('actor_profile.discovery_name_vague');
+    if (!sourceAnchor) return failure('actor_profile.discovery_anchor_missing');
+    if (!sourceAnchor.includes(name)) {
+        return failure('actor_profile.discovery_name_not_in_anchor');
+    }
+    const offset = narrative.indexOf(sourceAnchor);
+    if (offset < 0) return failure('actor_profile.discovery_anchor_not_in_narrative');
+    if (narrative.indexOf(sourceAnchor, offset + 1) >= 0) {
+        return failure('actor_profile.discovery_anchor_duplicate_in_narrative');
+    }
+    return {
+        ok: true,
+        reason: '',
+        retryable: false,
+        offset,
+        name,
+        sourceAnchor,
+    };
 }
 
 export function parseActorProfileCompletionBatchOutput(output, options = {}) {
-    const suppliedCandidates = (Array.isArray(options.candidates) ? options.candidates : [])
+    const requiredCandidates = (Array.isArray(options.candidates) ? options.candidates : [])
         .filter((candidate) => cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120));
+    const requiredIds = new Set(requiredCandidates.map((candidate) => cleanText(
+        candidate?.actorRef?.actorId || candidate?.actorId,
+        120,
+    )));
+    const suppliedCandidates = [...requiredCandidates];
     const candidateCounts = new Map();
     for (const candidate of suppliedCandidates) {
         const actorId = cleanText(candidate?.actorRef?.actorId || candidate?.actorId, 120);
@@ -3387,13 +3785,80 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
         candidate,
     ]));
     const parsed = parseProfileObjectsLocally(output);
+    const batchFormatUnrecoverable = parsed.objects.length === 0 && !parsed.explicitEmpty;
     const acceptedById = new Map();
     const failureById = new Map();
     const unexpected = [];
+    const discoveries = [];
+    const unresolved = [];
     const seen = new Set();
+    const seenDiscoveryKeys = new Set();
+    const duplicateDiscoveryKeys = new Set();
     for (const raw of parsed.objects) {
         const normalized = normalizeProfileInsertCandidate(raw);
         const actorId = cleanText(normalized?.actorRef?.actorId, 120);
+        const candidateName = cleanText(normalized?.candidateRef?.name, 160);
+        const sourceAnchor = String(normalized?.candidateRef?.sourceAnchor || '')
+            .trim().slice(0, 1200);
+        if (actorId && (candidateName || sourceAnchor)) {
+            unexpected.push({
+                actorId,
+                name: candidateName,
+                reason: 'actor_profile.row_ref_ambiguous',
+            });
+            continue;
+        }
+        if (!actorId && (candidateName || sourceAnchor)) {
+            const discoveryKey = `${candidateName}\u0000${sourceAnchor}`;
+            if (seenDiscoveryKeys.has(discoveryKey)) {
+                duplicateDiscoveryKeys.add(discoveryKey);
+                continue;
+            }
+            seenDiscoveryKeys.add(discoveryKey);
+            const anchorCheck = validateActorProfileDiscoveryAnchor(
+                { name: candidateName, sourceAnchor },
+                options.discoveryContext?.acceptedNarrative,
+            );
+            if (!anchorCheck.ok) {
+                unresolved.push({
+                    candidateRef: { name: candidateName, sourceAnchor },
+                    reason: anchorCheck.reason || 'actor_profile.discovery_anchor_invalid',
+                    missingFields: [],
+                    retryable: true,
+                });
+                continue;
+            }
+            const temporaryActorId = `DISC-${fingerprint(JSON.stringify([
+                candidateName,
+                sourceAnchor,
+            ])).slice(0, 24)}`;
+            normalized.actorRef = { actorId: temporaryActorId, name: candidateName };
+            const context = {
+                actorRef: normalized.actorRef,
+                completionMode: modeOf(options.discoveryContext?.completionMode),
+                deferTicketSourceNormalization: true,
+            };
+            const local = repairProfileCandidateMetadata(normalized, context);
+            const validation = validateActorProfileInsertCandidate(local.candidate, context);
+            if (!validation.ok) {
+                unresolved.push({
+                    candidateRef: { name: candidateName, sourceAnchor },
+                    reason: validation.errorCode || 'actor_profile.schema_incomplete',
+                    missingFields: validation.missingFields || [],
+                    retryable: true,
+                });
+                continue;
+            }
+            discoveries.push({
+                temporaryActorId,
+                candidateRef: { name: candidateName, sourceAnchor },
+                offset: anchorCheck.offset,
+                candidate: validation.candidate,
+                repairs: [...new Set([...parsed.repairs, ...local.repairs])],
+                resolutions: validation.resolutions || [],
+            });
+            continue;
+        }
         if (!actorId) {
             unexpected.push({ reason: 'actor_profile.actor_ref_missing' });
             continue;
@@ -3415,7 +3880,8 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
             continue;
         }
         seen.add(actorId);
-        const validation = validateActorProfileInsertCandidate(normalized, context);
+        const local = repairProfileCandidateMetadata(normalized, context);
+        const validation = validateActorProfileInsertCandidate(local.candidate, context);
         if (!validation.ok) {
             failureById.set(actorId, {
                 actorId,
@@ -3430,16 +3896,37 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
             actorId,
             name: cleanText(context?.actorRef?.name || context?.name, 160),
             candidate: validation.candidate,
-            repairs: parsed.repairs,
+            repairs: [...new Set([...parsed.repairs, ...local.repairs])],
             resolutions: validation.resolutions || [],
         });
     }
+    if (duplicateDiscoveryKeys.size) {
+        for (const key of duplicateDiscoveryKeys) {
+            const [name, sourceAnchor] = key.split('\u0000');
+            for (let index = discoveries.length - 1; index >= 0; index -= 1) {
+                const item = discoveries[index];
+                if (
+                    item.candidateRef.name === name
+                    && item.candidateRef.sourceAnchor === sourceAnchor
+                ) discoveries.splice(index, 1);
+            }
+            unresolved.push({
+                candidateRef: { name, sourceAnchor },
+                reason: 'actor_profile.discovery_ref_duplicate',
+                missingFields: [],
+                retryable: true,
+            });
+        }
+    }
     for (const [actorId, context] of expectedById) {
+        if (!requiredIds.has(actorId)) continue;
         if (acceptedById.has(actorId) || failureById.has(actorId)) continue;
         failureById.set(actorId, {
             actorId,
             name: cleanText(context?.actorRef?.name || context?.name, 160),
-            reason: 'actor_profile.missing_candidate',
+            reason: batchFormatUnrecoverable
+                ? 'actor_profile.format_unrecoverable'
+                : 'actor_profile.missing_candidate',
             missingFields: [],
             retryable: true,
         });
@@ -3466,10 +3953,16 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
         retryable: false,
     }));
     return {
-        ok: failures.length === 0 && inputFailures.length === 0 && unexpected.length === 0,
+        ok: failures.length === 0
+            && inputFailures.length === 0
+            && unexpected.length === 0
+            && unresolved.length === 0,
         entries,
         failures: [...inputFailures, ...failures],
         unexpected,
+        discoveries,
+        unresolved,
+        explicitEmpty: parsed.explicitEmpty === true,
         repairs: parsed.repairs,
     };
 }

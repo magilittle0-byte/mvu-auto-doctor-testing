@@ -30,6 +30,11 @@ function loadWorldGenerator(callModel) {
         callModel,
         parseContinuityOutput,
         validateWorldAdjudicationBatch: () => ({ valid: true, errors: [] }),
+        freshFrozenScopeGuard: async (captured) => (
+            captured?.scopeDigest
+                ? { ok: true }
+                : { ok: false, reason: 'scope_digest_missing' }
+        ),
     };
     vm.runInNewContext(
         `${code}\nthis.generateWorldContinuitySingleBatch = generateWorldContinuitySingleBatch;`,
@@ -157,7 +162,20 @@ const generatorSettings = {
     continuityMaxThreads: 24,
     sovereigntyHardTimeoutMs: 120000,
 };
-const captured = { chatId: 'chat-p3', index: 6 };
+const captured = {
+    chatId: 'chat-p3',
+    index: 6,
+    messageId: 'message-6',
+    swipeId: 0,
+    generationSerial: 6,
+    generationId: 'generation-6',
+    generationType: 'normal',
+    branchId: 'branch-main',
+    identityScopeId: 'chat-p3|character:card-main',
+    scopeDigest: 'scope:chat-p3|character:card-main',
+    contentFingerprint: 'accepted-p3-6',
+    fingerprint: 'accepted-p3-6',
+};
 
 test('0/1/3/6 world events each use exactly one production world-model call', async () => {
     const calls = [];
@@ -255,7 +273,7 @@ test('a mixed six-character P1 profile batch cannot fan out the world call', asy
     assert.equal(worldCalls, 1);
     const profileSection = sourceSection(
         'const profileCompletion = await completeActorProfilesForTurn(captured, {',
-        'const provisionalWorldLaneSchedule = scheduleWorldLanes(scheduledBase, {',
+        'const proposalBatch = await collectActorShardProposals(captured, {',
     );
     assert.doesNotMatch(profileSection, /generateWorldContinuitySingleBatch|callModel\(/u);
 });
@@ -447,6 +465,8 @@ test('an exact committed world target skips recovery generation and world-domain
         generationId: 'generation-9',
         generationType: 'normal',
         branchId: 'branch-main',
+        identityScopeId: 'chat-p3|character:card-main',
+        scopeDigest: 'scope:chat-p3|character:card-main',
         contentFingerprint: 'accepted-content-fingerprint',
     };
     const exact = loadCommittedWorldDetector();
@@ -474,6 +494,7 @@ test('an exact committed world target skips recovery generation and world-domain
         ['generationId', 'generation-10'],
         ['generationType', 'regenerate'],
         ['branchId', 'branch-other'],
+        ['scopeDigest', 'scope:another-card'],
         ['contentFingerprint', 'different-accepted-content'],
     ]) {
         assert.equal(
@@ -483,46 +504,54 @@ test('an exact committed world target skips recovery generation and world-domain
         );
     }
     const otherCardScope = loadCommittedWorldDetector('scope-other-card');
-    assert.equal(otherCardScope.detect(runtime, null, capturedTarget), false);
+    assert.equal(
+        otherCardScope.detect(runtime, null, capturedTarget),
+        true,
+        'the frozen captured scope, not ambient state, owns committed-target matching',
+    );
 
     const run = sourceSection(
-        'async function runContinuityTarget(captured, { force = false } = {})',
+        'async function runContinuityTarget(captured, {',
         'function sameTargetExceptContent(left, right)',
     );
-    assert.match(run, /const maxAttempts = worldTaskAlreadyCommitted \? 0 : 1/u);
-    assert.match(run, /let worldStateCommitted = worldTaskAlreadyCommitted/u);
     assert.match(
         run,
-        /remainingSovereigntyTasks = worldTaskAlreadyCommitted[\s\S]*?world: null/u,
+        /const existingPacket = stage3PersistedPackageForTarget\([\s\S]*?namespace\?\.continuity,[\s\S]*?profileGate\.actorLedger,[\s\S]*?captured,/u,
     );
-    assert.match(run, /if \(modelValidated && !worldTaskAlreadyCommitted\)/u);
     assert.match(
         run,
-        /if \(worldStateCommitted\) await applyContinuityInjection\(\)/u,
-        'recovery may idempotently finish prompt injection but cannot reopen world persistence',
+        /if \(existingPacket\) \{[\s\S]*?status: 'applied',[\s\S]*?recovered: true,[\s\S]*?worldModelCalls: 0,[\s\S]*?worldWrites: 0,[\s\S]*?nextTurnInjection: deepClone\(existingPacket\)/u,
+        'an exact persisted package recovers without a second world call or write',
     );
+    assert.doesNotMatch(run, /worldTaskAlreadyCommitted|applyContinuityInjection|maxAttempts/u);
 });
 
 test('6.1 regression wiring keeps one world batch and removes world fields from actor/profile commit', () => {
     const run = sourceSection(
-        'async function runContinuityTarget(captured, { force = false } = {})',
+        'async function runContinuityTarget(captured, {',
         'function sameTargetExceptContent(left, right)',
     );
     assert.doesNotMatch(run, /callModel\(/u);
     assert.doesNotMatch(run, /buildContinuityRepairMessages/u);
-    assert.match(run, /const maxAttempts = worldTaskAlreadyCommitted \? 0 : 1/u);
-    assert.match(run, /worldPrefetchAttempted/u);
-    assert.match(run, /remainingSovereigntyTasks = \{ \.\.\.sovereigntyTasks, world: null \}/u);
-    const actorCycleFields = run.match(/const cycleFields = \[([\s\S]*?)\];/u)?.[1] || '';
-    assert.doesNotMatch(actorCycleFields, /continuity|worldPressure|continuityWorldLaneReceipts/u);
-    assert.match(run, /requireReadback: true,[\s\S]*?readbackAttempts: 1/u);
+    const proposalAt = run.indexOf('await collectActorShardProposals');
+    const prepareAt = run.indexOf('prepareActorActionAttempts', proposalAt);
+    const recordAt = run.indexOf('recordActorActionAttempts', prepareAt);
+    const persistAt = run.indexOf('await persistActorActionAttemptsForTurn', recordAt);
+    const reserveAt = run.indexOf("stage3Phase: 'world_call_reserved'", persistAt);
+    const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', reserveAt);
+    const adjudicateAt = run.indexOf('validateWorldAdjudicationBatch', worldAt);
+    const settleAt = run.indexOf('settleActorActionCandidates', adjudicateAt);
+    const commitAt = run.indexOf("stage3Phase: 'world_committed'", settleAt);
+    assert.ok(proposalAt >= 0 && prepareAt > proposalAt && recordAt > prepareAt);
+    assert.ok(persistAt > recordAt && reserveAt > persistAt && worldAt > reserveAt);
+    assert.ok(adjudicateAt > worldAt && settleAt > adjudicateAt && commitAt > settleAt);
     assert.match(
         run,
-        /if \(modelValidated && !worldTaskAlreadyCommitted\) \{[\s\S]*?writeChatNamespace\(namespace, captured\.chatId/u,
+        /stage3Phase: 'world_call_reserved',[\s\S]*?writeChatNamespace\(namespace, captured\.chatId,[\s\S]*?requireReadback: true,[\s\S]*?readbackAttempts: 1/u,
     );
     assert.match(
         run,
-        /if \(!worldStateCommitted\) \{[\s\S]*?settleWorldSovereigntyTask/u,
+        /stage3Phase: 'world_committed',[\s\S]*?writeChatNamespace\(namespace, captured\.chatId/u,
     );
     assert.match(source, /const dedupeKey = capturedTargetKey\(expected\)/u);
 });

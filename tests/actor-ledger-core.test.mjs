@@ -10,6 +10,7 @@ import {
     mergeActorProfilePatches,
     migrateActorLedgerFromContinuity,
     normalizeActorLedger,
+    planActorAttemptRecovery,
     prepareActorActionAttempts,
     recordActorActionAttempts,
     runActorRegistryUpsert,
@@ -21,7 +22,7 @@ import {
     settleActorActionCandidates,
     settleActorInjectionReceipts,
 } from '../actor-ledger-core.mjs';
-import { makeActionReadyActor } from './helpers/actor-action-ready-fixture.mjs';
+import { makeActionReadyActor, makeActionReadyLedger } from './helpers/actor-action-ready-fixture.mjs';
 
 function settleWithWorld(ledger, candidates, options = {}) {
     const turn = Number(options.turn ?? ledger.turn) || 0;
@@ -32,31 +33,38 @@ function settleWithWorld(ledger, candidates, options = {}) {
         target,
     });
     const recorded = recordActorActionAttempts(prepared.ledger, prepared.attempts, { target });
-    const worldAdjudications = recorded.recorded
+    const recovered = planActorAttemptRecovery(recorded.ledger, { target });
+    if (recorded.recorded.length !== recovered.attempts.length) {
+        throw new Error(`fixture_recovery_mismatch:${JSON.stringify({
+            recorded: recorded.recorded.length,
+            recovered: recovered.attempts.length,
+            mode: recovered.mode,
+            ledger: recorded.ledger.actionAttempts,
+        })}`);
+    }
+    const worldAdjudications = recovered.attempts
         .filter((attempt) => attempt.intent !== 'wait')
         .map((attempt) => ({
             attemptId: attempt.id,
             actorRef: attempt.actorRef,
             target: attempt.target,
-            status: 'settled',
+            status: 'success',
             risk: 'the attempt may expose the actor or consume the stated resources',
             costs: ['one bounded action window'],
-            actualResourceCosts: attempt.resourceCosts,
+            actualResourceCosts: structuredClone(attempt.resourceCosts),
             durationTurns: 1,
-            visibility: attempt.route === 'background_public' ? 'public' : 'private',
+            visibility: 'private',
             observerActorIds: [],
-            publicSummary: attempt.route === 'background_public'
-                ? `${attempt.actorName || attempt.actorId} leaves a verifiable trace`
-                : '',
+            publicSummary: '',
             privateSummary: `${attempt.action} receives a bounded private result`,
             resultSummary: `${attempt.action} receives a concrete world result`,
             observableConsequence: `${attempt.actorName || attempt.actorId} leaves a verifiable trace`,
             revealPath: 'the trace can be observed in the next relevant scene',
-            appliedStateChanges: attempt.proposedStateChanges,
+            appliedStateChanges: attempt.desiredEffects,
         }));
-    const settled = settleActorActionCandidates(recorded.ledger, prepared.admittedCandidates, {
+    const settled = settleActorActionCandidates(recovered.ledger, recovered.candidates, {
         ...options,
-        attempts: recorded.recorded,
+        attempts: recovered.attempts,
         target,
         worldAdjudications,
     });
@@ -79,12 +87,15 @@ function sourceRef(index = 4, chatId = 'chat-actor-ledger') {
         logicalIndex: index,
         swipeId: 0,
         generation: index,
+        generationSerial: index,
         generationId: `generation-${index}`,
         generationType: 'normal',
         branchId: 'branch-main',
         identityScopeId: `${chatId}|character:synthetic`,
+        scopeDigest: `scope:${chatId}|character:synthetic`,
         hash: `hash-${index}`,
         contentHash: `hash-${index}`,
+        contentFingerprint: `fingerprint-${index}`,
     };
 }
 
@@ -97,6 +108,8 @@ function discoverAndPromote(ledger, options = {}) {
         {
             chatId: discovery.ledger.chatId,
             identityScopeId: expectedSourceRef?.identityScopeId,
+            scopeDigest: expectedSourceRef?.scopeDigest,
+            allowScopeDigestFill: true,
             expectedSourceRef,
             turn: options.turn,
             excludedActorNames: options.excludedActorNames,
@@ -110,6 +123,8 @@ function discoverAndPromote(ledger, options = {}) {
             {
                 chatId: discovery.ledger.chatId,
                 identityScopeId: expectedSourceRef?.identityScopeId,
+                scopeDigest: expectedSourceRef?.scopeDigest,
+                allowScopeDigestFill: true,
                 expectedSourceRef,
                 turn: options.turn,
                 excludedActorNames: options.excludedActorNames,
@@ -167,6 +182,53 @@ function readyActor(id, overrides = {}) {
         turn: Number(overrides.createdTurn) || 1,
     });
 }
+
+function scopedLedger(chatId, value = {}) {
+    const ref = sourceRef(0, chatId);
+    const ledger = normalizeActorLedger({
+        ...emptyActorLedger(chatId),
+        ...value,
+    }, {
+        chatId,
+        identityScopeId: ref.identityScopeId,
+        scopeDigest: ref.scopeDigest,
+        allowScopeDigestFill: true,
+    });
+    return makeActionReadyLedger(ledger, { sourceRef: ref, turn: ledger.turn || 1 });
+}
+
+test('default and null actor projection limits retain every actor and Registry row', () => {
+    const source = {
+        ...emptyActorLedger('chat-projection-default'),
+        actors: [
+            actor('NPC-PROJECTION-1', { name: '投影甲' }),
+            actor('NPC-PROJECTION-2', { name: '投影乙' }),
+            actor('NPC-PROJECTION-3', { name: '投影丙' }),
+        ],
+    };
+    for (const options of [{}, { maxActors: null }, { maxActors: undefined }]) {
+        const ledger = normalizeActorLedger(source, options);
+        assert.deepEqual(ledger.actors.map((entry) => entry.id), [
+            'NPC-PROJECTION-1',
+            'NPC-PROJECTION-2',
+            'NPC-PROJECTION-3',
+        ]);
+        assert.equal(Object.keys(ledger.actorRegistry.registered).length, 3);
+    }
+});
+
+test('explicit maxActors zero remains an empty compatibility projection', () => {
+    const source = {
+        ...emptyActorLedger('chat-projection-zero'),
+        actors: [
+            actor('NPC-PROJECTION-1', { name: '投影甲' }),
+            actor('NPC-PROJECTION-2', { name: '投影乙' }),
+        ],
+    };
+    const ledger = normalizeActorLedger(source, { maxActors: 0 });
+    assert.deepEqual(ledger.actors, []);
+    assert.deepEqual(ledger.actorRegistry.registered, {});
+});
 
 test('turn-source discovery creates candidates before deterministic registry promotion', () => {
     const userText = [
@@ -813,8 +875,7 @@ test('mutation-form identity conflict is quarantined without merging registered 
 });
 
 test('death departure sleep and wake transitions stop or resume scheduling without reviving the dead', () => {
-    const ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-actor-ledger'),
+    const ledger = scopedLedger('chat-actor-ledger', {
         turn: 8,
         actors: [
             readyActor('NPC-ADA', { name: '艾达', nextActionTurn: 8 }),
@@ -865,8 +926,7 @@ test('an observed terminal death sequence cannot become an offscreen survival ac
 });
 
 test('scheduler prioritizes due/deadline/commitment and reserves a bounded low-attention exploration slot', () => {
-    const ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-actor-ledger'),
+    const ledger = scopedLedger('chat-actor-ledger', {
         turn: 10,
         actors: [
             readyActor('NPC-DUE', {
@@ -900,8 +960,7 @@ test('scheduler prioritizes due/deadline/commitment and reserves a bounded low-a
 });
 
 test('local settlement blocks player sovereignty, teleportation, unknown facts and overspending', () => {
-    const ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-actor-ledger'),
+    const ledger = scopedLedger('chat-actor-ledger', {
         turn: 4,
         actors: [readyActor('NPC-ADA', {
             name: '艾达',
@@ -948,7 +1007,7 @@ test('local settlement blocks player sovereignty, teleportation, unknown facts a
         },
         { ...common, knowledgeRefs: ['UNKNOWN'], evidence: ['UNKNOWN'] },
     ], { turn: 4 });
-    assert.equal(result.accepted.length, 1);
+    assert.equal(result.accepted.length, 1, JSON.stringify(result.rejected));
     assert.equal(result.rejected.length, 3);
     assert.deepEqual(
         new Set(result.rejected.flatMap((item) => item.reasons)),
@@ -963,8 +1022,7 @@ test('local settlement blocks player sovereignty, teleportation, unknown facts a
 });
 
 test('due actor must execute, replan, or wait on a concrete unmet condition and receives full receipts', () => {
-    const ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-actor-ledger'),
+    const ledger = scopedLedger('chat-actor-ledger', {
         turn: 5,
         actors: [readyActor('NPC-ADA', { name: '艾达', nextActionTurn: 5 })],
     });
@@ -1012,7 +1070,7 @@ test('due actor must execute, replan, or wait on a concrete unmet condition and 
         waitCondition: '',
         evidence: ['fixture'],
     }], { turn: 5 });
-    assert.equal(executed.accepted.length, 1);
+    assert.equal(executed.accepted.length, 1, JSON.stringify(executed.rejected));
     assert.equal(executed.worldEvents.length, 1);
     assert.deepEqual(
         executed.ledger.actionReceipts.map((item) => item.stage),
@@ -1034,8 +1092,7 @@ test('due actor must execute, replan, or wait on a concrete unmet condition and 
 });
 
 test('injection settlement marks observable consequences consumed and keeps unrelated actions private', () => {
-    const ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-actor-ledger'),
+    const ledger = scopedLedger('chat-actor-ledger', {
         actionReceipts: [
             {
                 receiptId: 'R1',
@@ -1045,6 +1102,7 @@ test('injection settlement marks observable consequences consumed and keeps unre
                 status: 'pending',
                 observableConsequence: '布告栏出现告示',
                 createdTurn: 5,
+                target: sourceRef(7),
             },
             {
                 receiptId: 'R2',
@@ -1067,8 +1125,7 @@ test('injection settlement marks observable consequences consumed and keeps unre
 });
 
 test('actor injection receipts are settled only by the exact generation branch and swipe', () => {
-    const ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-actor-ledger'),
+    const ledger = scopedLedger('chat-actor-ledger', {
         actionReceipts: [{
             receiptId: 'R-BRANCH',
             actionId: 'A-BRANCH',
@@ -1078,12 +1135,10 @@ test('actor injection receipts are settled only by the exact generation branch a
             observableConsequence: '布告栏出现告示',
             createdTurn: 5,
             target: {
-                chatId: 'chat-actor-ledger',
-                messageId: 'message-20',
+                ...sourceRef(20),
                 swipeId: 1,
                 generation: 4,
-                branchId: 'branch-main',
-                hash: 'hash-20',
+                generationSerial: 4,
             },
         }],
     });
@@ -1093,6 +1148,7 @@ test('actor injection receipts are settled only by the exact generation branch a
             ...sourceRef(20),
             swipeId: 0,
             generation: 3,
+            generationSerial: 3,
         },
     });
     assert.equal(stale.actionReceipts[0].status, 'pending');
@@ -1102,14 +1158,14 @@ test('actor injection receipts are settled only by the exact generation branch a
             ...sourceRef(20),
             swipeId: 1,
             generation: 4,
+            generationSerial: 4,
         },
     });
     assert.equal(exact.actionReceipts[0].status, 'consumed');
 });
 
 test('80-turn low-attention exploration prevents starvation while receipts stay bounded', () => {
-    let ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-long-actor-ledger'),
+    let ledger = scopedLedger('chat-long-actor-ledger', {
         actors: Array.from({ length: 12 }, (_, index) => readyActor(`NPC-${index + 1}`, {
             tier: index < 2 ? 'secondary' : 'background',
             nextActionTurn: 1,
@@ -1163,8 +1219,7 @@ test('80-turn low-attention exploration prevents starvation while receipts stay 
 });
 
 test('an all-worker technical failure leaves character silence plans and failure counters untouched', () => {
-    let ledger = normalizeActorLedger({
-        ...emptyActorLedger('chat-failed-workers'),
+    let ledger = scopedLedger('chat-failed-workers', {
         turn: 20,
         actors: ['A', 'B', 'C'].map((id) => readyActor(`NPC-${id}`, {
             name: `人物${id}`,

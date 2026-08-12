@@ -4,6 +4,11 @@ import {
     materializeActorProfileBaseline,
     prepareActorProfileV6,
 } from '../../actor-profile-v6-core.mjs';
+import {
+    finalizeActorProfileBaselinesInLedger,
+    replaceActorProfileBaselineInLedger,
+    sealActorProfilePendingTransactionInLedger,
+} from '../../actor-ledger-core.mjs';
 
 function completeProfileCandidate(actor) {
     const name = String(actor?.name || actor?.id || '测试人物');
@@ -93,27 +98,81 @@ function completeProfileCandidate(actor) {
     };
 }
 
-export function makeActionReadyActor(rawActor, { turn = 1 } = {}) {
+export function makeActionReadyActor(rawActor, { turn = 1, sourceRef: suppliedSourceRef = null } = {}) {
     const actor = structuredClone(rawActor);
-    const prepared = prepareActorProfileV6(actor, { mode: 'full', turn, now: 1 });
-    const profile = materializeActorProfileBaseline(
-        prepared,
-        completeProfileCandidate(actor),
-        { turn, completionMode: 'full' },
-    );
-    const digest = actorProfileBaselineDigest(profile);
-    profile.baselineCommit = {
-        schemaVersion: ACTOR_PROFILE_V6_VERSION,
-        commitId: `PBI-TEST-${actor.id}`,
-        actorRef: { actorId: actor.id, name: actor.name },
-        digest,
-        sourceRef: null,
-        committedTurn: turn,
-        readbackVerified: true,
-        status: 'committed',
+    const chatId = String(actor.chatId || 'action-ready-fixture');
+    const sourceRef = suppliedSourceRef || {
+        chatId,
+        messageId: `action-ready-message-${turn}`,
+        index: turn,
+        swipeId: 0,
+        generation: turn,
+        generationId: `action-ready-generation-${turn}`,
+        generationType: 'normal',
+        branchId: 'branch-main',
+        identityScopeId: `${chatId}|character:fixture`,
+        scopeDigest: `${chatId}|scope:fixture`,
+        hash: `action-ready-hash-${turn}`,
+        compatibilityOnly: false,
     };
-    profile.preparedForAction = true;
-    profile.backgroundPending = false;
-    actor.profileV6 = profile;
-    return actor;
+    const ledger = makeActionReadyLedger({
+        chatId,
+        turn,
+        actors: [actor],
+    }, { sourceRef, turn });
+    const finalized = ledger.actors.find((entry) => entry.id === actor.id);
+    if (!finalized) throw new Error('fixture_finalized_actor_missing');
+    return finalized;
+}
+
+export function makeActionReadyLedger(rawLedger, { sourceRef, turn = 1 } = {}) {
+    let ledger = structuredClone(rawLedger);
+    const expectedCommits = [];
+    for (const actor of ledger.actors || []) {
+        const prepared = prepareActorProfileV6(actor, { mode: 'full', turn, now: 1 });
+        const baseline = materializeActorProfileBaseline(
+            prepared,
+            completeProfileCandidate(actor),
+            { turn, completionMode: 'full' },
+        );
+        const profileDigest = actorProfileBaselineDigest(baseline);
+        const commitId = `PBI-TEST-${actor.id}`;
+        const expected = {
+            actorRef: { actorId: actor.id, name: actor.name },
+            schemaVersion: ACTOR_PROFILE_V6_VERSION,
+            commitId,
+            profileDigest,
+            sourceRef: structuredClone(sourceRef),
+            scopeDigest: sourceRef.scopeDigest,
+            locks: structuredClone(baseline.locks || {}),
+            manualOverrides: structuredClone(baseline.manualOverrides || {}),
+        };
+        const staged = replaceActorProfileBaselineInLedger(
+            ledger,
+            expected.actorRef,
+            baseline,
+            {
+                ...expected,
+                digest: profileDigest,
+                committedTurn: turn,
+                phase: 'pending',
+            },
+        );
+        if (!staged.committed) throw new Error(`fixture_pending_failed:${staged.reason}`);
+        ledger = staged.ledger;
+        expectedCommits.push(expected);
+    }
+    if (!expectedCommits.length) return ledger;
+    const sealed = sealActorProfilePendingTransactionInLedger(ledger, expectedCommits, {
+        preparedFieldRevision: turn,
+    });
+    if (!sealed.sealed) throw new Error(`fixture_seal_failed:${sealed.reason}`);
+    const finalized = finalizeActorProfileBaselinesInLedger(sealed.ledger, expectedCommits, {
+        transactionId: sealed.transactionId,
+        writeSetDigest: sealed.writeSetDigest,
+        preparedLedgerDigest: sealed.preparedLedgerDigest,
+        preparedFieldRevision: sealed.preparedFieldRevision,
+    });
+    if (!finalized.finalized) throw new Error(`fixture_finalize_failed:${finalized.reason}`);
+    return finalized.ledger;
 }

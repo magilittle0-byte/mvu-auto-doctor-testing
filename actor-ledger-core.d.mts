@@ -8,7 +8,9 @@ export interface ActorLedgerSourceRef {
     generationType: string;
     branchId: string;
     identityScopeId: string;
+    scopeDigest: string;
     hash: string;
+    compatibilityOnly?: boolean;
 }
 
 export interface ActorKnowledge {
@@ -70,6 +72,7 @@ export interface ActorRegistry {
     version: number;
     chatId: string;
     identityScopeId: string;
+    scopeDigest: string;
     characters: Record<string, ActorRegistryCandidateRow>;
     registered: Record<string, ActorRegistryEntry>;
     updatedAt: number;
@@ -159,6 +162,7 @@ export interface ActorLedgerActor {
     lastAction: null | { id: string; turn: number; summary: string; outcome: string };
     actionHistory: Array<Record<string, unknown>>;
     profileV6: Record<string, unknown>;
+    pendingProfile?: Record<string, unknown> | null;
     nextActionTurn: number;
     deadlineTurn: number;
     lastSemanticTurn: number;
@@ -220,7 +224,7 @@ export const ACTOR_LEDGER_MAX_RECEIPTS: number;
 export const ACTOR_LEDGER_MAX_ACTION_ATTEMPTS: number;
 
 export function emptyActorLedger(chatId?: string): ActorLedger;
-export function emptyActorRegistry(chatId?: string, identityScopeId?: string): ActorRegistry;
+export function emptyActorRegistry(chatId?: string, identityScopeId?: string, scopeDigest?: string): ActorRegistry;
 export function explicitDelimitedActorAliases(value: unknown): string[];
 export function resolveActorRegistryTargetName(value: unknown): string;
 export function acceptedActorSourceRefMatches(value: unknown, expected: unknown): boolean;
@@ -229,6 +233,8 @@ export function normalizeActorRegistry(
     options?: {
         chatId?: string;
         identityScopeId?: string;
+        scopeDigest?: string;
+        allowScopeDigestFill?: boolean;
         actors?: unknown[];
         migrateLegacy?: boolean;
     },
@@ -236,7 +242,7 @@ export function normalizeActorRegistry(
 export function actorRegistryDigest(value: unknown): string;
 export function actorRegistryMatchesLedger(
     value: unknown,
-    expected?: { chatId?: string; digest?: string; actorIds?: string[] },
+    expected?: { chatId?: string; scopeDigest?: string; digest?: string; actorIds?: string[] },
 ): { ok: boolean; mismatches: string[] };
 export function parseRegisteredActorGateNames(result: unknown, registeredSet: Set<string> | string[]): string[];
 export function runRegisteredActorGate(
@@ -248,6 +254,8 @@ export function normalizeActorLedger(
     options?: {
         chatId?: string;
         identityScopeId?: string;
+        scopeDigest?: string;
+        allowScopeDigestFill?: boolean;
         maxActors?: number;
         excludedActorNames?: string[];
     },
@@ -262,6 +270,38 @@ export function migrateActorLedgerFromContinuity(
         migrationTimestamp?: number | null;
     },
 ): ActorLedger;
+export function actorLedgerDigest(value: unknown): string;
+export function actorProfilePendingWriteSetProjection(
+    value: unknown,
+    expectedCommits: unknown[],
+    options?: { preparedFieldRevision?: number; transactionId?: string; writeSetDigest?: string },
+): Record<string, unknown>;
+export function actorProfilePendingWriteSetDigest(
+    value: unknown,
+    expectedCommits: unknown[],
+    options?: { preparedFieldRevision?: number; transactionId?: string; writeSetDigest?: string },
+): string;
+export function actorProfileWriteSetDigest(expectedCommits: unknown[]): string;
+export function actorProfileTransactionId(options?: {
+    chatId?: string;
+    sourceRef?: ActorLedgerSourceRef | null;
+    preparedFieldRevision?: number;
+    expectedCommits?: unknown[];
+}): string;
+export function sealActorProfilePendingTransactionInLedger(
+    value: unknown,
+    expectedCommits: unknown[],
+    options?: { transactionId?: string; preparedFieldRevision?: number },
+): {
+    ledger: ActorLedger;
+    sealed: boolean;
+    reason?: string;
+    transactionId?: string;
+    writeSetDigest?: string;
+    preparedLedgerDigest?: string;
+    preparedFieldRevision?: number;
+    writeSet?: Array<Record<string, unknown>>;
+};
 export function replaceActorProfileBaselineInLedger(
     value: unknown,
     actorRef: { actorId: string; name?: string } | string,
@@ -278,6 +318,46 @@ export function actorProfileCommitMatchesLedger(
     value: unknown,
     expected: object,
 ): { ok: boolean; mismatches: string[] };
+export function finalizeActorProfileBaselinesInLedger(
+    value: unknown,
+    expectedCommits: unknown[],
+    options: {
+        preparedLedgerDigest: string;
+        preparedFieldRevision: number;
+        transactionId?: string;
+        writeSetDigest?: string;
+    },
+): {
+    ledger: ActorLedger;
+    finalized: boolean;
+    reason?: string;
+    preparedLedgerDigest?: string;
+    preparedFieldRevision?: number;
+    transactionId?: string;
+    writeSetDigest?: string;
+    writeSet?: Array<Record<string, unknown>>;
+};
+export function actorProfileReadinessInLedger(
+    value: unknown,
+    actorId: string,
+): { ready: boolean; reason: string; migrationRequired?: boolean; mismatches?: string[] };
+export function actorProfilePendingTransactionForSource(
+    value: unknown,
+    options?: { sourceRef?: ActorLedgerSourceRef | null; scopeDigest?: string },
+): {
+    present: boolean;
+    valid: boolean;
+    reason?: string;
+    reasons?: string[];
+    ledger: ActorLedger;
+    transactionId?: string;
+    writeSetDigest?: string;
+    preparedLedgerDigest?: string;
+    preparedFieldRevision?: number;
+    writeSet?: Array<Record<string, unknown>>;
+    actorIds?: string[];
+    ledgerDigest?: string;
+};
 export function discoverActorsFromTurnSources(
     value: unknown,
     options?: {
@@ -287,6 +367,7 @@ export function discoverActorsFromTurnSources(
         excludedActorNames?: string[];
         sourceRef?: ActorLedgerSourceRef | null;
         turn?: number | null;
+        modelProfileDiscoveries?: Array<Record<string, unknown>> | null;
     },
 ): {
     ledger: ActorLedger;
@@ -294,6 +375,8 @@ export function discoverActorsFromTurnSources(
     discovered: Array<{ actorId: string; name: string }>;
     touched: Array<{ actorId: string; name: string }>;
     location: string;
+    modelProfileDiscoveries: Array<Record<string, unknown>>;
+    unresolved: Array<Record<string, unknown>>;
 };
 export function promoteActorCandidatesToRegistry(
     value: unknown,
@@ -301,6 +384,8 @@ export function promoteActorCandidatesToRegistry(
     options?: {
         chatId?: string;
         identityScopeId?: string;
+        scopeDigest?: string;
+        allowScopeDigestFill?: boolean;
         expectedSourceRef?: ActorLedgerSourceRef | null;
         turn?: number | null;
         excludedActorNames?: string[];
@@ -323,6 +408,8 @@ export function runActorRegistryUpsert(
     options?: {
         chatId?: string;
         identityScopeId?: string;
+        scopeDigest?: string;
+        allowScopeDigestFill?: boolean;
         expectedSourceRef?: ActorLedgerSourceRef | null;
         turn?: number | null;
         excludedActorNames?: string[];
