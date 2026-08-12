@@ -558,6 +558,88 @@ test('transport failure has no outer retry and performs no save', async () => {
     assert.equal(run.saveCount, 0);
 });
 
+test('P2 preserves fail-closed local and transport categories without raw error detail', async () => {
+    const fixture = prepareRegisteredBatch(2);
+    const cases = [
+        ['scope_stale', false],
+        ['target_stale', false],
+        ['cancelled', false],
+        ['http', true],
+        ['timeout', true],
+        ['empty', true],
+        ['protocol', true],
+        ['transport', true],
+    ];
+    for (const [category, requestStarted] of cases) {
+        let calls = 0;
+        const run = await runBatch(fixture, {
+            semanticRetry: false,
+            requestBatch: () => {
+                calls += 1;
+                const error = new Error('secret-like raw failure detail must never escape');
+                error.failureKind = category;
+                error.routeDiagnostic = {
+                    channel: 'fast',
+                    slot: 1,
+                    model: 'safe-profile-model',
+                    failover: category === 'http',
+                    jsonMode: false,
+                    requestKind: 'actor_profile_batch',
+                    requestStarted,
+                    inputLengthBucket: 'large',
+                    httpStatus: category === 'http' ? 502 : 0,
+                    failureKind: category,
+                    body: 'must-not-survive',
+                    url: 'https://must-not-survive.invalid',
+                };
+                throw error;
+            },
+        });
+        assert.equal(calls, 1, category);
+        assert.equal(run.saveCount, 0, category);
+        assert.equal(run.result.accepted.length, 0, category);
+        assert.equal(run.result.failures.length, 2, category);
+        assert.ok(run.result.failures.every((failure) => (
+            failure.reason === `actor_profile.${category}`
+        )), category);
+        const diagnostic = run.result.failures[0].routeDiagnostic;
+        assert.deepEqual(diagnostic, {
+            channel: 'fast',
+            slot: 1,
+            model: 'safe-profile-model',
+            failover: category === 'http',
+            jsonMode: false,
+            requestStarted,
+            inputLengthBucket: 'large',
+            httpStatus: category === 'http' ? 502 : 0,
+            failureKind: category,
+        }, category);
+        assert.doesNotMatch(JSON.stringify(run.result), /secret-like|must-not-survive/u, category);
+        if (['scope_stale', 'target_stale', 'cancelled'].includes(category)) {
+            assert.equal(run.result.modelCalls, 0, `${category} must not claim a route call`);
+        }
+    }
+
+    const probeTagged = await runBatch(fixture, {
+        semanticRetry: false,
+        requestBatch: () => {
+            const error = new Error('probe failure must not enter P2 route receipt');
+            error.failureKind = 'http';
+            error.routeDiagnostic = {
+                channel: 'fast',
+                requestKind: 'connection_probe',
+                requestStarted: true,
+                failureKind: 'http',
+                httpStatus: 500,
+            };
+            throw error;
+        },
+    });
+    assert.equal(probeTagged.saveCount, 0);
+    assert.equal(probeTagged.result.failures[0].reason, 'actor_profile.http');
+    assert.equal(probeTagged.result.failures[0].routeDiagnostic, null);
+});
+
 test('partial validation still saves once, while save/readback failure claims nobody', async () => {
     const fixture = prepareRegisteredBatch(2);
     const partial = await runBatch(fixture, {
@@ -727,6 +809,10 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /maintenanceMaxActors: includeMaintenance/u);
     assert.match(profileFunction, /completeActorProfileBatchTransaction/u);
     assert.match(profileFunction, /maxTokens: 0/u);
+    assert.match(profileFunction, /requestKind: 'actor_profile_batch'/u);
+    assert.match(profileFunction, /maxFailovers: 1/u);
+    assert.match(profileFunction, /localBatchFailure\('scope_stale'\)/u);
+    assert.match(profileFunction, /localBatchFailure\('target_stale'\)/u);
     assert.match(profileFunction, /readbackAttempts: 3/u);
     assert.match(profileFunction, /persistPendingBatch/u);
     assert.match(profileFunction, /persistFinalizedBatch/u);

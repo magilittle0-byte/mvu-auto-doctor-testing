@@ -1434,6 +1434,12 @@ function normalizedModelDiagnostics(value) {
             routeSlotIndex: Math.max(0, Math.floor(Number(entry.routeSlotIndex) || 0)),
             routeName: String(entry.routeName || '').slice(0, 120),
             failover: entry.failover === true,
+            requestKind: ['actor_profile_batch', 'connection_probe', ''].includes(
+                entry.requestKind,
+            ) ? entry.requestKind : '',
+            requestStarted: entry.requestStarted === true,
+            inputLengthBucket: ['empty', 'tiny', 'small', 'medium', 'large', 'oversize']
+                .includes(entry.inputLengthBucket) ? entry.inputLengthBucket : 'empty',
             targetIndex: Number.isInteger(Number(entry.targetIndex))
                 ? Number(entry.targetIndex)
                 : -1,
@@ -7227,12 +7233,19 @@ async function withTimeout(promise, milliseconds, label, {
             racers.push(new Promise((_, reject) => {
                 timer = setTimeout(
                     () => {
+                        const error = new Error(`${label || '模型请求'}超时（${timeout}ms）`);
+                        error.code = 'MODEL_ATTEMPT_TIMEOUT';
+                        error.failureKind = 'timeout';
+                        error.diagnosticPhase = 'transport';
+                        // Settle the race before aborting provider work: abort
+                        // listeners may synchronously raise AbortError, which
+                        // must not erase this distinct timeout classification.
+                        reject(error);
                         try {
                             onTimeout?.();
                         } catch {
                             // Provider cancellation is optional.
                         }
-                        reject(new Error(`${label || '模型请求'}超时（${timeout}ms）`));
                     },
                     timeout,
                 );
@@ -7254,6 +7267,68 @@ async function withTimeout(promise, milliseconds, label, {
         clearTimeout(timer);
         if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
     }
+}
+
+function modelInputLengthBucket(messages) {
+    const length = (Array.isArray(messages) ? messages : []).reduce((total, message) => (
+        total + String(message?.content || '').length
+    ), 0);
+    if (!length) return 'empty';
+    if (length <= 4_096) return 'tiny';
+    if (length <= 16_384) return 'small';
+    if (length <= 42_000) return 'medium';
+    if (length <= 84_000) return 'large';
+    return 'oversize';
+}
+
+function modelFailureKind(error, controller = null) {
+    if (error?.failureKind === 'timeout' || error?.code === 'MODEL_ATTEMPT_TIMEOUT') {
+        return 'timeout';
+    }
+    if (controller?.signal?.aborted || error?.name === 'AbortError') return 'cancelled';
+    if (error?.failureKind) return error.failureKind;
+    if (isRateLimitError(error)) return 'rate-limit';
+    if (Number(error?.status) > 0) return 'http';
+    return 'transport-error';
+}
+
+function safeRouteDiagnostic({
+    channel,
+    slotIndex,
+    profile,
+    failover,
+    jsonMode,
+    requestKind,
+    requestStarted,
+    inputLengthBucket,
+    httpStatus,
+    failureKind,
+} = {}) {
+    const category = failureKind === 'cancelled' ? 'cancelled'
+        : failureKind === 'timeout' ? 'timeout'
+        : failureKind === 'empty'
+            || (failureKind === 'validation-error' && requestKind === 'actor_profile_batch')
+            ? 'empty'
+            : failureKind === 'parse-error' || failureKind === 'protocol'
+                ? 'protocol'
+                : Number(httpStatus) > 0 || failureKind === 'http' || failureKind === 'rate-limit'
+                    ? 'http'
+                    : 'transport';
+    return Object.freeze({
+        channel: channel === 'fast' ? 'fast' : 'strict',
+        slot: Math.max(0, Math.floor(Number(slotIndex) || 0)),
+        model: String(profile?.model || '').slice(0, 120),
+        failover: failover === true,
+        jsonMode: jsonMode === true,
+        requestKind: requestKind === 'actor_profile_batch' || requestKind === 'connection_probe'
+            ? requestKind
+            : '',
+        requestStarted: requestStarted === true,
+        inputLengthBucket: ['empty', 'tiny', 'small', 'medium', 'large', 'oversize']
+            .includes(inputLengthBucket) ? inputLengthBucket : 'empty',
+        httpStatus: Math.max(0, Math.floor(Number(httpStatus) || 0)),
+        failureKind: category,
+    });
 }
 
 function isRateLimitError(error) {
@@ -7583,6 +7658,7 @@ async function callDirectModel(messages, {
     profile: capturedProfile = null,
     usageSink = null,
     transportSink = null,
+    requestStartSink = null,
 } = {}) {
     const profile = capturedProfile || directProfile(getSettings(), channel);
     const url = openAiChatCompletionsUrl(profile.baseUrl, profile.rawUrl);
@@ -7626,6 +7702,7 @@ async function callDirectModel(messages, {
             ...rest,
         };
         if (Number(requestMaxTokens) > 0) payload.max_tokens = Number(requestMaxTokens);
+        requestStartSink?.();
         const result = await context.ChatCompletionService.processRequest(
             payload,
             { presetName: undefined },
@@ -7633,10 +7710,15 @@ async function callDirectModel(messages, {
             signal,
         );
         const output = String(result?.content || '');
-        if (!output.trim()) throw new Error('酒馆后端转发成功，但模型正文为空');
+        if (!output.trim()) {
+            const error = new Error('酒馆后端转发成功，但模型正文为空');
+            error.failureKind = 'empty';
+            throw error;
+        }
         usageSink?.(normalizedProviderUsage(result?.usage));
         return output;
     }
+    requestStartSink?.();
     const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -7653,6 +7735,7 @@ async function callDirectModel(messages, {
         // text and report only the HTTP status.
         const error = new Error(`独立 API HTTP ${response.status}`);
         error.status = response.status;
+        error.failureKind = 'http';
         throw error;
     }
     let payload;
@@ -7667,7 +7750,11 @@ async function callDirectModel(messages, {
     }
     usageSink?.(normalizedProviderUsage(payload?.usage));
     const output = directResponseText(payload);
-    if (!output.trim()) throw new Error('独立 API 返回成功，但正文为空');
+    if (!output.trim()) {
+        const error = new Error('独立 API 返回成功，但正文为空');
+        error.failureKind = 'empty';
+        throw error;
+    }
     return output;
 }
 
@@ -7893,6 +7980,8 @@ async function callModel(messages, options = {}) {
         role: String(message?.role || ''),
         content: String(message?.content || ''),
     }));
+    const inputLengthBucket = modelInputLengthBucket(messageCopies);
+    let requestStarted = false;
     lastPromptSnapshot = {
         task,
         capturedAt: Date.now(),
@@ -7934,6 +8023,9 @@ async function callModel(messages, options = {}) {
                     routeName: profile.name,
                     failover: Array.isArray(options.attemptedRouteSlots)
                         && options.attemptedRouteSlots.length > 0,
+                    requestKind: options.requestKind,
+                    requestStarted,
+                    inputLengthBucket,
                     ...normalizedProviderUsage(providerUsage),
                 });
                 return validatedOutput;
@@ -7959,6 +8051,9 @@ async function callModel(messages, options = {}) {
                                     responseParsed: transport?.responseParsed === true,
                                 };
                             },
+                            requestStartSink: () => {
+                                requestStarted = true;
+                            },
                         }),
                         attemptTimeoutMs,
                         `${channel === 'fast' ? '轻量' : '严格'}独立 API`,
@@ -7978,6 +8073,7 @@ async function callModel(messages, options = {}) {
                         if (api.capabilities?.abortSignal === true) {
                             runOptions.signal = controller.signal;
                         }
+                        requestStarted = true;
                         const output = await withTimeout(
                             api.run(effectiveMessages, runOptions),
                             attemptTimeoutMs,
@@ -8006,6 +8102,7 @@ async function callModel(messages, options = {}) {
                     rawOptions.signal = controller.signal;
                     rawOptions.abortSignal = controller.signal;
                 }
+                requestStarted = true;
                 const output = await withTimeout(
                     context.generateRaw(rawOptions),
                     attemptTimeoutMs,
@@ -8017,9 +8114,36 @@ async function callModel(messages, options = {}) {
                 );
                 return succeed(output);
             } catch (error) {
-                const failureKind = error?.failureKind
-                    || (isRateLimitError(error) ? 'rate-limit' : 'transport-error');
-                if (failureKind !== 'validation-error') {
+                const failureKind = modelFailureKind(error, controller);
+                try {
+                    error.failureKind = failureKind;
+                    error.routeDiagnostic = safeRouteDiagnostic({
+                        channel,
+                        slotIndex,
+                        profile,
+                        failover: Array.isArray(options.attemptedRouteSlots)
+                            && options.attemptedRouteSlots.length > 0,
+                        jsonMode: options.jsonMode === true,
+                        requestKind: options.requestKind,
+                        requestStarted,
+                        inputLengthBucket,
+                        httpStatus: Math.max(
+                            0,
+                            Number(error?.status)
+                                || (
+                                    profile.provider === 'direct'
+                                    && profile.viaBackend !== true
+                                    ? providerTransport.httpStatus
+                                    : 0
+                                ),
+                        ),
+                        failureKind,
+                    });
+                } catch {
+                    // A foreign error may be non-extensible; diagnostics below
+                    // still remain sanitised and the failure stays fail-closed.
+                }
+                if (!['validation-error', 'cancelled'].includes(failureKind)) {
                     markModelRouteHealth(channel, slotIndex, profile, false, { failureKind });
                 }
                 recordModelCall(task, 'failed', error, callGenerationSerial);
@@ -8048,9 +8172,12 @@ async function callModel(messages, options = {}) {
                     routeName: profile.name,
                     failover: Array.isArray(options.attemptedRouteSlots)
                         && options.attemptedRouteSlots.length > 0,
+                    requestKind: options.requestKind,
+                    requestStarted,
+                    inputLengthBucket,
                     failureKind,
                     validationCode: error?.validationReason || '',
-                    reason: error?.message || error,
+                    reason: failureKind,
                     ...(error?.invalidOutput
                         ? structuredOutputShape(error.invalidOutput)
                         : {}),
@@ -8066,6 +8193,44 @@ async function callModel(messages, options = {}) {
             maxConcurrent: 1,
             });
         } catch (error) {
+            const outerFailureKind = modelFailureKind(error, controller);
+            let routeError = error;
+            try {
+                routeError.failureKind = outerFailureKind;
+                if (!routeError.routeDiagnostic) {
+                    routeError.routeDiagnostic = safeRouteDiagnostic({
+                        channel,
+                        slotIndex,
+                        profile,
+                        failover: Array.isArray(options.attemptedRouteSlots)
+                            && options.attemptedRouteSlots.length > 0,
+                        jsonMode: options.jsonMode === true,
+                        requestKind: options.requestKind,
+                        requestStarted,
+                        inputLengthBucket,
+                        httpStatus: Math.max(0, Number(error?.status) || 0),
+                        failureKind: outerFailureKind,
+                    });
+                }
+            } catch {
+                // Errors from host code can be frozen. Do not let their raw
+                // properties leak or make cancellation depend on mutation.
+                routeError = new Error('model_route_failure');
+                routeError.failureKind = outerFailureKind;
+                routeError.routeDiagnostic = safeRouteDiagnostic({
+                    channel,
+                    slotIndex,
+                    profile,
+                    failover: Array.isArray(options.attemptedRouteSlots)
+                        && options.attemptedRouteSlots.length > 0,
+                    jsonMode: options.jsonMode === true,
+                    requestKind: options.requestKind,
+                    requestStarted,
+                    inputLengthBucket,
+                    httpStatus: Math.max(0, Number(error?.status) || 0),
+                    failureKind: outerFailureKind,
+                });
+            }
             const attemptedRouteSlots = [
                 ...(Array.isArray(options.attemptedRouteSlots)
                     ? options.attemptedRouteSlots
@@ -8078,7 +8243,7 @@ async function callModel(messages, options = {}) {
                     : []),
                 modelConnectionKey(profile),
             ];
-            const nextRoute = error?.failureKind !== 'validation-error'
+            const nextRoute = !['validation-error', 'cancelled'].includes(outerFailureKind)
                 && options.failover === true
                 && !externalSignal?.aborted
                 && attemptedRouteSlots.length <= maxFailovers
@@ -8093,7 +8258,7 @@ async function callModel(messages, options = {}) {
                     ).openedUntil <= Date.now()
                 ))
                 : null;
-            if (!nextRoute) throw error;
+            if (!nextRoute) throw routeError;
             recordOperation(
                 '模型接管',
                 `${task} 的槽位 ${slotIndex + 1} 失败，已转交槽位 ${nextRoute.slotIndex + 1}`,
@@ -8146,6 +8311,7 @@ async function probeModelChannelConnections(channel = 'strict') {
                 jsonMode: normalizedChannel === 'fast',
                 maxTokens: 128,
                 task,
+                requestKind: 'connection_probe',
                 routeSlotIndex: slotIndex,
                 runUntilCancelled: false,
                 timeoutMs: 120_000,
@@ -12875,6 +13041,24 @@ async function completeActorProfilesForTurn(captured, {
     discoveryContext = null,
     resolveDiscoveries = null,
 } = {}) {
+    const localBatchFailure = (category) => {
+        const error = new Error(`actor_profile.${category}`);
+        error.failureKind = category;
+        error.profileBatchFailureCategory = category;
+        error.routeDiagnostic = Object.freeze({
+            channel: 'fast',
+            slot: 0,
+            model: '',
+            failover: false,
+            jsonMode: false,
+            requestKind: 'actor_profile_batch',
+            requestStarted: false,
+            inputLengthBucket: 'empty',
+            httpStatus: 0,
+            failureKind: category,
+        });
+        return error;
+    };
     const settings = getSettings();
     const candidates = selectActorProfileCompletionCandidates(actorLedger, {
         initialActorIds,
@@ -12931,9 +13115,9 @@ async function completeActorProfilesForTurn(captured, {
             !token || continuityTargetIsCurrent(captured, token).ok
         ),
         requestBatch: async ({ messages, attempt }) => {
-            const freshScope = await freshFrozenScopeGuard(captured);
+            const freshScope = await freshFrozenScopeGuard(captured).catch(() => ({ ok: false }));
             if (!freshScope.ok) {
-                throw new Error(freshScope.reason || 'profile.scope_stale_before_call');
+                throw localBatchFailure('scope_stale');
             }
             const output = await callModel(messages, {
                 // Zero delegates the output ceiling to the selected connection.
@@ -12947,13 +13131,15 @@ async function completeActorProfilesForTurn(captured, {
                 failover: true,
                 maxFailovers: 1,
                 runUntilCancelled: false,
+                requestKind: 'actor_profile_batch',
             });
-            const afterModelScope = await freshFrozenScopeGuard(captured);
+            const afterModelScope = await freshFrozenScopeGuard(captured)
+                .catch(() => ({ ok: false }));
             if (!afterModelScope.ok) {
-                throw new Error(afterModelScope.reason || 'profile.scope_stale_after_call');
+                throw localBatchFailure('scope_stale');
             }
             if (token && !continuityTargetIsCurrent(captured, token).ok) {
-                throw new Error('profile.target_stale_after_call');
+                throw localBatchFailure('target_stale');
             }
             return output;
         },
@@ -13613,20 +13799,23 @@ async function runActorProfileTarget(captured, {
         ...(profileCompletion.failures || []),
         ...(profileCompletion.rejected || []),
     ]) {
+        const routeDiagnostic = failure?.routeDiagnostic || {};
         recordModelDiagnostic({
             phase: 'validation',
             task: '人物完整档案批次',
-            channel: 'fast',
+            channel: routeDiagnostic.channel === 'strict' ? 'strict' : 'fast',
+            model: String(routeDiagnostic.model || ''),
             status: 'failed',
             targetIndex: captured.index,
-            failureKind: 'actor-profile-batch-rejected',
+            httpStatus: Math.max(0, Number(routeDiagnostic.httpStatus) || 0),
+            routeSlotIndex: Math.max(0, Number(routeDiagnostic.slot) || 0),
+            failover: routeDiagnostic.failover === true,
+            requestKind: routeDiagnostic.requestKind,
+            requestStarted: routeDiagnostic.requestStarted === true,
+            inputLengthBucket: routeDiagnostic.inputLengthBucket,
+            failureKind: routeDiagnostic.failureKind || 'actor-profile-batch-rejected',
             validationCode: failure.reason || 'actor_profile.batch_rejected',
-            reason: [
-                failure.actorId,
-                failure.name,
-                failure.reason,
-                ...(failure.missingFields || []),
-            ].filter(Boolean).join(':'),
+            reason: failure.reason || 'actor_profile.batch_rejected',
             outputChars: 0,
         });
     }
@@ -18134,7 +18323,7 @@ function buildSettingsPanel() {
                                     <input class="text_pole mvuad-api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="sk-…">
                                 </label>
                                 <div class="mvuad-actions">
-                                    <button class="menu_button mvuad-provider-test" type="button">测试严格通道</button>
+                                    <button class="menu_button mvuad-provider-test" type="button">测试严格通道（仅连通）</button>
                                 </div>
                                 <div class="mvuad-provider-status" role="status"></div>
                             </div>
@@ -18162,7 +18351,7 @@ function buildSettingsPanel() {
                                 </label>
                                 <div class="mvuad-fast-options"></div>
                                 <div class="mvuad-actions">
-                                    <button class="menu_button mvuad-provider-test" type="button">测试轻量通道</button>
+                                    <button class="menu_button mvuad-provider-test" type="button">测试轻量通道（仅连通）</button>
                                 </div>
                                 <div class="mvuad-provider-status" role="status"></div>
                             </div>

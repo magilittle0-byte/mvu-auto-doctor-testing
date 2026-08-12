@@ -25,15 +25,34 @@ test('profile runtime delegates one batch and contains no per-actor model lane o
     assert.doesNotMatch(source, /mergeActorProfileCompletionPatches/u);
     assert.match(completion, /completeActorProfileBatchTransaction/u);
     assert.match(completion, /maxTokens: 0/u);
+    assert.match(completion, /channel: 'fast'/u);
+    assert.match(completion, /jsonMode: false/u);
+    assert.match(completion, /requestKind: 'actor_profile_batch'/u);
+    assert.match(completion, /maxFailovers: 1/u);
+    assert.match(completion, /freshFrozenScopeGuard\(captured\).*?localBatchFailure\('scope_stale'\)/su);
+    assert.match(completion, /continuityTargetIsCurrent\(captured, token\).*?localBatchFailure\('target_stale'\)/su);
     assert.doesNotMatch(
         completion,
         /Promise\.all\(candidates\.map|parallelLane|actorShardMaxTokens|sovereigntyHardTimeoutMs/u,
     );
     assert.match(batchSource, /const first = await collect\(selected, \[\], 0\)/u);
+    assert.match(batchSource, /PROFILE_BATCH_FAILURE_CATEGORIES/u);
+    assert.match(batchSource, /profileBatchRouteDiagnostic/u);
+    assert.doesNotMatch(batchSource, /transportFailure/u);
     assert.match(batchSource, /const retryCandidates = semanticRetry/u);
     assert.match(batchSource, /parseActorProfileCompletionBatchOutput/u);
     assert.doesNotMatch(batchSource, /Promise\.all/u);
     assert.doesNotMatch(completion, /\bpatch(?:es)?\b/u);
+    assert.match(source, /actor_registry_awaiting_p2/u);
+    assert.match(source, /requestKind: 'connection_probe'/u);
+    assert.match(source, /仅连通/u);
+    const callModel = sourceBetween(
+        'async function callModel(messages, options = {})',
+        'async function probeModelChannelConnections',
+    );
+    assert.match(source, /function modelFailureKind\(error, controller = null\).*?controller\?\.signal\?\.aborted.*AbortError/su);
+    assert.match(callModel, /!\['validation-error', 'cancelled'\]\.includes\(outerFailureKind\)/u);
+    assert.match(callModel, /if \(!\['validation-error', 'cancelled'\]\.includes\(failureKind\)\)/u);
 });
 
 test('profile commit is durable, content-verified, fail-closed, and accepted only after readback', () => {

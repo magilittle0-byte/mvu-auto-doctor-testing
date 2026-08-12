@@ -42,6 +42,67 @@ function failureFor(candidate, reason, extras = {}) {
     };
 }
 
+const PROFILE_BATCH_FAILURE_CATEGORIES = new Set([
+    'scope_stale',
+    'target_stale',
+    'cancelled',
+    'http',
+    'timeout',
+    'empty',
+    'protocol',
+    'transport',
+]);
+
+const PROFILE_BATCH_LENGTH_BUCKETS = new Set([
+    'empty',
+    'tiny',
+    'small',
+    'medium',
+    'large',
+    'oversize',
+]);
+
+function profileBatchRouteDiagnostic(value) {
+    if (!value || typeof value !== 'object') return null;
+    if (value.requestKind && value.requestKind !== 'actor_profile_batch') return null;
+    const channel = value.channel === 'fast' ? 'fast'
+        : value.channel === 'strict' ? 'strict' : '';
+    const requestKind = value.requestKind === 'actor_profile_batch'
+        ? 'actor_profile_batch'
+        : '';
+    if (!channel && !requestKind) return null;
+    return {
+        channel,
+        slot: Math.max(0, Math.floor(Number(value.slot) || 0)),
+        model: cleanText(value.model, 120),
+        failover: value.failover === true,
+        jsonMode: value.jsonMode === true,
+        requestStarted: value.requestStarted === true,
+        inputLengthBucket: PROFILE_BATCH_LENGTH_BUCKETS.has(value.inputLengthBucket)
+            ? value.inputLengthBucket
+            : 'empty',
+        httpStatus: Math.max(0, Math.floor(Number(value.httpStatus) || 0)),
+        failureKind: PROFILE_BATCH_FAILURE_CATEGORIES.has(value.failureKind)
+            ? value.failureKind
+            : 'transport',
+    };
+}
+
+function profileBatchRequestFailure(error) {
+    const requested = String(error?.profileBatchFailureCategory || error?.failureKind || '');
+    const category = PROFILE_BATCH_FAILURE_CATEGORIES.has(requested)
+        ? requested
+        : error?.name === 'AbortError'
+            ? 'cancelled'
+            : Number(error?.status) > 0
+                ? 'http'
+                : 'transport';
+    return {
+        category,
+        routeDiagnostic: profileBatchRouteDiagnostic(error?.routeDiagnostic),
+    };
+}
+
 function persistenceFailureReason(reason) {
     if (reason === 'host_save_readback_unsupported') {
         return 'actor_profile.readback_unsupported';
@@ -169,18 +230,17 @@ export async function completeActorProfileBatchTransaction({
         });
         let output;
         try {
-            modelCalls += 1;
             output = await requestBatch({
                 candidates: clone(subset),
                 messages,
                 attempt,
             });
+            modelCalls += 1;
         } catch (error) {
+            const failure = profileBatchRequestFailure(error);
+            if (failure.routeDiagnostic?.requestStarted === true) modelCalls += 1;
             return {
-                transportFailure: cleanText(
-                    error?.validationReason || error?.message || error,
-                    500,
-                ),
+                requestFailure: failure,
             };
         }
         if (!await current()) return { stale: true };
@@ -191,7 +251,7 @@ export async function completeActorProfileBatchTransaction({
     };
 
     const first = await collect(selected, [], 0);
-    if (first.transportFailure) {
+    if (first.requestFailure) {
         return {
             ...base,
             modelCalls,
@@ -199,11 +259,11 @@ export async function completeActorProfileBatchTransaction({
                 ...inputFailures,
                 ...(selected.length ? selected.map((candidate) => failureFor(
                     candidate,
-                    'actor_profile.transport_failed',
-                    { detail: first.transportFailure },
+                    `actor_profile.${first.requestFailure.category}`,
+                    { routeDiagnostic: first.requestFailure.routeDiagnostic },
                 )) : [{
-                    reason: 'actor_profile.transport_failed',
-                    detail: first.transportFailure,
+                    reason: `actor_profile.${first.requestFailure.category}`,
+                    routeDiagnostic: first.requestFailure.routeDiagnostic,
                 }]),
             ],
         };
@@ -270,18 +330,18 @@ export async function completeActorProfileBatchTransaction({
                 reason: 'actor_profile.target_stale',
                 retryable: false,
             }));
-        } else if (retry.transportFailure) {
+        } else if (retry.requestFailure) {
             for (const candidate of retryCandidates) {
                 failureById.set(candidateActorId(candidate), failureFor(
                     candidate,
-                    'actor_profile.transport_failed',
-                    { detail: retry.transportFailure },
+                    `actor_profile.${retry.requestFailure.category}`,
+                    { routeDiagnostic: retry.requestFailure.routeDiagnostic },
                 ));
             }
             unresolved = unresolved.map((entry) => ({
                 ...entry,
-                reason: 'actor_profile.transport_failed',
-                detail: retry.transportFailure,
+                reason: `actor_profile.${retry.requestFailure.category}`,
+                routeDiagnostic: retry.requestFailure.routeDiagnostic,
                 retryable: false,
             }));
         } else {
