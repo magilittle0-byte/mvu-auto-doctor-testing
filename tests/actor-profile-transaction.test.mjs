@@ -29,6 +29,24 @@ test('profile runtime delegates one batch and contains no per-actor model lane o
     assert.match(completion, /jsonMode: false/u);
     assert.match(completion, /requestKind: 'actor_profile_batch'/u);
     assert.match(completion, /maxFailovers: 1/u);
+    assert.match(completion, /noTimeout: true/u);
+    assert.match(source, /const CONNECTION_PROBE_TIMEOUT_MS = 120_000/u);
+    const probe = sourceBetween(
+        'async function probeModelChannelConnections',
+        'function combineSocialUsage',
+    );
+    assert.match(probe, /timeoutMs: CONNECTION_PROBE_TIMEOUT_MS/u);
+    const multiSlotProbe = sourceBetween(
+        'const bindTest = (channel, button, status) =>',
+        'function bindModelProviderCard',
+    );
+    assert.match(multiSlotProbe, /routeSlotIndex: slotIndex,\s*timeoutMs: CONNECTION_PROBE_TIMEOUT_MS,/su);
+    const singleSlotProbe = sourceBetween(
+        'function bindModelProviderCard',
+        'function buildSettingsPanel',
+    );
+    assert.match(singleSlotProbe, /task: .*?通道测试`,\s*timeoutMs: CONNECTION_PROBE_TIMEOUT_MS,/su);
+    assert.match(source, /Math\.min\(\s*35000,\s*Math\.max\(25000,\s*Math\.floor\(Number\(settings\.modelTimeoutMs\) \|\| 30000\)\),\s*\)/su);
     assert.match(completion, /freshFrozenScopeGuard\(captured\).*?localBatchFailure\('scope_stale'\)/su);
     assert.match(completion, /continuityTargetIsCurrent\(captured, token\).*?localBatchFailure\('target_stale'\)/su);
     assert.doesNotMatch(
@@ -50,6 +68,12 @@ test('profile runtime delegates one batch and contains no per-actor model lane o
         'async function callModel(messages, options = {})',
         'async function probeModelChannelConnections',
     );
+    assert.match(callModel, /const noTimeout = options\.noTimeout === true/u);
+    assert.match(callModel, /const timeoutMs = noTimeout \? 0 : Math\.min\(/u);
+    assert.match(callModel, /Number\(options\.timeoutMs \?\? settings\.modelTimeoutMs\) \|\| 120000/u);
+    assert.match(callModel, /const deadlineAt = !noTimeout && Number\.isFinite\(Number\(options\.deadlineAt\)\)/u);
+    assert.match(callModel, /const attemptTimeoutMs = noTimeout \|\| runUntilCancelled\s*\? 0/u);
+    assert.match(source, /if \(timeout > 0\) \{/u);
     assert.match(source, /function modelFailureKind\(error, controller = null\).*?controller\?\.signal\?\.aborted.*AbortError/su);
     assert.match(callModel, /!\['validation-error', 'cancelled'\]\.includes\(outerFailureKind\)/u);
     assert.match(callModel, /if \(!\['validation-error', 'cancelled'\]\.includes\(failureKind\)\)/u);

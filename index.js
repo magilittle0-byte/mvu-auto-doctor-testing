@@ -240,6 +240,9 @@ const ACTOR_ACTION_ERROR_LABELS = Object.freeze({
 });
 const MIN_MODEL_TIMEOUT_MS = 10_000;
 const MAX_MODEL_TIMEOUT_MS = 180_000;
+// Connection probes are bounded non-production checks. Production profile
+// completion explicitly opts out of the normal hard timeout below.
+const CONNECTION_PROBE_TIMEOUT_MS = 120_000;
 const CONTINUITY_MODEL_PROMPT_MAX_CHARS = 40_000;
 const DEFAULTS = Object.freeze({
     enabled: true,
@@ -7882,14 +7885,15 @@ async function callModel(messages, options = {}) {
     );
     const { profile, slotIndex } = selectedConnection;
     const runUntilCancelled = false;
-    const timeoutMs = Math.min(
+    const noTimeout = options.noTimeout === true;
+    const timeoutMs = noTimeout ? 0 : Math.min(
         MAX_MODEL_TIMEOUT_MS,
         Math.max(
             MIN_MODEL_TIMEOUT_MS,
             Number(options.timeoutMs ?? settings.modelTimeoutMs) || 120000,
         ),
     );
-    const deadlineAt = Number.isFinite(Number(options.deadlineAt))
+    const deadlineAt = !noTimeout && Number.isFinite(Number(options.deadlineAt))
         ? Number(options.deadlineAt)
         : 0;
     const attemptedCount = Array.isArray(options.attemptedRouteSlots)
@@ -7923,7 +7927,7 @@ async function callModel(messages, options = {}) {
         error.code = 'MODEL_TOTAL_DEADLINE';
         throw error;
     }
-    const attemptTimeoutMs = runUntilCancelled
+    const attemptTimeoutMs = noTimeout || runUntilCancelled
         ? 0
         : deadlineAt
         ? Math.max(
@@ -8314,7 +8318,7 @@ async function probeModelChannelConnections(channel = 'strict') {
                 requestKind: 'connection_probe',
                 routeSlotIndex: slotIndex,
                 runUntilCancelled: false,
-                timeoutMs: 120_000,
+                timeoutMs: CONNECTION_PROBE_TIMEOUT_MS,
                 validateOutput: (text, parsedJson) => {
                     parseSucceeded = normalizedChannel === 'fast'
                         ? Boolean(parsedJson && typeof parsedJson === 'object')
@@ -13131,6 +13135,7 @@ async function completeActorProfilesForTurn(captured, {
                 failover: true,
                 maxFailovers: 1,
                 runUntilCancelled: false,
+                noTimeout: true,
                 requestKind: 'actor_profile_batch',
             });
             const afterModelScope = await freshFrozenScopeGuard(captured)
@@ -18039,6 +18044,7 @@ function bindModelConnectionManager(root) {
                     maxTokens: 128,
                     task: `${channel === 'fast' ? '轻量' : '严格'}通道槽位 ${slotIndex + 1} 测试`,
                     routeSlotIndex: slotIndex,
+                    timeoutMs: CONNECTION_PROBE_TIMEOUT_MS,
                     validateOutput: (text, parsedJson) => channel === 'fast'
                         ? parsedJson?.ok === true
                             ? true
@@ -18144,6 +18150,7 @@ function bindModelProviderCard(card) {
                 jsonMode: fast,
                 maxTokens: 128,
                 task: `${fast ? '轻量' : '严格'}通道测试`,
+                timeoutMs: CONNECTION_PROBE_TIMEOUT_MS,
                 validateOutput: (text, parsedJson) => fast
                     ? parsedJson?.ok === true
                         ? true

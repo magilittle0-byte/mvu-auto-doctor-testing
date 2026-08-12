@@ -640,6 +640,41 @@ test('P2 preserves fail-closed local and transport categories without raw error 
     assert.equal(probeTagged.result.failures[0].routeDiagnostic, null);
 });
 
+test('a cancelled in-flight P2 request performs no failover or write', async () => {
+    const fixture = prepareRegisteredBatch(2);
+    let calls = 0;
+    const run = await runBatch(fixture, {
+        semanticRetry: false,
+        requestBatch: () => {
+            calls += 1;
+            const error = new Error('cancelled');
+            error.name = 'AbortError';
+            error.failureKind = 'cancelled';
+            error.routeDiagnostic = {
+                channel: 'fast',
+                slot: 0,
+                model: 'safe-profile-model',
+                failover: false,
+                jsonMode: false,
+                requestKind: 'actor_profile_batch',
+                requestStarted: true,
+                inputLengthBucket: 'large',
+                httpStatus: 0,
+                failureKind: 'cancelled',
+            };
+            throw error;
+        },
+    });
+    assert.equal(calls, 1);
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.result.modelCalls, 1);
+    assert.ok(run.result.failures.every((failure) => (
+        failure.reason === 'actor_profile.cancelled'
+        && failure.routeDiagnostic?.failover === false
+        && failure.routeDiagnostic?.requestStarted === true
+    )));
+});
+
 test('partial validation still saves once, while save/readback failure claims nobody', async () => {
     const fixture = prepareRegisteredBatch(2);
     const partial = await runBatch(fixture, {
@@ -811,6 +846,7 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /maxTokens: 0/u);
     assert.match(profileFunction, /requestKind: 'actor_profile_batch'/u);
     assert.match(profileFunction, /maxFailovers: 1/u);
+    assert.match(profileFunction, /noTimeout: true/u);
     assert.match(profileFunction, /localBatchFailure\('scope_stale'\)/u);
     assert.match(profileFunction, /localBatchFailure\('target_stale'\)/u);
     assert.match(profileFunction, /readbackAttempts: 3/u);
