@@ -364,7 +364,9 @@ function loadAcceptedFinalRuntimeHarness({
     return { state, generation, accept: sandbox.acceptFinalGeneration, sandbox };
 }
 
-function loadAcceptedFinalFullDispatchHarness() {
+function loadAcceptedFinalFullDispatchHarness({
+    profileResult = { status: 'not_completed' },
+} = {}) {
     const support = sourceSection(
         'function acceptedFinalScopeDecision(generation, scopeDigest)',
         'function dispatchAcceptedFinal(envelope)',
@@ -381,6 +383,11 @@ function loadAcceptedFinalFullDispatchHarness() {
         scope: { chatId: 'chat-a', cardId: 'character:card-a', runtimeVersion: 'rc14' },
         dispatchedTargets: [],
         errors: [],
+        profileTargets: [],
+        continuityCalls: [],
+        worldModelCalls: 0,
+        worldWrites: 0,
+        continuityProfileRetrySignals: new Map(),
     };
     const message = {
         mes: '<content>真实自然正文：林舟把钥匙放在桌上，转身等候答复。</content>',
@@ -427,9 +434,25 @@ function loadAcceptedFinalFullDispatchHarness() {
         enqueueOpeningResourceSync: (_index, options) => captureUse(options.expectedTarget),
         runSocialAuditTarget: captureUse,
         enqueueForum: (_index, options) => captureUse(options.expectedTarget),
-        enqueueActorProfiles: (_index, options) => captureUse(options.expectedTarget),
-        enqueueContinuity: (_index, options) => captureUse(options.expectedTarget),
-        continuityProfileRetrySignals: new Map(),
+        enqueueActorProfiles: (_index, options) => {
+            state.dispatchedTargets.push(options.expectedTarget);
+            state.profileTargets.push(options.expectedTarget);
+            return Promise.resolve(profileResult);
+        },
+        enqueueContinuity: (_index, options) => {
+            state.dispatchedTargets.push(options.expectedTarget);
+            state.continuityCalls.push({
+                target: options.expectedTarget,
+                noActorPermit: options.noActorPermit || null,
+            });
+            if (!options.noActorPermit) {
+                return Promise.resolve({ status: 'actor_registry_awaiting_p2' });
+            }
+            state.worldModelCalls += 1;
+            state.worldWrites += 1;
+            return Promise.resolve({ status: 'applied' });
+        },
+        continuityProfileRetrySignals: state.continuityProfileRetrySignals,
         stage3AcceptedTargetKey: () => 'stage3-key',
         safeDiagnosticReason: (value) => String(value || ''),
         recordOperation: (...args) => state.errors.push(args),
@@ -484,11 +507,12 @@ test('actual accepted-final path freezes scope before identity and dispatches on
     assert.equal(scopeChanged.state.dispatches.length, 0);
 });
 
-test('actual dispatch gives every accepted-final consumer the same frozen target', async () => {
+test('accepted-final dispatch gives variables and P1 the same frozen target, then wakes P3 only after P1 readback', async () => {
     const runtime = loadAcceptedFinalFullDispatchHarness();
     assert.equal(await runtime.accept(runtime.generation), true);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.ok(runtime.state.dispatchedTargets.length >= 6);
+    assert.equal(runtime.state.dispatchedTargets.length, 2);
+    assert.equal(runtime.state.continuityCalls.length, 0);
     for (const target of runtime.state.dispatchedTargets) {
         assert.equal(target.scopeDigest, 'chat-a|character:card-a|rc14');
         assert.deepEqual(
@@ -497,6 +521,51 @@ test('actual dispatch gives every accepted-final consumer the same frozen target
         );
     }
     assert.deepEqual(runtime.state.errors, []);
+});
+
+test('a P1 not-completed result never grants a P3 permit or world launch', async () => {
+    const flushDispatch = async (runtime) => {
+        assert.equal(await runtime.accept(runtime.generation), true);
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    const incomplete = loadAcceptedFinalFullDispatchHarness({
+        profileResult: {
+            status: 'not_completed',
+            persistenceStatus: 'not_completed',
+            readbackVerified: true,
+            accepted: [{ actorId: 'NPC-successful-peer' }],
+        },
+    });
+    await flushDispatch(incomplete);
+    assert.equal(incomplete.state.profileTargets.length, 1);
+    // A not-completed P1 result cannot wake P3 at all.
+    assert.equal(incomplete.state.continuityCalls.length, 0);
+    assert.equal(incomplete.state.worldModelCalls, 0);
+    assert.equal(incomplete.state.worldWrites, 0);
+    assert.equal(incomplete.state.errors.length, 0);
+    assert.equal(incomplete.state.continuityProfileRetrySignals.size, 0);
+
+    const atomic = loadAcceptedFinalFullDispatchHarness({
+        profileResult: { status: 'atomic_readback' },
+    });
+    await flushDispatch(atomic);
+    assert.equal(atomic.state.continuityCalls.length, 1);
+    assert.equal(atomic.state.continuityProfileRetrySignals.size, 0);
+    assert.equal(atomic.state.continuityCalls.every((call) => call.noActorPermit === null), true);
+
+    const noCandidates = loadAcceptedFinalFullDispatchHarness({
+        profileResult: { status: 'no_candidates' },
+    });
+    await flushDispatch(noCandidates);
+    assert.equal(noCandidates.state.continuityCalls.length, 1);
+    assert.equal(noCandidates.state.continuityProfileRetrySignals.size, 0);
+    assert.equal(noCandidates.state.continuityCalls.filter((call) => (
+        call.noActorPermit?.status === 'no_candidates'
+    )).length, 1);
+    assert.equal(noCandidates.state.worldModelCalls, 1);
+    assert.equal(noCandidates.state.worldWrites, 1);
 });
 
 test('accepted-final rejection is ephemeral and an old epoch cannot touch the new chat', async () => {
@@ -889,8 +958,8 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
     const p1 = state.dispatches.find(({ kind }) => kind === 'p1')?.target;
     const p3 = state.dispatches.find(({ kind }) => kind === 'p3')?.target;
     assert.ok(p1);
-    assert.ok(p3);
-    for (const target of [p1, p3]) {
+    assert.equal(p3, undefined, 'P3 is only woken by an atomic P1 result');
+    for (const target of [p1]) {
         assert.equal(target.chatId, 'chat-a');
         assert.equal(target.scopeDigest, 'chat-a|character:card-a|rc14');
         assert.deepEqual(
@@ -1299,7 +1368,7 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(state.identitySaves, 1);
     assert.equal(messages['chat-b'].extra.mvu_auto_doctor_generation_id, bSession.id);
-    assert.ok(state.dispatches.length >= 6);
+    assert.equal(state.dispatches.length, 2);
     assert.ok(state.dispatches.every((target) => target.scopeDigest === 'scope-chat-b'));
 
     state.chatId = 'chat-a';
@@ -1366,53 +1435,6 @@ function loadAcceptedTargetMatcher(operationEpoch = 7) {
     const sandbox = { operationEpoch };
     vm.runInNewContext(`${code}\nthis.sameAcceptedNarrativeTarget = sameAcceptedNarrativeTarget;`, sandbox);
     return sandbox.sameAcceptedNarrativeTarget;
-}
-
-function loadAutomaticWaitHarness() {
-    const code = sourceSection(
-        'async function waitAutomaticTargetSettled(initialCaptured)',
-        'function sourceRefOf(captured)',
-    );
-    const firstSleep = deferred();
-    const state = {
-        now: 10_000,
-        holdFirstSleep: true,
-        busyReads: 0,
-        fingerprintReads: 0,
-        statuses: [],
-    };
-    const sandbox = {
-        Date: { now: () => state.now },
-        DEFAULTS: { delayMs: 300, mvuStableTimeoutMs: 1_000 },
-        getSettings: () => ({ delayMs: 300, mvuStableTimeoutMs: 1_000 }),
-        getMvu: async () => ({
-            isDuringExtraAnalysis: () => {
-                state.busyReads += 1;
-                return true;
-            },
-            getMvuData: async () => ({ stat_data: { revision: ++state.fingerprintReads } }),
-        }),
-        mvuDataAt: async (Mvu) => Mvu.getMvuData(),
-        statDataOf: (value) => value.stat_data,
-        safeJson: (value) => JSON.stringify(value),
-        fingerprint: (value) => String(value),
-        targetSnapshotIsCurrent: (captured) => ({ ok: true, captured }),
-        setStatus: (message) => state.statuses.push(message),
-        recordOperation: () => undefined,
-        sleep: async (ms) => {
-            state.now += ms;
-            if (state.holdFirstSleep) {
-                state.holdFirstSleep = false;
-                await firstSleep.promise;
-            }
-        },
-    };
-    vm.runInNewContext(`${code}\nthis.waitAutomaticTargetSettled = waitAutomaticTargetSettled;`, sandbox);
-    return {
-        wait: sandbox.waitAutomaticTargetSettled,
-        release: firstSleep.resolve,
-        state,
-    };
 }
 
 function makeTarget(overrides = {}) {
@@ -1536,40 +1558,7 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
     };
 }
 
-async function startP2Branches({
-    observe,
-    settleContinuityReceipt,
-    settleActorReceipt,
-    enqueueContinuity,
-    waitAutomaticTargetSettled,
-    enqueueVariable,
-}) {
-    const observation = await observe();
-    await settleContinuityReceipt();
-    await settleActorReceipt();
-    const continuity = observation.persisted
-        ? enqueueContinuity()
-        : Promise.resolve({ status: 'failed' });
-    const variable = waitAutomaticTargetSettled().then((settled) => (
-        settled.status === 'settled' ? enqueueVariable() : settled
-    ));
-    return { continuity, variable };
-}
-
-async function startP2AfterSettlementDedupe({
-    existingSettlement,
-    waitExistingSettlement,
-    createSettlementRecord,
-    enqueueContinuity,
-}) {
-    const existing = existingSettlement();
-    if (existing) return waitExistingSettlement(existing);
-    const record = await createSettlementRecord();
-    if (record.recoveredTerminal) return record.result;
-    return { status: 'started', continuity: enqueueContinuity() };
-}
-
-test('accepted-final dispatch starts P1 and P3 without a barrier or MVU-stability wait', async () => {
+test('accepted-final dispatch starts variables and P1, then P1 readback wakes independent P3 without a global barrier', async () => {
     const handler = sourceSection(
         'function dispatchAcceptedFinal(envelope)',
         'async function acceptFinalGeneration(generation)',
@@ -1578,182 +1567,19 @@ test('accepted-final dispatch starts P1 and P3 without a barrier or MVU-stabilit
     const profileEnqueueAt = handler.indexOf('const profileTask = enqueueActorProfiles', profileAt);
     const profileReadbackAt = handler.indexOf("['atomic_readback', 'no_candidates']", profileEnqueueAt);
     const profileRetryAt = handler.indexOf('void enqueueContinuity(envelope.index', profileReadbackAt);
-    const worldAt = handler.indexOf("launchScoped('世界连续性'", profileRetryAt);
-    const worldEnqueueAt = handler.indexOf('enqueueContinuity(envelope.index', worldAt);
     assert.ok(profileAt >= 0 && profileEnqueueAt > profileAt);
     assert.ok(profileReadbackAt > profileEnqueueAt);
     assert.ok(profileRetryAt > profileReadbackAt);
-    assert.ok(worldAt > profileRetryAt && worldEnqueueAt > worldAt);
     assert.match(
-        handler.slice(profileAt, worldAt),
-        /continuityProfileRetrySignals\.set[\s\S]*?void enqueueContinuity\(envelope\.index/u,
+        handler.slice(profileAt),
+        /\['atomic_readback', 'no_candidates'\][\s\S]*?void enqueueContinuity\(envelope\.index/u,
     );
+    assert.doesNotMatch(handler, /launchScoped\('世界连续性'/u);
     assert.doesNotMatch(
         handler,
         /createTargetSettlementRecord|barrierRecord|waitAutomaticTargetSettled|isDuringExtraAnalysis|getMvuData/u,
     );
 
-    const variableStable = deferred();
-    const trace = [];
-    const branches = await startP2Branches({
-        observe: async () => {
-            trace.push('observation-persisted');
-            return { persisted: true };
-        },
-        settleContinuityReceipt: async () => trace.push('continuity-receipt-settled'),
-        settleActorReceipt: async () => trace.push('actor-receipt-settled'),
-        enqueueContinuity: async () => {
-            trace.push('world-started');
-            return { status: 'applied' };
-        },
-        waitAutomaticTargetSettled: () => {
-            trace.push('mvu-stability-waiting-busy-and-changing');
-            return variableStable.promise;
-        },
-        enqueueVariable: async () => {
-            trace.push('variable-started');
-            return { status: 'applied' };
-        },
-    });
-    await branches.continuity;
-    assert.deepEqual(trace, [
-        'observation-persisted',
-        'continuity-receipt-settled',
-        'actor-receipt-settled',
-        'world-started',
-        'mvu-stability-waiting-busy-and-changing',
-    ]);
-    assert.equal(trace.includes('variable-started'), false);
-    variableStable.resolve({ status: 'settled' });
-    await branches.variable;
-    assert.equal(trace.at(-1), 'variable-started');
-});
-
-test('pending and persisted-terminal settlement identities short-circuit before world launch', async () => {
-    let starts = 0;
-    const pending = await startP2AfterSettlementDedupe({
-        existingSettlement: () => ({ state: 'captured', pending: true }),
-        waitExistingSettlement: async () => ({ status: 'busy' }),
-        createSettlementRecord: async () => {
-            throw new Error('must not create a second settlement record');
-        },
-        enqueueContinuity: () => {
-            starts += 1;
-        },
-    });
-    assert.equal(pending.status, 'busy');
-    assert.equal(starts, 0);
-
-    const reloadedTerminal = await startP2AfterSettlementDedupe({
-        existingSettlement: () => null,
-        waitExistingSettlement: async () => ({ status: 'unexpected' }),
-        createSettlementRecord: async () => ({
-            recoveredTerminal: true,
-            result: { status: 'settled', workflowStatus: 'recovered-terminal' },
-        }),
-        enqueueContinuity: () => {
-            starts += 1;
-        },
-    });
-    assert.equal(reloadedTerminal.status, 'settled');
-    assert.equal(reloadedTerminal.workflowStatus, 'recovered-terminal');
-    assert.equal(starts, 0);
-
-    const capturedBarrier = deferred();
-    let barrierPersisted = false;
-    void capturedBarrier.promise.then(() => {
-        barrierPersisted = true;
-    });
-    const fresh = await startP2AfterSettlementDedupe({
-        existingSettlement: () => null,
-        waitExistingSettlement: async () => ({ status: 'unexpected' }),
-        createSettlementRecord: async () => ({
-            recoveredTerminal: false,
-            ready: capturedBarrier.promise,
-        }),
-        enqueueContinuity: () => {
-            starts += 1;
-            return Promise.resolve({ status: 'applied' });
-        },
-    });
-    assert.equal(fresh.status, 'started');
-    assert.equal(starts, 1);
-    assert.equal((await fresh.continuity).status, 'applied');
-    assert.equal(barrierPersisted, false);
-    capturedBarrier.resolve();
-    await capturedBarrier.promise;
-});
-
-test('world and variable branches remain parallel and failure-isolated', async () => {
-    const worldGate = deferred();
-    const repairGate = deferred();
-    const trace = [];
-    const branches = await startP2Branches({
-        observe: async () => ({ persisted: true }),
-        settleContinuityReceipt: async () => undefined,
-        settleActorReceipt: async () => undefined,
-        enqueueContinuity: async () => {
-            trace.push('world-started');
-            return worldGate.promise;
-        },
-        waitAutomaticTargetSettled: async () => ({ status: 'settled' }),
-        enqueueVariable: async () => {
-            trace.push('variable-started');
-            return repairGate.promise;
-        },
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(trace, ['world-started', 'variable-started']);
-
-    repairGate.resolve({ status: 'failed', reason: 'synthetic-variable-failure' });
-    assert.equal((await branches.variable).status, 'failed');
-    assert.deepEqual(trace, ['world-started', 'variable-started']);
-    worldGate.resolve({ status: 'applied' });
-    assert.equal((await branches.continuity).status, 'applied');
-
-    const failedWorld = await startP2Branches({
-        observe: async () => ({ persisted: true }),
-        settleContinuityReceipt: async () => undefined,
-        settleActorReceipt: async () => undefined,
-        enqueueContinuity: async () => ({ status: 'failed', reason: 'synthetic-world-failure' }),
-        waitAutomaticTargetSettled: async () => ({ status: 'settled' }),
-        enqueueVariable: async () => ({ status: 'applied' }),
-    });
-    assert.equal((await failedWorld.continuity).status, 'failed');
-    assert.equal((await failedWorld.variable).status, 'applied');
-});
-
-test('actual MVU busy and changing-fingerprint wait remains unresolved after world starts', async () => {
-    const waitHarness = loadAutomaticWaitHarness();
-    const target = makeTarget();
-    let worldStarted = false;
-    let variableStarted = false;
-    const branches = await startP2Branches({
-        observe: async () => ({ persisted: true }),
-        settleContinuityReceipt: async () => undefined,
-        settleActorReceipt: async () => undefined,
-        enqueueContinuity: async () => {
-            worldStarted = true;
-            return { status: 'applied' };
-        },
-        waitAutomaticTargetSettled: () => waitHarness.wait(target),
-        enqueueVariable: async () => {
-            variableStarted = true;
-            return { status: 'applied' };
-        },
-    });
-    await branches.continuity;
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(worldStarted, true);
-    assert.equal(variableStarted, false);
-    assert.ok(waitHarness.state.busyReads >= 1);
-    assert.ok(waitHarness.state.fingerprintReads >= 1);
-
-    waitHarness.release();
-    const variableResult = await branches.variable;
-    assert.equal(variableResult.status, 'busy');
-    assert.equal(variableStarted, false);
-    assert.ok(waitHarness.state.fingerprintReads >= 2);
 });
 
 test('mechanism-only edits preserve accepted fingerprint while narrative edits do not', () => {

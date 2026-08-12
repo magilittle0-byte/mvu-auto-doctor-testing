@@ -9,7 +9,6 @@ import {
     ACTOR_PROFILE_V6_VERSION,
     actorProfileActionReadiness,
     actorProfileBaselineDigest,
-    takeActorProfileDiscoveryAnchorPolicies,
     normalizeActorProfileV6,
     validateActorProfileDiscoveryAnchor,
 } from './actor-profile-v6-core.mjs';
@@ -134,15 +133,22 @@ function normalizeSourceRef(value) {
     return {
         chatId,
         messageId,
+        logicalIndex: integer(value.logicalIndex ?? value.index, 0, Number.MAX_SAFE_INTEGER, 0),
         index: integer(value.index, 0, Number.MAX_SAFE_INTEGER, 0),
         swipeId: integer(value.swipeId, 0, Number.MAX_SAFE_INTEGER, 0),
         generation: integer(value.generation, 0, Number.MAX_SAFE_INTEGER, 0),
+        generationSerial: integer(value.generationSerial ?? value.generation, 0, Number.MAX_SAFE_INTEGER, 0),
         generationId: cleanText(value.generationId, 180),
         generationType: cleanText(value.generationType, 80),
         identityScopeId: cleanText(value.identityScopeId, 300),
         scopeDigest,
         hash,
-        compatibilityOnly: !scopeDigest,
+        contentHash: cleanText(value.contentHash || value.contentFingerprint || hash, 180),
+        contentFingerprint: cleanText(value.contentFingerprint || value.contentHash || hash, 180),
+        compatibilityOnly: !scopeDigest
+            || !cleanText(value.generationId, 180)
+            || !cleanText(value.generationType, 80)
+            || !cleanText(value.contentHash || value.contentFingerprint, 180),
     };
 }
 
@@ -160,17 +166,16 @@ export function resolveActorRegistryTargetName(value) {
 }
 
 // Doctor-required accepted-narrative adapter: source/generation/swipe binding.
-export function acceptedActorSourceRefMatches(value, expected) {
+export function acceptedActorSourceRefMatches(value, expected, { allowLegacyReadOnly = false } = {}) {
     const actual = normalizeSourceRef(value);
     const target = normalizeSourceRef(expected);
     if (!actual || !target) return false;
-    // A pre-scope persisted record may only reconcile with another equally
-    // unscoped record whose full legacy identity below still matches exactly.
-    // A scoped record never matches an unscoped one.
+    if (!allowLegacyReadOnly && (actual.compatibilityOnly || target.compatibilityOnly)) return false;
     if (Boolean(actual.scopeDigest) !== Boolean(target.scopeDigest)) return false;
     return [
-        'chatId', 'messageId', 'index', 'swipeId', 'generation',
+        'chatId', 'messageId', 'logicalIndex', 'index', 'swipeId', 'generation', 'generationSerial',
         'generationId', 'generationType', 'identityScopeId', 'scopeDigest', 'hash',
+        'contentHash', 'contentFingerprint',
     ].every((field) => actual[field] === target[field]);
 }
 
@@ -2569,10 +2574,6 @@ function structuredContentActorFacts(content) {
 function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = null) {
     const source = String(content || '');
     const supplied = Array.isArray(discoveries) ? discoveries : [];
-    const anchorPolicies = takeActorProfileDiscoveryAnchorPolicies(supplied, {
-        acceptedNarrative: source,
-        sourceRef,
-    });
     const prepared = supplied.map((entry, inputIndex) => {
         const narrativeName = entry?.candidate?.profileFormat === 'narrative-v1'
             || entry?.profileFormat === 'narrative-v1';
@@ -2584,7 +2585,6 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = nu
         const anchorCheck = validateActorProfileDiscoveryAnchor(
             { name, sourceAnchor },
             source,
-            anchorPolicies.get(entry) || null,
         );
         return {
             entry,
@@ -2621,11 +2621,7 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = nu
             continue;
         }
         const acceptedIndex = accepted.length;
-        const {
-            __narrativeFirstLiteralProof: _narrativeFirstLiteralProof,
-            __narrativeFirstLiteralBatchId: _narrativeFirstLiteralBatchId,
-            ...safeEntry
-        } = clone(item.entry);
+        const safeEntry = clone(item.entry);
         accepted.push({
             ...safeEntry,
             candidateRef: { name: item.name, sourceAnchor: item.sourceAnchor },
@@ -3752,6 +3748,12 @@ function schedulingScore(actor, turn) {
     const deadlineDistance = actor.deadlineTurn > 0 ? actor.deadlineTurn - turn : Infinity;
     const openCommitments = actor.commitments.filter((item) => item.status === 'open');
     const overdueCommitments = openCommitments.filter((item) => item.dueTurn <= turn);
+    const goalReady = actor.currentGoals.length > 0
+        && actor.plan?.status === 'active'
+        && actor.nextActionTurn <= turn + 1;
+    const activeGoalStarved = actor.currentGoals.length > 0
+        && actor.plan?.status === 'active'
+        && semanticAge >= actorStarvationLimit(actor);
     const reasons = [];
     let score = 0;
     if (due) {
@@ -3775,6 +3777,18 @@ function schedulingScore(actor, turn) {
     } else if (openCommitments.length) {
         score += 18;
         reasons.push('commitment-open');
+    }
+    if ((goalReady && !due) || activeGoalStarved) {
+        score += 52;
+        reasons.push('current-goal-due');
+    }
+    if (actor.longTermGoals.length && !goalReady) {
+        score += 8;
+        reasons.push('long-term-goal');
+    }
+    if (actor.lastAction && Number(actor.lastAction.turn || 0) < turn && semanticAge >= actorStarvationLimit(actor)) {
+        score += 20;
+        reasons.push('last-action-starved');
     }
     score += actor.initiative * 12;
     score += actor.opportunity * 14;
@@ -3863,7 +3877,7 @@ export function actorActionEligibility(value, actorId) {
 
 export function scheduleActorTurns(value, {
     turn = null,
-    maxActors = 2,
+    maxActors = null,
     explorationSlots = 1,
     excludedActorNames = [],
     requireProfileReady: _requireProfileReady = true,
@@ -3871,7 +3885,9 @@ export function scheduleActorTurns(value, {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = normalizeActorLedger(value, { excludedActorNames });
     const currentTurn = integer(turn, 0, Number.MAX_SAFE_INTEGER, ledger.turn);
-    const limit = integer(maxActors, 0, 6, 2);
+    const limit = maxActors === null || maxActors === undefined
+        ? Number.MAX_SAFE_INTEGER
+        : integer(maxActors, 0, Number.MAX_SAFE_INTEGER, 2);
     const explorationLimit = Math.min(
         limit,
         integer(explorationSlots, 0, 2, 1),
@@ -3893,8 +3909,16 @@ export function scheduleActorTurns(value, {
             || left.actor.nextActionTurn - right.actor.nextActionTurn
             || left.actor.id.localeCompare(right.actor.id)
         ));
+    const isMustInclude = (item) => item.reasons.some((reason) => (
+        ['action-due', 'semantic-starvation', 'deadline-due', 'commitment-due', 'current-goal-due', 'last-action-starved'].includes(reason)
+    ));
+    // Due NPC commitments are durable world obligations, not a cosmetic
+    // prompt-budget choice.  The optional budget only constrains non-due
+    // exploration candidates.
+    const mustInclude = scored.filter(isMustInclude);
     const coreLimit = Math.max(0, limit - explorationLimit);
-    const selected = scored.slice(0, coreLimit).map((item) => ({
+    const optional = scored.filter((item) => !isMustInclude(item)).slice(0, coreLimit);
+    const selected = [...mustInclude, ...optional].map((item) => ({
         actorId: item.actor.id,
         actorName: item.actor.name,
         slot: 'priority',
@@ -3954,11 +3978,12 @@ export function actorActionCandidatesFromShard(value, proposals, {
         const declaredIntent = cleanText(proposal?.intent, 40);
         const wait = declaredIntent === 'wait';
         const replan = declaredIntent === 'replan';
-        const contactMatch = intensity > 0 && action.match(
-            intensity >= 2
-                ? /(?:寻找|来访|拜访|寄信|传信|悬赏|跟踪|求助|袭击|取走|拿走|封锁|抬价|降价|散布|公告|布告|交通|舆论)/u
-                : /(?:来访|拜访|寄信|传信|袭击|求助)/u,
-        );
+        // Routing is an explicit Advance field.  Do not infer a public/contact
+        // action from prose with a keyword regexp: natural language remains
+        // model-authored content, not a local semantic authority.
+        const declaredContact = proposal?.contact && typeof proposal.contact === 'object'
+            ? proposal.contact
+            : null;
         const knowledgeRefs = (actor.knowledge || [])
             .filter((item) => (proposal?.knowledgeBasis || []).includes(item.claim))
             .map((item) => item.id);
@@ -4004,14 +4029,14 @@ export function actorActionCandidatesFromShard(value, proposals, {
                 amount: number(item?.amount, 0, 1_000_000_000, 0),
             })),
             capabilityUsed: cleanText(proposal?.capabilityUsed, 160),
-            contact: contactMatch
+            contact: declaredContact
                 ? {
-                    mode: cleanText(contactMatch[0], 80),
+                    mode: cleanText(declaredContact.mode, 80),
                     target: cleanText(
-                        proposal?.interactionTargets?.[0]?.actorName || '当前世界',
+                        declaredContact.target || proposal?.interactionTargets?.[0]?.actorName || '当前世界',
                         180,
                     ),
-                    observableConsequence: action,
+                    observableConsequence: cleanText(declaredContact.observableConsequence, 500) || action,
                 }
                 : null,
             planUpdate: cleanText(proposal?.currentGoal, 500),

@@ -1046,8 +1046,11 @@ function normalizeTick(value, turn) {
 
 export function normalizeContinuityState(value, {
     chatId = '',
-    maxThreads = 6,
-    maxResolved = 12,
+    // Persistent continuity is canonical history, not a display list.  UI/P4
+    // callers may project a bounded view afterwards, but normalization must
+    // never demote or discard an offscreen thread.
+    maxThreads = null,
+    maxResolved = null,
 } = {}) {
     const source = value && typeof value === 'object' ? value : {};
     const turn = boundedInteger(source.turn, 0, Number.MAX_SAFE_INTEGER, 0);
@@ -1058,40 +1061,24 @@ export function normalizeContinuityState(value, {
         if (!thread || used.has(thread.id)) continue;
         used.add(thread.id);
         allThreads.push(thread);
-        if (allThreads.length >= 64) break;
     }
-    const activeLimit = boundedInteger(maxThreads, 1, 24, 6);
-    const resolvedLimit = boundedInteger(maxResolved, 0, 24, 12);
-    const runnable = allThreads.filter((thread) => (
-        thread.stage !== 'resolved' && thread.stage !== 'dormant'
-    ));
-    const active = runnable.slice(0, activeLimit);
-    const overflow = runnable.slice(activeLimit).map((thread) => ({
-        ...thread,
-        stage: 'dormant',
-    }));
-    const dormant = [
-        ...allThreads.filter((thread) => thread.stage === 'dormant'),
-        ...overflow,
-    ];
-    const resolved = allThreads
-        .filter((thread) => thread.stage === 'resolved')
-        .sort((left, right) => (
-            right.resolvedTurn - left.resolvedTurn
-            || right.lastAdvancedTurn - left.lastAdvancedTurn
-        ))
-        .slice(0, resolvedLimit);
+    // `maxThreads` and `maxResolved` remain accepted for old callers, but are
+    // deliberately not applied to durable state.  A bounded renderer is the
+    // only place a display budget is allowed to hide a thread.
+    void maxThreads;
+    void maxResolved;
+    const dormant = allThreads.filter((thread) => thread.stage === 'dormant');
     return {
         version: 6,
         chatId: cleanText(chatId || source.chatId, 180),
         turn,
         lastTick: normalizeTick(source.lastTick, turn),
         lastSource: normalizeSourceRef(source.lastSource),
-        threads: [...active, ...dormant, ...resolved],
+        threads: allThreads,
         world: normalizeWorldState(source.world, { turn }),
         scenarioPlan: normalizeScenarioPlan(source.scenarioPlan, { turn }),
         nextTurnInjection: normalizeNextTurnInjection(source.nextTurnInjection),
-        droppedCount: overflow.length,
+        droppedCount: 0,
         deferredCount: dormant.length,
         updatedAt: boundedInteger(source.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
     };
@@ -1386,6 +1373,32 @@ export function scheduleWorldLanes(value, {
             sourceThreads: item.sourceThreads,
         });
     }
+    for (const item of state.world.shadows?.enemies || []) {
+        addCandidate({
+            laneType: 'shadow_enemy', sourceId: item.id, label: item.name,
+            updatedTurn: item.updatedTurn, baseScore: 56,
+            dueScore: item.status === 'active' ? 10 : 0,
+            dueReason: item.summary || item.goal || item.lastChange,
+            knowledge: item.knowledge, sourceThreads: item.sourceThreads,
+        });
+    }
+    for (const item of state.world.shadows?.secrets || []) {
+        addCandidate({
+            laneType: 'shadow_secret', sourceId: item.id, label: item.title,
+            updatedTurn: item.updatedTurn, baseScore: 44,
+            dueScore: item.status === 'active' ? 8 : 0,
+            dueReason: item.summary || item.basis,
+            knowledge: item.knowledge, sourceThreads: item.sourceThreads,
+        });
+    }
+    for (const [key, value] of Object.entries(state.world.reputation || {})) {
+        if (!value || (!value.summary && !value.basis && Number(value.level) === 0)) continue;
+        addCandidate({
+            laneType: 'reputation', sourceId: `reputation:${key}`, label: `声誉：${key}`,
+            updatedTurn: value.updatedTurn, baseScore: 40 + Math.abs(Number(value.level) || 0) * 6,
+            dueReason: value.summary || value.basis, knowledge: 'observed',
+        });
+    }
 
     const sorted = candidates.sort((left, right) => (
         right.score - left.score
@@ -1424,6 +1437,10 @@ export function scheduleWorldLanes(value, {
         maxLanes: limit,
         factionSlots: factionLimit,
         environmentSlots: environmentLimit,
+        // Full normalized/sorted projection is read-only recall input.  The
+        // selected budget remains the Advance priority, never a filter that
+        // erases offscreen/due lanes before recall can inspect them.
+        candidates: clone(sorted),
         selected,
         receipts,
     };

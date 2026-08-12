@@ -126,13 +126,6 @@ const NARRATIVE_SECTION_SOURCE_SET = new Set([
     'designed_seed',
     'hypothesis',
 ]);
-// This capability is intentionally module-private.  Only rows emitted by the
-// bounded Markdown parser can use the first literal name occurrence for a
-// discovery anchor; JSON/legacy callers cannot self-declare that privilege.
-const NARRATIVE_FIRST_LITERAL_POLICY = Symbol('narrative_first_literal');
-const narrativeParsedRows = new WeakSet();
-const narrativeFirstLiteralProofBatches = new Map();
-let narrativeFirstLiteralProofSequence = 0;
 const MODULE_SET = new Set(ACTOR_PROFILE_MODULES);
 
 function clone(value) {
@@ -146,39 +139,6 @@ function cleanText(value, limit = 500) {
 function narrativeText(value, limit = 4000) {
     const text = cleanText(value, limit);
     return text && !PROFILE_PLACEHOLDER_RE.test(text) ? text : '';
-}
-
-function canonicalNarrativeDiscoverySourceRef(value) {
-    if (!isRecord(value)) return null;
-    const index = Number.isInteger(value.logicalIndex)
-        ? value.logicalIndex
-        : value.index;
-    const generationSerial = Number.isInteger(value.generationSerial)
-        ? value.generationSerial
-        : value.generation;
-    const sourceRef = {
-        chatId: cleanText(value.chatId, 180),
-        messageId: cleanText(value.messageId, 180),
-        index: Number.isInteger(index) && index >= 0 ? index : -1,
-        swipeId: Number.isInteger(value.swipeId) && value.swipeId >= 0 ? value.swipeId : -1,
-        generationSerial: Number.isInteger(generationSerial) && generationSerial >= 0
-            ? generationSerial
-            : -1,
-        generationId: cleanText(value.generationId, 180),
-        generationType: cleanText(value.generationType, 80),
-        hash: cleanText(value.hash, 180),
-        contentHash: cleanText(value.contentHash || value.contentFingerprint, 180),
-        contentFingerprint: cleanText(value.contentFingerprint || value.contentHash, 180),
-        identityScopeId: cleanText(value.identityScopeId, 300),
-        scopeDigest: cleanText(value.scopeDigest, 180),
-    };
-    return Object.values(sourceRef).every((entry) => entry !== '' && entry !== -1)
-        ? sourceRef
-        : null;
-}
-
-function acceptedNarrativeDigest(value) {
-    return `accepted-narrative-v1:${fingerprint(String(value || ''))}`;
 }
 
 function narrativeSection(value, key, { modelAuthored = false } = {}) {
@@ -208,9 +168,10 @@ function normalizeNarrativeSections(value, options = {}) {
 function narrativeSectionsReady(profile) {
     if (profile?.profileFormat !== 'narrative-v1') return false;
     const sections = profile.narrativeSections || {};
-    return ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.every((key) => (
+    return ACTOR_PROFILE_NARRATIVE_SECTION_KEYS
+        .filter((key) => key !== 'physiology')
+        .every((key) => (
         Boolean(narrativeText(sections[key]?.text, 4000))
-        && sections[key]?.title === ACTOR_PROFILE_NARRATIVE_TITLES[key]
         && NARRATIVE_SECTION_SOURCE_SET.has(sections[key]?.source)
     ));
 }
@@ -2443,13 +2404,14 @@ function actorProfilePromptContext(candidate) {
 }
 
 function actorProfileFieldGuide(candidate) {
+    const physiology = modeOf(candidate?.completionMode) === 'full_adult'
+        ? '生理档案已启用：写稳定、客观且符合物种的信息；不适用时写明原因。'
+        : '生理信息按人物和物种的实际适用性填写。';
     return [
-        '每人一个自然中文档案块：标题为【人物档案：姓名】。已登记目标另写 ActorRef：精确 actorId；新人物只写标题姓名。',
-        '每块都必须有七个非空段落：【人物信息】【生理特征】【性格特征】【过往经历】【当前状态】【关系与动机】【知识、能力与资源】。',
-        '段落可以是数句自然中文，不要 JSON、数组、技术 flag、来源字段或字段表。标题顺序可变；不要替玩家写行动、感受、同意或世界结果。',
-        modeOf(candidate?.completionMode) === 'full_adult'
-            ? '生理特征仅写长期稳定且符合物种的客观身体信息；确实不适用时解释原因。'
-            : '生理特征写适用于当前物种的长期稳定描述。',
+        '每人一个自然中文档案块，标题为【人物档案：姓名】；已登记目标另写精确 ActorRef，新人物只写标题姓名。',
+        '自然段需覆盖人物信息、性格底色、经历、当前状态、关系与动机、知识能力与资源。可用近义标题、任意合理顺序或连贯段落，不要求逐字使用固定七标题。',
+        physiology,
+        '每项写非占位的自然中文完整句；不要 JSON、数组、技术 flag、来源字段或字段表；不要替玩家写行动、感受、同意或世界结果。',
     ].join('\n');
 }
 
@@ -2476,13 +2438,14 @@ export function buildActorProfileCompletionMessages(candidates, {
     // P2 must never ask a model for the former field table or provenance.
     const narrativeSystem = [
         '\u4f60\u53ea\u751f\u6210\u4eba\u7269\u6863\u6848\uff0c\u4e0d\u7ee7\u5199\u5267\u60c5\uff0c\u4e0d\u66ff\u73a9\u5bb6\u51b3\u5b9a\u884c\u52a8\u3001\u611f\u53d7\u3001\u540c\u610f\u6216\u4e16\u754c\u7ed3\u679c\u3002',
-        '\u6bcf\u4eba\u4e00\u4e2a\u5bbd\u677e\u4e2d\u6587\u6863\u6848\u5757\uff1a\u3010\u4eba\u7269\u6863\u6848\uff1a\u59d3\u540d\u3011\uff0c\u5fc5\u987b\u5177\u6709\u4e03\u6bb5\uff1a\u3010\u4eba\u7269\u4fe1\u606f\u3011\u3010\u751f\u7406\u7279\u5f81\u3011\u3010\u6027\u683c\u7279\u5f81\u3011\u3010\u8fc7\u5f80\u7ecf\u5386\u3011\u3010\u5f53\u524d\u72b6\u6001\u3011\u3010\u5173\u7cfb\u4e0e\u52a8\u673a\u3011\u3010\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90\u3011\u3002\u6bcf\u6bb5\u5199\u975e\u5360\u4f4d\u7684\u81ea\u7136\u4e2d\u6587\u6bb5\u843d\uff0c\u53ea\u5199\u957f\u671f\u7a33\u5b9a\u4fe1\u606f\uff0c\u4e0d\u8981 JSON\u3001\u6570\u7ec4\u3001\u6280\u672f\u6807\u8bb0\u6216\u6765\u6e90\u5b57\u6bb5\u3002',
-        '\u5df2\u767b\u8bb0\u4eba\u7269\u5728\u540d\u79f0\u4e0b\u4e00\u884c\u5199 ActorRef\uff1a\u540e\u9762\u5fc5\u987b\u662f\u8f93\u5165\u4e2d\u8be5\u4eba\u7269\u7684\u771f\u5b9e\u7cbe\u786e actorId \u503c\uff1b\u4e0d\u5f97\u5199 actorId \u5b57\u9762\u6a21\u677f\u3002\u65b0\u4eba\u7269\u4e0d\u5199 ActorRef \u6216\u951a\u70b9\uff1b\u811a\u672c\u53ea\u7528\u6807\u9898\u539f\u59d3\u540d\u5728\u5df2\u63a5\u53d7\u6b63\u6587\u7684\u552f\u4e00\u7cbe\u786e\u51fa\u73b0\u6765\u6784\u9020\u672c\u5730\u951a\u70b9\u3002',
+        '\u6bcf\u4eba\u4e00\u4e2a\u5bbd\u677e\u4e2d\u6587\u6863\u6848\u5757\uff1a\u3010\u4eba\u7269\u6863\u6848\uff1a\u59d3\u540d\u3011\u3002\u7528\u81ea\u7136\u6bb5\u843d\u4ea4\u4ee3\u8eab\u4efd/\u5916\u8c8c\u3001\u751f\u7406\uff08\u542f\u7528\u65f6\uff09\u3001\u6027\u683c\u5e95\u8272\u3001\u7ecf\u5386\u3001\u5f53\u524d\u72b6\u6001\u3001\u5173\u7cfb\u4e0e\u52a8\u673a\u3001\u77e5\u8bc6/\u80fd\u529b/\u8d44\u6e90\u3002\u53ef\u7528\u5efa\u8bae\u6807\u9898\u6216\u540c\u4e49\u6807\u9898\uff0c\u4e0d\u9700\u9010\u5b57\u5e7f\u5b9a\u4e03\u4e2a\u6807\u9898\uff1b\u6bcf\u4e2a\u6838\u5fc3\u7ef4\u5ea6\u90fd\u5fc5\u987b\u6709\u975e\u5360\u4f4d\u7684\u81ea\u7136\u4e2d\u6587\u3002\u4e0d\u8981 JSON\u3001\u6570\u7ec4\u3001\u6280\u672f\u6807\u8bb0\u6216\u6765\u6e90\u5b57\u6bb5\u3002',
+        `\u5b57\u6bb5\u8bed\u4e49\u6307\u5357\uff08\u53ea\u653e\u4e00\u6b21\uff09\uff1a\n${batchFieldGuide}`,
+        '\u5df2\u767b\u8bb0\u4eba\u7269\u5728\u540d\u79f0\u4e0b\u4e00\u884c\u5199 ActorRef\uff1a\u540e\u9762\u5fc5\u987b\u662f\u8f93\u5165\u4e2d\u8be5\u4eba\u7269\u7684\u771f\u5b9e\u7cbe\u786e actorId \u503c\uff1b\u4e0d\u5f97\u5199 actorId \u5b57\u9762\u6a21\u677f\u3002\u65b0\u4eba\u7269\u4e0d\u5199 ActorRef \u6216\u951a\u70b9\uff1b\u6807\u9898\u59d3\u540d\u5fc5\u987b\u9010\u5b57\u590d\u7528\u5df2\u63a5\u53d7\u6b63\u6587\u4e2d\u81f3\u5c11\u4e00\u6b21\u51fa\u73b0\u7684\u975e\u6a21\u7cca\u539f\u59cb\u59d3\u540d\u8fde\u7eed\u5b50\u4e32\uff0c\u591a\u6b21\u51fa\u73b0\u65f6\u811a\u672c\u53d6\u7b2c\u4e00\u6b21\u3002\u4e0d\u5f97\u4f7f\u7528\u522b\u540d\u3001\u65b0\u53d6\u540d\u3001\u73a9\u5bb6\u4ee3\u79f0\u3001\u6cdb\u79f0\u6216\u65b0\u589e\u4eba\u7269\u3002',
         discovery.discoveryRetryOnly === true
             ? '\u8fd9\u662f\u5931\u8d25\u4eba\u7269\u5b50\u96c6\u66ff\u6362\uff1a\u4e0d\u5f97\u91cd\u65b0\u53d1\u73b0\u6b63\u6587\u4eba\u7269\u3002'
             : '\u4ec5\u4e3a\u771f\u6b63\u5728\u6b63\u6587\u4e2d\u51fa\u573a\u7684\u4eba\u7269\u5199\u6863\u3002',
         cleanList(validationFeedback, 16, 120).length
-            ? `\u4ec5\u91cd\u5199\u5931\u8d25\u4eba\u7269\u7684\u6574\u5f20\u4e03\u6bb5\u6863\u6848\uff1b\u56fa\u5b9a\u53cd\u9988\uff1a${cleanList(validationFeedback, 16, 120).join(', ')}`
+            ? `\u4ec5\u91cd\u5199\u5931\u4eba\u7269\u7684\u5b8c\u6574\u6863\u6848\uff1b\u56fa\u5b9a\u53cd\u9988\uff1a${cleanList(validationFeedback, 16, 120).join(', ')}`
             : '',
     ].filter(Boolean).join('\n\n');
     const narrativeUser = [
@@ -3264,15 +3227,6 @@ function normalizeProfileInsertCandidate(raw, repairs = null) {
         const rawSections = isRecord(normalizedRaw.narrativeSections)
             ? normalizedRaw.narrativeSections
             : {};
-        const unexpectedSection = Object.keys(rawSections).find((key) => (
-            !ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.includes(key)
-        ));
-        const invalidTitle = ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.find((key) => {
-            const supplied = rawSections[key];
-            return isRecord(supplied)
-                && supplied.title !== undefined
-                && supplied.title !== ACTOR_PROFILE_NARRATIVE_TITLES[key];
-        });
         return {
             profileFormat: 'narrative-v1',
             actorRef: {
@@ -3290,10 +3244,7 @@ function normalizeProfileInsertCandidate(raw, repairs = null) {
             narrativeSections: normalizeNarrativeSections(rawSections, { modelAuthored: true }),
             sources: {},
             __narrativeIdentityFailure: cleanText(normalizedRaw.__narrativeIdentityFailure, 120),
-            __narrativeParseFailure: cleanText(normalizedRaw.__narrativeParseFailure, 120)
-                || (unexpectedSection
-                    ? 'actor_profile.narrative_section_unknown'
-                    : (invalidTitle ? 'actor_profile.narrative_section_title_invalid' : '')),
+            __narrativeParseFailure: cleanText(normalizedRaw.__narrativeParseFailure, 120),
         };
     }
     const rawRef = isRecord(normalizedRaw.actorRef) ? normalizedRaw.actorRef
@@ -3705,7 +3656,10 @@ export function validateActorProfileInsertCandidate(candidate, context = {}) {
         }
         if (!actualActorId) missingFields.push('actorRef.actorId');
         if (!actualName) missingFields.push('actorRef.name');
-        for (const key of ACTOR_PROFILE_NARRATIVE_SECTION_KEYS) {
+        const requiredNarrativeKeys = ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.filter((key) => (
+            key !== 'physiology' || modeOf(context.completionMode) === 'full_adult'
+        ));
+        for (const key of requiredNarrativeKeys) {
             if (!narrativeText(sourceCandidate.narrativeSections?.[key]?.text, 4000)) {
                 missingFields.push(`narrativeSections.${key}`);
             }
@@ -4193,7 +4147,7 @@ function isVagueDiscoveryName(name) {
     return DISCOVERY_NAME_VAGUE_TERMS.has(compact);
 }
 
-export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative, policy = null) {
+export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative) {
     const name = String(candidateRef?.name || '').trim().slice(0, 160);
     const sourceAnchor = String(candidateRef?.sourceAnchor || '').trim().slice(0, 1200);
     const narrative = String(acceptedNarrative || '');
@@ -4211,26 +4165,14 @@ export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrat
     if (!sourceAnchor.includes(name)) {
         return failure('actor_profile.discovery_name_not_in_anchor');
     }
-    if (policy === NARRATIVE_FIRST_LITERAL_POLICY) {
-        if (sourceAnchor !== name) {
-            return failure('actor_profile.discovery_anchor_not_literal_name');
-        }
-        const offset = narrative.indexOf(name);
-        if (offset < 0) return failure('actor_profile.discovery_anchor_not_in_narrative');
-        return {
-            ok: true,
-            reason: '',
-            retryable: false,
-            offset,
-            name,
-            sourceAnchor,
-        };
+    if (narrative.indexOf(sourceAnchor) < 0) {
+        return failure('actor_profile.discovery_anchor_not_in_narrative');
     }
-    const offset = narrative.indexOf(sourceAnchor);
+    // The dossier title supplies an explicit literal name.  That name may
+    // naturally recur in prose: use its first offset only for deterministic
+    // ordering/ticket binding, never as a uniqueness gate.
+    const offset = narrative.indexOf(name);
     if (offset < 0) return failure('actor_profile.discovery_anchor_not_in_narrative');
-    if (narrative.indexOf(sourceAnchor, offset + 1) >= 0) {
-        return failure('actor_profile.discovery_anchor_duplicate_in_narrative');
-    }
     return {
         ok: true,
         reason: '',
@@ -4241,53 +4183,6 @@ export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrat
     };
 }
 
-function narrativeProofBatchMatchesContext(batch, context) {
-    const sourceRef = canonicalNarrativeDiscoverySourceRef(context?.sourceRef);
-    return Boolean(
-        sourceRef
-        && batch?.acceptedNarrativeDigest === acceptedNarrativeDigest(context?.acceptedNarrative)
-        && JSON.stringify(batch?.sourceRef) === JSON.stringify(sourceRef),
-    );
-}
-
-export function takeActorProfileDiscoveryAnchorPolicies(values, context = null) {
-    const entries = Array.isArray(values) ? values : [];
-    const batchIds = [...new Set(entries
-        .map((entry) => cleanText(entry?.__narrativeFirstLiteralBatchId, 180))
-        .filter(Boolean))];
-    const policies = new Map();
-    for (const batchId of batchIds) {
-        const batch = narrativeFirstLiteralProofBatches.get(batchId);
-        // Take and remove the complete batch before any match. A replay, stale
-        // target or partial failure can never retain an unused sibling proof.
-        narrativeFirstLiteralProofBatches.delete(batchId);
-        if (!batch || !narrativeProofBatchMatchesContext(batch, context)) continue;
-        const consumedProofs = new Set();
-        for (const entry of entries) {
-            if (cleanText(entry?.__narrativeFirstLiteralBatchId, 180) !== batchId) continue;
-            const proof = cleanText(entry?.__narrativeFirstLiteralProof, 180);
-            const expected = batch.proofs.get(proof);
-            if (
-                !expected
-                || consumedProofs.has(proof)
-                || expected.name !== String(entry?.candidateRef?.name || '').trim().slice(0, 160)
-                || expected.sourceAnchor !== String(entry?.candidateRef?.sourceAnchor || '').trim().slice(0, 1200)
-                || expected.offset !== Number(entry?.offset)
-            ) continue;
-            consumedProofs.add(proof);
-            policies.set(entry, NARRATIVE_FIRST_LITERAL_POLICY);
-        }
-    }
-    return policies;
-}
-
-export function discardActorProfileDiscoveryProofBatches(value) {
-    for (const batchId of new Set(Array.isArray(value) ? value : [value])) {
-        const key = cleanText(batchId, 180);
-        if (key) narrativeFirstLiteralProofBatches.delete(key);
-    }
-}
-
 const NARRATIVE_SECTION_HEADER_KEYS = Object.freeze(Object.fromEntries(
     ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.map((key) => [
         ACTOR_PROFILE_NARRATIVE_TITLES[key],
@@ -4295,8 +4190,39 @@ const NARRATIVE_SECTION_HEADER_KEYS = Object.freeze(Object.fromEntries(
     ]),
 ));
 
+// These are semantic aliases, not a second schema.  The model may use a
+// familiar natural heading; storage still normalizes it into the one dossier
+// shape owned by the ledger.
+const NARRATIVE_SECTION_HEADER_ALIASES = Object.freeze({
+    '\u8eab\u4efd': 'person', '\u57fa\u672c\u8d44\u6599': 'person', '\u5916\u8c8c': 'person',
+    '\u751f\u7406': 'physiology', '\u4f53\u5f81': 'physiology',
+    '\u6027\u683c': 'personality', '\u4e2a\u6027': 'personality', '\u5e95\u8272': 'personality',
+    '\u80cc\u666f': 'history', '\u5c65\u5386': 'history', '\u7ecf\u5386': 'history',
+    '\u73b0\u72b6': 'currentState', '\u8fd1\u51b5': 'currentState', '\u72b6\u6001': 'currentState',
+    '\u5173\u7cfb': 'relationshipsMotives', '\u52a8\u673a': 'relationshipsMotives', '\u76ee\u7684': 'relationshipsMotives',
+    '\u77e5\u8bc6': 'knowledgeCapabilitiesResources', '\u80fd\u529b': 'knowledgeCapabilitiesResources', '\u8d44\u6e90': 'knowledgeCapabilitiesResources',
+});
+
 function narrativeHeaderKey(value) {
-    return NARRATIVE_SECTION_HEADER_KEYS[cleanText(value, 120)] || '';
+    const label = cleanText(value, 120);
+    return NARRATIVE_SECTION_HEADER_KEYS[label]
+        || NARRATIVE_SECTION_HEADER_ALIASES[label.toLowerCase()]
+        || '';
+}
+
+function narrativeParagraphSection(text, fallback) {
+    const value = cleanText(text, 4000);
+    const rules = [
+        [/\u751f\u7406|\u4f53\u5f81|\u8eab\u4f53|\u5916\u5f62/u, 'physiology'],
+        [/\u6027\u683c|\u4e2a\u6027|\u5e95\u8272|\u4e60\u60ef|\u53cd\u5e94/u, 'personality'],
+        [/\u8fc7\u53bb|\u7ecf\u5386|\u5c65\u5386|\u80cc\u666f|\u66fe\u7ecf/u, 'history'],
+        [/\u73b0\u5728|\u5f53\u524d|\u8fd1\u671f|\u6b63\u5728|\u72b6\u6001/u, 'currentState'],
+        [/\u5173\u7cfb|\u52a8\u673a|\u76ee\u7684|\u6b32\u671b|\u5728\u610f/u, 'relationshipsMotives'],
+        [/\u77e5\u9053|\u64c5\u957f|\u80fd\u529b|\u8d44\u6e90|\u4f1a\u4ec0\u4e48/u, 'knowledgeCapabilitiesResources'],
+        [/\u8eab\u4efd|\u540d\u5b57|\u5916\u8c8c|\u804c\u4e1a|\u79cd\u65cf/u, 'person'],
+    ];
+    const matched = rules.find(([pattern]) => pattern.test(value))?.[1];
+    return matched || '';
 }
 
 function parseNarrativeProfileBlocks(output, discoveryContext = null) {
@@ -4314,34 +4240,55 @@ function parseNarrativeProfileBlocks(output, discoveryContext = null) {
         const body = source.slice(bodyStart, bodyEnd);
         const actorRefLine = body.match(/(?:^|\n)\s*(?:ActorRef|actor[_ ]?ref)\s*[：:]\s*([^\n]+)/iu);
         const sections = {};
+        const additionalParagraphs = [];
         let parseFailure = '';
-        // Accept markdown decoration and either colon, but keep the seven
-        // canonical Chinese section titles exact. Unknown/duplicate sections
-        // are not a repairable synonym: they fail the whole candidate.
+        // Bracketed headings mark real dossier sections.  A bare colon is a
+        // boundary only for a known semantic alias, so ordinary prose remains
+        // ordinary prose instead of becoming a malformed table row.
         const headerMatches = [...body.matchAll(/(?:^|\n)\s*(?:#+\s*)?(?:【\s*([^】\n]+)\s*】\s*(?:[：:])?|([^\n：:]{2,80})\s*[：:])/gu)];
-        // Bracketed headings are explicit structure and therefore unknown
-        // labels fail closed. A bare colon is common natural prose, so it is a
-        // section boundary only when it is one of the fixed seven labels.
         const headers = headerMatches.filter((header) => (
             Boolean(header[1]) || Boolean(narrativeHeaderKey(header[2]))
         ));
+        const unheaded = narrativeText(body.slice(0, headers[0]?.index ?? body.length), 4000);
+        if (unheaded) additionalParagraphs.push(unheaded);
         for (let headerIndex = 0; headerIndex < headers.length; headerIndex += 1) {
             const header = headers[headerIndex];
             const label = cleanText(header[1] || header[2], 120);
             if (/^actor[_ ]?ref$/iu.test(label)) continue;
             const section = narrativeHeaderKey(label);
-            if (!section) {
-                parseFailure = 'actor_profile.narrative_section_unknown';
-                break;
-            }
-            if (sections[section]) {
-                parseFailure = 'actor_profile.narrative_section_duplicate';
-                break;
-            }
             const start = header.index + header[0].length;
             const end = headerIndex + 1 < headers.length ? headers[headerIndex + 1].index : body.length;
             const text = narrativeText(body.slice(start, end), 4000);
-            if (text) sections[section] = { text, source: 'hypothesis', evidence: [] };
+            if (!text) continue;
+            if (!section) {
+                additionalParagraphs.push(text);
+            } else if (sections[section]) {
+                sections[section].text = narrativeText(`${sections[section].text}\n\n${text}`, 4000);
+            } else {
+                sections[section] = { text, source: 'hypothesis', evidence: [] };
+            }
+        }
+        if (additionalParagraphs.length) {
+            const fallback = ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.filter((key) => (
+                key !== 'physiology' && !sections[key]
+            ));
+            const paragraphs = additionalParagraphs.flatMap((value) => (
+                String(value).split(/\n\s*\n+/u)
+            )).map((value) => narrativeText(value, 4000)).filter(Boolean);
+            for (const text of paragraphs) {
+                const section = narrativeParagraphSection(text, fallback);
+                if (!section) {
+                    sections.person = sections.person
+                        ? { ...sections.person, text: narrativeText(`${sections.person.text}\n\n${text}`, 4000) }
+                        : { text, source: 'hypothesis', evidence: [] };
+                    continue;
+                }
+                const indexOfSection = fallback.indexOf(section);
+                if (indexOfSection >= 0) fallback.splice(indexOfSection, 1);
+                sections[section] = sections[section]
+                    ? { ...sections[section], text: narrativeText(`${sections[section].text}\n\n${text}`, 4000) }
+                    : { text, source: 'hypothesis', evidence: [] };
+            }
         }
         const actorId = cleanText(actorRefLine?.[1], 120)
             .replace(/^(?:actorId\s*[=:]\s*)/iu, '')
@@ -4362,7 +4309,6 @@ function parseNarrativeProfileBlocks(output, discoveryContext = null) {
                 ? ''
                 : 'actor_profile.discovery_name_missing_from_narrative',
         };
-        narrativeParsedRows.add(row);
         rows.push(row);
     }
     return rows;
@@ -4426,7 +4372,6 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
     const failureById = new Map();
     const unexpected = [];
     const discoveries = [];
-    let narrativeProofBatch = null;
     const unresolved = [];
     const seen = new Set();
     const seenDiscoveryKeys = new Set();
@@ -4438,7 +4383,7 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
                 candidateRef: { name: cleanText(raw?.candidateRef?.name || raw?.actorRef?.name, 160), sourceAnchor: '' },
                 reason: normalized.__narrativeIdentityFailure,
                 missingFields: [],
-                retryable: true,
+                retryable: false,
             });
             continue;
         }
@@ -4461,16 +4406,9 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
                 continue;
             }
             seenDiscoveryKeys.add(discoveryKey);
-            const narrativeSourceRef = canonicalNarrativeDiscoverySourceRef(
-                options.discoveryContext?.sourceRef,
-            );
-            const discoveryPolicy = narrativeParsedRows.has(raw) && narrativeSourceRef
-                ? NARRATIVE_FIRST_LITERAL_POLICY
-                : null;
             const anchorCheck = validateActorProfileDiscoveryAnchor(
                 { name: candidateName, sourceAnchor },
                 options.discoveryContext?.acceptedNarrative,
-                discoveryPolicy,
             );
             if (!anchorCheck.ok) {
                 unresolved.push({
@@ -4510,38 +4448,6 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
                 repairs: [...new Set([...parsed.repairs, ...local.repairs])],
                 resolutions: validation.resolutions || [],
             };
-            if (discoveryPolicy === NARRATIVE_FIRST_LITERAL_POLICY) {
-                if (!narrativeProofBatch) {
-                    const batchId = `NFB-${++narrativeFirstLiteralProofSequence}-${fingerprint(JSON.stringify([
-                        acceptedNarrativeDigest(options.discoveryContext?.acceptedNarrative),
-                        narrativeSourceRef,
-                        Date.now(),
-                    ])).slice(0, 24)}`;
-                    narrativeProofBatch = {
-                        batchId,
-                        acceptedNarrativeDigest: acceptedNarrativeDigest(
-                            options.discoveryContext?.acceptedNarrative,
-                        ),
-                        sourceRef: narrativeSourceRef,
-                        proofs: new Map(),
-                    };
-                    narrativeFirstLiteralProofBatches.set(batchId, narrativeProofBatch);
-                }
-                const proof = `NFD-${++narrativeFirstLiteralProofSequence}-${fingerprint(JSON.stringify([
-                    narrativeProofBatch.batchId,
-                    candidateName,
-                    sourceAnchor,
-                    anchorCheck.offset,
-                    Date.now(),
-                ])).slice(0, 24)}`;
-                narrativeProofBatch.proofs.set(proof, {
-                    name: candidateName,
-                    sourceAnchor,
-                    offset: anchorCheck.offset,
-                });
-                discovery.__narrativeFirstLiteralProof = proof;
-                discovery.__narrativeFirstLiteralBatchId = narrativeProofBatch.batchId;
-            }
             discoveries.push(discovery);
             continue;
         }
@@ -4651,7 +4557,6 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
         explicitEmpty: parsed.explicitEmpty === true,
         repairs: parsed.repairs,
         batchMeta: parsed.batchMeta,
-        narrativeProofBatchId: narrativeProofBatch?.batchId || '',
     };
 }
 

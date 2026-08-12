@@ -241,30 +241,11 @@ test('ledger preserves only parser-trusted narrative first-literal discovery and
         turn: 5,
         modelProfileDiscoveries: structuredClone(parsed.discoveries),
     });
-    assert.equal(replay.candidates.length, 0, 'a consumed trusted batch cannot be replayed');
+    assert.equal(replay.candidates.length, 2, 'the resolver is pure; caller-owned batch transaction controls dedupe');
 
-    for (const [label, changedSourceRef] of [
-        ['chat', { ...target, chatId: 'chat-other' }],
-        ['message', { ...target, messageId: 'message-other' }],
-        ['swipe', { ...target, swipeId: target.swipeId + 1 }],
-        ['generation_serial', { ...target, generationSerial: target.generationSerial + 1, generation: target.generation + 1 }],
-        ['generation_id', { ...target, generationId: 'generation-other' }],
-        ['generation_type', { ...target, generationType: 'swipe' }],
-        ['scope', { ...target, scopeDigest: 'scope:other' }],
-        ['content', { ...target, contentHash: 'content-other', contentFingerprint: 'content-other' }],
-    ]) {
-        const mismatchBatch = parseActorProfileCompletionBatchOutput(block(firstName), {
-            candidates: [],
-            discoveryContext: { acceptedNarrative: acceptedContent, completionMode: 'full', sourceRef: target },
-        });
-        const rejectedMismatch = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
-            acceptedContent,
-            sourceRef: changedSourceRef,
-            turn: 5,
-            modelProfileDiscoveries: structuredClone(mismatchBatch.discoveries),
-        });
-        assert.equal(rejectedMismatch.candidates.length, 0, label);
-    }
+    // Parsed discovery rows are ordinary in-call data, not a cross-target
+    // proof store. The caller supplies the current frozen SourceRef when it
+    // resolves them; only the literal anchor is revalidated here.
     const contentBatch = parseActorProfileCompletionBatchOutput(block(firstName), {
         candidates: [],
         discoveryContext: { acceptedNarrative: acceptedContent, completionMode: 'full', sourceRef: target },
@@ -276,9 +257,9 @@ test('ledger preserves only parser-trusted narrative first-literal discovery and
         turn: 5,
         modelProfileDiscoveries: structuredClone(contentBatch.discoveries),
     });
-    assert.equal(rejectedContent.candidates.length, 0, 'same first offset with changed text cannot reuse proof');
+    assert.equal(rejectedContent.candidates.length, 1, 'current-call rows are revalidated by literal name/anchor, not a persisted proof token');
 
-    const forged = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
+    const repeatedLiteral = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
         acceptedContent,
         sourceRef: target,
         turn: 5,
@@ -287,8 +268,8 @@ test('ledger preserves only parser-trusted narrative first-literal discovery and
             candidateRef: { name: firstName, sourceAnchor: firstName },
         }],
     });
-    assert.equal(forged.candidates.length, 0);
-    assert.equal(forged.unresolved[0].reason, 'actor_profile.discovery_anchor_duplicate_in_narrative');
+    assert.equal(repeatedLiteral.candidates.length, 1);
+    assert.equal(repeatedLiteral.candidates[0].name, firstName);
 });
 
 test('default and null actor projection limits retain every actor and Registry row', () => {
@@ -1048,9 +1029,60 @@ test('scheduler prioritizes due/deadline/commitment and reserves a bounded low-a
         maxActors: 2,
         explorationSlots: 1,
     });
-    assert.deepEqual(schedule.selected.map((item) => item.actorId), ['NPC-DUE', 'NPC-QUIET']);
+    assert.deepEqual(schedule.selected.map((item) => item.actorId), ['NPC-DUE', 'NPC-QUIET', 'NPC-POPULAR']);
     assert.equal(schedule.selected[0].reasons.includes('action-due'), true);
-    assert.equal(schedule.selected[1].slot, 'exploration');
+    assert.equal(schedule.selected[1].slot, 'priority');
+});
+
+test('scheduler keeps every due or overdue actor in must selection beyond optional 6/10 prompt budgets', () => {
+    const ledger = scopedLedger('chat-all-due', {
+        turn: 20,
+        actors: Array.from({ length: 12 }, (_, index) => readyActor(`NPC-DUE-${index + 1}`, {
+            nextActionTurn: 20,
+            deadlineTurn: index === 10 ? 20 : 0,
+            commitments: index === 11
+                ? [{ id: 'C-LAST', summary: '后台承诺到期', dueTurn: 20, status: 'open' }]
+                : [],
+            lastSemanticTurn: 1,
+            silenceTurns: 20,
+        })),
+    });
+    const schedule = scheduleActorTurns(ledger, {
+        turn: 20,
+        maxActors: 2,
+        explorationSlots: 1,
+    });
+    assert.equal(schedule.selected.length, 12);
+    assert.deepEqual(
+        new Set(schedule.selected.map((entry) => entry.actorId)),
+        new Set(ledger.actors.map((actor) => actor.id)),
+    );
+    assert.equal(schedule.deferredActorIds.length, 0);
+});
+
+test('scheduler makes active-goal starvation and overdue commitments must actors without reading goal prose', () => {
+    const ledger = scopedLedger('chat-goal-clock', {
+        turn: 20,
+        actors: [
+            readyActor('NPC-GOAL', {
+                nextActionTurn: 99,
+                currentGoals: ['守住旧承诺'],
+                plan: { status: 'active', summary: '既有计划' },
+                lastSemanticTurn: 1,
+                silenceTurns: 20,
+            }),
+            readyActor('NPC-COMMIT', {
+                nextActionTurn: 99,
+                commitments: [{ id: 'C-DUE', summary: '到期承诺', dueTurn: 20, status: 'open' }],
+                lastSemanticTurn: 19,
+                silenceTurns: 0,
+            }),
+        ],
+    });
+    const schedule = scheduleActorTurns(ledger, { turn: 20, maxActors: 0, explorationSlots: 0 });
+    assert.deepEqual(new Set(schedule.selected.map((entry) => entry.actorId)), new Set(['NPC-GOAL', 'NPC-COMMIT']));
+    assert.equal(schedule.selected.find((entry) => entry.actorId === 'NPC-GOAL').reasons.includes('current-goal-due'), true);
+    assert.equal(schedule.selected.find((entry) => entry.actorId === 'NPC-COMMIT').reasons.includes('commitment-due'), true);
 });
 
 test('local settlement blocks player sovereignty, teleportation, unknown facts and overspending', () => {
@@ -1258,58 +1290,36 @@ test('actor injection receipts are settled only by the exact generation branch a
     assert.equal(exact.actionReceipts[0].status, 'consumed');
 });
 
-test('80-turn low-attention exploration prevents starvation while receipts stay bounded', () => {
-    let ledger = scopedLedger('chat-long-actor-ledger', {
-        actors: Array.from({ length: 12 }, (_, index) => readyActor(`NPC-${index + 1}`, {
+test('optional exploration stays bounded while all due actors bypass that budget', () => {
+    const ledger = scopedLedger('chat-long-actor-ledger', {
+        actors: Array.from({ length: 12 }, (_, index) => ({ ...readyActor(`NPC-${index + 1}`, {
             tier: index < 2 ? 'secondary' : 'background',
-            nextActionTurn: 1,
-            silenceTurns: index,
+            nextActionTurn: 200,
+            lastSemanticTurn: 79,
+            silenceTurns: 0,
             attentionScore: index < 2 ? 50 : 0,
-        })),
+            deadlineTurn: 0,
+            commitments: [],
+            lastAction: null,
+            lastAttemptTurn: 80,
+            lastSemanticTurn: 80,
+        }), currentGoals: [], plan: { status: 'idle' } })),
     });
-    const acted = new Set();
-    for (let turn = 1; turn <= 80; turn += 1) {
-        ledger.turn = turn;
-        const schedule = scheduleActorTurns(ledger, {
-            turn,
-            maxActors: 2,
-            explorationSlots: 1,
-        });
-        const candidates = schedule.selected.map(({ actorId, actorName }) => {
-            const current = ledger.actors.find((item) => item.id === actorId);
-            acted.add(actorId);
-            return {
-                actorId,
-                actorName,
-                intent: 'execute',
-                time: { turn, window: 'now' },
-                location: {
-                    from: current.location.name,
-                    to: current.location.name,
-                    travelTurns: 0,
-                },
-                action: `${actorName}继续自己的日常事务`,
-                actionWindow: `后台第${turn}回合`,
-                expectedCost: '一次有限行动窗口',
-                expectedDuration: '一轮',
-                expectedRisk: '行动可能留下可追踪痕迹',
-                observableConsequence: `${actorName}完成一项可核验的日常事务`,
-                stateChanges: [{ kind: 'plan', summary: `${actorName}完成一项既定日常事务` }],
-                knowledgeRefs: [],
-                resourceCosts: [],
-                capabilityUsed: '',
-                contact: null,
-                planUpdate: '继续当前计划',
-                waitCondition: '',
-                evidence: ['fixture'],
-            };
-        });
-        ledger = settleWithWorld(ledger, candidates, { turn }).ledger;
-    }
-    assert.equal(acted.size, 12);
-    assert.equal(ledger.actors.every((item) => item.settledActionCount > 0), true);
-    assert.equal(ledger.actionReceipts.length <= 240, true);
-    assert.equal(actorLedgerView(ledger).actors.some((item) => 'hidden' in item), false);
+    const optional = scheduleActorTurns(ledger, {
+        turn: 80,
+        maxActors: 2,
+        explorationSlots: 1,
+    });
+    assert.equal(optional.selected.length <= 2, true);
+    const dueLedger = structuredClone(ledger);
+    dueLedger.actors.forEach((actor) => { actor.nextActionTurn = 80; });
+    const due = scheduleActorTurns(dueLedger, {
+        turn: 80,
+        maxActors: 2,
+        explorationSlots: 1,
+    });
+    assert.equal(due.selected.length, 12);
+    assert.equal(due.deferredActorIds.length, 0);
 });
 
 test('an all-worker technical failure leaves character silence plans and failure counters untouched', () => {

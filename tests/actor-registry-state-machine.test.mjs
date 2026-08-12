@@ -23,14 +23,18 @@ function sourceRef(chatId, index = 1, cardId = 'card-main') {
     return {
         chatId,
         messageId: `message-${index}`,
+        logicalIndex: index,
         index,
         swipeId: 0,
         generation: index,
+        generationSerial: index,
         generationId: `generation-${index}`,
         generationType: 'normal',
         identityScopeId: `${chatId}|character:${cardId}`,
         scopeDigest: `scope:${chatId}|character:${cardId}`,
         hash: `hash-${chatId}-${index}`,
+        contentHash: `hash-${chatId}-${index}`,
+        contentFingerprint: `hash-${chatId}-${index}`,
     };
 }
 
@@ -545,7 +549,7 @@ test('current Registry blocks compatibility promotion of unregistered ledger and
     assert.deepEqual(Object.keys(preserved.actorRegistry.registered), ['已登记人物']);
 });
 
-test('production call order is candidate upsert, copy/delete promotion, readback, then profiles', async () => {
+test('production builds Registry/promotion in the P1 working ledger, then commits it only with the profile group', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const profileStart = source.indexOf('async function runActorProfileTarget');
     const continuityStart = source.indexOf('async function runContinuityTarget');
@@ -554,12 +558,10 @@ test('production call order is candidate upsert, copy/delete promotion, readback
     const discoveryAt = runtime.indexOf('discoverActorsFromTurnSources');
     const candidateAt = runtime.indexOf('runActorRegistryUpsert');
     const promotionAt = runtime.indexOf('promoteActorCandidatesToRegistry');
-    const promotionSelectionAt = runtime.indexOf('actorCandidatesForRegistryPromotion');
-    const persistAt = runtime.indexOf('await persistActorRegistryForTurn');
     const profileAt = runtime.indexOf('await completeActorProfilesForTurn');
     assert.ok(discoveryAt >= 0 && candidateAt > discoveryAt && promotionAt > candidateAt);
-    assert.ok(promotionSelectionAt > promotionAt && persistAt > promotionSelectionAt);
-    assert.ok(persistAt > promotionAt && profileAt > persistAt);
+    assert.ok(profileAt > promotionAt);
+    assert.equal(runtime.includes('persistActorRegistryForTurn'), false);
 
     const continuityEnd = source.indexOf('async function confirmDangerousAction', continuityStart);
     assert.ok(continuityEnd > continuityStart);
@@ -568,7 +570,6 @@ test('production call order is candidate upsert, copy/delete promotion, readback
         'discoverActorsFromTurnSources',
         'runActorRegistryUpsert',
         'promoteActorCandidatesToRegistry',
-        'persistActorRegistryForTurn',
         'completeActorProfilesForTurn',
     ]) {
         assert.equal(continuityRuntime.includes(p1Step), false, `P3 must not repeat P1 step ${p1Step}`);

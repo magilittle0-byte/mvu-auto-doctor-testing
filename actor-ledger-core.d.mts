@@ -1,14 +1,18 @@
 export interface ActorLedgerSourceRef {
     chatId: string;
     messageId: string;
+    logicalIndex: number;
     index: number;
     swipeId: number;
     generation: number;
+    generationSerial: number;
     generationId: string;
     generationType: string;
     identityScopeId: string;
     scopeDigest: string;
     hash: string;
+    contentHash: string;
+    contentFingerprint: string;
     compatibilityOnly?: boolean;
 }
 
@@ -226,7 +230,11 @@ export function emptyActorLedger(chatId?: string): ActorLedger;
 export function emptyActorRegistry(chatId?: string, identityScopeId?: string, scopeDigest?: string): ActorRegistry;
 export function explicitDelimitedActorAliases(value: unknown): string[];
 export function resolveActorRegistryTargetName(value: unknown): string;
-export function acceptedActorSourceRefMatches(value: unknown, expected: unknown): boolean;
+export function acceptedActorSourceRefMatches(
+    value: unknown,
+    expected: unknown,
+    options?: { allowLegacyReadOnly?: boolean },
+): boolean;
 export function normalizeActorRegistry(
     value: unknown,
     options?: {

@@ -23,6 +23,7 @@ import {
     selectActorProfileCompletionCandidates,
     setActorProfileV6Lock,
     validateActorProfileInsertCandidate,
+    validateActorProfileDiscoveryAnchor,
 } from '../actor-profile-v6-core.mjs';
 import {
     actorProfileCommitMatchesLedger,
@@ -478,7 +479,8 @@ test('database-style profile generation accepts loose structure and completes th
     assert.equal(Object.hasOwn(candidates[0], 'stateFacts'), false);
     const messages = buildActorProfileCompletionMessages(candidates, { evidenceText });
     assert.match(messages[0].content, /【人物档案：姓名】/u);
-    assert.match(messages[0].content, /【人物信息】【生理特征】【性格特征】/u);
+    assert.match(messages[0].content, /身份\/外貌、生理（启用时）、性格底色、经历、当前状态、关系与动机、知识\/能力\/资源/u);
+    assert.match(messages[0].content, /不要求逐字使用固定七标题/u);
     assert.match(messages[0].content, /不要 JSON、数组、技术标记或来源字段/u);
     assert.doesNotMatch(messages[0].content, /candidateRef|sourceAnchor|characterCreationTicket|coverageState/u);
     assert.doesNotMatch(messages[1].content, /profileSummary|socialStyle|copingStyle|obstacles|costs|alternatives|candidateRef/u);
@@ -697,8 +699,8 @@ test('database-style profile generation accepts loose structure and completes th
     });
     assert.equal(adultCandidates.length, 1, 'a completed core dossier must still retry its empty body table');
     const adultMessages = buildActorProfileCompletionMessages(adultCandidates, { evidenceText });
-    assert.match(adultMessages[0].content, /【生理特征】/u);
-    assert.match(adultMessages[0].content, /长期稳定/u);
+    assert.match(adultMessages[0].content, /生理档案已启用/u);
+    assert.match(adultMessages[0].content, /稳定、客观/u);
     assert.doesNotMatch(adultMessages[0].content, /reproductiveAnatomy|secretionCycle|fertility/u);
     const adultPatch = structuredClone(patch);
     adultPatch.physiology = {
@@ -1360,6 +1362,14 @@ test('narrative first-literal discovery remains parser-only and fail-closed for 
     });
     assert.equal(missing.discoveries.length, 0);
     assert.equal(missing.unresolved[0].reason, 'actor_profile.discovery_name_missing_from_narrative');
+    assert.equal(missing.unresolved[0].identityReplacement, undefined);
+
+    const missingWithBadSection = parseActorProfileCompletionBatchOutput([
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a\u5357\u6865\u3011`,
+        ...sectionKeys.slice(1).map((title) => `\u3010${title}\u3011\u8fd9\u662f\u5b8c\u6574\u81ea\u7136\u4e2d\u6587\u6bb5\u843d\u3002`),
+    ].join('\n'), { candidates: [], discoveryContext: context });
+    assert.equal(missingWithBadSection.unresolved[0].reason, 'actor_profile.discovery_name_missing_from_narrative');
+    assert.equal(missingWithBadSection.unresolved[0].identityReplacement, undefined);
 
     const vague = parseActorProfileCompletionBatchOutput(narrativeBlock('\u4ed6'), {
         candidates: [], discoveryContext: { acceptedNarrative: '\u4ed6\u7ad9\u5728\u95e8\u8fb9\u3002', completionMode: 'full' },
@@ -1381,14 +1391,21 @@ test('narrative first-literal discovery remains parser-only and fail-closed for 
             'relationshipsMotives', 'knowledgeCapabilitiesResources',
         ].map((key) => [key, { text: '\u5b8c\u6574\u7684\u4e2d\u6587\u53d9\u4e8b\u6bb5\u843d\u3002' }])),
     };
-    const forged = parseActorProfileCompletionBatchOutput(JSON.stringify(forgedJson), {
+    const repeatedLiteral = parseActorProfileCompletionBatchOutput(JSON.stringify(forgedJson), {
         candidates: [], discoveryContext: context,
     });
-    assert.equal(forged.discoveries.length, 0);
-    assert.equal(forged.unresolved[0].reason, 'actor_profile.discovery_anchor_duplicate_in_narrative');
+    assert.equal(repeatedLiteral.discoveries.length, 1);
+    assert.equal(repeatedLiteral.discoveries[0].offset, acceptedNarrative.indexOf(name));
+
+    const forgedAnchor = validateActorProfileDiscoveryAnchor({
+        name,
+        sourceAnchor: `${name}在一座不存在的钟楼内策划行动。`,
+    }, acceptedNarrative);
+    assert.equal(forgedAnchor.ok, false);
+    assert.equal(forgedAnchor.reason, 'actor_profile.discovery_anchor_not_in_narrative');
 });
 
-test('narrative-v1 rejects unknown or duplicate section headings and strips model-claimed provenance', () => {
+test('narrative-v1 keeps unknown or duplicate headings as loose additional prose and strips model-claimed provenance', () => {
     const actorRef = { actorId: 'NPC-NARRATIVE-GATE', name: '\u6797\u5cb8' };
     const seven = [
         ['\u4eba\u7269\u4fe1\u606f', '\u4ed6\u662f\u4e00\u540d\u8d1f\u8d23\u770b\u5b88\u54e8\u4f4d\u7684\u4eba\u3002'],
@@ -1412,10 +1429,8 @@ test('narrative-v1 rejects unknown or duplicate section headings and strips mode
         const parsed = parseActorProfileCompletionBatchOutput(output, {
             candidates: [{ actorRef, completionMode: 'full' }],
         });
-        assert.equal(parsed.entries.length, 0, label);
-        assert.ok(parsed.failures[0].missingFields.some((field) => (
-            field === `actor_profile.narrative_section_${label}`
-        )), label);
+        assert.equal(parsed.entries.length, 1, label);
+        assert.equal(parsed.failures.length, 0, label);
     }
 
     const sectionKeys = [
@@ -1509,8 +1524,8 @@ test('narrative transport accepts bounded heading forms and only the strict empt
         '【关系与动机】她愿意协作，但尊重每个人的边界。',
         '【知识、能力与资源】她熟悉值守流程，资源仍以账本为准。',
     ].join('\n'), { candidates: [{ actorRef: { actorId: 'NPC-DIALOGUE', name: '\u5317\u6865' } }] });
-    assert.equal(bracketUnknown.entries.length, 0);
-    assert.ok(bracketUnknown.failures[0].missingFields.includes('actor_profile.narrative_section_unknown'));
+    assert.equal(bracketUnknown.entries.length, 1);
+    assert.equal(bracketUnknown.failures.length, 0);
 });
 
 test('legacy V6 normalizes and renders without adding narrative persistence fields', () => {

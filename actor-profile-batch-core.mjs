@@ -2,7 +2,6 @@ import { fingerprint } from './core.mjs';
 import {
     actorProfileBaselineDigest,
     buildActorProfileCompletionMessages,
-    discardActorProfileDiscoveryProofBatches,
     materializeActorProfileBaseline,
     parseActorProfileCompletionBatchOutput,
     validateActorProfileInsertCandidate,
@@ -210,7 +209,6 @@ export async function completeActorProfileBatchTransaction({
     const acceptedById = new Map();
     const failureById = new Map();
     const rejected = [];
-    const narrativeProofBatchIds = new Set();
     let modelCalls = 0;
     const collect = async (
         subset,
@@ -253,7 +251,6 @@ export async function completeActorProfileBatchTransaction({
             candidates: subset,
             discoveryContext: attemptDiscoveryContext,
         });
-        if (parsed.narrativeProofBatchId) narrativeProofBatchIds.add(parsed.narrativeProofBatchId);
         return parsed;
     };
 
@@ -488,7 +485,7 @@ export async function completeActorProfileBatchTransaction({
     if (resolved?.ok !== true) {
         return {
             ...base,
-            ledger: resolvedLedger,
+            ledger: originalLedger,
             modelCalls,
             rejected,
             failures: [
@@ -551,7 +548,7 @@ export async function completeActorProfileBatchTransaction({
     if (!allCandidates.length) {
         return {
             ...base,
-            ledger: resolvedLedger,
+            ledger: originalLedger,
             candidates: [],
             modelCalls,
             rejected,
@@ -561,6 +558,35 @@ export async function completeActorProfileBatchTransaction({
                 && !discoveryFailures.length
                 ? 'no_candidates'
                 : 'not_completed',
+            explicitEmpty,
+            registry: clone(resolved.registry || null),
+        };
+    }
+
+    // This is one database-style group insert: discovery rows, existing rows
+    // and their complete profiles either enter the pending transaction as a
+    // whole or remain entirely in the S0 snapshot.  In particular, do not
+    // turn a successfully parsed peer into a durable Registry/profile while a
+    // sibling is unresolved, rejected, malformed, or identity-quarantined.
+    const groupFailuresBeforePersist = [
+        ...inputFailures,
+        ...discoveryFailures,
+        ...rejected,
+        ...allCandidates
+            .map((candidate) => failureById.get(candidateActorId(candidate)))
+            .filter(Boolean),
+        ...allCandidates
+            .filter((candidate) => !acceptedById.has(candidateActorId(candidate)))
+            .map((candidate) => failureFor(candidate, 'actor_profile.group_row_missing')),
+    ];
+    if (groupFailuresBeforePersist.length) {
+        return {
+            ...base,
+            ledger: originalLedger,
+            candidates: allCandidates,
+            modelCalls,
+            rejected,
+            failures: groupFailuresBeforePersist,
             explicitEmpty,
             registry: clone(resolved.registry || null),
         };
@@ -634,10 +660,10 @@ export async function completeActorProfileBatchTransaction({
             resolutions: completion.resolutions || [],
         });
     }
-    if (!prepared.length) {
+    if (prepared.length !== allCandidates.length) {
         return {
             ...base,
-            ledger: resolvedLedger,
+            ledger: originalLedger,
             candidates: allCandidates,
             modelCalls,
             rejected,
@@ -651,7 +677,7 @@ export async function completeActorProfileBatchTransaction({
     if (!await current()) {
         return {
             ...base,
-            ledger: resolvedLedger,
+            ledger: originalLedger,
             candidates: allCandidates,
             modelCalls,
             rejected,
@@ -685,7 +711,7 @@ export async function completeActorProfileBatchTransaction({
         }
         return {
             ...base,
-            ledger: resolvedLedger,
+            ledger: originalLedger,
             candidates: allCandidates,
             modelCalls,
             rejected,
@@ -744,7 +770,7 @@ export async function completeActorProfileBatchTransaction({
         }
         return {
             ...base,
-            ledger: resolvedLedger,
+            ledger: originalLedger,
             candidates: allCandidates,
             modelCalls,
             rejected,
@@ -856,6 +882,7 @@ export async function completeActorProfileBatchTransaction({
         batchFormatReplacementAttempted,
     };
     } finally {
-        discardActorProfileDiscoveryProofBatches([...narrativeProofBatchIds]);
+        // No proof cache or cross-request identity state is retained.  Every
+        // retry rechecks the accepted narrative inside this same transaction.
     }
 }

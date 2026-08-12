@@ -556,8 +556,8 @@ test('static production path proves pre-generation injection and forbids doctor 
     ));
     const bindAt = actorTransaction.indexOf('bindCharacterCreationTicketsToRegisteredActors');
     assert.ok(bindAt > 0);
-    assert.ok(bindAt < actorTransaction.indexOf('persistActorRegistryForTurn'));
     assert.ok(bindAt < actorTransaction.indexOf('prepareActorLedgerProfilesV6'));
+    assert.doesNotMatch(actorTransaction, /persistActorRegistryForTurn/u);
     assert.doesNotMatch(runtimeSource, /settleNpcDesignTicketBatch/u);
     const chatSwitchStart = runtimeSource.indexOf('const onChatChanged = async () =>');
     const chatSwitchEnd = runtimeSource.indexOf('lastGeneration = {', chatSwitchStart);

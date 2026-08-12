@@ -23,36 +23,20 @@ async function loadClearLegacyNextTurnSlots(context) {
     return sandbox.clearLegacyNextTurnSlots;
 }
 
-test('P4 production uses one actor proposal batch, no per-actor or repair model path, before P3 world batch', async () => {
+test('P3 uses Recall then one Advance call; no separate actor proposal model or repair path', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-    const start = source.indexOf('async function collectActorShardProposals');
-    const end = source.indexOf('\nasync function persistActorRegistryForTurn', start);
-    assert.ok(start >= 0 && end > start);
-    const collect = source.slice(start, end);
-    assert.match(collect, /runActorShardProposalBatch\s*\(/u);
-    assert.match(collect, /buildActorShardBatchMessages\s*\(/u);
-    assert.match(collect, /callBatch:\s*async/u);
-    assert.match(collect, /failover:\s*false/u);
-    assert.match(collect, /maxFailovers:\s*0/u);
-    assert.doesNotMatch(collect, /runActorShardBatch\s*\(/u);
-    assert.doesNotMatch(collect, /callWorker\s*:/u);
-    assert.doesNotMatch(collect, /repairWorker\s*:/u);
-    assert.doesNotMatch(collect, /buildActorShardRepairMessages/u);
-    assert.match(collect, /status:\s*result\.status/u);
-    assert.match(collect, /const current = \(\) =>/u);
-    assert.match(
-        collect,
-        /actorActionTargetMatches\(\s*target,\s*actorShardLeaseFingerprint\(fresh\),?\s*\)/u,
-    );
-    assert.doesNotMatch(collect, /TaskLeaseManager|actorShardLeaseManager|leaseId|branchId/u);
-    assert.doesNotMatch(collect, /status:\s*'completed',\s*\n\s*candidates:/u);
-
-    const persist = source.indexOf('await persistActorActionAttemptsForTurn', end);
-    const world = source.indexOf('generateWorldContinuitySingleBatch', persist);
-    const settle = source.indexOf('settleActorActionCandidates', world);
-    assert.ok(persist > end, 'attempt persistence must exist after actor proposals');
-    assert.ok(world > persist, 'P3 world batch must start only after attempt persistence/readback');
-    assert.ok(settle > world, 'settlement must occur only after the world batch');
+    const runStart = source.indexOf('async function runContinuityTarget(captured, {');
+    const runEnd = source.indexOf('\nfunction sameTargetExceptContent', runStart);
+    assert.ok(runStart >= 0 && runEnd > runStart);
+    const run = source.slice(runStart, runEnd);
+    const recall = run.indexOf('await generateWorldRecallPacket');
+    const advance = run.indexOf('await generateWorldContinuitySingleBatch', recall);
+    const prepare = run.indexOf('prepareActorActionAttempts', advance);
+    const persist = run.indexOf('await persistActorActionAttemptsForTurn', prepare);
+    assert.ok(recall >= 0 && advance > recall && prepare > advance && persist > prepare);
+    assert.doesNotMatch(source, /collectActorShardProposals|runActorShardProposalBatch|buildActorShardBatchMessages/u);
+    assert.match(source, /stage3Phase: 'world_candidate_prepared'/u);
+    assert.match(source, /async function commitPreparedWorldCandidate/u);
 });
 
 test('manifest entry imports only current v2 leaf modules, not retired aggregate graphs', async () => {
@@ -151,15 +135,16 @@ test('P4 cleanup failure fails closed and never restarts a producer or legacy br
     );
 });
 
-test('P4 six-actor capacity is wired through selector, scheduler, settings and UI without changing defaults', async () => {
-    const [shard, ledger, source] = await Promise.all([
-        readFile(new URL('../actor-shard-core.mjs', import.meta.url), 'utf8'),
+test('P3 keeps due actors outside optional budgets through Recall and Advance, while P4 stays a single consumer', async () => {
+    const [ledger, source] = await Promise.all([
         readFile(new URL('../actor-ledger-core.mjs', import.meta.url), 'utf8'),
         readFile(new URL('../index.js', import.meta.url), 'utf8'),
     ]);
-    assert.match(shard, /ACTOR_SHARD_MAX_WORKERS\s*=\s*6/u);
-    assert.match(ledger, /integer\(maxActors,\s*0,\s*6,\s*2\)/u);
-    assert.match(source, /actorShardMaxWorkers:\s*2/u);
-    assert.match(source, /actorLedgerMaxActorsPerTurn:\s*2/u);
-    assert.match(source, /mvuad-actor-shard-workers[^>]+max="6"/u);
+    assert.match(ledger, /const mustInclude = scored\.filter\(isMustInclude\)/u);
+    assert.match(ledger, /const optional = scored\.filter\(\(item\) => !isMustInclude\(item\)\)\.slice\(0, coreLimit\)/u);
+    assert.match(source, /scheduledActorIds = actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);
+    assert.match(source, /await generateWorldRecallPacket[\s\S]*?await generateWorldContinuitySingleBatch/u);
+    assert.match(source, /await persistActorActionAttemptsForTurn[\s\S]*?stage3Phase: 'world_candidate_prepared'/u);
+    assert.doesNotMatch(source, /collectActorShardProposals|runActorShardProposalBatch/u);
+    assert.match(source, /precomposeNextTurnConsumer/u);
 });

@@ -4,6 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 import {
+    advanceContinuityClocks,
     applyWorldUpdate,
     mergeMarkerRecords,
     normalizeContinuityState,
@@ -139,7 +140,7 @@ function loadStage3NoActorPermitGate() {
 function loadWorldGenerator(callModel) {
     const code = sourceSection(
         'async function generateWorldContinuitySingleBatch(messages, {',
-        'function actorShardLeaseFingerprint(captured)',
+        'async function persistActorRegistryForTurn(captured, {',
     );
     const sandbox = {
         callModel,
@@ -387,7 +388,7 @@ test('a mixed six-character P1 profile batch cannot fan out the world call', asy
     assert.equal(worldCalls, 1);
     const profileSection = sourceSection(
         'const profileCompletion = await completeActorProfilesForTurn(captured, {',
-        'const proposalBatch = await collectActorShardProposals(captured, {',
+        'function stage3AcceptedTarget(captured) {',
     );
     assert.doesNotMatch(profileSection, /generateWorldContinuitySingleBatch|callModel\(/u);
 });
@@ -469,7 +470,12 @@ test('stable IDs update and add deterministically without array-position duplica
 });
 
 test('production namespace writer requires one save/readback and fails closed at each stale boundary', async () => {
-    const makeHarness = ({ staleOnSave = false, staleOnReadback = false, mismatch = false } = {}) => {
+    const makeHarness = ({
+        staleOnSave = false,
+        staleOnReadback = false,
+        mismatch = false,
+        nextContinuity = { turn: 1, lastSource: 'target-6' },
+    } = {}) => {
         let current = true;
         let saves = 0;
         let readbacks = 0;
@@ -502,7 +508,7 @@ test('production namespace writer requires one save/readback and fails closed at
         const writer = loadNamespaceWriter(() => context);
         const next = {
             ...structuredClone(oldNamespace),
-            continuity: { turn: 1, lastSource: 'target-6' },
+            continuity: structuredClone(nextContinuity),
         };
         const run = (precondition = () => current) => writer.write(next, 'chat-p3', {
             fields: ['continuity'],
@@ -510,7 +516,7 @@ test('production namespace writer requires one save/readback and fails closed at
             force: true,
             requireReadback: true,
             readbackAttempts: 1,
-            contentValidator: (value) => value?.continuity?.turn === 1,
+            contentValidator: (value) => JSON.stringify(value?.continuity) === JSON.stringify(nextContinuity),
             precondition,
         });
         return { context, oldNamespace, run, counts: () => ({ saves, readbacks }) };
@@ -542,6 +548,24 @@ test('production namespace writer requires one save/readback and fails closed at
     assert.equal(await mismatch.run(), false);
     assert.deepEqual(mismatch.counts(), { saves: 1, readbacks: 1 });
     assert.equal(mismatch.context.chatMetadata.mvu_auto_doctor.continuity.turn, 0);
+
+    const fullThreads = Array.from({ length: 72 }, (_, index) => ({
+        id: `PERSISTED-OFFSCREEN-${index + 1}`,
+        stage: index < 30 ? 'resolved' : 'advancing',
+        title: `persistent thread ${index + 1}`,
+    }));
+    const fullHistory = makeHarness({
+        nextContinuity: normalizeContinuityState({ chatId: 'chat-p3', threads: fullThreads }, {
+            chatId: 'chat-p3', maxThreads: 12, maxResolved: 12,
+        }),
+    });
+    assert.equal(await fullHistory.run(), true);
+    assert.deepEqual(fullHistory.counts(), { saves: 1, readbacks: 1 });
+    assert.deepEqual(
+        fullHistory.context.chatMetadata.mvu_auto_doctor.continuity.threads.map((thread) => thread.id),
+        fullThreads.map((thread) => thread.id),
+        'the namespace save/readback path must preserve every persistent thread ID',
+    );
 });
 
 test('world and actor/profile persistence outcomes remain independent', () => {
@@ -921,32 +945,84 @@ test('P3 normalize and durable readback retain the complete packet and settlemen
     assert.equal(legacy.nextTurnInjection, null, 'legacy packet without generation type is non-restorable');
 });
 
-test('6.1 regression wiring keeps one world batch and removes world fields from actor/profile commit', () => {
+test('P3 wiring uses Recall then one Advance call, with ATT plus prepared checkpoint before Phase2', () => {
     const run = sourceSection(
         'async function runContinuityTarget(captured, {',
         'function sameTargetExceptContent(left, right)',
     );
     assert.doesNotMatch(run, /callModel\(/u);
     assert.doesNotMatch(run, /buildContinuityRepairMessages/u);
-    const proposalAt = run.indexOf('await collectActorShardProposals');
+    const recallAt = run.indexOf('await generateWorldRecallPacket');
+    const reserveAt = run.indexOf("stage3Phase: 'world_call_reserved'");
+    const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', reserveAt);
+    const proposalAt = run.indexOf('actorActionCandidatesFromShard', worldAt);
     const prepareAt = run.indexOf('prepareActorActionAttempts', proposalAt);
     const recordAt = run.indexOf('recordActorActionAttempts', prepareAt);
     const persistAt = run.indexOf('await persistActorActionAttemptsForTurn', recordAt);
-    const reserveAt = run.indexOf("stage3Phase: 'world_call_reserved'", persistAt);
-    const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', reserveAt);
-    const adjudicateAt = run.indexOf('validateWorldAdjudicationBatch', worldAt);
-    const settleAt = run.indexOf('settleActorActionCandidates', adjudicateAt);
-    const commitAt = run.indexOf("stage3Phase: 'world_committed'", settleAt);
-    assert.ok(proposalAt >= 0 && prepareAt > proposalAt && recordAt > prepareAt);
-    assert.ok(persistAt > recordAt && reserveAt > persistAt && worldAt > reserveAt);
-    assert.ok(adjudicateAt > worldAt && settleAt > adjudicateAt && commitAt > settleAt);
-    assert.match(
-        run,
-        /stage3Phase: 'world_call_reserved',[\s\S]*?writeChatNamespace\(namespace, captured\.chatId,[\s\S]*?requireReadback: true,[\s\S]*?readbackAttempts: 1/u,
-    );
-    assert.match(
-        run,
-        /stage3Phase: 'world_committed',[\s\S]*?writeChatNamespace\(namespace, captured\.chatId/u,
-    );
-    assert.match(source, /const dedupeKey = capturedTargetKey\(expected\)/u);
+    const preparedAt = run.indexOf("stage3Phase: 'world_candidate_prepared'", persistAt);
+    assert.ok(recallAt >= 0 && reserveAt > recallAt && worldAt > reserveAt);
+    assert.ok(proposalAt > worldAt && prepareAt > proposalAt && recordAt > prepareAt && persistAt > recordAt);
+    assert.ok(preparedAt < 0, 'checkpoint state is created by the pure helper, not duplicated in the runner');
+    assert.match(run, /return commitPreparedWorldCandidate\(captured/u);
+    assert.match(run, /stage3PreparedWorldCheckpoint\(/u);
+    assert.match(run, /stage3PreparedWorldCheckpointMatches\(/u);
+    assert.match(source, /async function commitPreparedWorldCandidate/u);
+    assert.match(source, /expectedFieldStates/u);
+    assert.doesNotMatch(source, /collectActorShardProposals/u);
+});
+
+test('P3 keeps full persistent thread history while P4 remains a separate visible projection', () => {
+    const threads = Array.from({ length: 72 }, (_, index) => ({
+        id: `OFFSCREEN-${index + 1}`,
+        title: `offscreen continuity ${index + 1}`,
+        stage: index < 30 ? 'resolved' : 'advancing',
+        eventType: 'progress',
+        relation: 'independent',
+        knowledge: 'hidden',
+        urgency: 1,
+        createdTurn: index + 1,
+        lastAdvancedTurn: index + 1,
+        sourceRefs: [],
+    }));
+    const normalized = normalizeContinuityState({ chatId: 'chat-full-history', threads }, {
+        chatId: 'chat-full-history', maxThreads: 12, maxResolved: 12,
+    });
+    const expectedIds = threads.map((thread) => thread.id);
+    assert.equal(normalized.threads.length, 72);
+    assert.deepEqual(normalized.threads.map((thread) => thread.id), expectedIds);
+    assert.equal(normalized.threads.at(-1).id, 'OFFSCREEN-72');
+    assert.equal(normalized.threads.filter((thread) => thread.stage === 'resolved').length, 30);
+    assert.equal(normalized.threads.filter((thread) => thread.stage === 'advancing').length, 42);
+    const clocked = advanceContinuityClocks(normalized, {
+        chatId: 'chat-full-history', random: () => 0.9,
+    }).state;
+    assert.equal(clocked.threads.length, 72);
+    assert.deepEqual(clocked.threads.map((thread) => thread.id), expectedIds);
+    const merged = mergeMarkerRecords(clocked, [], { chatId: 'chat-full-history', maxThreads: 12 });
+    assert.equal(merged.threads.length, 72);
+    assert.deepEqual(merged.threads.map((thread) => thread.id), expectedIds);
+    const parsed = parseContinuityOutput(JSON.stringify(merged), { chatId: 'chat-full-history', maxThreads: 12 });
+    assert.ok(parsed.state);
+    assert.deepEqual(parsed.state.threads.map((thread) => thread.id), expectedIds);
+});
+
+test('P3 source retains every scheduled ActorRef atomically and fails capacity before a model call', () => {
+    const advance = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
+    const recall = sourceSection('function buildWorldRecallMessages({', 'async function generateWorldRecallPacket(');
+    assert.match(advance, /recalledActors = \[\.\.\.\(actorLedger\?\.actors \|\| \[\]\)\]/u);
+    assert.match(advance, /world_recall_missing_scheduled_actor_material/u);
+    assert.match(advance, /world_recall_capacity_unavailable/u);
+    assert.doesNotMatch(advance, /recalledActors\.slice\(/u);
+    assert.match(recall, /world_recall_capacity_unavailable/u);
+    assert.doesNotMatch(recall, /cropText\(user/u);
+    const runner = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
+    assert.match(runner, /actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);
+    assert.doesNotMatch(runner, /actor_schedule_empty/u);
+});
+
+test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudications', () => {
+    const prompt = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
+    assert.match(prompt, /newly scheduled actors there is no actionAttempt yet/u);
+    assert.match(prompt, /Do not invent attemptId, actorRef, or target/u);
+    assert.match(prompt, /For existing persisted actionAttempts/u);
 });

@@ -920,11 +920,11 @@ test('production persists supplied attempts before adjudication and settle has n
     const runtime = indexSource.slice(runtimeStart, settleAt + 800);
     assert.match(runtime, /recordActorActionAttempts/u);
     assert.match(runtime, /attempts: recorded\.recorded/u);
-    assert.match(runtime, /sourceRef: actorActionTargetOf\(captured\)/u);
+    assert.match(runtime, /sourceRef: actionTarget/u);
     assert.match(runtime, /target: actionTarget/u);
     assert.match(indexSource, /actorActionSettlementsMatchLedger/u);
     assert.match(indexSource, /requireReadback: true,\s*readbackAttempts: 1,\s*failureSink/u);
-    assert.match(indexSource, /actorSchedule\.selected\.length/u);
+    assert.match(indexSource, /scheduledActorIds\.length/u);
     assert.match(indexSource, /pendingActorActionAttempts\(actionLedger, \{ target: actionTarget \}\)/u);
     assert.match(indexSource, /world_task_owner_changed/u);
 

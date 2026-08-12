@@ -1,4 +1,4 @@
-# P3 单批世界连续性：R4-R2 来源与运行合同
+# P3 世界召回与推进：来源与运行合同
 
 本阶段仅进行了静态调用图与差异检查；未运行测试、语法、API、宿主、构建或 CI。
 
@@ -9,16 +9,22 @@ ActorLedger、数据库、receipt 数组、第二 store 或旧 `continuityInject
 
 | 机制 | 成熟实现 | 分类 | P3 接法 |
 |---|---|---|---|
-| 单次世界演进 | World `evolve/callEvolutionAPI`、既有 `generateWorldContinuitySingleBatch` | 原样复用/最小适配 | 一次冻结输入、一次世界调用、`failover:false`、`maxFailovers:0`。 |
-| 单批人物 proposal | `collectActorShardProposals`、`runActorShardProposalBatch`、npc_tracker 一次 gate | 原样复用 | 1/3/6 ready actors 仅一次既有批调用，不建第二模型、池或状态机。 |
-| attempt 准备与读回 | `actorActionCandidatesFromShard`、`prepareActorActionAttempts`、`recordActorActionAttempts`、`persistActorActionAttemptsForTurn` | 原样复用 | attempt 在世界调用前先 durable readback。 |
+| 只读召回 | Stitches Reborn V 的 `recall` task（只选 AM/支持材料）与 TavernDB `prepareAIInput_ACU` 的持久快照输入 | 最小适配 | 本地时钟先给出不可删除的 due 人物/线程/世界轨；Recall 只从持久 Profile、Continuity、世界书选择支持材料，零权威写。 |
+| 世界推进 | Stitches Reborn V 的 `act,scene` 推进任务、既有 `generateWorldContinuitySingleBatch` | 最小适配 | Advance 读取 canonical recall packet 与最终正文；一次输出 NPC proposals、按 actorId 的裁决和世界/线程变化，`failover:false`、`maxFailovers:0`。 |
+| attempt 准备与读回 | `actorActionCandidatesFromShard`、`prepareActorActionAttempts`、`recordActorActionAttempts`、`persistActorActionAttemptsForTurn` | 原样复用 | Advance 返回 proposal/adjudication 草案后，代码在任何 outcome 应用前先 durable ATT + prepared candidate readback。 |
 | 世界裁决与结果 | `validateWorldAdjudicationBatch`、`settleActorActionCandidates`、`mergeActorWorldEventsIntoContinuity` | 原样复用 | attempt 不等于 outcome；不得替玩家行动、同意、感受或结果。 |
-| 世界保存与恢复 | World checkpoint/store、既有 `writeChatNamespace` | 最小适配 | 无 branch accepted target、checkpoint reservation、包内双域 settlement proof。 |
-| 下回合包 | `buildContinuityInjection` + `ContinuityState` | 必要新写 | 只保存为 `nextTurnInjection`；阶段四 `finalSystemDirective` 未来唯一 reserve/consume。 |
+| 世界保存与恢复 | TavernDB `runTableWriteTransaction_ACU` / `runTableUpdateCommit_ACU` 的工作副本→读回→最终提交，既有 `writeChatNamespace` | 最小适配 | 现有 checkpoint 的 `world_candidate_prepared` 与 ActorLedger attempt 同一 CAS/readback；Phase2 只从读回候选结算。 |
+| 下回合包 | `buildContinuityInjection` + `ContinuityState` | 必要新写 | 只保存为 `nextTurnInjection`；阶段四实际 `precomposeNextTurnConsumer → commitNextTurnConsumer` 是唯一 reserve/consume。 |
+
+## 代码与提示词的分权
+
+- **代码硬保证：** fresh ledger 中所有 due/overdue/starved NPC 都进入 `mustActorIds`，预算只限制可选探索；Recall 必须保留这些 ID 并物化完整 ActorRef/Profile/目标/承诺/知识材料；Advance 对每个 must actor 恰收一条 proposal 和一条 adjudication 草案；ActionAttempt 与 prepared checkpoint 同 CAS/readback；Phase2、scope/target/CAS、恢复与 P4 可见投影均 fail-closed。
+- **提示词负责：** 从人物档案、欲望、有限知识、关系、资源和压力形成自然 NPC 尝试；按规则给成本、时间、风险和后果；正文不是后台行动的相关性过滤器；绝不替玩家行动、同意或感受。
+- **交界：** Advance 同次返回尝试候选和按 actorId 的裁决草案；代码在任何世界结果应用前先本地验证集合、持久并读回 ATT，再绑定草案并结算。代码不增加人格关键词或语义裁判。
 
 ## P2/P3 时序与人物门
 
-P2 与 P3 从 accepted final 独立 fire-and-forget。P3 不 await P2、不由 P2 直接判定成功，手动世界运行也不重跑 P2。
+自动 accepted-final 仅在 P1 完整档案 readback 或严格 `no_candidates` 后才唤醒 P3；P3 自己 fresh-read ledger，不把瞬时 P1 result 当持久权威。手动世界入口直接 `enqueueContinuity(force)`，也只凭同一 fresh durable ledger gate 准入，不重跑 P1；手动人物档案入口才会重试 P1。
 
 P3 每次自行 fresh-read ActorRegistry/ActorLedger/Profile：
 
@@ -29,31 +35,30 @@ P3 每次自行 fresh-read ActorRegistry/ActorLedger/Profile：
 
 该 transient signal 不持久、不作 P3 成功收据，也不形成 barrier。它随写入时的 chat/operation epoch 绑定；若它在初次 P3 尚 pending 时到达，按同 target 记录一次 deferred retry；旧 chat/epoch 不消费或写入新 chat 信号。
 
-## 全批 proposal→attempt→单次世界裁决
+## actor-first Recall→Advance→两阶段提交
 
 ```text
 fresh ledger readback
   -> scheduleActorTurns
-  -> 0 ready（仅 no_candidates permit）: 0 proposal -> structure world
-  -> 1/3/6 ready: collectActorShardProposals (one batch)
-  -> actorActionCandidatesFromShard
+  -> local mustInclude (人物目标/承诺/冷却/截止优先；独立世界轨可并列)
+  -> Recall API: only select persistent supporting profiles/threads/lanes/WI, preserve all mustInclude
+  -> Advance API: actor proposals first, actorId adjudications + world/thread changes
+  -> actorActionCandidatesFromShard（Advance 的尝试候选）
   -> prepareActorActionAttempts
   -> recordActorActionAttempts
-  -> durable actorLedger readback
-  -> fresh pendingActorActionAttempts
-  -> generateWorldContinuitySingleBatch (one call)
+  -> actorLedger + world_candidate_prepared checkpoint same CAS durable readback
   -> validateWorldAdjudicationBatch
   -> settleActorActionCandidates
-  -> world + settled ledger + package durable readback
+  -> world + settled ledger + package final CAS durable readback
 ```
 
-任何 scheduled ready actor 的 proposal 缺失、运输/语义/stale 失败、prepare/record 拒绝或 attempt readback 不符，都会让整个 world batch 失败：不调用世界模型、不写世界状态、不部分记录 attempt。已有持久 `pending_world` attempt 仅用于其原有恢复路径，仍必须经同一单次世界裁决。
+任何 scheduled ready actor 的 proposal 缺失、Recall/Advance 运输或语义失败、prepare/record 拒绝或 Phase1 readback 不符，都会让整个 batch 失败：零 Phase2 世界写。正文不是幕后轨的过滤器；P4 才按可见性和 convergence 投影注入。
 
 ## 无 branch target、reservation 与双域恢复
 
 P3 target 严格为 `chatId/index/messageId/swipeId/generationSerial/generationId/generationType/scopeDigest/contentFingerprint`；不含 branch。任一 generation identity 缺失的旧 checkpoint、packet 或 settlement proof 仅能进入人工协调，不能恢复、复用或放行世界调用；既有 ActionAttempt 仍以同一完整 target 做 receipt matcher。
 
-世界调用前，既有 `continuityCheckpoint` 持久写入无 branch `stage3ProducerTarget + world_call_reserved`。该 reservation 未 readback 不调用世界；世界调用后最终提交失败则保留 reservation，同 target 后续 fail-closed/manual reconciliation，禁止重复世界调用。
+Advance 前，既有 `continuityCheckpoint` 持久写入无 branch `stage3ProducerTarget + world_call_reserved`。Advance 输出经本地验证后，ActorLedger `pending_world` 和 `world_candidate_prepared` 同一 CAS/readback；刷新或明确重试从该读回做 0 模型 Phase2。reserved 无候选、候选 proof/CAS 不符均 fail-closed/manual reconciliation，不重演 Advance。
 
 `nextTurnInjection.settlementProof` 是 canonical ordered projection：
 
@@ -73,8 +78,8 @@ P3 target 严格为 `chatId/index/messageId/swipeId/generationSerial/generationI
 
 所有 P3 `applied/blocked/failed/stale/disabled`、completed key、状态展示和 world diagnostics 都必须在 `taskEpoch === operationEpoch && taskChatId === currentChatId` 下更新。旧 A 切换到 B 后只能删除自己的 pending key；不得写 B 的状态、completed key、诊断或结果。当前 task 的 stale/disabled 显式收为 idle，零世界持久化。
 
-P3 只保存 package，不调用 `registerContinuityInjection`、`prepareContinuityInjectionBatch` 或正文提示入口。阶段四 `finalSystemDirective` 是唯一 reserve/consume 消费者；当前未接入，因此 package 不会进入正文。
+P3 只保存 package，不调用旧 `registerContinuityInjection`、`prepareContinuityInjectionBatch` 或旧平行桥。阶段四的 single consumer 已从 package 做唯一 reserve/consume；P3 本身不直接写正文提示槽。
 
 ## 文件与未验证风险
 
-仅修改：`index.js`、`continuity-core.mjs` 与本 source map。未修改 ActorLedger core、MVU、TavernDB、数据库、预设、缝合怪或阶段四消费代码。真实模型、host durable readback、刷新恢复、reservation partial-save 和阶段四消费均未运行验证。
+本阶段修改：`index.js`、`continuity-core.mjs` 与本 source map。未复制缝合怪的 NSFW/正文大提示词、TavernDB CRUD 或第二存储；Recall→Advance 串行 relay 是对其 tag task 和数据库 staged transaction 的最小适配。MVU、外部数据库、预设和 P4 消费代码保持独立。真实模型、host durable readback、刷新恢复和阶段四消费尚未运行验证。

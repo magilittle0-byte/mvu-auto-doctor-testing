@@ -541,7 +541,7 @@ test('repeating one explicit accepted recovery event is idempotent', () => {
     assert.deepEqual(repeated.registration.ledger.actors[0].actionHistory, snapshot.actionHistory);
 });
 
-test('runActorProfileTarget wiring persists mixed new and quarantine-restored actors once before profiles', () => {
+test('runActorProfileTarget keeps mixed new and quarantine-restored actors in the P1 working ledger until the profile group commits', () => {
     const { orphanId, migrated } = quarantinedIdentityFixture('identity-mixed-persist');
     const ref = identitySourceRef(migrated.chatId, 5);
     const chain = runIdentityRegistryChain(
@@ -571,24 +571,14 @@ test('runActorProfileTarget wiring persists mixed new and quarantine-restored ac
     const upsertAt = runtime.indexOf('runActorRegistryUpsert');
     const promotionAt = runtime.indexOf('promoteActorCandidatesToRegistry');
     const registrationLedgerAt = runtime.indexOf('let nextLedger = actorRegistration.ledger');
-    const persistAt = runtime.indexOf('persistActorRegistryForTurn');
-    const persistedLedgerAt = runtime.indexOf('const s1Ledger = registryPersistence.ledger');
+    const ticketBindingAt = runtime.indexOf('bindCharacterCreationTicketsToRegisteredActors');
+    const persistedLedgerAt = runtime.indexOf('const s1Ledger = nextLedger');
     const profileAt = runtime.indexOf('completeActorProfilesForTurn');
     assert.ok(discoveryAt >= 0 && upsertAt > discoveryAt && promotionAt > upsertAt);
-    assert.ok(registrationLedgerAt > promotionAt && persistAt > registrationLedgerAt);
-    assert.ok(persistedLedgerAt > persistAt && profileAt > persistedLedgerAt);
-    assert.match(
-        runtime.slice(persistAt, persistedLedgerAt),
-        /previousLedger: s0Ledger[\s\S]*nextLedger[\s\S]*actorIds: actorRegistration\.promoted/u,
-    );
-    const persistence = runtimeSource.slice(
-        runtimeSource.indexOf('async function persistActorRegistryForTurn'),
-        runtimeSource.indexOf('async function persistActorActionAttemptsForTurn'),
-    );
-    assert.match(persistence, /fields: \['actorLedger'\]/u);
-    assert.match(persistence, /requireReadback: true/u);
-    assert.match(persistence, /if \(!saved\)[\s\S]*ledger: previousLedger/u);
-    assert.match(persistence, /actor_registry\.readback_mismatch'[\s\S]*ledger: previousLedger/u);
+    assert.ok(registrationLedgerAt > promotionAt && ticketBindingAt > registrationLedgerAt);
+    assert.ok(persistedLedgerAt > ticketBindingAt && profileAt > persistedLedgerAt);
+    assert.doesNotMatch(runtime, /persistActorRegistryForTurn/u);
+    assert.match(runtime.slice(ticketBindingAt, profileAt), /failed sibling must leave[\s\S]*?pre-generation batch intact/u);
 
     const continuityRuntime = runtimeSource.slice(
         continuityStart,
@@ -598,7 +588,6 @@ test('runActorProfileTarget wiring persists mixed new and quarantine-restored ac
         'discoverActorsFromTurnSources',
         'runActorRegistryUpsert',
         'promoteActorCandidatesToRegistry',
-        'persistActorRegistryForTurn',
         'completeActorProfilesForTurn',
     ]) assert.doesNotMatch(continuityRuntime, new RegExp(p1Step, 'u'));
 

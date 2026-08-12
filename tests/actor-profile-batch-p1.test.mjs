@@ -29,9 +29,13 @@ function sourceRef(chatId, generation = 1) {
         generation,
         generationId: `generation-${generation}`,
         generationType: 'normal',
+        generationSerial: generation,
+        logicalIndex: generation,
         identityScopeId: `${chatId}|character:card-main`,
         scopeDigest: `scope:${chatId}|character:card-main`,
         hash: `hash-${chatId}-${generation}`,
+        contentHash: `hash-${chatId}-${generation}`,
+        contentFingerprint: `hash-${chatId}-${generation}`,
         compatibilityOnly: false,
     };
 }
@@ -44,6 +48,26 @@ function narrativeDiscoverySourceRef(ref) {
         contentHash: ref.hash,
         contentFingerprint: ref.hash,
     };
+}
+
+const NARRATIVE_SECTION_TITLES = [
+    '\u4eba\u7269\u4fe1\u606f', '\u751f\u7406\u7279\u5f81', '\u6027\u683c\u7279\u5f81', '\u8fc7\u5f80\u7ecf\u5386',
+    '\u5f53\u524d\u72b6\u6001', '\u5173\u7cfb\u4e0e\u52a8\u673a', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90',
+];
+
+function narrativeProfileBlock(name, {
+    actorId = '',
+    omitTitle = '',
+    extra = '',
+} = {}) {
+    return [
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a${name}\u3011`,
+        actorId ? `ActorRef: ${actorId}` : '',
+        ...NARRATIVE_SECTION_TITLES
+            .filter((title) => title !== omitTitle)
+            .map((title) => `\u3010${title}\u3011\u4fdd\u6301\u5b8c\u6574\u7684\u81ea\u7136\u4e2d\u6587\u6863\u6848\u6bb5\u843d\u3002`),
+        extra,
+    ].filter(Boolean).join('\n');
 }
 
 function registerNames(ledger, names, ref = sourceRef(ledger.chatId)) {
@@ -251,8 +275,8 @@ function prepareRegisteredBatch(count, {
             ))),
     ];
     const candidates = selectActorProfileCompletionCandidates(prepared.ledger, {
-        maxActors: profileCapacity || 1,
-        priorityActorIds,
+        initialActorIds: priorityActorIds,
+        maintenanceMaxActors: profileCapacity || 1,
         turn: registered.ref.generation,
     });
     return {
@@ -267,6 +291,8 @@ function prepareRegisteredBatch(count, {
 async function runBatch(fixture, {
     requestBatch = ({ candidates }) => JSON.stringify(candidates.map(completeCandidate)),
     persistBatch = null,
+    persistPendingBatch = null,
+    persistFinalizedBatch = null,
     semanticRetry = true,
     isTargetCurrent = () => true,
     allowDiscovery = false,
@@ -303,11 +329,28 @@ async function runBatch(fixture, {
             registry: fixture.registration,
             snapshot: { fieldRevision: 0 },
         })),
-        persistPendingBatch: persisted,
-        persistFinalizedBatch: persisted,
+        persistPendingBatch: persistPendingBatch || persisted,
+        persistFinalizedBatch: persistFinalizedBatch || persisted,
         isTargetCurrent,
     });
     return { result, saveCount, readbackCount, persistencePayloads };
+}
+
+function assertSingleAtomicPeerReadback(run, actorId) {
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.readbackCount, 2);
+    assert.equal(run.persistencePayloads.length, 2);
+    const [pendingSave, finalSave] = run.persistencePayloads;
+    const pendingActor = pendingSave.ledger.actors.find((actor) => actor.id === actorId);
+    const finalActor = finalSave.ledger.actors.find((actor) => actor.id === actorId);
+    assert.ok(pendingActor?.pendingProfile);
+    assert.equal(pendingActor.pendingProfile.readbackVerified, false);
+    assert.equal(pendingActor.profileV6.baselineCommit, null);
+    assert.equal(pendingActor.profileV6.preparedForAction, false);
+    assert.equal(finalActor?.pendingProfile, null);
+    assert.equal(finalActor?.profileV6.baselineCommit?.readbackVerified, true);
+    assert.equal(finalActor?.profileV6.preparedForAction, true);
+    assert.equal(actorProfileReadyForAction(finalActor), true);
 }
 
 for (const count of [0, 1, 3, 6, 8]) {
@@ -550,7 +593,8 @@ test('discovery format replacement keeps discovery enabled while subset retries 
     const replacementUser = replacement.find((message) => message.role === 'user').content;
     assert.equal(replacementSystem.includes('不得重新发现正文人物'), false);
     assert.ok(replacementUser.includes('最终正文'));
-    assert.ok(replacementSystem.includes('唯一精确出现'));
+    assert.ok(replacementSystem.includes('逐字复用'));
+    assert.equal(replacementSystem.includes('唯一精确出现'), false);
     assert.equal(replacementUser.includes('candidateRef.sourceAnchor'), false);
 
     const subset = buildActorProfileCompletionMessages([], {
@@ -628,7 +672,310 @@ test('rowless current-source discovery response gets one full replacement and th
     assert.equal(run.saveCount, 2);
 });
 
-test('one narrative proof batch carries more than 256 discoveries through one real ledger take', async () => {
+test('a malformed narrative discovery keeps the whole current-source group at S0', async () => {
+    const fixture = prepareRegisteredBatch(1);
+    const registered = fixture.candidates[0];
+    const literalName = '\u6b63\u6587\u65b0\u4eba';
+    const successfulDiscoveryName = '\u5df2\u51fa\u573a\u540c\u4f34';
+    const acceptedNarrative = `${literalName}\u51fa\u73b0\u5728\u8d70\u5eca\uff0c\u4e0e${successfulDiscoveryName}\u4fdd\u6301\u8b66\u89c9\u3002`;
+    const calls = [];
+    const run = await runBatch(fixture, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        requestBatch: ({ candidates, attempt, messages }) => {
+            calls.push({
+                attempt,
+                actorIds: candidates.map((candidate) => candidate.actorRef.actorId),
+                messages,
+            });
+            return attempt === 0
+                ? [
+                    narrativeProfileBlock(registered.actorRef.name, { actorId: registered.actorRef.actorId }),
+                    narrativeProfileBlock(successfulDiscoveryName),
+                    narrativeProfileBlock('\u865a\u6784\u540d\u5b57'),
+                ].join('\n')
+                : narrativeProfileBlock(literalName);
+        },
+    });
+    assert.deepEqual(calls.map(({ attempt, actorIds }) => ({ attempt, actorIds })), [
+        { attempt: 0, actorIds: [registered.actorRef.actorId] },
+    ]);
+    assert.equal(run.result.modelCalls, 1);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
+    assert.deepEqual(run.result.ledger, fixture.ledger);
+});
+
+test('invalid narrative discovery rows fail closed before Registry or profile persistence', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const literalName = '\u6b63\u6587\u65b0\u4eba';
+    const acceptedNarrative = `${literalName}\u51fa\u73b0\u5728\u8d70\u5eca\uff0c\u4fdd\u6301\u8b66\u89c9\u3002`;
+    const initial = narrativeProfileBlock('\u865a\u6784\u540d\u5b57');
+    const legacyTemplate = completeCandidate(prepareRegisteredBatch(1).candidates[0]);
+    delete legacyTemplate.actorRef;
+    legacyTemplate.candidateRef = { name: literalName, sourceAnchor: literalName };
+    const cases = [
+        ['missing', '\u65e0\u4eba\u7269\u6863\u6848'],
+        ['extra', [narrativeProfileBlock(literalName), narrativeProfileBlock('\u53e6\u4e00\u540d')].join('\n')],
+        ['duplicate', [narrativeProfileBlock(literalName), narrativeProfileBlock(literalName)].join('\n')],
+        ['actor-ref-mixed', narrativeProfileBlock(literalName, { actorId: 'NPC-UNEXPECTED' })],
+        ['still-missing', narrativeProfileBlock('\u4ecd\u662f\u865a\u6784\u540d')],
+        ['legacy-json', JSON.stringify([legacyTemplate])],
+    ];
+    for (const [label, replacement] of cases) {
+        const calls = [];
+        let resolverCalls = 0;
+        const run = await runBatch({ ...fixture, candidates: [] }, {
+            allowDiscovery: true,
+            discoveryContext: {
+                acceptedNarrative,
+                completionMode: 'full',
+                sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+            },
+            requestBatch: ({ attempt }) => {
+                calls.push(attempt);
+                return attempt === 0 ? initial : replacement;
+            },
+            resolveDiscoveries: async () => {
+                resolverCalls += 1;
+                return {
+                    ok: true,
+                    ledger: structuredClone(fixture.ledger),
+                    candidates: [],
+                    entries: [],
+                    rejected: [],
+                    failures: [],
+                    registry: fixture.registration,
+                    snapshot: { fieldRevision: 0 },
+                };
+            },
+        });
+        assert.deepEqual(calls, [0], label);
+        assert.equal(run.result.modelCalls, 1, label);
+        assert.equal(run.result.persistenceStatus, 'not_completed', label);
+        assert.ok(run.result.failures.length > 0, label);
+        assert.equal(resolverCalls, 1, label);
+        assert.equal(run.saveCount, 0, label);
+        assert.equal(run.readbackCount, 0, label);
+        assert.equal(run.persistencePayloads.length, 0, label);
+        assert.equal(run.result.accepted.length, 0, label);
+        assert.equal(run.result.ledger.actors.some((actor) => actor.name === literalName), false, label);
+    }
+});
+
+test('a rejected narrative discovery blocks a first-pass ActorRef peer from durable commit', async () => {
+    const fixture = prepareRegisteredBatch(1);
+    const registered = fixture.candidates[0];
+    const literalName = '\u6b63\u6587\u65b0\u4eba';
+    const acceptedNarrative = `${literalName}\u51fa\u73b0\u5728\u8d70\u5eca\uff0c\u4fdd\u6301\u8b66\u89c9\u3002`;
+    const legacyTemplate = completeCandidate(registered);
+    delete legacyTemplate.actorRef;
+    legacyTemplate.candidateRef = { name: literalName, sourceAnchor: literalName };
+    const calls = [];
+    let resolverCalls = 0;
+    const run = await runBatch(fixture, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        requestBatch: ({ attempt, candidates }) => {
+            calls.push({ attempt, actorIds: candidates.map((candidate) => candidate.actorRef.actorId) });
+            return attempt === 0
+                ? [
+                    narrativeProfileBlock(registered.actorRef.name, { actorId: registered.actorRef.actorId }),
+                    narrativeProfileBlock('\u865a\u6784\u540d\u5b57'),
+                ].join('\n')
+                : JSON.stringify([legacyTemplate]);
+        },
+        resolveDiscoveries: async ({ discoveries, unresolved }) => {
+            resolverCalls += 1;
+            assert.equal(discoveries.length, 0);
+            assert.match(unresolved[0].reason, /^actor_profile\.discovery_/u);
+            return {
+                ok: true,
+                ledger: structuredClone(fixture.ledger),
+                candidates: [],
+                entries: [],
+                rejected: [],
+                failures: [],
+                registry: fixture.registration,
+                snapshot: { fieldRevision: 0 },
+            };
+        },
+    });
+    assert.deepEqual(calls, [{ attempt: 0, actorIds: [registered.actorRef.actorId] }]);
+    assert.equal(resolverCalls, 1);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.result.accepted.length, 0);
+    assert.equal(run.saveCount, 0);
+    assert.deepEqual(run.result.ledger, fixture.ledger);
+    assert.equal(run.result.ledger.actors.some((actor) => actor.name === literalName), false);
+    assert.equal(run.persistencePayloads.every((payload) => (
+        payload.ledger.actors.every((actor) => actor.name !== literalName)
+    )), true);
+    assert.ok(run.result.failures.length > 0);
+});
+
+test('a rejected narrative discovery blocks a first-pass discovery peer from durable promotion', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const successfulDiscoveryName = '\u5df2\u51fa\u573a\u540c\u4f34';
+    const literalName = '\u6b63\u6587\u65b0\u4eba';
+    const acceptedNarrative = `${successfulDiscoveryName}\u4e0e${literalName}\u90fd\u51fa\u73b0\u5728\u8d70\u5eca\u3002`;
+    const promoted = registerNames(
+        fixture.ledger,
+        [successfulDiscoveryName],
+        narrativeDiscoverySourceRef(fixture.ref),
+    );
+    const promotedPrepared = prepareActorLedgerProfilesV6(promoted.registration.ledger, {
+        mode: 'full',
+        turn: fixture.ref.generation,
+    });
+    const promotedCandidate = selectActorProfileCompletionCandidates(promotedPrepared.ledger, {
+        maxActors: 1,
+        turn: fixture.ref.generation,
+    })[0];
+    const legacyTemplate = completeCandidate(prepareRegisteredBatch(1).candidates[0]);
+    delete legacyTemplate.actorRef;
+    legacyTemplate.candidateRef = { name: literalName, sourceAnchor: literalName };
+    const calls = [];
+    let resolverCalls = 0;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        requestBatch: ({ attempt, candidates }) => {
+            calls.push({ attempt, actorIds: candidates.map((candidate) => candidate.actorRef.actorId) });
+            return attempt === 0
+                ? [
+                    narrativeProfileBlock(successfulDiscoveryName),
+                    narrativeProfileBlock('\u865a\u6784\u540d\u5b57'),
+                ].join('\n')
+                : JSON.stringify([legacyTemplate]);
+        },
+        resolveDiscoveries: async ({ discoveries, unresolved }) => {
+            resolverCalls += 1;
+            assert.equal(discoveries.length, 1);
+            assert.equal(discoveries[0].candidateRef.name, successfulDiscoveryName);
+            assert.match(unresolved[0].reason, /^actor_profile\.discovery_/u);
+            return {
+                ok: true,
+                ledger: structuredClone(promotedPrepared.ledger),
+                candidates: [structuredClone(promotedCandidate)],
+                entries: [{
+                    actorRef: structuredClone(promotedCandidate.actorRef),
+                    candidate: structuredClone(discoveries[0].candidate),
+                }],
+                rejected: [],
+                failures: [],
+                registry: promoted.registration,
+                snapshot: { fieldRevision: 0 },
+            };
+        },
+    });
+    assert.deepEqual(calls, [{ attempt: 0, actorIds: [] }]);
+    assert.equal(resolverCalls, 1);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.result.accepted.length, 0);
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.result.ledger.actors.length, 0, 'the S0 group has no promoted discovery peer');
+    assert.equal(run.result.ledger.actors.some((actor) => actor.name === literalName), false);
+    assert.equal(run.persistencePayloads.every((payload) => (
+        payload.ledger.actors.every((actor) => actor.name !== literalName)
+    )), true);
+    assert.ok(run.result.failures.length > 0 || run.result.rejected.length > 0);
+});
+
+test('malformed narrative rows remain local failures and never produce a durable peer commit', async () => {
+    const malformedFixture = prepareRegisteredBatch(0);
+    const literalName = '\u6b63\u6587\u65b0\u4eba';
+    const acceptedNarrative = `${literalName}\u51fa\u73b0\u5728\u8d70\u5eca\uff0c\u4fdd\u6301\u8b66\u89c9\u3002`;
+    const malformed = await runBatch({ ...malformedFixture, candidates: [] }, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(malformedFixture.ref),
+        },
+        requestBatch: () => narrativeProfileBlock('\u865a\u6784\u540d\u5b57', {
+            omitTitle: NARRATIVE_SECTION_TITLES[0],
+        }),
+    });
+    assert.equal(malformed.result.modelCalls, 1);
+    assert.equal(malformed.saveCount, 0);
+
+    const mixedCalls = [];
+    const mixed = await runBatch({ ...malformedFixture, candidates: [] }, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative: `${acceptedNarrative}\n\u53e6\u4e00\u4eba\u4e5f\u5728\u73b0\u573a\u3002`,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(malformedFixture.ref),
+        },
+        requestBatch: ({ attempt }) => {
+            mixedCalls.push(attempt);
+            return [
+                narrativeProfileBlock('\u865a\u6784\u540d\u5b57'),
+                narrativeProfileBlock('\u53e6\u4e00\u4eba', { extra: '\u3010\u672a\u77e5\u6bb5\u3011\u4e0d\u80fd\u9759\u9ed8\u541e\u6389\u3002' }),
+            ].join('\n');
+        },
+    });
+    assert.deepEqual(mixedCalls, [0]);
+    assert.equal(mixed.result.modelCalls, 1);
+    assert.equal(mixed.saveCount, 0);
+
+    const fixture = prepareRegisteredBatch(1);
+    const registered = fixture.candidates[0];
+    const calls = [];
+    const combined = await runBatch(fixture, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        requestBatch: ({ attempt, candidates }) => {
+            calls.push({ attempt, actorIds: candidates.map((candidate) => candidate.actorRef.actorId) });
+            return attempt === 0
+                ? [
+                    narrativeProfileBlock(registered.actorRef.name, {
+                        actorId: registered.actorRef.actorId,
+                        omitTitle: NARRATIVE_SECTION_TITLES[0],
+                    }),
+                    narrativeProfileBlock('\u865a\u6784\u540d\u5b57'),
+                ].join('\n')
+                : [
+                    narrativeProfileBlock(registered.actorRef.name, { actorId: registered.actorRef.actorId }),
+                    narrativeProfileBlock(literalName),
+                ].join('\n');
+        },
+        resolveDiscoveries: async ({ discoveries }) => ({
+            ok: true,
+            ledger: structuredClone(fixture.ledger),
+            candidates: [],
+            entries: [],
+            rejected: [],
+            failures: [],
+            registry: fixture.registration,
+            snapshot: { fieldRevision: 0 },
+        }),
+    });
+    assert.deepEqual(calls, [{ attempt: 0, actorIds: [registered.actorRef.actorId] }]);
+    assert.equal(combined.result.modelCalls, 1);
+    assert.equal(combined.result.persistenceStatus, 'not_completed');
+    assert.equal(combined.saveCount, 0);
+    assert.deepEqual(combined.result.ledger, fixture.ledger);
+});
+
+test('one narrative response carries more than 256 ordinary discoveries through one real ledger resolution', async () => {
     const fixture = prepareRegisteredBatch(0);
     const names = Array.from({ length: 257 }, (_, index) => `\u4eba\u7269${String(index + 1).padStart(3, '0')}`);
     const acceptedNarrative = names.map((name) => (
@@ -669,8 +1016,7 @@ test('one narrative proof batch carries more than 256 discoveries through one re
             );
             assert.equal(new Set(verified.candidates.map((candidate) => candidate.candidateId)).size, 257);
             const serialized = JSON.stringify(verified);
-            assert.equal(serialized.includes('__narrativeFirstLiteralProof'), false);
-            assert.equal(serialized.includes('__narrativeFirstLiteralBatchId'), false);
+            assert.equal(serialized.includes('narrativeFirstLiteral'), false);
             resolverVerified = true;
             return {
                 ok: true,
@@ -697,7 +1043,7 @@ test('one narrative proof batch carries more than 256 discoveries through one re
     );
 });
 
-test('an unconsumed narrative proof batch is cleared by the P1 transaction finally path', async () => {
+test('parsed narrative discoveries remain ordinary local data within one resolution call', async () => {
     const fixture = prepareRegisteredBatch(0);
     const name = '\u4eba\u7269\u6e05\u7406';
     const acceptedNarrative = `${name}\u51fa\u73b0\u5728\u8d70\u5eca\uff0c${name}\u6682\u65f6\u4fdd\u6301\u89c2\u5bdf\u3002`;
@@ -741,7 +1087,7 @@ test('an unconsumed narrative proof batch is cleared by the P1 transaction final
         turn: fixture.ref.generation,
         modelProfileDiscoveries: capturedDiscoveries,
     });
-    assert.equal(replay.candidates.length, 0, 'finally clears every unconsumed proof in the batch');
+    assert.equal(replay.candidates.length, 1, 'the resolver revalidates ordinary local rows against the current narrative');
 });
 
 test('a second rowless discovery response fails closed with a fixed parse code and no save', async () => {
@@ -831,7 +1177,7 @@ test('one incomplete actor gets one subset replacement while valid peers stay ac
     assert.equal(run.readbackCount, 2);
 });
 
-test('duplicate output retries only that ActorRef and unknown output never blocks valid saves', async () => {
+test('duplicate or unknown output may use its bounded repair, but blocks the whole current-source group', async () => {
     const fixture = prepareRegisteredBatch(2);
     const calls = [];
     const run = await runBatch(fixture, {
@@ -847,9 +1193,10 @@ test('duplicate output retries only that ActorRef and unknown output never block
     });
     assert.equal(calls.length, 2);
     assert.deepEqual(calls[1], [fixture.candidates[0].actorId]);
-    assert.equal(run.result.accepted.length, 2);
+    assert.equal(run.result.accepted.length, 0);
     assert.equal(run.result.rejected[0].reason, 'actor_profile.actor_ref_unknown');
-    assert.equal(run.saveCount, 2);
+    assert.equal(run.saveCount, 0);
+    assert.deepEqual(run.result.ledger, fixture.ledger);
 });
 
 test('duplicate input ActorIds fail closed instead of being swallowed by Map', async () => {
@@ -867,12 +1214,13 @@ test('duplicate input ActorIds fail closed instead of being swallowed by Map', a
         },
     });
     assert.deepEqual(calls, [[fixture.candidates[2].actorId]]);
-    assert.equal(run.result.accepted.length, 1);
+    assert.equal(run.result.accepted.length, 0);
     assert.equal(run.result.failures[0].reason, 'actor_profile.input_actor_ref_duplicate');
-    assert.equal(run.saveCount, 2);
+    assert.equal(run.saveCount, 0);
+    assert.deepEqual(run.result.ledger, fixture.ledger);
 });
 
-test('one unrecoverable actor does not block another valid actor', async () => {
+test('one unrecoverable actor keeps the whole current-source group at S0', async () => {
     const fixture = prepareRegisteredBatch(2);
     const run = await runBatch(fixture, {
         semanticRetry: false,
@@ -883,9 +1231,10 @@ test('one unrecoverable actor does not block another valid actor', async () => {
             return JSON.stringify([good, crossActor]);
         },
     });
-    assert.equal(run.result.accepted.length, 1);
+    assert.equal(run.result.accepted.length, 0);
     assert.equal(run.result.failures[0].reason, 'actor_profile.actor_ref_mismatch');
-    assert.equal(run.saveCount, 2);
+    assert.equal(run.saveCount, 0);
+    assert.deepEqual(run.result.ledger, fixture.ledger);
 });
 
 test('transport failure has no outer retry and performs no save', async () => {
@@ -1019,7 +1368,7 @@ test('a cancelled in-flight P2 request performs no failover or write', async () 
     )));
 });
 
-test('partial validation still saves once, while save/readback failure claims nobody', async () => {
+test('partial validation and Phase-1 save/readback failures keep the current-source group at S0', async () => {
     const fixture = prepareRegisteredBatch(2);
     const partial = await runBatch(fixture, {
         semanticRetry: false,
@@ -1029,8 +1378,9 @@ test('partial validation still saves once, while save/readback failure claims no
             return JSON.stringify(rows);
         },
     });
-    assert.equal(partial.result.accepted.length, 1);
-    assert.equal(partial.saveCount, 2);
+    assert.equal(partial.result.accepted.length, 0);
+    assert.equal(partial.saveCount, 0);
+    assert.deepEqual(partial.result.ledger, fixture.ledger);
 
     for (const persistBatch of [
         async () => ({ ok: false, reason: 'host_save_rejected' }),
@@ -1040,6 +1390,44 @@ test('partial validation still saves once, while save/readback failure claims no
         assert.equal(failed.result.accepted.length, 0);
         assert.equal(failed.result.ledger.actors.some(actorProfileReadyForAction), false);
     }
+});
+
+test('Phase-1 failures return S0, while only a post-readback Phase-2 failure exposes recoverable S2', async () => {
+    const fixture = prepareRegisteredBatch(1);
+    const originalActor = structuredClone(fixture.ledger.actors[0]);
+    for (const pendingOutcome of [
+        async () => ({ ok: false, reason: 'host_save_rejected' }),
+        async () => ({ ok: true, ledger: structuredClone(fixture.ledger), persistenceMeta: { rev: 1 } }),
+    ]) {
+        let finalCalls = 0;
+        const failed = await runBatch(fixture, {
+            persistPendingBatch: pendingOutcome,
+            persistFinalizedBatch: async () => {
+                finalCalls += 1;
+                return { ok: true, ledger: structuredClone(fixture.ledger) };
+            },
+        });
+        assert.equal(finalCalls, 0);
+        assert.equal(failed.result.persistenceStatus, 'not_completed');
+        assert.deepEqual(failed.result.ledger.actors[0], originalActor);
+        assert.equal(failed.result.ledger.actors[0].pendingProfile, null);
+        assert.equal(actorProfileReadyForAction(failed.result.ledger.actors[0]), false);
+    }
+
+    let pendingPayload = null;
+    const phase2Failure = await runBatch(fixture, {
+        persistPendingBatch: async (payload) => {
+            pendingPayload = structuredClone(payload.ledger);
+            return { ok: true, ledger: structuredClone(payload.ledger), persistenceMeta: { rev: 1 } };
+        },
+        persistFinalizedBatch: async () => ({ ok: false, reason: 'host_save_rejected' }),
+    });
+    assert.ok(pendingPayload?.actors[0]?.pendingProfile);
+    assert.equal(pendingPayload.actors[0].profileV6.baselineCommit, null);
+    assert.equal(phase2Failure.result.persistenceStatus, 'not_completed');
+    assert.ok(phase2Failure.result.ledger.actors[0].pendingProfile);
+    assert.equal(phase2Failure.result.ledger.actors[0].profileV6.baselineCommit, null);
+    assert.equal(actorProfileReadyForAction(phase2Failure.result.ledger.actors[0]), false);
 });
 
 test('stale target before or after model response performs zero writes', async () => {
@@ -1375,18 +1763,24 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /scopeDigest: captured\.scopeDigest/u);
     assert.match(profileFunction, /const discoverySourceRef = \{[\s\S]*?logicalIndex: captured\.index,[\s\S]*?generationSerial: captured\.generationSerial,[\s\S]*?contentHash: captured\.contentFingerprint \|\| captured\.fingerprint,[\s\S]*?contentFingerprint: captured\.contentFingerprint \|\| captured\.fingerprint,/u);
     assert.match(profileFunction, /discoveryContext: \{[\s\S]*?sourceRef: discoverySourceRef,/u);
+    const diagnosticProjection = source.slice(
+        source.indexOf('const narrativeValidationDiagnostic'),
+        source.indexOf('const quarantined'),
+    );
+    assert.match(source, /function compactActorProfileFailureCode\(value\) \{[\s\S]*?String\(value \?\? ''\)\.trim\(\)\.slice\(0, 120\)/u);
+    assert.match(diagnosticProjection, /compactActorProfileFailureCode\(failure\?\.reason\)/u);
+    assert.doesNotMatch(diagnosticProjection, /cleanText\(failure\?\.reason/u);
     for (const p1Step of [
         'discoverActorsFromTurnSources',
         'runActorRegistryUpsert',
         'promoteActorCandidatesToRegistry',
-        'persistActorRegistryForTurn',
         'completeActorProfilesForTurn',
     ]) assert.match(entryFunction, new RegExp(p1Step, 'u'));
+    assert.doesNotMatch(entryFunction, /persistActorRegistryForTurn/u);
     for (const p1Step of [
         'discoverActorsFromTurnSources',
         'runActorRegistryUpsert',
         'promoteActorCandidatesToRegistry',
-        'persistActorRegistryForTurn',
         'completeActorProfilesForTurn',
     ]) assert.doesNotMatch(continuityFunction, new RegExp(p1Step, 'u'));
 });
