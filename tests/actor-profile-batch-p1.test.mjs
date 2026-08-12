@@ -260,6 +260,9 @@ async function runBatch(fixture, {
     persistBatch = null,
     semanticRetry = true,
     isTargetCurrent = () => true,
+    allowDiscovery = false,
+    discoveryContext = null,
+    resolveDiscoveries = null,
 } = {}) {
     let saveCount = 0;
     let readbackCount = 0;
@@ -278,8 +281,10 @@ async function runBatch(fixture, {
         turn: fixture.ref.generation,
         target: { ...fixture.ref, sourceRef: fixture.ref },
         semanticRetry,
+        allowDiscovery,
+        discoveryContext,
         requestBatch,
-        resolveDiscoveries: async () => ({
+        resolveDiscoveries: resolveDiscoveries || (async () => ({
             ok: true,
             ledger: structuredClone(fixture.ledger),
             candidates: [],
@@ -288,7 +293,7 @@ async function runBatch(fixture, {
             failures: [],
             registry: fixture.registration,
             snapshot: { fieldRevision: 0 },
-        }),
+        })),
         persistPendingBatch: persisted,
         persistFinalizedBatch: persisted,
         isTargetCurrent,
@@ -454,18 +459,231 @@ test('broken outer array salvages two good rows while isolating one bad row', ()
     assert.ok(parsed.repairs.includes('array_row_salvaged'));
 });
 
+test('TavernDB-compatible quote normalization recovers full-width CJK JSON quotes locally', () => {
+    const fixture = prepareRegisteredBatch(1);
+    let quote = 0;
+    const output = JSON.stringify([completeCandidate(fixture.candidates[0])])
+        .replace(/"/gu, () => (quote++ % 2 === 0 ? '「' : '」'));
+    const parsed = parseActorProfileCompletionBatchOutput(output, {
+        candidates: fixture.candidates,
+    });
+    assert.equal(parsed.entries.length, 1);
+    assert.ok(parsed.batchMeta.repairLabels.includes('fullwidth_quote_normalized'));
+});
+
+test('TavernDB loose-value subset repairs nested single quotes and an object comma locally', () => {
+    const fixture = prepareRegisteredBatch(1);
+    const candidate = completeCandidate(fixture.candidates[0]);
+    let loose = JSON.stringify([candidate])
+        .replace(/"([^"\\]*(?:\\.[^"\\]*)*)"\s*:/gu, '$1:')
+        .replace(/"([^"\\]*(?:\\.[^"\\]*)*)"/gu, (_match, value) => `'${value}'`);
+    loose = loose.replace(
+        /(actorRef:\s*\{[^{}]*\}),(\s*identity:)/u,
+        '$1$2',
+    );
+    const parsed = parseActorProfileCompletionBatchOutput(loose, {
+        candidates: fixture.candidates,
+    });
+    assert.equal(parsed.entries.length, 1);
+    assert.ok(parsed.batchMeta.repairLabels.includes('loose_single_quotes_normalized'));
+    assert.ok(parsed.batchMeta.repairLabels.includes('loose_missing_property_comma_added'));
+});
+
+test('embedded profile containers require a complete matching JSON value', () => {
+    const fixture = prepareRegisteredBatch(1);
+    const suffixCandidate = completeCandidate(fixture.candidates[0]);
+    suffixCandidate.personality.primaryDerivatives = `${JSON.stringify(
+        suffixCandidate.personality.primaryDerivatives,
+    )} trailing prose`;
+    const suffixParsed = parseActorProfileCompletionBatchOutput(JSON.stringify([suffixCandidate]), {
+        candidates: fixture.candidates,
+    });
+    assert.equal(suffixParsed.entries.length, 0);
+    assert.equal(suffixParsed.failures.length, 1);
+    assert.equal(suffixParsed.batchMeta.repairLabels.includes('embedded_profile_container_parsed'), false);
+
+    const proseCandidate = completeCandidate(fixture.candidates[0]);
+    proseCandidate.personality.primaryDerivatives = '{"ordinary":"prose, not a derivative list"}';
+    const proseParsed = parseActorProfileCompletionBatchOutput(JSON.stringify([proseCandidate]), {
+        candidates: fixture.candidates,
+    });
+    assert.equal(proseParsed.entries.length, 0);
+    assert.equal(proseParsed.failures.length, 1);
+    assert.equal(proseParsed.batchMeta.repairLabels.includes('embedded_profile_container_parsed'), false);
+
+    const quotedBatch = JSON.stringify(JSON.stringify([completeCandidate(fixture.candidates[0])]));
+    const quotedParsed = parseActorProfileCompletionBatchOutput(quotedBatch, {
+        candidates: fixture.candidates,
+    });
+    assert.equal(quotedParsed.entries.length, 0);
+    assert.equal(quotedParsed.failures.length, 1);
+    assert.equal(quotedParsed.batchMeta.repairLabels.includes('embedded_profile_container_parsed'), false);
+
+    const escapedQuoted = '"ordinary prose with an escaped \\"[{not:a,profile:b}]\\" marker"';
+    const escapedParsed = parseActorProfileCompletionBatchOutput(escapedQuoted, {
+        candidates: fixture.candidates,
+    });
+    assert.equal(escapedParsed.entries.length, 0);
+    assert.equal(escapedParsed.failures.length, 1);
+});
+
+test('discovery format replacement keeps discovery enabled while subset retries stay retry-only', () => {
+    const acceptedNarrative = '新人1 enters the scene.';
+    const replacement = buildActorProfileCompletionMessages([], {
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            discoveryEnabled: true,
+            discoveryRetryOnly: false,
+        },
+    });
+    const replacementSystem = replacement.find((message) => message.role === 'system').content;
+    const replacementUser = replacement.find((message) => message.role === 'user').content;
+    assert.equal(replacementSystem.includes('不得重新发现正文人物'), false);
+    assert.ok(replacementUser.includes('共享最终正文'));
+    assert.ok(replacementUser.includes('candidateRef.sourceAnchor'));
+
+    const subset = buildActorProfileCompletionMessages([], {
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            discoveryEnabled: true,
+            discoveryRetryOnly: true,
+        },
+        discoveryRetryTargets: [{ name: '新人1', sourceAnchor: acceptedNarrative }],
+    });
+    const subsetSystem = subset.find((message) => message.role === 'system').content;
+    assert.ok(subsetSystem.includes('不得重新发现正文人物'));
+});
+
+test('rowless nonempty batch output keeps only bounded parse metadata', () => {
+    const parsed = parseActorProfileCompletionBatchOutput('not a profile array', {
+        candidates: [],
+    });
+    assert.deepEqual(parsed.batchMeta, {
+        rootType: 'other',
+        parsedRowCount: 0,
+        explicitEmpty: false,
+        emptyOutput: false,
+        formatUnrecoverable: true,
+        repairLabels: [],
+    });
+    assert.equal(parsed.entries.length, 0);
+    assert.equal(parsed.failures.length, 0);
+    assert.equal(parsed.unexpected.length, 0);
+});
+
+test('rowless current-source discovery response gets one full replacement and then atomic readback', async () => {
+    const fixture = prepareRegisteredBatch(1);
+    const resolvedCandidates = structuredClone(fixture.candidates);
+    const anchor = `新人1 enters the scene.`;
+    const discoveryRow = completeCandidate(fixture.candidates[0]);
+    delete discoveryRow.actorRef;
+    discoveryRow.candidateRef = {
+        name: fixture.candidates[0].actorRef.name,
+        sourceAnchor: anchor,
+    };
+    const calls = [];
+    let resolverCalls = 0;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative: anchor, completionMode: 'full' },
+        requestBatch: ({ candidates, attempt }) => {
+            calls.push({ attempt, count: candidates.length });
+            return attempt === 0 ? 'not a profile array' : JSON.stringify([discoveryRow]);
+        },
+        resolveDiscoveries: async ({ discoveries }) => {
+            resolverCalls += 1;
+            assert.equal(discoveries.length, 1);
+            return {
+                ok: true,
+                ledger: structuredClone(fixture.ledger),
+                candidates: structuredClone(resolvedCandidates),
+                entries: [{
+                    actorRef: structuredClone(resolvedCandidates[0].actorRef),
+                    candidate: structuredClone(discoveries[0].candidate),
+                }],
+                rejected: [],
+                failures: [],
+                registry: fixture.registration,
+                snapshot: { fieldRevision: 0 },
+            };
+        },
+    });
+    assert.deepEqual(calls, [{ attempt: 0, count: 0 }, { attempt: 1, count: 0 }]);
+    assert.equal(resolverCalls, 1);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.batchFormatReplacementAttempted, true);
+    assert.equal(run.result.batchMeta.parsedRowCount, 1);
+    assert.equal(run.saveCount, 2);
+});
+
+test('a second rowless discovery response fails closed with a fixed parse code and no save', async () => {
+    const fixture = prepareRegisteredBatch(1);
+    const calls = [];
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative: 'Candidate One enters the scene.', completionMode: 'full' },
+        requestBatch: ({ candidates, attempt }) => {
+            calls.push({ attempt, count: candidates.length });
+            return 'not a profile array';
+        },
+    });
+    assert.deepEqual(calls, [{ attempt: 0, count: 0 }, { attempt: 1, count: 0 }]);
+    assert.equal(run.result.failures[0].reason, 'actor_profile.format_unrecoverable');
+    assert.equal(run.result.batchFormatReplacementAttempted, true);
+    assert.equal(run.result.batchMeta.formatUnrecoverable, true);
+    assert.equal(run.saveCount, 0);
+});
+
+test('an explicit empty discovery batch stays no-candidates and never consumes the replacement', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    let calls = 0;
+    const run = await runBatch(fixture, {
+        allowDiscovery: true,
+        requestBatch: () => {
+            calls += 1;
+            return '[]';
+        },
+    });
+    assert.equal(calls, 1);
+    assert.equal(run.result.persistenceStatus, 'no_candidates');
+    assert.equal(run.result.batchFormatReplacementAttempted, false);
+    assert.equal(run.saveCount, 0);
+});
+
+test('a parsed row with an expected ActorRef keeps the existing row path and no batch replacement', async () => {
+    const fixture = prepareRegisteredBatch(1);
+    const calls = [];
+    const run = await runBatch(fixture, {
+        allowDiscovery: true,
+        requestBatch: ({ candidates, attempt }) => {
+            calls.push({ attempt, count: candidates.length });
+            return JSON.stringify(candidates.map(completeCandidate));
+        },
+    });
+    assert.deepEqual(calls, [{ attempt: 0, count: 1 }]);
+    assert.equal(run.result.batchFormatReplacementAttempted, false);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+});
+
 test('a locally repairable batch needs one model call', async () => {
     const fixture = prepareRegisteredBatch(3);
     let calls = 0;
     const run = await runBatch(fixture, {
         requestBatch: ({ candidates }) => {
             calls += 1;
-            const json = JSON.stringify(candidates.map(completeCandidate));
-            return `说明文字\n\`\`\`json\n${json.replace('"actorRef":', 'actorRef:').replace(/\]$/u, ',]')}\n\`\`\``;
+            const rows = candidates.map(completeCandidate);
+            rows[0].personality.primaryDerivatives = JSON.stringify(
+                rows[0].personality.primaryDerivatives,
+            );
+            const json = JSON.stringify(rows);
+            return `Here's the profile JSON:\n\`\`\`json\n${json.replace('"actorRef":', 'actorRef:').replace(/\]$/u, ',]')}\n\`\`\``;
         },
     });
     assert.equal(calls, 1);
     assert.equal(run.result.accepted.length, 3);
+    assert.ok(run.result.accepted[0].repairs.includes('embedded_profile_container_parsed'));
     assert.equal(run.saveCount, 2);
 });
 

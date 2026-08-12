@@ -38,7 +38,29 @@ export function validateActorProfileDiscoveryAnchor(candidateRef: unknown, accep
     sourceAnchor: string;
 };
 export function parseActorProfileCompletionOutput(output: string, options?: object): object;
-export function parseActorProfileCompletionBatchOutput(output: string, options?: object): object;
+export interface ActorProfileBatchParseMeta {
+    rootType: 'array' | 'object' | 'other' | 'empty';
+    parsedRowCount: number;
+    explicitEmpty: boolean;
+    emptyOutput: boolean;
+    formatUnrecoverable: boolean;
+    repairLabels: string[];
+}
+export interface ActorProfileCompletionBatchParseResult {
+    ok: boolean;
+    entries: object[];
+    failures: object[];
+    unexpected: object[];
+    discoveries: object[];
+    unresolved: object[];
+    explicitEmpty: boolean;
+    repairs: string[];
+    batchMeta: ActorProfileBatchParseMeta;
+}
+export function parseActorProfileCompletionBatchOutput(
+    output: string,
+    options?: object,
+): ActorProfileCompletionBatchParseResult;
 export function actorProfileCompletionMissingFields(candidate: unknown, context?: object): string[];
 export function materializeActorProfileBaseline(
     previousProfile: unknown,

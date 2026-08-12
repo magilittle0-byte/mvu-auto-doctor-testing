@@ -25,6 +25,13 @@
 
 ## 唯一生产调用图
 
+## P13 宽容解析来源映射（格式层，不改语义）
+
+- `shujuku-spv8.4-index.test-fixture.js`: `normalizeQuotesLayer_ACU`、`sanitizeJsonPipeline_ACU`、`splitTopLevelSegments_ACU`、`tryParseLooseJsonValue_ACU`、`coerceLooseRowObject_ACU` 与 `tryParseJsonObject` 是本次逐项核对的成熟来源。
+- 已有直接复用/适配：围栏与废话剥离、主对象/数组、JSONL/连续对象、弯引号、控制字符、未引号键、尾逗号、缺闭合、深度感知拆分、逐行 salvage、轻微字段别名及类型归一。
+- P13 最小移植：标准单引号的嵌套 object/array、对象内可明确识别的缺属性逗号、以及只在已知 ProfileInsertCandidate object/array 字段中对“完整且类型匹配”的字符串化 JSON 容器转换；顶层整体引号包装的结构不拆包，普通废话前缀的英文缩写 apostrophe 不会吞掉后续真实结构根；任意引号自然文本、带后缀或类型不匹配的内嵌 JSON 保留原字符串并交 schema 拒绝。仅机械恢复并记录有限 repair label，随后仍走既有 ActorRef/candidateRef、锚点、schema、authority 与 pending→final/readback 门。
+- 明确不移植：`tableEdit` 块提取、SQL/ORM、数据库 CRUD、表写入时序以及任意自由文本语义猜测；格式无法恢复时维持 fail-closed，才允许一次 discovery-only 联合 replacement。
+
 ```text
 accepted-final
   └─ enqueueActorProfiles(includeMaintenance=false)

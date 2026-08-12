@@ -1,3 +1,5 @@
+import type { ActorProfileBatchParseMeta } from './actor-profile-v6-core.mjs';
+
 export interface ActorProfileBatchTransactionResult {
     ledger: Record<string, unknown>;
     candidates: object[];
@@ -14,6 +16,8 @@ export interface ActorProfileBatchTransactionResult {
     preparedFieldRevision?: number;
     pendingLedger?: Record<string, unknown> | null;
     finalLedger?: Record<string, unknown> | null;
+    batchMeta?: ActorProfileBatchParseMeta | null;
+    batchFormatReplacementAttempted?: boolean;
 }
 
 export interface ActorProfileBatchPersistenceContext {

@@ -2763,16 +2763,199 @@ function isRecord(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function normalizeJsonLikeText(output, repairs) {
+// Minimal transplant of TavernDB's JSON surface normalizer: these quotation
+// variants are formatting, never profile facts. Keep this separate from the
+// semantic candidate validator below.
+function normalizeProfileJsonSurface(output, repairs = null) {
     let source = String(output || '').slice(0, 120000)
         .replace(/```(?:json|javascript|js)?/giu, '')
-        .replace(/```/gu, '')
-        .replace(/[“”]/gu, '"')
+        .replace(/```/gu, '');
+    const normalizedQuotes = source
+        .replace(/[“”「」『』〝〞＂]/gu, '"')
         .replace(/[‘’]/gu, "'");
-    const first = [source.indexOf('{'), source.indexOf('[')]
-        .filter((index) => index >= 0)
-        .sort((left, right) => left - right)[0];
-    if (first === undefined) return '';
+    if (normalizedQuotes !== source) repairs?.push('fullwidth_quote_normalized');
+    source = normalizedQuotes;
+    return source;
+}
+
+function isProfileWordCharacter(value) {
+    return /[\p{L}\p{N}_]/u.test(value || '');
+}
+
+function isInWordApostrophe(source, index) {
+    return source[index] === "'"
+        && isProfileWordCharacter(source[index - 1])
+        && isProfileWordCharacter(source[index + 1]);
+}
+
+function firstUnquotedProfileStructureIndex(source) {
+    const trimmed = source.trimStart();
+    // A complete quoted root is transport text, not a profile container. It
+    // may only be unwrapped later by a declared ProfileInsertCandidate field.
+    if (trimmed[0] === '"' || trimmed[0] === "'") return -1;
+    let quote = '';
+    let escaped = false;
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (quote) {
+            if (escaped) escaped = false;
+            else if (char === '\\') escaped = true;
+            else if (char === quote) quote = '';
+            continue;
+        }
+        if (char === '"' || (char === "'" && !isInWordApostrophe(source, index))) {
+            quote = char;
+            continue;
+        }
+        if (char === '{' || char === '[') return index;
+    }
+    return -1;
+}
+
+// Small, data-only subset of TavernDB's loose JSON reader. It deliberately
+// recognizes only JSON values plus single-quoted strings and missing object
+// property commas; it never turns arbitrary prose into profile facts.
+function parseLooseProfileJsonStructure(output, repairs) {
+    const source = normalizeProfileJsonSurface(output, repairs);
+    const start = firstUnquotedProfileStructureIndex(source);
+    if (start < 0) return null;
+    let cursor = start;
+    const skip = () => {
+        while (/\s/u.test(source[cursor] || '')) cursor += 1;
+    };
+    const parseQuoted = () => {
+        const quote = source[cursor++];
+        const singleQuoted = quote === "'";
+        let value = '';
+        while (cursor < source.length) {
+            const char = source[cursor++];
+            if (char === quote) {
+                if (singleQuoted) repairs.push('loose_single_quotes_normalized');
+                return value;
+            }
+            if (char !== '\\') {
+                value += char;
+                continue;
+            }
+            const escaped = source[cursor++];
+            if (escaped === undefined) return null;
+            if (escaped === 'n') value += '\n';
+            else if (escaped === 'r') value += '\r';
+            else if (escaped === 't') value += '\t';
+            else if (escaped === 'b') value += '\b';
+            else if (escaped === 'f') value += '\f';
+            else if (escaped === 'u' && /^[0-9a-f]{4}$/iu.test(source.slice(cursor, cursor + 4))) {
+                value += String.fromCharCode(Number.parseInt(source.slice(cursor, cursor + 4), 16));
+                cursor += 4;
+            } else value += escaped;
+        }
+        return null;
+    };
+    const parseBare = () => {
+        const begin = cursor;
+        while (cursor < source.length && !/[\s,}\]]/u.test(source[cursor])) cursor += 1;
+        const value = source.slice(begin, cursor);
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+        if (value === 'null') return null;
+        if (/^-?(?:\d+\.?\d*|\.\d+)$/u.test(value)) return Number(value);
+        return null;
+    };
+    const parseKey = () => {
+        skip();
+        if (source[cursor] === '"' || source[cursor] === "'") return parseQuoted();
+        const begin = cursor;
+        while (cursor < source.length && /[\p{L}\p{N}_$-]/u.test(source[cursor])) cursor += 1;
+        return cursor > begin ? source.slice(begin, cursor) : null;
+    };
+    const parseValue = () => {
+        skip();
+        if (source[cursor] === '{') return parseObject();
+        if (source[cursor] === '[') return parseArray();
+        if (source[cursor] === '"' || source[cursor] === "'") return parseQuoted();
+        return parseBare();
+    };
+    const parseObject = () => {
+        if (source[cursor++] !== '{') return null;
+        const value = {};
+        skip();
+        if (source[cursor] === '}') {
+            cursor += 1;
+            return value;
+        }
+        while (cursor < source.length) {
+            const key = parseKey();
+            if (!key) return null;
+            skip();
+            if (source[cursor++] !== ':') return null;
+            const member = parseValue();
+            if (member === null && source.slice(Math.max(0, cursor - 4), cursor) !== 'null') return null;
+            value[key] = member;
+            skip();
+            if (source[cursor] === '}') {
+                cursor += 1;
+                return value;
+            }
+            if (source[cursor] === ',') {
+                cursor += 1;
+                skip();
+                if (source[cursor] === '}') {
+                    cursor += 1;
+                    return value;
+                }
+                continue;
+            }
+            // A next valid object key is an unambiguous missing-property-comma
+            // repair. Arrays intentionally do not receive this repair.
+            const lookahead = cursor;
+            const nextKey = parseKey();
+            skip();
+            const hasColon = source[cursor] === ':';
+            cursor = lookahead;
+            if (nextKey && hasColon) {
+                repairs.push('loose_missing_property_comma_added');
+                continue;
+            }
+            return null;
+        }
+        return null;
+    };
+    const parseArray = () => {
+        if (source[cursor++] !== '[') return null;
+        const value = [];
+        skip();
+        if (source[cursor] === ']') {
+            cursor += 1;
+            return value;
+        }
+        while (cursor < source.length) {
+            const item = parseValue();
+            if (item === null && source.slice(Math.max(0, cursor - 4), cursor) !== 'null') return null;
+            value.push(item);
+            skip();
+            if (source[cursor] === ']') {
+                cursor += 1;
+                return value;
+            }
+            if (source[cursor++] !== ',') return null;
+            skip();
+            if (source[cursor] === ']') {
+                cursor += 1;
+                return value;
+            }
+        }
+        return null;
+    };
+    const value = parseValue();
+    if (value === null) return null;
+    repairs.push('loose_nested_structure_parsed');
+    return value;
+}
+
+function normalizeJsonLikeText(output, repairs) {
+    let source = normalizeProfileJsonSurface(output, repairs);
+    const first = firstUnquotedProfileStructureIndex(source);
+    if (first < 0) return '';
     if (first > 0) repairs.push('prose_prefix_removed');
     source = source.slice(first);
     let quoted = false;
@@ -2914,13 +3097,89 @@ function normalizeCandidateArray(value, { text = false, limit = 24, itemLimit = 
     return text ? meaningfulProfileList(entries, limit, itemLimit) : clone(entries);
 }
 
-function normalizeProfileInsertCandidate(raw) {
+// Do not let the transport parser reinterpret arbitrary quoted prose. Only
+// canonical ProfileInsertCandidate container fields may unwrap a *complete*
+// JSON string, and only when its resulting type is the declared one.
+function parseStrictEmbeddedProfileContainer(value, expected, repairs = null) {
+    const typeMatches = expected === 'array'
+        ? Array.isArray(value)
+        : isRecord(value);
+    if (typeMatches || typeof value !== 'string') return value;
+    const source = value.trim();
+    if (!source || (source[0] !== '{' && source[0] !== '[')) return value;
+    try {
+        const parsed = JSON.parse(source);
+        const parsedMatches = expected === 'array'
+            ? Array.isArray(parsed)
+            : isRecord(parsed);
+        if (!parsedMatches) return value;
+        repairs?.push('embedded_profile_container_parsed');
+        return parsed;
+    } catch {
+        return value;
+    }
+}
+
+function normalizeKnownProfileInsertContainers(raw, repairs = null) {
+    if (!isRecord(raw)) return raw;
+    const normalized = { ...raw };
+    const objectFields = [
+        'actorRef', 'actor_ref', 'candidateRef', 'candidate_ref', 'identity',
+        'personality', 'relationships', 'goals', 'knowledge',
+        'resourcesCapabilities', 'resources_capabilities', 'physiology', 'sources',
+    ];
+    for (const field of objectFields) {
+        normalized[field] = parseStrictEmbeddedProfileContainer(
+            normalized[field],
+            'object',
+            repairs,
+        );
+    }
+    const normalizeArrays = (value, fields) => {
+        if (!isRecord(value)) return value;
+        const next = { ...value };
+        for (const field of fields) {
+            next[field] = parseStrictEmbeddedProfileContainer(next[field], 'array', repairs);
+        }
+        return next;
+    };
+    normalized.personality = normalizeArrays(normalized.personality, [
+        'primaryDerivatives', 'baseDerivatives', 'accentDerivatives', 'othersVoices',
+    ]);
+    normalized.relationships = normalizeArrays(normalized.relationships, ['entries', 'patterns']);
+    normalized.knowledge = normalizeArrays(normalized.knowledge, ['entries']);
+    normalized.resourcesCapabilities = normalizeArrays(normalized.resourcesCapabilities, [
+        'resources', 'capabilities',
+    ]);
+    normalized.resources_capabilities = normalizeArrays(normalized.resources_capabilities, [
+        'resources', 'capabilities',
+    ]);
+    normalized.goals = normalizeArrays(normalized.goals, [
+        'longTerm', 'pursuitPrinciples', 'current',
+    ]);
+    for (const strategyField of ['strategy', 'plan']) {
+        const strategy = parseStrictEmbeddedProfileContainer(
+            normalized.goals?.[strategyField],
+            'object',
+            repairs,
+        );
+        if (!isRecord(normalized.goals) || !isRecord(strategy)) continue;
+        normalized.goals = {
+            ...normalized.goals,
+            [strategyField]: normalizeArrays(strategy, ['steps']),
+        };
+    }
+    return normalized;
+}
+
+function normalizeProfileInsertCandidate(raw, repairs = null) {
     if (!isRecord(raw)) return null;
-    const rawRef = isRecord(raw.actorRef) ? raw.actorRef
-        : isRecord(raw.actor_ref) ? raw.actor_ref
+    const normalizedRaw = normalizeKnownProfileInsertContainers(raw, repairs);
+    const rawRef = isRecord(normalizedRaw.actorRef) ? normalizedRaw.actorRef
+        : isRecord(normalizedRaw.actor_ref) ? normalizedRaw.actor_ref
             : {};
-    const rawCandidateRef = isRecord(raw.candidateRef) ? raw.candidateRef
-        : isRecord(raw.candidate_ref) ? raw.candidate_ref
+    const rawCandidateRef = isRecord(normalizedRaw.candidateRef) ? normalizedRaw.candidateRef
+        : isRecord(normalizedRaw.candidate_ref) ? normalizedRaw.candidate_ref
             : {};
     const candidateName = cleanText(
         rawCandidateRef.name || rawCandidateRef.displayName,
@@ -2929,30 +3188,31 @@ function normalizeProfileInsertCandidate(raw) {
     const sourceAnchor = String(
         rawCandidateRef.sourceAnchor || rawCandidateRef.source_anchor || '',
     ).trim().slice(0, 1200);
-    const identity = normalizeLooseProfileSection(raw, 'identity');
+    const identity = normalizeLooseProfileSection(normalizedRaw, 'identity');
     const personality = {
-        ...normalizeLooseProfileSection(raw, 'personality'),
-        ...normalizeLooseProfileSection(raw.identity, 'personality'),
+        ...normalizeLooseProfileSection(normalizedRaw, 'personality'),
+        ...normalizeLooseProfileSection(normalizedRaw.identity, 'personality'),
     };
-    const rawGoals = candidateSection(raw, 'goals');
-    const goals = normalizeLooseProfileSection(raw, 'goals');
+    const rawGoals = candidateSection(normalizedRaw, 'goals');
+    const goals = normalizeLooseProfileSection(normalizedRaw, 'goals');
     const rawStrategy = isRecord(rawGoals.strategy) ? rawGoals.strategy
         : isRecord(rawGoals.plan) ? rawGoals.plan
             : {};
-    const relationshipsRaw = raw.relationships ?? candidateSection(raw, 'relationships');
-    const knowledgeRaw = raw.knowledge ?? candidateSection(raw, 'knowledge');
-    const resourcesRaw = raw.resourcesCapabilities
-        ?? raw.resources_capabilities
-        ?? candidateSection(raw, 'resourcesCapabilities');
-    const physiologyRaw = candidateSection(raw, 'physiology');
-    const sources = flattenCandidateSources(raw.sources);
+    const relationshipsRaw = normalizedRaw.relationships
+        ?? candidateSection(normalizedRaw, 'relationships');
+    const knowledgeRaw = normalizedRaw.knowledge ?? candidateSection(normalizedRaw, 'knowledge');
+    const resourcesRaw = normalizedRaw.resourcesCapabilities
+        ?? normalizedRaw.resources_capabilities
+        ?? candidateSection(normalizedRaw, 'resourcesCapabilities');
+    const physiologyRaw = candidateSection(normalizedRaw, 'physiology');
+    const sources = flattenCandidateSources(normalizedRaw.sources);
     return {
         actorRef: {
             actorId: cleanText(rawRef.actorId || rawRef.actor_id || raw.actorId || raw.actor_id, 120),
             name: cleanText(
                 rawRef.name
                     || rawRef.displayName
-                    || (!candidateName ? raw.name || raw.姓名 : ''),
+                    || (!candidateName ? normalizedRaw.name || normalizedRaw.姓名 : ''),
                 160,
             ),
         },
@@ -3474,7 +3734,7 @@ export function repairActorProfileInsertLocally(output, context = {}) {
             missingFields: [],
         };
     }
-    const candidate = normalizeProfileInsertCandidate(objects[0]);
+    const candidate = normalizeProfileInsertCandidate(objects[0], repairs);
     if (!candidate) {
         return {
             ok: false,
@@ -3503,26 +3763,22 @@ export function parseActorProfileCompletionOutput(output, options = {}) {
 }
 
 function balancedJsonSegments(text) {
-    const source = String(text || '')
-        .replace(/```(?:json|javascript|js)?/giu, '')
-        .replace(/```/gu, '')
-        .replace(/[“”]/gu, '"')
-        .replace(/[‘’]/gu, "'");
+    const source = normalizeProfileJsonSurface(text);
     const segments = [];
     let start = -1;
-    let quoted = false;
+    let quote = '';
     let escaped = false;
     const stack = [];
     for (let index = 0; index < source.length; index += 1) {
         const char = source[index];
-        if (quoted) {
+        if (quote) {
             if (escaped) escaped = false;
             else if (char === '\\') escaped = true;
-            else if (char === '"') quoted = false;
+            else if (char === quote) quote = '';
             continue;
         }
-        if (char === '"') {
-            quoted = true;
+        if (char === '"' || (char === "'" && !isInWordApostrophe(source, index))) {
+            quote = char;
             continue;
         }
         if (char === '{' || char === '[') {
@@ -3554,12 +3810,14 @@ function balancedJsonSegments(text) {
 function splitTopLevelProfileSegments(text, delimiter = ',') {
     const segments = [];
     let current = '';
-    let quoted = false;
+    let quote = '';
     let escaped = false;
     let braceDepth = 0;
     let bracketDepth = 0;
     let parenDepth = 0;
-    for (const char of String(text || '')) {
+    const source = String(text || '');
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
         if (escaped) {
             current += char;
             escaped = false;
@@ -3567,15 +3825,20 @@ function splitTopLevelProfileSegments(text, delimiter = ',') {
         }
         if (char === '\\') {
             current += char;
-            if (quoted) escaped = true;
+            if (quote) escaped = true;
             continue;
         }
-        if (char === '"') {
+        if (quote) {
             current += char;
-            quoted = !quoted;
+            if (char === quote) quote = '';
             continue;
         }
-        if (!quoted) {
+        if (char === '"' || (char === "'" && !isInWordApostrophe(source, index))) {
+            current += char;
+            quote = char;
+            continue;
+        }
+        if (!quote) {
             if (char === '{') braceDepth += 1;
             else if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
             else if (char === '[') bracketDepth += 1;
@@ -3600,13 +3863,9 @@ function splitTopLevelProfileSegments(text, delimiter = ',') {
 }
 
 function salvageProfileArrayRows(output, repairs) {
-    const source = String(output || '')
-        .replace(/```(?:json|javascript|js)?/giu, '')
-        .replace(/```/gu, '')
-        .replace(/[“”]/gu, '"')
-        .replace(/[‘’]/gu, "'");
-    const open = source.indexOf('[');
-    if (open < 0) return [];
+    const source = normalizeProfileJsonSurface(output, repairs);
+    const open = firstUnquotedProfileStructureIndex(source);
+    if (open < 0 || source[open] !== '[') return [];
     const trimmedEnd = source.trimEnd();
     const close = trimmedEnd.endsWith(']') ? source.lastIndexOf(']') : -1;
     const body = source.slice(open + 1, close > open ? close : source.length);
@@ -3669,6 +3928,10 @@ function parseProfileObjectsLocally(output) {
         }
     }
     if (!parsedValues.length) {
+        const loose = parseLooseProfileJsonStructure(source, repairs);
+        if (loose !== null) addParsed(loose);
+    }
+    if (!parsedValues.length) {
         for (const segment of balancedJsonSegments(source)) {
             try {
                 addParsed(JSON.parse(segment));
@@ -3698,7 +3961,48 @@ function parseProfileObjectsLocally(output) {
             repairs.push('loose_profile_table_parsed');
         }
     }
-    return { objects: parsedValues, repairs: [...new Set(repairs)], explicitEmpty };
+    const repairLabels = [...new Set(repairs)]
+        .filter((label) => new Set([
+            'prose_prefix_removed',
+            'unescaped_quote_escaped',
+            'control_character_escaped',
+            'control_character_removed',
+            'fullwidth_colon_normalized',
+            'fullwidth_comma_normalized',
+            'fullwidth_quote_normalized',
+            'unquoted_key_quoted',
+            'missing_object_comma_added',
+            'trailing_comma_removed',
+            'closing_bracket_added',
+            'array_row_salvaged',
+            'loose_profile_table_parsed',
+            'loose_single_quotes_normalized',
+            'loose_missing_property_comma_added',
+            'embedded_profile_container_parsed',
+            'loose_nested_structure_parsed',
+        ]).has(label))
+        .slice(0, 12);
+    const emptyOutput = source.length === 0;
+    const rootType = emptyOutput
+        ? 'empty'
+        : source.startsWith('[')
+            ? 'array'
+            : source.startsWith('{')
+                ? 'object'
+                : 'other';
+    return {
+        objects: parsedValues,
+        repairs: [...new Set(repairs)],
+        explicitEmpty,
+        batchMeta: {
+            rootType,
+            parsedRowCount: Math.min(128, parsedValues.length),
+            explicitEmpty,
+            emptyOutput,
+            formatUnrecoverable: !emptyOutput && parsedValues.length === 0 && !explicitEmpty,
+            repairLabels,
+        },
+    };
 }
 
 const DISCOVERY_NAME_VAGUE_TERMS = new Set([
@@ -3795,7 +4099,7 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
     const seenDiscoveryKeys = new Set();
     const duplicateDiscoveryKeys = new Set();
     for (const raw of parsed.objects) {
-        const normalized = normalizeProfileInsertCandidate(raw);
+        const normalized = normalizeProfileInsertCandidate(raw, parsed.repairs);
         const actorId = cleanText(normalized?.actorRef?.actorId, 120);
         const candidateName = cleanText(normalized?.candidateRef?.name, 160);
         const sourceAnchor = String(normalized?.candidateRef?.sourceAnchor || '')
@@ -3964,6 +4268,7 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
         unresolved,
         explicitEmpty: parsed.explicitEmpty === true,
         repairs: parsed.repairs,
+        batchMeta: parsed.batchMeta,
     };
 }
 

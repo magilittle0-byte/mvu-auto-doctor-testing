@@ -53,7 +53,10 @@ test('profile runtime delegates one batch and contains no per-actor model lane o
         completion,
         /Promise\.all\(candidates\.map|parallelLane|actorShardMaxTokens|sovereigntyHardTimeoutMs/u,
     );
-    assert.match(batchSource, /const first = await collect\(selected, \[\], 0\)/u);
+    assert.match(batchSource, /let first = await collect\(selected, \[\], 0\)/u);
+    assert.match(batchSource, /needsDiscoveryFormatReplacement.*?selected\.length === 0.*?formatUnrecoverable === true/su);
+    assert.match(batchSource, /const replacement = await collect\(\[\], \[\], 1, \[\], true\)/u);
+    assert.match(batchSource, /batchFormatReplacementAttempted = true/u);
     assert.match(batchSource, /PROFILE_BATCH_FAILURE_CATEGORIES/u);
     assert.match(batchSource, /profileBatchRouteDiagnostic/u);
     assert.doesNotMatch(batchSource, /transportFailure/u);

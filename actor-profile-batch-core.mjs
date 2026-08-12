@@ -171,6 +171,8 @@ export async function completeActorProfileBatchTransaction({
         modelCalls: 0,
         persistenceStatus: 'not_completed',
         readbackVerified: false,
+        batchMeta: null,
+        batchFormatReplacementAttempted: false,
     };
     if (!selected.length && !allowDiscovery) return base;
     if (
@@ -213,12 +215,13 @@ export async function completeActorProfileBatchTransaction({
         validationFeedback,
         attempt,
         discoveryRetryTargets = [],
+        forceDiscoveryRetry = false,
     ) => {
         const attemptDiscoveryContext = attempt === 0
             ? discoveryContext
             : {
                 ...(discoveryContext || {}),
-                discoveryEnabled: discoveryRetryTargets.length > 0,
+                discoveryEnabled: discoveryRetryTargets.length > 0 || forceDiscoveryRetry,
                 discoveryRetryOnly: discoveryRetryTargets.length > 0,
             };
         const messages = buildActorProfileCompletionMessages(subset, {
@@ -250,9 +253,16 @@ export async function completeActorProfileBatchTransaction({
         });
     };
 
-    const first = await collect(selected, [], 0);
+    let batchMeta = null;
+    let batchFormatReplacementAttempted = false;
+    const withBatchMeta = (result) => ({
+        ...result,
+        batchMeta: clone(batchMeta),
+        batchFormatReplacementAttempted,
+    });
+    let first = await collect(selected, [], 0);
     if (first.requestFailure) {
-        return {
+        return withBatchMeta({
             ...base,
             modelCalls,
             failures: [
@@ -266,10 +276,10 @@ export async function completeActorProfileBatchTransaction({
                     routeDiagnostic: first.requestFailure.routeDiagnostic,
                 }]),
             ],
-        };
+        });
     }
     if (first.stale) {
-        return {
+        return withBatchMeta({
             ...base,
             modelCalls,
             failures: [
@@ -279,7 +289,49 @@ export async function completeActorProfileBatchTransaction({
                     'actor_profile.target_stale',
                 )) : [{ reason: 'actor_profile.target_stale' }]),
             ],
-        };
+        });
+    }
+    batchMeta = clone(first.batchMeta || null);
+    base.batchMeta = clone(batchMeta);
+    const needsDiscoveryFormatReplacement = allowDiscovery === true
+        && selected.length === 0
+        && batchMeta?.emptyOutput !== true
+        && batchMeta?.explicitEmpty !== true
+        && batchMeta?.formatUnrecoverable === true;
+    if (needsDiscoveryFormatReplacement) {
+        batchFormatReplacementAttempted = true;
+        base.batchFormatReplacementAttempted = true;
+        const replacement = await collect([], [], 1, [], true);
+        if (replacement.requestFailure) {
+            return withBatchMeta({
+                ...base,
+                modelCalls,
+                failures: [{
+                    reason: `actor_profile.${replacement.requestFailure.category}`,
+                    routeDiagnostic: replacement.requestFailure.routeDiagnostic,
+                }],
+            });
+        }
+        if (replacement.stale) {
+            return withBatchMeta({
+                ...base,
+                modelCalls,
+                failures: [{ reason: 'actor_profile.target_stale' }],
+            });
+        }
+        batchMeta = clone(replacement.batchMeta || null);
+        base.batchMeta = clone(batchMeta);
+        if (
+            batchMeta?.formatUnrecoverable === true
+            || batchMeta?.parsedRowCount === 0
+        ) {
+            return withBatchMeta({
+                ...base,
+                modelCalls,
+                failures: [{ reason: 'actor_profile.format_unrecoverable' }],
+            });
+        }
+        first = replacement;
     }
     for (const entry of first.entries || []) acceptedById.set(entry.actorId, entry);
     for (const failure of first.failures || []) failureById.set(failure.actorId, failure);
@@ -287,12 +339,12 @@ export async function completeActorProfileBatchTransaction({
     let discoveries = [...(first.discoveries || [])];
     let unresolved = [...(first.unresolved || [])];
     const explicitEmpty = first.explicitEmpty === true;
-    const retryCandidates = semanticRetry
+    const retryCandidates = semanticRetry && !batchFormatReplacementAttempted
         ? selected.filter((candidate) => (
             failureById.get(candidateActorId(candidate))?.retryable
         ))
         : [];
-    const retryDiscoveryTargets = semanticRetry
+    const retryDiscoveryTargets = semanticRetry && !batchFormatReplacementAttempted
         ? unresolved
             .filter((entry) => (
                 entry.retryable === true
@@ -795,5 +847,7 @@ export async function completeActorProfileBatchTransaction({
         readbackVerified: true,
         explicitEmpty,
         registry: clone(resolved.registry || null),
+        batchMeta: clone(batchMeta),
+        batchFormatReplacementAttempted,
     };
 }
