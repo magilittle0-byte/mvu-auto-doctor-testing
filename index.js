@@ -11937,6 +11937,14 @@ async function completeActorProfilesForTurn(captured, {
             : worldContext,
         stateAnchors,
     ].filter(Boolean).join('\n\n');
+    const currentSourceRef = sourceRefOf(captured);
+    const discoverySourceRef = {
+        ...currentSourceRef,
+        logicalIndex: captured.index,
+        generationSerial: captured.generationSerial,
+        contentHash: captured.contentFingerprint || captured.fingerprint,
+        contentFingerprint: captured.contentFingerprint || captured.fingerprint,
+    };
     return completeActorProfileBatchTransaction({
         ledger: actorLedger,
         persistenceBaseLedger,
@@ -11949,12 +11957,13 @@ async function completeActorProfilesForTurn(captured, {
             swipeId: captured.swipeId,
             generationId: captured.generationId,
             scopeDigest: captured.scopeDigest,
-            sourceRef: sourceRefOf(captured),
+            sourceRef: currentSourceRef,
         },
         semanticRetry: settings.actorProfileSemanticRetries > 0,
         allowDiscovery: true,
         discoveryContext: {
             ...(discoveryContext || {}),
+            sourceRef: discoverySourceRef,
         },
         resolveDiscoveries,
         isTargetCurrent: () => (
@@ -12251,6 +12260,13 @@ async function runActorProfileTarget(captured, {
         Number(captured.index) + 1,
     );
     const sourceRef = sourceRefOf(captured);
+    const discoverySourceRef = {
+        ...sourceRef,
+        logicalIndex: captured.index,
+        generationSerial: captured.generationSerial,
+        contentHash: captured.contentFingerprint || captured.fingerprint,
+        contentFingerprint: captured.contentFingerprint || captured.fingerprint,
+    };
     const s0Snapshot = {
         fieldRevision: Math.max(
             0,
@@ -12425,7 +12441,7 @@ async function runActorProfileTarget(captured, {
         const actorDiscovery = discoverActorsFromTurnSources(s0Ledger, {
             acceptedContent: acceptedNarrative,
             excludedActorNames,
-            sourceRef,
+            sourceRef: discoverySourceRef,
             turn,
             modelProfileDiscoveries: discoveries,
         });
@@ -12633,6 +12649,7 @@ async function runActorProfileTarget(captured, {
         discoveryContext: {
             completionMode: settings.actorProfileCompletionMode,
             acceptedNarrative,
+            sourceRef: discoverySourceRef,
             registeredActorIndex,
             characterCreationTickets: deepClone(
                 characterCreationTicketBatch?.tickets || [],

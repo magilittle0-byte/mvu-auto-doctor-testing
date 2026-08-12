@@ -30,7 +30,7 @@ export function buildActorProfileEvidenceBank(evidenceText: string, options?: ob
 export function buildActorProfileCompletionMessages(candidates: unknown[], options?: object): object[];
 export function repairActorProfileInsertLocally(output: string, context?: object): object;
 export function validateActorProfileInsertCandidate(candidate: unknown, context?: object): object;
-export function validateActorProfileDiscoveryAnchor(candidateRef: unknown, acceptedNarrative: unknown): {
+export function validateActorProfileDiscoveryAnchor(candidateRef: unknown, acceptedNarrative: unknown, policy?: unknown): {
     ok: boolean;
     reason: string;
     retryable: boolean;
@@ -38,6 +38,8 @@ export function validateActorProfileDiscoveryAnchor(candidateRef: unknown, accep
     name: string;
     sourceAnchor: string;
 };
+export function takeActorProfileDiscoveryAnchorPolicies(values: unknown[], context?: object): Map<unknown, unknown>;
+export function discardActorProfileDiscoveryProofBatches(value: unknown): void;
 export function parseActorProfileCompletionOutput(output: string, options?: object): object;
 export interface ActorProfileBatchParseMeta {
     rootType: 'array' | 'object' | 'other' | 'empty' | 'narrative_blocks';

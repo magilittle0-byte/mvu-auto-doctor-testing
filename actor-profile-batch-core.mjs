@@ -2,6 +2,7 @@ import { fingerprint } from './core.mjs';
 import {
     actorProfileBaselineDigest,
     buildActorProfileCompletionMessages,
+    discardActorProfileDiscoveryProofBatches,
     materializeActorProfileBaseline,
     parseActorProfileCompletionBatchOutput,
     validateActorProfileInsertCandidate,
@@ -209,6 +210,7 @@ export async function completeActorProfileBatchTransaction({
     const acceptedById = new Map();
     const failureById = new Map();
     const rejected = [];
+    const narrativeProofBatchIds = new Set();
     let modelCalls = 0;
     const collect = async (
         subset,
@@ -247,10 +249,12 @@ export async function completeActorProfileBatchTransaction({
             };
         }
         if (!await current()) return { stale: true };
-        return parseActorProfileCompletionBatchOutput(output, {
+        const parsed = parseActorProfileCompletionBatchOutput(output, {
             candidates: subset,
             discoveryContext: attemptDiscoveryContext,
         });
+        if (parsed.narrativeProofBatchId) narrativeProofBatchIds.add(parsed.narrativeProofBatchId);
+        return parsed;
     };
 
     let batchMeta = null;
@@ -260,6 +264,7 @@ export async function completeActorProfileBatchTransaction({
         batchMeta: clone(batchMeta),
         batchFormatReplacementAttempted,
     });
+    try {
     let first = await collect(selected, [], 0);
     if (first.requestFailure) {
         return withBatchMeta({
@@ -850,4 +855,7 @@ export async function completeActorProfileBatchTransaction({
         batchMeta: clone(batchMeta),
         batchFormatReplacementAttempted,
     };
+    } finally {
+        discardActorProfileDiscoveryProofBatches([...narrativeProofBatchIds]);
+    }
 }

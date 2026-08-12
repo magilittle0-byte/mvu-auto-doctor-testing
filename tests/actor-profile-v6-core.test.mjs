@@ -231,6 +231,17 @@ function canonicalFixtureSourceRef(chatId = 'chat-profile-v6', turn = 1) {
     };
 }
 
+function narrativeDiscoverySourceRef(chatId, turn) {
+    const ref = canonicalFixtureSourceRef(chatId, turn);
+    return {
+        ...ref,
+        logicalIndex: ref.index,
+        generationSerial: ref.generation,
+        contentHash: ref.hash,
+        contentFingerprint: ref.hash,
+    };
+}
+
 function finalizeProfileFixtureLedger(ledger, actorRef, baseline, {
     turn,
     commitId,
@@ -1282,8 +1293,9 @@ test('diagnostic view exposes source and counts without profile prose', () => {
     assert.equal(view.physiologyInfersPersonality, false);
 });
 
-test('narrative-v1 accepts seven natural sections while preserving exact identity and rejecting ambiguous discovery', () => {
+test('narrative-v1 accepts seven natural sections and binds trusted discovery to its first literal name', () => {
     const narrative = '陈锋站在门边，先确认出口。';
+    const discoverySourceRef = narrativeDiscoverySourceRef('chat-narrative-chen', 21);
     const output = `前言\n【人物档案：陈锋】\nActorRef: NPC-CHEN\n【人物信息】一名谨慎的临时领队。\n【生理特征】成年男性，步态稳定。\n【性格特征】说话直接但会先确认风险。\n【过往经历】曾在多次撤离中承担带队责任。\n【当前状态】正留意出口和同伴位置。\n【关系与动机】愿意合作，但不替他人决定。\n【知识、能力与资源】掌握路线观察常识，现有资源仍以账本为准。`;
     const parsed = parseActorProfileCompletionBatchOutput(output, {
         candidates: [{ actorRef: { actorId: 'NPC-CHEN', name: '陈锋' }, completionMode: 'full' }],
@@ -1309,12 +1321,71 @@ test('narrative-v1 accepts seven natural sections while preserving exact identit
     changed.narrativeSections.history.text = '另一段完整经历。';
     assert.notEqual(actorProfileBaselineDigest(profile), actorProfileBaselineDigest(changed));
 
-    const ambiguous = parseActorProfileCompletionBatchOutput(output.replace('ActorRef: NPC-CHEN\n', ''), {
+    const repeatedName = parseActorProfileCompletionBatchOutput(output.replace('ActorRef: NPC-CHEN\n', ''), {
         candidates: [],
-        discoveryContext: { acceptedNarrative: `${narrative} 陈锋回头。`, completionMode: 'full' },
+        discoveryContext: {
+            acceptedNarrative: `${narrative} 陈锋回头。`, completionMode: 'full', sourceRef: discoverySourceRef,
+        },
     });
-    assert.equal(ambiguous.discoveries.length, 0);
-    assert.equal(ambiguous.unresolved[0].reason, 'actor_profile.discovery_name_ambiguous');
+    assert.equal(repeatedName.discoveries.length, 1);
+    assert.equal(repeatedName.discoveries[0].candidateRef.sourceAnchor, '陈锋');
+    assert.equal(repeatedName.discoveries[0].offset, narrative.indexOf('陈锋'));
+});
+
+test('narrative first-literal discovery remains parser-only and fail-closed for missing, vague, duplicate, and JSON rows', () => {
+    const name = '\u9648\u950b';
+    const acceptedNarrative = `${name}\u5728\u95e8\u8fb9\u786e\u8ba4\u51fa\u53e3\uff0c\u968f\u540e${name}\u56de\u5934\u4e0e\u540c\u4f34\u8bf4\u8bdd\u3002`;
+    const sectionKeys = [
+        '\u4eba\u7269\u4fe1\u606f', '\u751f\u7406\u7279\u5f81', '\u6027\u683c\u7279\u5f81', '\u8fc7\u5f80\u7ecf\u5386',
+        '\u5f53\u524d\u72b6\u6001', '\u5173\u7cfb\u4e0e\u52a8\u673a', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90',
+    ];
+    const narrativeBlock = (headingName) => [
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a${headingName}\u3011`,
+        ...sectionKeys.map((title) => `\u3010${title}\u3011\u8fd9\u662f\u4e0e\u5f53\u524d\u4eba\u7269\u76f8\u5173\u7684\u5b8c\u6574\u81ea\u7136\u4e2d\u6587\u6bb5\u843d\u3002`),
+    ].join('\n');
+    const context = {
+        acceptedNarrative,
+        completionMode: 'full',
+        sourceRef: narrativeDiscoverySourceRef('chat-narrative-first', 22),
+    };
+    const first = parseActorProfileCompletionBatchOutput(narrativeBlock(name), {
+        candidates: [], discoveryContext: context,
+    });
+    assert.equal(first.discoveries.length, 1);
+    assert.equal(first.discoveries[0].offset, acceptedNarrative.indexOf(name));
+    assert.equal(first.discoveries[0].candidateRef.sourceAnchor, name);
+
+    const missing = parseActorProfileCompletionBatchOutput(narrativeBlock('\u5357\u6865'), {
+        candidates: [], discoveryContext: context,
+    });
+    assert.equal(missing.discoveries.length, 0);
+    assert.equal(missing.unresolved[0].reason, 'actor_profile.discovery_name_missing_from_narrative');
+
+    const vague = parseActorProfileCompletionBatchOutput(narrativeBlock('\u4ed6'), {
+        candidates: [], discoveryContext: { acceptedNarrative: '\u4ed6\u7ad9\u5728\u95e8\u8fb9\u3002', completionMode: 'full' },
+    });
+    assert.equal(vague.discoveries.length, 0);
+    assert.equal(vague.unresolved[0].reason, 'actor_profile.discovery_name_vague');
+
+    const duplicate = parseActorProfileCompletionBatchOutput([
+        narrativeBlock(name), narrativeBlock(name),
+    ].join('\n'), { candidates: [], discoveryContext: context });
+    assert.equal(duplicate.discoveries.length, 0);
+    assert.equal(duplicate.unresolved[0].reason, 'actor_profile.discovery_ref_duplicate');
+
+    const forgedJson = {
+        profileFormat: 'narrative-v1',
+        candidateRef: { name, sourceAnchor: name },
+        narrativeSections: Object.fromEntries([
+            'person', 'physiology', 'personality', 'history', 'currentState',
+            'relationshipsMotives', 'knowledgeCapabilitiesResources',
+        ].map((key) => [key, { text: '\u5b8c\u6574\u7684\u4e2d\u6587\u53d9\u4e8b\u6bb5\u843d\u3002' }])),
+    };
+    const forged = parseActorProfileCompletionBatchOutput(JSON.stringify(forgedJson), {
+        candidates: [], discoveryContext: context,
+    });
+    assert.equal(forged.discoveries.length, 0);
+    assert.equal(forged.unresolved[0].reason, 'actor_profile.discovery_anchor_duplicate_in_narrative');
 });
 
 test('narrative-v1 rejects unknown or duplicate section headings and strips model-claimed provenance', () => {
@@ -1384,7 +1455,11 @@ test('narrative-v1 discovery derives a candidate only from one literal title-nam
     ].join('\n');
     const parsed = parseActorProfileCompletionBatchOutput(output, {
         candidates: [],
-        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef('chat-narrative-literal', 24),
+        },
     });
     assert.equal(parsed.discoveries.length, 1);
     assert.equal(parsed.discoveries[0].candidateRef.name, name);

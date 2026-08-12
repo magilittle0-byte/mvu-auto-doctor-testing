@@ -126,6 +126,13 @@ const NARRATIVE_SECTION_SOURCE_SET = new Set([
     'designed_seed',
     'hypothesis',
 ]);
+// This capability is intentionally module-private.  Only rows emitted by the
+// bounded Markdown parser can use the first literal name occurrence for a
+// discovery anchor; JSON/legacy callers cannot self-declare that privilege.
+const NARRATIVE_FIRST_LITERAL_POLICY = Symbol('narrative_first_literal');
+const narrativeParsedRows = new WeakSet();
+const narrativeFirstLiteralProofBatches = new Map();
+let narrativeFirstLiteralProofSequence = 0;
 const MODULE_SET = new Set(ACTOR_PROFILE_MODULES);
 
 function clone(value) {
@@ -139,6 +146,39 @@ function cleanText(value, limit = 500) {
 function narrativeText(value, limit = 4000) {
     const text = cleanText(value, limit);
     return text && !PROFILE_PLACEHOLDER_RE.test(text) ? text : '';
+}
+
+function canonicalNarrativeDiscoverySourceRef(value) {
+    if (!isRecord(value)) return null;
+    const index = Number.isInteger(value.logicalIndex)
+        ? value.logicalIndex
+        : value.index;
+    const generationSerial = Number.isInteger(value.generationSerial)
+        ? value.generationSerial
+        : value.generation;
+    const sourceRef = {
+        chatId: cleanText(value.chatId, 180),
+        messageId: cleanText(value.messageId, 180),
+        index: Number.isInteger(index) && index >= 0 ? index : -1,
+        swipeId: Number.isInteger(value.swipeId) && value.swipeId >= 0 ? value.swipeId : -1,
+        generationSerial: Number.isInteger(generationSerial) && generationSerial >= 0
+            ? generationSerial
+            : -1,
+        generationId: cleanText(value.generationId, 180),
+        generationType: cleanText(value.generationType, 80),
+        hash: cleanText(value.hash, 180),
+        contentHash: cleanText(value.contentHash || value.contentFingerprint, 180),
+        contentFingerprint: cleanText(value.contentFingerprint || value.contentHash, 180),
+        identityScopeId: cleanText(value.identityScopeId, 300),
+        scopeDigest: cleanText(value.scopeDigest, 180),
+    };
+    return Object.values(sourceRef).every((entry) => entry !== '' && entry !== -1)
+        ? sourceRef
+        : null;
+}
+
+function acceptedNarrativeDigest(value) {
+    return `accepted-narrative-v1:${fingerprint(String(value || ''))}`;
 }
 
 function narrativeSection(value, key, { modelAuthored = false } = {}) {
@@ -4153,7 +4193,7 @@ function isVagueDiscoveryName(name) {
     return DISCOVERY_NAME_VAGUE_TERMS.has(compact);
 }
 
-export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative) {
+export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative, policy = null) {
     const name = String(candidateRef?.name || '').trim().slice(0, 160);
     const sourceAnchor = String(candidateRef?.sourceAnchor || '').trim().slice(0, 1200);
     const narrative = String(acceptedNarrative || '');
@@ -4171,6 +4211,21 @@ export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrat
     if (!sourceAnchor.includes(name)) {
         return failure('actor_profile.discovery_name_not_in_anchor');
     }
+    if (policy === NARRATIVE_FIRST_LITERAL_POLICY) {
+        if (sourceAnchor !== name) {
+            return failure('actor_profile.discovery_anchor_not_literal_name');
+        }
+        const offset = narrative.indexOf(name);
+        if (offset < 0) return failure('actor_profile.discovery_anchor_not_in_narrative');
+        return {
+            ok: true,
+            reason: '',
+            retryable: false,
+            offset,
+            name,
+            sourceAnchor,
+        };
+    }
     const offset = narrative.indexOf(sourceAnchor);
     if (offset < 0) return failure('actor_profile.discovery_anchor_not_in_narrative');
     if (narrative.indexOf(sourceAnchor, offset + 1) >= 0) {
@@ -4184,6 +4239,53 @@ export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrat
         name,
         sourceAnchor,
     };
+}
+
+function narrativeProofBatchMatchesContext(batch, context) {
+    const sourceRef = canonicalNarrativeDiscoverySourceRef(context?.sourceRef);
+    return Boolean(
+        sourceRef
+        && batch?.acceptedNarrativeDigest === acceptedNarrativeDigest(context?.acceptedNarrative)
+        && JSON.stringify(batch?.sourceRef) === JSON.stringify(sourceRef),
+    );
+}
+
+export function takeActorProfileDiscoveryAnchorPolicies(values, context = null) {
+    const entries = Array.isArray(values) ? values : [];
+    const batchIds = [...new Set(entries
+        .map((entry) => cleanText(entry?.__narrativeFirstLiteralBatchId, 180))
+        .filter(Boolean))];
+    const policies = new Map();
+    for (const batchId of batchIds) {
+        const batch = narrativeFirstLiteralProofBatches.get(batchId);
+        // Take and remove the complete batch before any match. A replay, stale
+        // target or partial failure can never retain an unused sibling proof.
+        narrativeFirstLiteralProofBatches.delete(batchId);
+        if (!batch || !narrativeProofBatchMatchesContext(batch, context)) continue;
+        const consumedProofs = new Set();
+        for (const entry of entries) {
+            if (cleanText(entry?.__narrativeFirstLiteralBatchId, 180) !== batchId) continue;
+            const proof = cleanText(entry?.__narrativeFirstLiteralProof, 180);
+            const expected = batch.proofs.get(proof);
+            if (
+                !expected
+                || consumedProofs.has(proof)
+                || expected.name !== String(entry?.candidateRef?.name || '').trim().slice(0, 160)
+                || expected.sourceAnchor !== String(entry?.candidateRef?.sourceAnchor || '').trim().slice(0, 1200)
+                || expected.offset !== Number(entry?.offset)
+            ) continue;
+            consumedProofs.add(proof);
+            policies.set(entry, NARRATIVE_FIRST_LITERAL_POLICY);
+        }
+    }
+    return policies;
+}
+
+export function discardActorProfileDiscoveryProofBatches(value) {
+    for (const batchId of new Set(Array.isArray(value) ? value : [value])) {
+        const key = cleanText(batchId, 180);
+        if (key) narrativeFirstLiteralProofBatches.delete(key);
+    }
 }
 
 const NARRATIVE_SECTION_HEADER_KEYS = Object.freeze(Object.fromEntries(
@@ -4247,20 +4349,21 @@ function parseNarrativeProfileBlocks(output, discoveryContext = null) {
         if (/^actorid$/iu.test(actorId)) parseFailure ||= 'actor_profile.actor_ref_literal_invalid';
         const narrative = String(discoveryContext?.acceptedNarrative || '');
         const first = name ? narrative.indexOf(name) : -1;
-        const unique = first >= 0 && narrative.indexOf(name, first + name.length) < 0;
-        rows.push({
+        const row = {
             profileFormat: 'narrative-v1',
             actorRef: actorId ? { actorId, name } : {},
             candidateRef: actorId ? null : {
                 name,
-                sourceAnchor: unique ? narrative.slice(first, first + name.length) : '',
+                sourceAnchor: first >= 0 ? narrative.slice(first, first + name.length) : '',
             },
             narrativeSections: sections,
             __narrativeParseFailure: parseFailure,
-            __narrativeIdentityFailure: actorId || unique ? '' : (first < 0
-                ? 'actor_profile.discovery_name_missing_from_narrative'
-                : 'actor_profile.discovery_name_ambiguous'),
-        });
+            __narrativeIdentityFailure: actorId || first >= 0
+                ? ''
+                : 'actor_profile.discovery_name_missing_from_narrative',
+        };
+        narrativeParsedRows.add(row);
+        rows.push(row);
     }
     return rows;
 }
@@ -4323,6 +4426,7 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
     const failureById = new Map();
     const unexpected = [];
     const discoveries = [];
+    let narrativeProofBatch = null;
     const unresolved = [];
     const seen = new Set();
     const seenDiscoveryKeys = new Set();
@@ -4357,9 +4461,16 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
                 continue;
             }
             seenDiscoveryKeys.add(discoveryKey);
+            const narrativeSourceRef = canonicalNarrativeDiscoverySourceRef(
+                options.discoveryContext?.sourceRef,
+            );
+            const discoveryPolicy = narrativeParsedRows.has(raw) && narrativeSourceRef
+                ? NARRATIVE_FIRST_LITERAL_POLICY
+                : null;
             const anchorCheck = validateActorProfileDiscoveryAnchor(
                 { name: candidateName, sourceAnchor },
                 options.discoveryContext?.acceptedNarrative,
+                discoveryPolicy,
             );
             if (!anchorCheck.ok) {
                 unresolved.push({
@@ -4391,14 +4502,47 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
                 });
                 continue;
             }
-            discoveries.push({
+            const discovery = {
                 temporaryActorId,
                 candidateRef: { name: candidateName, sourceAnchor },
                 offset: anchorCheck.offset,
                 candidate: validation.candidate,
                 repairs: [...new Set([...parsed.repairs, ...local.repairs])],
                 resolutions: validation.resolutions || [],
-            });
+            };
+            if (discoveryPolicy === NARRATIVE_FIRST_LITERAL_POLICY) {
+                if (!narrativeProofBatch) {
+                    const batchId = `NFB-${++narrativeFirstLiteralProofSequence}-${fingerprint(JSON.stringify([
+                        acceptedNarrativeDigest(options.discoveryContext?.acceptedNarrative),
+                        narrativeSourceRef,
+                        Date.now(),
+                    ])).slice(0, 24)}`;
+                    narrativeProofBatch = {
+                        batchId,
+                        acceptedNarrativeDigest: acceptedNarrativeDigest(
+                            options.discoveryContext?.acceptedNarrative,
+                        ),
+                        sourceRef: narrativeSourceRef,
+                        proofs: new Map(),
+                    };
+                    narrativeFirstLiteralProofBatches.set(batchId, narrativeProofBatch);
+                }
+                const proof = `NFD-${++narrativeFirstLiteralProofSequence}-${fingerprint(JSON.stringify([
+                    narrativeProofBatch.batchId,
+                    candidateName,
+                    sourceAnchor,
+                    anchorCheck.offset,
+                    Date.now(),
+                ])).slice(0, 24)}`;
+                narrativeProofBatch.proofs.set(proof, {
+                    name: candidateName,
+                    sourceAnchor,
+                    offset: anchorCheck.offset,
+                });
+                discovery.__narrativeFirstLiteralProof = proof;
+                discovery.__narrativeFirstLiteralBatchId = narrativeProofBatch.batchId;
+            }
+            discoveries.push(discovery);
             continue;
         }
         if (!actorId) {
@@ -4507,6 +4651,7 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
         explicitEmpty: parsed.explicitEmpty === true,
         repairs: parsed.repairs,
         batchMeta: parsed.batchMeta,
+        narrativeProofBatchId: narrativeProofBatch?.batchId || '',
     };
 }
 

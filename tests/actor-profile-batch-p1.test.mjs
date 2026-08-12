@@ -36,6 +36,16 @@ function sourceRef(chatId, generation = 1) {
     };
 }
 
+function narrativeDiscoverySourceRef(ref) {
+    return {
+        ...ref,
+        logicalIndex: ref.index,
+        generationSerial: ref.generation,
+        contentHash: ref.hash,
+        contentFingerprint: ref.hash,
+    };
+}
+
 function registerNames(ledger, names, ref = sourceRef(ledger.chatId)) {
     const discovery = discoverActorsFromTurnSources(ledger, {
         acceptedContent: names.map((name) => `<actor name="${name}"></actor>`).join('\n'),
@@ -616,6 +626,122 @@ test('rowless current-source discovery response gets one full replacement and th
     assert.equal(run.result.batchFormatReplacementAttempted, true);
     assert.equal(run.result.batchMeta.parsedRowCount, 1);
     assert.equal(run.saveCount, 2);
+});
+
+test('one narrative proof batch carries more than 256 discoveries through one real ledger take', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const names = Array.from({ length: 257 }, (_, index) => `\u4eba\u7269${String(index + 1).padStart(3, '0')}`);
+    const acceptedNarrative = names.map((name) => (
+        `${name}\u51fa\u73b0\u5728\u8d70\u5eca\uff0c${name}\u6682\u65f6\u4fdd\u6301\u89c2\u5bdf\u3002`
+    )).join('\n');
+    const titles = [
+        '\u4eba\u7269\u4fe1\u606f', '\u751f\u7406\u7279\u5f81', '\u6027\u683c\u7279\u5f81', '\u8fc7\u5f80\u7ecf\u5386',
+        '\u5f53\u524d\u72b6\u6001', '\u5173\u7cfb\u4e0e\u52a8\u673a', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90',
+    ];
+    const output = names.map((name) => [
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a${name}\u3011`,
+        ...titles.map((title) => `\u3010${title}\u3011\u4fdd\u6301\u5b8c\u6574\u7684\u81ea\u7136\u4e2d\u6587\u6863\u6848\u6bb5\u843d\u3002`),
+    ].join('\n')).join('\n');
+    const discoverySourceRef = narrativeDiscoverySourceRef(fixture.ref);
+    let resolverVerified = false;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: discoverySourceRef,
+        },
+        requestBatch: () => output,
+        resolveDiscoveries: async ({ discoveries }) => {
+            assert.equal(discoveries.length, 257);
+            const verified = discoverActorsFromTurnSources(emptyActorLedger(fixture.ledger.chatId), {
+                acceptedContent: acceptedNarrative,
+                sourceRef: discoverySourceRef,
+                turn: fixture.ref.generation,
+                modelProfileDiscoveries: structuredClone(discoveries),
+            });
+            assert.equal(verified.candidates.length, 257);
+            assert.equal(verified.modelProfileDiscoveries.length, 257);
+            assert.deepEqual(verified.candidates.map((candidate) => candidate.name), names);
+            assert.deepEqual(
+                verified.modelProfileDiscoveries.map((entry) => entry.sourceOffset),
+                names.map((name) => acceptedNarrative.indexOf(name)),
+            );
+            assert.equal(new Set(verified.candidates.map((candidate) => candidate.candidateId)).size, 257);
+            const serialized = JSON.stringify(verified);
+            assert.equal(serialized.includes('__narrativeFirstLiteralProof'), false);
+            assert.equal(serialized.includes('__narrativeFirstLiteralBatchId'), false);
+            resolverVerified = true;
+            return {
+                ok: true,
+                ledger: structuredClone(fixture.ledger),
+                candidates: [],
+                entries: [],
+                rejected: [],
+                failures: [],
+                registry: null,
+                snapshot: { fieldRevision: 0 },
+            };
+        },
+    });
+    assert.equal(resolverVerified, true);
+    assert.equal(run.result.modelCalls, 1);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(
+        (run.result.failures || []).some((failure) => failure?.reason === 'actor_profile.discovery_failed'),
+        false,
+    );
+    assert.equal(
+        (run.result.rejected || []).some((rejection) => rejection?.reason === 'actor_profile.discovery_failed'),
+        false,
+    );
+});
+
+test('an unconsumed narrative proof batch is cleared by the P1 transaction finally path', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const name = '\u4eba\u7269\u6e05\u7406';
+    const acceptedNarrative = `${name}\u51fa\u73b0\u5728\u8d70\u5eca\uff0c${name}\u6682\u65f6\u4fdd\u6301\u89c2\u5bdf\u3002`;
+    const titles = [
+        '\u4eba\u7269\u4fe1\u606f', '\u751f\u7406\u7279\u5f81', '\u6027\u683c\u7279\u5f81', '\u8fc7\u5f80\u7ecf\u5386',
+        '\u5f53\u524d\u72b6\u6001', '\u5173\u7cfb\u4e0e\u52a8\u673a', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90',
+    ];
+    const output = [
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a${name}\u3011`,
+        ...titles.map((title) => `\u3010${title}\u3011\u4fdd\u6301\u5b8c\u6574\u7684\u81ea\u7136\u4e2d\u6587\u6863\u6848\u6bb5\u843d\u3002`),
+    ].join('\n');
+    const discoverySourceRef = narrativeDiscoverySourceRef(fixture.ref);
+    let capturedDiscoveries = [];
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: discoverySourceRef,
+        },
+        requestBatch: () => output,
+        resolveDiscoveries: async ({ discoveries }) => {
+            capturedDiscoveries = structuredClone(discoveries);
+            assert.equal(discoveries.length, 1);
+            return {
+                ok: true,
+                ledger: structuredClone(fixture.ledger),
+                candidates: [],
+                entries: [],
+                rejected: [],
+                failures: [],
+                registry: null,
+                snapshot: { fieldRevision: 0 },
+            };
+        },
+    });
+    assert.equal(run.result.modelCalls, 1);
+    const replay = discoverActorsFromTurnSources(emptyActorLedger(fixture.ledger.chatId), {
+        acceptedContent: acceptedNarrative,
+        sourceRef: discoverySourceRef,
+        turn: fixture.ref.generation,
+        modelProfileDiscoveries: capturedDiscoveries,
+    });
+    assert.equal(replay.candidates.length, 0, 'finally clears every unconsumed proof in the batch');
 });
 
 test('a second rowless discovery response fails closed with a fixed parse code and no save', async () => {
@@ -1247,6 +1373,8 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(transaction, /recordModelDiagnostic/u);
     assert.match(profileFunction, /worldContext\.text/u);
     assert.match(profileFunction, /scopeDigest: captured\.scopeDigest/u);
+    assert.match(profileFunction, /const discoverySourceRef = \{[\s\S]*?logicalIndex: captured\.index,[\s\S]*?generationSerial: captured\.generationSerial,[\s\S]*?contentHash: captured\.contentFingerprint \|\| captured\.fingerprint,[\s\S]*?contentFingerprint: captured\.contentFingerprint \|\| captured\.fingerprint,/u);
+    assert.match(profileFunction, /discoveryContext: \{[\s\S]*?sourceRef: discoverySourceRef,/u);
     for (const p1Step of [
         'discoverActorsFromTurnSources',
         'runActorRegistryUpsert',

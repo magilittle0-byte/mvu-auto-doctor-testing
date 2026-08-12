@@ -23,6 +23,7 @@ import {
     settleActorInjectionReceipts,
 } from '../actor-ledger-core.mjs';
 import { makeActionReadyActor, makeActionReadyLedger } from './helpers/actor-action-ready-fixture.mjs';
+import { parseActorProfileCompletionBatchOutput } from '../actor-profile-v6-core.mjs';
 
 function settleWithWorld(ledger, candidates, options = {}) {
     const turn = Number(options.turn ?? ledger.turn) || 0;
@@ -195,6 +196,100 @@ function scopedLedger(chatId, value = {}) {
     });
     return makeActionReadyLedger(ledger, { sourceRef: ref, turn: ledger.turn || 1 });
 }
+
+test('ledger preserves only parser-trusted narrative first-literal discovery and orders distinct names by source offset', () => {
+    const chatId = 'chat-narrative-first-literal';
+    const target = sourceRef(5, chatId);
+    const firstName = '\u7532\u4e00';
+    const secondName = '\u4e59\u4e8c';
+    const acceptedContent = `${firstName}\u5148\u5728\u901a\u9053\u51fa\u73b0\uff0c${secondName}\u7a0d\u540e\u52a0\u5165\uff0c${firstName}\u518d\u6b21\u63d0\u9192\u540c\u4f34\uff0c${secondName}\u4fdd\u6301\u8b66\u6212\u3002`;
+    const titles = [
+        '\u4eba\u7269\u4fe1\u606f', '\u751f\u7406\u7279\u5f81', '\u6027\u683c\u7279\u5f81', '\u8fc7\u5f80\u7ecf\u5386',
+        '\u5f53\u524d\u72b6\u6001', '\u5173\u7cfb\u4e0e\u52a8\u673a', '\u77e5\u8bc6\u3001\u80fd\u529b\u4e0e\u8d44\u6e90',
+    ];
+    const block = (name) => [
+        `\u3010\u4eba\u7269\u6863\u6848\uff1a${name}\u3011`,
+        ...titles.map((title) => `\u3010${title}\u3011\u6b64\u5904\u4fdd\u7559\u5b8c\u6574\u81ea\u7136\u4e2d\u6587\u4eba\u7269\u6863\u6848\u6bb5\u843d\u3002`),
+    ].join('\n');
+    const parsed = parseActorProfileCompletionBatchOutput([
+        block(secondName), block(firstName),
+    ].join('\n'), {
+        candidates: [],
+        discoveryContext: { acceptedNarrative: acceptedContent, completionMode: 'full', sourceRef: target },
+    });
+    assert.equal(parsed.discoveries.length, 2);
+    const trusted = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
+        acceptedContent,
+        sourceRef: target,
+        turn: 5,
+        modelProfileDiscoveries: structuredClone(parsed.discoveries),
+    });
+    assert.deepEqual(trusted.candidates.map((candidate) => candidate.name), [firstName, secondName]);
+    assert.deepEqual(trusted.modelProfileDiscoveries.map((entry) => entry.sourceOffset), [
+        acceptedContent.indexOf(firstName), acceptedContent.indexOf(secondName),
+    ]);
+    assert.notEqual(trusted.candidates[0].candidateId, trusted.candidates[1].candidateId);
+    assert.equal(
+        Object.hasOwn(trusted.modelProfileDiscoveries[0], '__narrativeFirstLiteralProof'),
+        false,
+        'the short-lived parser proof cannot reach ledger output or persistence',
+    );
+
+    const replay = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
+        acceptedContent,
+        sourceRef: target,
+        turn: 5,
+        modelProfileDiscoveries: structuredClone(parsed.discoveries),
+    });
+    assert.equal(replay.candidates.length, 0, 'a consumed trusted batch cannot be replayed');
+
+    for (const [label, changedSourceRef] of [
+        ['chat', { ...target, chatId: 'chat-other' }],
+        ['message', { ...target, messageId: 'message-other' }],
+        ['swipe', { ...target, swipeId: target.swipeId + 1 }],
+        ['generation_serial', { ...target, generationSerial: target.generationSerial + 1, generation: target.generation + 1 }],
+        ['generation_id', { ...target, generationId: 'generation-other' }],
+        ['generation_type', { ...target, generationType: 'swipe' }],
+        ['scope', { ...target, scopeDigest: 'scope:other' }],
+        ['content', { ...target, contentHash: 'content-other', contentFingerprint: 'content-other' }],
+    ]) {
+        const mismatchBatch = parseActorProfileCompletionBatchOutput(block(firstName), {
+            candidates: [],
+            discoveryContext: { acceptedNarrative: acceptedContent, completionMode: 'full', sourceRef: target },
+        });
+        const rejectedMismatch = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
+            acceptedContent,
+            sourceRef: changedSourceRef,
+            turn: 5,
+            modelProfileDiscoveries: structuredClone(mismatchBatch.discoveries),
+        });
+        assert.equal(rejectedMismatch.candidates.length, 0, label);
+    }
+    const contentBatch = parseActorProfileCompletionBatchOutput(block(firstName), {
+        candidates: [],
+        discoveryContext: { acceptedNarrative: acceptedContent, completionMode: 'full', sourceRef: target },
+    });
+    const changedContent = acceptedContent.replace('\u901a\u9053', '\u5e7f\u573a');
+    const rejectedContent = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
+        acceptedContent: changedContent,
+        sourceRef: target,
+        turn: 5,
+        modelProfileDiscoveries: structuredClone(contentBatch.discoveries),
+    });
+    assert.equal(rejectedContent.candidates.length, 0, 'same first offset with changed text cannot reuse proof');
+
+    const forged = discoverActorsFromTurnSources(emptyActorLedger(chatId), {
+        acceptedContent,
+        sourceRef: target,
+        turn: 5,
+        modelProfileDiscoveries: [{
+            candidate: { profileFormat: 'narrative-v1' },
+            candidateRef: { name: firstName, sourceAnchor: firstName },
+        }],
+    });
+    assert.equal(forged.candidates.length, 0);
+    assert.equal(forged.unresolved[0].reason, 'actor_profile.discovery_anchor_duplicate_in_narrative');
+});
 
 test('default and null actor projection limits retain every actor and Registry row', () => {
     const source = {

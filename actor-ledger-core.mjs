@@ -9,6 +9,7 @@ import {
     ACTOR_PROFILE_V6_VERSION,
     actorProfileActionReadiness,
     actorProfileBaselineDigest,
+    takeActorProfileDiscoveryAnchorPolicies,
     normalizeActorProfileV6,
     validateActorProfileDiscoveryAnchor,
 } from './actor-profile-v6-core.mjs';
@@ -2565,9 +2566,13 @@ function structuredContentActorFacts(content) {
         .map(({ position: _position, ordinal: _ordinal, ...fact }) => fact);
 }
 
-function acceptedModelProfileDiscoveryFacts(content, discoveries) {
+function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = null) {
     const source = String(content || '');
     const supplied = Array.isArray(discoveries) ? discoveries : [];
+    const anchorPolicies = takeActorProfileDiscoveryAnchorPolicies(supplied, {
+        acceptedNarrative: source,
+        sourceRef,
+    });
     const prepared = supplied.map((entry, inputIndex) => {
         const narrativeName = entry?.candidate?.profileFormat === 'narrative-v1'
             || entry?.profileFormat === 'narrative-v1';
@@ -2579,6 +2584,7 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries) {
         const anchorCheck = validateActorProfileDiscoveryAnchor(
             { name, sourceAnchor },
             source,
+            anchorPolicies.get(entry) || null,
         );
         return {
             entry,
@@ -2615,8 +2621,13 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries) {
             continue;
         }
         const acceptedIndex = accepted.length;
+        const {
+            __narrativeFirstLiteralProof: _narrativeFirstLiteralProof,
+            __narrativeFirstLiteralBatchId: _narrativeFirstLiteralBatchId,
+            ...safeEntry
+        } = clone(item.entry);
         accepted.push({
-            ...clone(item.entry),
+            ...safeEntry,
             candidateRef: { name: item.name, sourceAnchor: item.sourceAnchor },
             sourceOffset: item.sourceOffset,
             inputIndex: item.inputIndex,
@@ -2656,6 +2667,7 @@ export function discoverActorsFromTurnSources(value, {
     const modelDiscovery = acceptedModelProfileDiscoveryFacts(
         acceptedContent,
         modelProfileDiscoveries,
+        sourceRef,
     );
     const useModelProfileDiscoveries = Array.isArray(modelProfileDiscoveries);
     const facts = [
