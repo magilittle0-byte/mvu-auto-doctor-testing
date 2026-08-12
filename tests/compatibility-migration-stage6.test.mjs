@@ -12,6 +12,7 @@ import {
     ensureActorSovereigntyMigration,
     migrateActorSovereigntyNamespace,
     prepareActorSovereigntyFieldWriteCandidate,
+    rebaseActorSovereigntyFieldWriteAfterMigration,
 } from '../compatibility-migration-core.mjs';
 import { emptyActorLedger } from '../actor-ledger-core.mjs';
 import {
@@ -296,6 +297,55 @@ test('generic field-write guard rejects old scope/state and only rebases identic
     assert.equal(rejectedScope.reason, 'migration.write_scope_mismatch');
     assert.deepEqual(current.repairJournal, [{ id: 'repair-current', value: 'NEW-SCOPE' }]);
     assert.equal(current.actorLedger.turn, 0);
+});
+
+test('first post-migration field write safely replays caller value only on an unchanged base', async () => {
+    const valueScope = scope();
+    const before = namespace(valueScope);
+    before.rev = 0;
+    before.characterCreationTicketBatches = [];
+    before.fieldRevisions = { characterCreationTicketBatches: 0 };
+    const caller = structuredClone(before);
+    caller.characterCreationTicketBatches = [{ generationId: 'generation-1', tickets: ['T1'] }];
+
+    const adapter = inMemoryMigrationAdapter(before);
+    const migrated = await ensureWithAdapter(before, valueScope, adapter);
+    assert.equal(migrated.ok, true);
+    assert.ok(migrated.namespace.rev > before.rev);
+
+    const replay = rebaseActorSovereigntyFieldWriteAfterMigration(
+        caller,
+        before,
+        migrated.namespace,
+        { scope: valueScope, fields: ['characterCreationTicketBatches'] },
+    );
+    assert.equal(replay.allowed, true);
+    assert.deepEqual(replay.candidate.characterCreationTicketBatches, caller.characterCreationTicketBatches);
+    assert.equal(
+        replay.candidate.fieldRevisions.characterCreationTicketBatches,
+        migrated.namespace.fieldRevisions.characterCreationTicketBatches
+            || migrated.namespace.rev,
+    );
+    const prepared = prepareActorSovereigntyFieldWriteCandidate(
+        replay.candidate,
+        migrated.namespace,
+        { scope: valueScope, fields: ['characterCreationTicketBatches'] },
+    );
+    assert.equal(prepared.allowed, true);
+
+    const concurrentlyChanged = structuredClone(migrated.namespace);
+    concurrentlyChanged.characterCreationTicketBatches = [{ generationId: 'other', tickets: [] }];
+    concurrentlyChanged.rev += 1;
+    concurrentlyChanged.fieldRevisions.characterCreationTicketBatches = concurrentlyChanged.rev;
+    const blocked = rebaseActorSovereigntyFieldWriteAfterMigration(
+        caller,
+        before,
+        concurrentlyChanged,
+        { scope: valueScope, fields: ['characterCreationTicketBatches'] },
+    );
+    assert.equal(blocked.allowed, false);
+    assert.equal(blocked.reason, 'migration.write_rebase_field_changed');
+    assert.deepEqual(blocked.staleFields, ['characterCreationTicketBatches']);
 });
 
 test('legacy namespace without full scope quarantines active work and preserves history only', () => {

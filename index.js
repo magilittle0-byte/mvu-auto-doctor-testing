@@ -39,6 +39,7 @@ import {
     migrateActorSovereigntyNamespace,
     normalizeWorldbookSelectorKeys,
     prepareActorSovereigntyFieldWriteCandidate,
+    rebaseActorSovereigntyFieldWriteAfterMigration,
 } from './compatibility-migration-core.mjs';
 import {
     appendRepairJournal,
@@ -136,6 +137,7 @@ import {
     nextModelRouteHealth,
 } from './model-queue.mjs';
 import {
+    actorProfileRecoveryCriticalFingerprint,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
     actorProfileTicketBatchPersistenceDigest,
@@ -517,6 +519,7 @@ let latestActorProfileDiagnostic = {
 function hydratedActorProfileDiagnostic(namespace = readChatNamespace()) {
     if (latestActorProfileDiagnostic.status !== 'waiting') return latestActorProfileDiagnostic;
     const receipt = namespace?.actorProfileRetryReceipt;
+    if (!receipt) return latestActorProfileDiagnostic;
     const latest = latestAiMessage(getContext());
     const current = latest.index >= 0 ? captureTarget(getContext(), latest.index) : null;
     const currentSourceRef = sourceRefOf(current);
@@ -559,6 +562,23 @@ function markActorSchedulingFailure(code, {
         succeeded: succeededCount,
         failed: Math.max(1, selectedCount - succeededCount),
         failureCodes: [String(code || 'actor_scheduling.failed')],
+    };
+}
+
+function markActorSchedulingNotReachedByProfile(profileFailureCode = '') {
+    latestActorShardDiagnostics = {
+        status: 'not_reached_by_p1',
+        selected: 0,
+        completed: 0,
+        succeeded: 0,
+        failed: 0,
+        semanticActions: 0,
+        heldActions: 0,
+        scheduledWithoutSemanticAction: 0,
+        failureCodes: ['actor_scheduling.not_reached_by_p1'],
+        upstreamFailureCodes: [String(profileFailureCode || '')]
+            .filter((code) => /^actor_profile\.[a-z0-9_.-]+$/u.test(code))
+            .slice(0, 1),
     };
 }
 
@@ -2928,6 +2948,29 @@ function renderEnvironmentReport(report = lastEnvironmentReport) {
     }
 }
 
+function doctorRuntimeCriticalFingerprint() {
+    return `runtime-critical:${fingerprint([
+        VERSION,
+        actorProfileRecoveryCriticalFingerprint(),
+        verifyPersistedChatNamespace.toString(),
+        writeChatNamespace.toString(),
+        rebaseActorSovereigntyFieldWriteAfterMigration.toString(),
+        persistNpcDesignTicketBatch.toString(),
+        persistActorProfileRecoveryState.toString(),
+        completeActorProfileBatchTransaction.toString(),
+        assistantTargetHasPriorRealPlayerInput.toString(),
+        captureTarget.toString(),
+        markActorSchedulingNotReachedByProfile.toString(),
+        createPrivacySafeDiagnosticProjection.toString(),
+        acceptFinalGeneration.toString(),
+        dispatchAcceptedFinal.toString(),
+        runContinuityTarget.toString(),
+        commitPreparedWorldCandidate.toString(),
+        precomposeNextTurnConsumer.toString(),
+        commitNextTurnConsumer.toString(),
+    ].join('\n'))}`;
+}
+
 function diagnosticPayload() {
     const context = getContext();
     const namespace = readChatNamespace(context);
@@ -2957,7 +3000,11 @@ function diagnosticPayload() {
         exportedAt: new Date().toISOString(),
         ...createPrivacySafeDiagnosticProjection({
             userAgent: navigator.userAgent,
-            plugin: { id: PLUGIN_ID, version: VERSION },
+            plugin: {
+                id: PLUGIN_ID,
+                version: VERSION,
+                runtimeCriticalFingerprint: doctorRuntimeCriticalFingerprint(),
+            },
             environment: lastEnvironmentReport,
             barrierProtocol: databaseBarrier,
             actorShards: latestActorShardDiagnostics,
@@ -3775,6 +3822,11 @@ async function writeChatNamespace(next, expectedChatId, options = {}) {
             'migration.write_scope_missing',
         );
     }
+    const beforeMigrationNamespace = readChatNamespace(context);
+    const migrationWasCurrent = actorSovereigntyMigrationIsCurrent(
+        context.chatMetadata?.[PLUGIN_ID],
+        candidateScope,
+    );
     const migration = await ensureActorSovereigntyMigrationPersisted(context, candidateScope);
     if (
         migration?.ok !== true
@@ -3809,10 +3861,33 @@ async function writeChatNamespace(next, expectedChatId, options = {}) {
             'migration.authoritative_readback_scope_changed',
         );
     }
-    const prepared = prepareActorSovereigntyFieldWriteCandidate(next, authoritative, {
-        scope: committedScope,
-        fields: options.fields,
-    });
+    let selectedWriteCandidate = next;
+    if (!migrationWasCurrent) {
+        const replay = rebaseActorSovereigntyFieldWriteAfterMigration(
+            next,
+            beforeMigrationNamespace,
+            authoritative,
+            { scope: committedScope, fields: options.fields },
+        );
+        if (!replay.allowed) {
+            return rejectChatNamespaceWrite(
+                options,
+                replay.reason === 'migration.write_rebase_field_changed'
+                    ? 'stale_namespace_revision'
+                    : 'actor_sovereignty_migration_candidate_stale',
+                replay.reason,
+            );
+        }
+        selectedWriteCandidate = replay.candidate;
+    }
+    const prepared = prepareActorSovereigntyFieldWriteCandidate(
+        selectedWriteCandidate,
+        authoritative,
+        {
+            scope: committedScope,
+            fields: options.fields,
+        },
+    );
     if (!prepared.allowed) {
         return rejectChatNamespaceWrite(
             options,
@@ -5094,11 +5169,32 @@ function frozenIdentityScopeId(scope) {
     return chatId && cardId ? `${chatId}|${cardId}` : '';
 }
 
-function captureTarget(context, index, { frozenScope = null, unscoped = false } = {}) {
+function assistantTargetHasPriorRealPlayerInput(context, index) {
+    const targetIndex = Math.max(0, Math.floor(Number(index) || 0));
+    return (Array.isArray(context?.chat) ? context.chat : [])
+        .slice(0, targetIndex)
+        .some((message) => (
+            message?.is_user === true
+            && message?.is_system !== true
+            && typeof message?.mes === 'string'
+            && message.mes.trim().length > 0
+        ));
+}
+
+function captureTarget(context, index, {
+    frozenScope = null,
+    unscoped = false,
+    allowOpening = false,
+} = {}) {
     const message = context?.chat?.[index];
     if (!message || message.is_user || message.is_system || !message.mes?.trim()) {
         return null;
     }
+    // The card greeting is host-owned setup, not an accepted player turn.
+    // Refuse the target before either the message or any swipe receives Doctor
+    // source/generation identity.  The first natural reply after a real player
+    // input passes this gate and follows the normal accepted-final lifecycle.
+    if (!allowOpening && !assistantTargetHasPriorRealPlayerInput(context, index)) return null;
     const messageId = ensureMessageStableId(context, message, index);
     const runtimeIdentity = ensureRuntimeTargetIdentity(
         context,
@@ -6763,7 +6859,9 @@ async function runOpeningResourceSync(targetId, {
     if (resolved < 0 || assistantMessageOrdinal(context, resolved) > 4) {
         return { status: 'outside-opening' };
     }
-    const captured = expectedTarget || captureTarget(context, resolved);
+    const captured = expectedTarget || captureTarget(context, resolved, {
+        allowOpening: manual === true,
+    });
     if (!captured) return { status: 'stale', reason: '开局资源同步目标不可用' };
     const scopeGuard = await freshFrozenScopeGuard(captured);
     if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
@@ -10123,11 +10221,17 @@ function npcDesignTicketBatchForTarget(captured) {
     return batch;
 }
 
-async function persistNpcDesignTicketBatch(batch, captured) {
-    if (!batch?.chatId || !batch?.generationId) return false;
+async function persistNpcDesignTicketBatch(batch, captured, failureSink = {}) {
+    const fail = (code) => {
+        if (failureSink && typeof failureSink === 'object') failureSink.code = code;
+        return false;
+    };
+    if (!batch?.chatId || !batch?.generationId) {
+        return fail('actor_profile.ticket_batch_identity_invalid');
+    }
     const acceptedTarget = sourceRefOf(captured);
     const sealed = sealActorProfileTicketBatchForPersistence(batch, acceptedTarget);
-    if (!sealed) return false;
+    if (!sealed) return fail('actor_profile.ticket_batch_digest_invalid');
     const expectedDigest = actorProfileTicketBatchPersistenceDigest(sealed);
     const namespace = readChatNamespace();
     namespace.characterCreationTicketBatches = [
@@ -10140,7 +10244,8 @@ async function persistNpcDesignTicketBatch(batch, captured) {
         fields: ['characterCreationTicketBatches'],
         durable: true,
         requireReadback: true,
-        readbackAttempts: 1,
+        readbackAttempts: 3,
+        failureSink,
         precondition: () => actorProfileRecoverySourceMatches(
             sourceRefOf(captureTarget(getContext(), captured?.index, {
                 frozenScope: captured?.actorSovereigntyScope,
@@ -12402,7 +12507,7 @@ async function persistActorProfileRecoveryState(captured, result) {
         fields: ['characterCreationTicketBatches', 'actorProfileRetryReceipt'],
         durable: true,
         requireReadback: true,
-        readbackAttempts: 1,
+        readbackAttempts: 3,
         precondition: sourceStillCurrent,
         contentValidator: (persisted) => {
             if (terminal) {
@@ -12428,6 +12533,14 @@ function compactActorProfileFailureCode(value) {
     return String(value ?? '').trim().slice(0, 120);
 }
 
+function actorProfileTicketPersistenceFailureCode(failure = {}) {
+    const exact = String(failure?.migrationReason || failure?.code || '')
+        .trim()
+        .toLowerCase();
+    const safe = /^[a-z0-9_.-]{1,120}$/u.test(exact) ? exact : 'unknown';
+    return `actor_profile.ticket_persistence.${safe}`;
+}
+
 async function runActorProfileTarget(captured, {
     force = false,
     includeMaintenance = false,
@@ -12439,11 +12552,21 @@ async function runActorProfileTarget(captured, {
             acceptedTarget: acceptedTicketTarget,
         }));
     if (preGenerationTicket && !persistedTicket) {
-        const persisted = await persistNpcDesignTicketBatch(preGenerationTicket, captured);
-        if (!persisted) return actorProfileTransientResult('not_completed', {
-            reason: 'actor_profile.ticket_persistence_failed',
-            profileBatch: { failed: [{ reason: 'actor_profile.ticket_persistence_failed' }] },
-        });
+        const ticketPersistenceFailure = {};
+        const persisted = await persistNpcDesignTicketBatch(
+            preGenerationTicket,
+            captured,
+            ticketPersistenceFailure,
+        );
+        if (!persisted) {
+            const persistenceFailureCode = actorProfileTicketPersistenceFailureCode(
+                ticketPersistenceFailure,
+            );
+            return actorProfileTransientResult('not_completed', {
+                reason: persistenceFailureCode,
+                profileBatch: { failed: [{ reason: persistenceFailureCode }] },
+            });
+        }
     }
     const scopeGuard = await freshFrozenScopeGuard(captured);
     if (!scopeGuard.ok) {
@@ -14269,6 +14392,11 @@ async function enqueueActorProfiles(targetId, {
                         })),
                     )),
             };
+            if (!['atomic_readback', 'no_candidates'].includes(result?.status)) {
+                markActorSchedulingNotReachedByProfile(
+                    latestActorProfileDiagnostic.lastFailureCodes[0] || result?.reason,
+                );
+            }
             if (result?.status === 'atomic_readback') {
                 const committed = result.profileBatch?.committed?.length || 0;
                 setActorProfileStatus(
@@ -14300,6 +14428,7 @@ async function enqueueActorProfiles(targetId, {
                     status: 'not_completed', failingModules: ['profile'],
                     lastFailureCodes: ['actor_profile.unhandled_failure'], canRetry: true,
                 };
+                markActorSchedulingNotReachedByProfile('actor_profile.unhandled_failure');
                 setActorProfileStatus(`人物档案未完成：${error.message || error}`, 'error');
             }
             return result;

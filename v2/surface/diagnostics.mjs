@@ -430,6 +430,7 @@ export function createPrivacySafeDiagnosticProjection({
         plugin: {
             id: String(plugin?.id || ''),
             version: String(plugin?.version || ''),
+            runtimeCriticalFingerprint: cleanRuntimeCode(plugin?.runtimeCriticalFingerprint),
         },
         environment: {
             userAgent: coarseUserAgent(userAgent),
@@ -539,6 +540,12 @@ export function createPrivacySafeDiagnosticProjection({
                         .filter((value) => /^actor_scheduling\.[a-z0-9_.-]+$/u.test(value)),
                 ),
             ].slice(0, 8),
+            upstreamFailureCodes: (Array.isArray(actorShards?.upstreamFailureCodes)
+                ? actorShards.upstreamFailureCodes
+                : [])
+                .map((value) => cleanRuntimeCode(value))
+                .filter((value) => /^actor_profile\.[a-z0-9_.-]+$/u.test(value))
+                .slice(0, 4),
         },
         // Deprecated read-only alias for older diagnostic consumers.
         actorShards: { deprecated: true },

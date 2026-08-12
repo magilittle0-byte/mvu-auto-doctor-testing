@@ -475,6 +475,8 @@ test('production namespace writer requires one save/readback and fails closed at
         staleOnSave = false,
         staleOnReadback = false,
         mismatch = false,
+        oldReadbacks = 0,
+        readbackAttempts = 1,
         nextContinuity = { turn: 1, lastSource: 'target-6' },
     } = {}) => {
         let current = true;
@@ -501,7 +503,7 @@ test('production namespace writer requires one save/readback and fails closed at
             },
             async readPersistedChatMetadata() {
                 readbacks += 1;
-                const value = mismatch ? oldNamespace : persisted;
+                const value = mismatch || readbacks <= oldReadbacks ? oldNamespace : persisted;
                 if (staleOnReadback) current = false;
                 return structuredClone(value);
             },
@@ -516,7 +518,7 @@ test('production namespace writer requires one save/readback and fails closed at
             durable: true,
             force: true,
             requireReadback: true,
-            readbackAttempts: 1,
+            readbackAttempts,
             contentValidator: (value) => JSON.stringify(value?.continuity) === JSON.stringify(nextContinuity),
             precondition,
         });
@@ -549,6 +551,15 @@ test('production namespace writer requires one save/readback and fails closed at
     assert.equal(await mismatch.run(), false);
     assert.deepEqual(mismatch.counts(), { saves: 1, readbacks: 1 });
     assert.equal(mismatch.context.chatMetadata.mvu_auto_doctor.continuity.turn, 0);
+
+    const eventuallyVisible = makeHarness({ oldReadbacks: 1, readbackAttempts: 3 });
+    assert.equal(await eventuallyVisible.run(), true);
+    assert.deepEqual(eventuallyVisible.counts(), { saves: 1, readbacks: 2 });
+
+    const boundedMismatch = makeHarness({ mismatch: true, readbackAttempts: 3 });
+    assert.equal(await boundedMismatch.run(), false);
+    assert.deepEqual(boundedMismatch.counts(), { saves: 1, readbacks: 3 });
+    assert.equal(boundedMismatch.context.chatMetadata.mvu_auto_doctor.continuity.turn, 0);
 
     const fullThreads = Array.from({ length: 72 }, (_, index) => ({
         id: `PERSISTED-OFFSCREEN-${index + 1}`,

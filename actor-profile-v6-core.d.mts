@@ -71,6 +71,14 @@ export function materializeActorProfileBaseline(
     options?: object,
 ): object;
 export function actorProfileBaselineDigest(profile: unknown): string;
+export function normalizeActorProfileRecoverySourceRef(value: unknown): object;
+export function actorProfileRecoverySourceMatches(left: unknown, right: unknown): boolean;
+export function actorProfileTicketBatchPersistenceDigest(value: unknown, acceptedTarget?: unknown): string;
+export function sealActorProfileTicketBatchForPersistence(value: unknown, acceptedTarget: unknown): object | null;
+export function actorProfileTicketBatchPersistenceMatches(value: unknown, options?: object): boolean;
+export function createActorProfileRetryReceipt(options?: object): object | null;
+export function actorProfileRetryReceiptMatches(value: unknown, options?: object): boolean;
+export function actorProfileRecoveryCriticalFingerprint(overrides?: Record<string, unknown>): string;
 export function applyActorProfileCompletionToV6(value: unknown, candidate: unknown, options?: object): object;
 export function setActorProfileV6Lock(value: unknown, options?: object): object;
 export function applyActorProfileV6Override(value: unknown, options?: object): object;

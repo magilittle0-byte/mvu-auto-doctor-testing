@@ -372,6 +372,103 @@ export function prepareActorSovereigntyFieldWriteCandidate(candidateValue, curre
     };
 }
 
+// A first write may itself have to persist the sovereignty migration before it
+// can commit the caller's selected field.  That migration advances revisions,
+// but it must not turn the caller's already selected value into a false stale
+// write.  Rebase only when every selected field in the migrated readback is
+// still byte-for-byte the same field state the caller read before migration.
+// A real concurrent field mutation therefore remains a hard CAS failure.
+export function rebaseActorSovereigntyFieldWriteAfterMigration(
+    candidateValue,
+    beforeMigrationValue,
+    currentValue,
+    {
+        scope = currentValue?.actorSovereigntyScope,
+        fields = [],
+    } = {},
+) {
+    const candidate = candidateValue && typeof candidateValue === 'object'
+        && !Array.isArray(candidateValue) ? clone(candidateValue) : null;
+    const before = beforeMigrationValue && typeof beforeMigrationValue === 'object'
+        && !Array.isArray(beforeMigrationValue) ? beforeMigrationValue : null;
+    const current = currentValue && typeof currentValue === 'object'
+        && !Array.isArray(currentValue) ? currentValue : null;
+    const expectedScope = createActorSovereigntyScope(scope);
+    const selectedFields = [...new Set((Array.isArray(fields) ? fields : [])
+        .map((field) => cleanText(field, 180))
+        .filter(Boolean))];
+    const blocked = (reason, staleFields = []) => ({
+        allowed: false,
+        reason,
+        candidate: null,
+        rebasedFields: [],
+        staleFields: [...staleFields],
+    });
+    if (!candidate || !before || !current || !selectedFields.length) {
+        return blocked('migration.write_rebase_candidate_invalid');
+    }
+    if (
+        !actorSovereigntyMigrationIsCurrent(current, expectedScope)
+        || cleanText(candidate.chatId, 180) !== expectedScope.chatId
+        || cleanText(before.chatId, 180) !== expectedScope.chatId
+        || cleanText(current.chatId, 180) !== expectedScope.chatId
+        || !actorSovereigntyScopesMatch(candidate.actorSovereigntyScope, expectedScope)
+        || !actorSovereigntyScopesMatch(before.actorSovereigntyScope, expectedScope)
+        || !actorSovereigntyScopesMatch(current.actorSovereigntyScope, expectedScope)
+    ) {
+        return blocked('migration.write_rebase_scope_mismatch');
+    }
+    const beforeFieldRevisions = before.fieldRevisions
+        && typeof before.fieldRevisions === 'object' && !Array.isArray(before.fieldRevisions)
+        ? before.fieldRevisions : {};
+    const candidateFieldRevisions = candidate.fieldRevisions
+        && typeof candidate.fieldRevisions === 'object' && !Array.isArray(candidate.fieldRevisions)
+        ? candidate.fieldRevisions : {};
+    const currentFieldRevisions = current.fieldRevisions
+        && typeof current.fieldRevisions === 'object' && !Array.isArray(current.fieldRevisions)
+        ? current.fieldRevisions : {};
+    const staleFields = selectedFields.filter((field) => {
+        const beforeRevision = Math.max(
+            0,
+            Number(beforeFieldRevisions[field]) || Number(before.rev) || 0,
+        );
+        const candidateRevision = Math.max(
+            0,
+            Number(candidateFieldRevisions[field]) || Number(candidate.rev) || 0,
+        );
+        if (candidateRevision < beforeRevision) return true;
+        const projection = (value) => ({
+            present: Object.hasOwn(value, field),
+            value: Object.hasOwn(value, field) ? value[field] : null,
+        });
+        return contentAddressedJsonRef(projection(before))
+            !== contentAddressedJsonRef(projection(current));
+    });
+    if (staleFields.length) {
+        return blocked('migration.write_rebase_field_changed', staleFields);
+    }
+    const rebased = clone(current);
+    for (const field of selectedFields) {
+        if (Object.hasOwn(candidate, field)) rebased[field] = clone(candidate[field]);
+        else delete rebased[field];
+    }
+    rebased.fieldRevisions = {
+        ...currentFieldRevisions,
+        ...Object.fromEntries(selectedFields.map((field) => [
+            field,
+            Math.max(0, Number(currentFieldRevisions[field]) || Number(current.rev) || 0),
+        ])),
+    };
+    rebased.rev = Math.max(0, Number(current.rev) || 0);
+    return {
+        allowed: true,
+        reason: '',
+        candidate: rebased,
+        rebasedFields: selectedFields,
+        staleFields: [],
+    };
+}
+
 function strictTargetForScope(value, scope) {
     const target = normalizeActorActionTarget(value);
     return target

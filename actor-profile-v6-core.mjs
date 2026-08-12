@@ -1602,15 +1602,14 @@ function recoveryInteger(value, fallback = -1) {
 export function normalizeActorProfileRecoverySourceRef(value) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const logicalIndex = recoveryInteger(source.logicalIndex ?? source.index);
-    const generationSerial = recoveryInteger(source.generationSerial ?? source.generation, 0);
     return {
         chatId: cleanText(source.chatId, 180),
         messageId: cleanText(source.messageId, 180),
         logicalIndex,
         index: recoveryInteger(source.index ?? source.logicalIndex),
         swipeId: recoveryInteger(source.swipeId, 0),
-        generation: generationSerial,
-        generationSerial,
+        generation: recoveryInteger(source.generation, -1),
+        generationSerial: recoveryInteger(source.generationSerial, -1),
         generationId: cleanText(source.generationId, 180),
         generationType: cleanText(source.generationType ?? source.type, 40),
         type: cleanText(source.type ?? source.generationType, 40),
@@ -1637,12 +1636,24 @@ export function actorProfileRecoverySourceMatches(left, right) {
         !normalizedLeft.chatId
         || !normalizedLeft.messageId
         || normalizedLeft.logicalIndex < 0
+        || normalizedLeft.generation < 0
+        || normalizedLeft.generationSerial < 0
         || !normalizedLeft.generationId
         || !normalizedLeft.scopeDigest
         || !normalizedLeft.contentFingerprint
     ) return false;
-    return JSON.stringify(canonicalProfileValue(normalizedLeft))
-        === JSON.stringify(canonicalProfileValue(normalizedRight));
+    // `hash` is the full host message hash and may legitimately change when
+    // MVU/mechanism blocks are repaired after the narrative was accepted.
+    // Recovery identity is instead bound to the immutable message/generation,
+    // scope and accepted narrative fingerprint.  All of those remain strict;
+    // a narrative, swipe, generation or identity drift still fails closed.
+    const recoveryIdentity = (source) => {
+        const projection = { ...source };
+        delete projection.hash;
+        return projection;
+    };
+    return JSON.stringify(canonicalProfileValue(recoveryIdentity(normalizedLeft)))
+        === JSON.stringify(canonicalProfileValue(recoveryIdentity(normalizedRight)));
 }
 
 function actorProfileTicketBatchDigestPayload(value, acceptedTarget = null) {
@@ -1660,14 +1671,16 @@ function actorProfileTicketBatchDigestPayload(value, acceptedTarget = null) {
 
 function actorProfileTicketBatchShapeValid(value, acceptedTarget) {
     const target = normalizeActorProfileRecoverySourceRef(acceptedTarget);
-    const batchGeneration = recoveryInteger(value?.generationSerial ?? value?.generation, 0);
+    const batchGeneration = recoveryInteger(value?.generation, -1);
+    const batchGenerationSerial = recoveryInteger(value?.generationSerial, -1);
     const capacity = recoveryInteger(value?.capacity, 0);
     const tickets = Array.isArray(value?.tickets) ? value.tickets : [];
     return Boolean(
         target.chatId
         && value?.chatId === target.chatId
         && cleanText(value?.generationId, 180) === target.generationId
-        && batchGeneration === target.generationSerial
+        && batchGeneration === target.generation
+        && batchGenerationSerial === target.generationSerial
         && cleanText(value?.generationType, 40) === target.generationType
         && capacity > 0
         && tickets.length === capacity
@@ -1676,7 +1689,7 @@ function actorProfileTicketBatchShapeValid(value, acceptedTarget) {
             return normalized
                 && normalized.ticketId
                 && normalized.issuance.chatId === target.chatId
-                && normalized.issuance.generation === target.generationSerial
+                && normalized.issuance.generation === target.generation
                 && normalized.issuance.generationId === target.generationId
                 && normalized.issuance.generationType === target.generationType;
         })
@@ -1756,6 +1769,26 @@ export function actorProfileRetryReceiptMatches(value, {
         acceptedTarget: currentSourceRef,
         expectedDigest: value.ticketBatchDigest,
     });
+}
+
+export function actorProfileRecoveryCriticalFingerprint(overrides = {}) {
+    const helpers = {
+        normalizeActorProfileRecoverySourceRef,
+        actorProfileRecoverySourceDigest,
+        actorProfileRecoverySourceMatches,
+        actorProfileTicketBatchDigestPayload,
+        actorProfileTicketBatchShapeValid,
+        actorProfileTicketBatchPersistenceDigest,
+        sealActorProfileTicketBatchForPersistence,
+        actorProfileTicketBatchPersistenceMatches,
+        createActorProfileRetryReceipt,
+        actorProfileRetryReceiptMatches,
+    };
+    const manifest = Object.entries(helpers).map(([name, helper]) => [
+        name,
+        String(Object.hasOwn(overrides, name) ? overrides[name] : helper),
+    ]);
+    return `actor-profile-critical:${fingerprint(JSON.stringify(manifest))}`;
 }
 
 export function actorProfileBaselineDigest(value) {

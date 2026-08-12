@@ -30,6 +30,18 @@ export function prepareActorSovereigntyFieldWriteCandidate(
     rebasedFields: string[];
     staleFields: string[];
 };
+export function rebaseActorSovereigntyFieldWriteAfterMigration(
+    candidate: unknown,
+    beforeMigration: unknown,
+    current: unknown,
+    options?: { scope?: unknown; fields?: string[] },
+): {
+    allowed: boolean;
+    reason: string;
+    candidate: Record<string, unknown> | null;
+    rebasedFields: string[];
+    staleFields: string[];
+};
 export function actorSovereigntyMigrationDigest(namespace: unknown, scope?: unknown): string;
 export function actorSovereigntyMigrationIsCurrent(namespace: unknown, scope?: unknown): boolean;
 export function markActorSovereigntyMigrationCurrent(

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createDoctorRuntimePresentation, createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
 import {
+    actorProfileRecoveryCriticalFingerprint,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
     actorProfileTicketBatchPersistenceMatches,
@@ -51,9 +52,23 @@ test('profile recovery uses the existing namespace with durable readback and sur
     assert.match(indexSource, /fields:\s*\['characterCreationTicketBatches', 'actorProfileRetryReceipt'\]/u);
     assert.match(indexSource, /requireReadback:\s*true/u);
     assert.match(indexSource, /actorProfileRetryReceiptMatches\(receipt, \{ currentSourceRef, ticketBatch \}\)/u);
-    assert.match(indexSource, /persistNpcDesignTicketBatch\(preGenerationTicket, captured\)/u);
+    assert.match(indexSource, /persistNpcDesignTicketBatch\(\s*preGenerationTicket,\s*captured,\s*ticketPersistenceFailure/u);
+    const ticketPersistence = sourceBetween(
+        indexSource,
+        'async function persistNpcDesignTicketBatch',
+        'function retireNpcDesignTicketInjection',
+    );
+    const recoveryPersistence = sourceBetween(
+        indexSource,
+        'async function persistActorProfileRecoveryState',
+        'function compactActorProfileFailureCode',
+    );
+    assert.match(ticketPersistence, /readbackAttempts:\s*3/u);
+    assert.match(recoveryPersistence, /readbackAttempts:\s*3/u);
+    assert.match(ticketPersistence, /contentValidator:\s*\(persistedNamespace\) =>/u);
     assert.match(indexSource, /precondition: sourceStillCurrent/u);
     assert.match(indexSource, /contentValidator: \(persisted\) =>/u);
+    assert.match(indexSource, /actorProfileTicketPersistenceFailureCode\(\s*ticketPersistenceFailure/u);
 });
 
 function recoverySource(overrides = {}) {
@@ -103,6 +118,22 @@ test('recovery receipt survives refresh only for the exact accepted target and i
         currentSourceRef: current,
         ticketBatch: savedNamespace.characterCreationTicketBatches[0],
     }), true);
+    const generationDrift = recoverySource({ generation: 99 });
+    assert.equal(actorProfileRecoverySourceMatches(current, generationDrift), false);
+    assert.equal(sealActorProfileTicketBatchForPersistence(ticketBatchFor(current), generationDrift), null);
+    assert.equal(actorProfileTicketBatchPersistenceMatches(sealedTicket, {
+        acceptedTarget: generationDrift,
+    }), false);
+    assert.equal(actorProfileRetryReceiptMatches(receipt, {
+        currentSourceRef: generationDrift,
+        ticketBatch: sealedTicket,
+    }), false);
+    const mechanismOnlyRefresh = recoverySource({ hash: 'mechanism-block-rewritten' });
+    assert.equal(actorProfileRecoverySourceMatches(current, mechanismOnlyRefresh), true);
+    assert.equal(actorProfileRetryReceiptMatches(savedNamespace.actorProfileRetryReceipt, {
+        currentSourceRef: mechanismOnlyRefresh,
+        ticketBatch: savedNamespace.characterCreationTicketBatches[0],
+    }), true);
     assert.equal(actorProfileRetryReceiptMatches(receipt, {
         currentSourceRef: recoverySource({ contentFingerprint: 'changed', contentHash: 'changed' }),
         ticketBatch: sealedTicket,
@@ -120,19 +151,22 @@ test('recovery target comparison is complete and receipt status fails closed', (
     assert.equal(actorProfileRecoverySourceMatches(source, structuredClone(source)), true);
     for (const [field, changed] of [
         ['chatId', 'other-chat'], ['messageId', 'other-message'], ['logicalIndex', 9],
-        ['swipeId', 2], ['generationSerial', 5], ['generationId', 'other-generation'],
+        ['swipeId', 2], ['generation', 99], ['generationSerial', 5], ['generationId', 'other-generation'],
         ['generationType', 'regenerate'], ['identityScopeId', 'other-scope'],
-        ['scopeDigest', 'other-digest'], ['hash', 'other-raw'],
+        ['scopeDigest', 'other-digest'],
         ['contentFingerprint', 'other-content'],
     ]) {
         assert.equal(actorProfileRecoverySourceMatches(source, recoverySource({
             [field]: changed,
             ...(field === 'logicalIndex' ? { index: changed } : {}),
-            ...(field === 'generationSerial' ? { generation: changed } : {}),
             ...(field === 'generationType' ? { type: changed } : {}),
             ...(field === 'contentFingerprint' ? { contentHash: changed } : {}),
         })), false, field);
     }
+    assert.equal(actorProfileRecoverySourceMatches(
+        source,
+        recoverySource({ hash: 'mechanism-only-change' }),
+    ), true, 'full host hash may change while accepted narrative identity stays exact');
     const noTicketReceipt = createActorProfileRetryReceipt({ sourceRef: source });
     assert.equal(actorProfileRetryReceiptMatches(noTicketReceipt, {
         currentSourceRef: source, ticketBatch: null,
@@ -151,6 +185,10 @@ test('failed profile is described plainly and cannot be hidden by busy presentat
 
 test('privacy-safe diagnostic behavior preserves controlled profile recovery fields', () => {
     const projected = createPrivacySafeDiagnosticProjection({
+        plugin: {
+            id: 'mvu-auto-doctor', version: '2.0.0-rc.14',
+            runtimeCriticalFingerprint: 'runtime-critical:12345:abcdef12',
+        },
         statuses: {
             profile: {
                 kind: 'error', status: 'not_completed',
@@ -159,14 +197,16 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
             },
         },
         actorShards: {
-            status: 'failed', failed: 2,
+            status: 'not_reached_by_p1', failed: 0,
             failureCodes: [
                 'actor_scheduling.advance_parse_failed',
                 'actor_shard.json_missing',
                 'world.private_payload',
             ],
+            upstreamFailureCodes: ['actor_profile.host_save_readback_mismatch', 'private text'],
         },
     });
+    assert.equal(projected.plugin.runtimeCriticalFingerprint, 'runtime-critical:12345:abcdef12');
     assert.deepEqual(projected.latestStatuses.profile, {
         kind: 'error', status: 'not_completed', failingModules: ['personality'],
         lastFailureCodes: ['actor_profile.module_missing'], canRetry: true,
@@ -175,8 +215,134 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
         'actor_scheduling.advance_parse_failed',
         'actor_scheduling.json_missing',
     ]);
-    assert.equal(projected.actorScheduling.failed, 2);
+    assert.equal(projected.actorScheduling.status, 'not_reached_by_p1');
+    assert.equal(projected.actorScheduling.failed, 0);
+    assert.deepEqual(projected.actorScheduling.upstreamFailureCodes, [
+        'actor_profile.host_save_readback_mismatch',
+    ]);
     assert.deepEqual(projected.actorShards, { deprecated: true });
+});
+
+test('opening greeting never becomes a Doctor target before a real player input', () => {
+    const helperSource = sourceBetween(
+        indexSource,
+        'function assistantTargetHasPriorRealPlayerInput',
+        'function captureTarget',
+    );
+    const helper = Function(`${helperSource}; return assistantTargetHasPriorRealPlayerInput;`)();
+    const opening = { is_user: false, mes: '默认开场', swipe_info: [{ extra: {} }] };
+    const context = { chat: [opening] };
+    assert.equal(helper(context, 0), false);
+    assert.deepEqual(opening.swipe_info[0].extra, {});
+    context.chat.push({ is_user: true, mes: '真实玩家输入' });
+    context.chat.push({ is_user: false, mes: '第一条自然回复' });
+    assert.equal(helper(context, 2), true);
+    const capture = sourceBetween(indexSource, 'function captureTarget', 'async function freshFrozenScopeGuard');
+    assert.ok(
+        capture.indexOf('assistantTargetHasPriorRealPlayerInput')
+            < capture.indexOf('ensureMessageStableId'),
+        'opening must be rejected before message/swipe identity mutation',
+    );
+});
+
+test('diagnostic critical fingerprint is runtime-derived and covers the accepted-final chain', () => {
+    const fingerprintSource = sourceBetween(
+        indexSource,
+        'function doctorRuntimeCriticalFingerprint',
+        'function diagnosticPayload',
+    );
+    assert.match(fingerprintSource, /actorProfileRecoveryCriticalFingerprint\(\)/u);
+    assert.match(fingerprintSource, /writeChatNamespace\.toString\(\)/u);
+    assert.match(fingerprintSource, /rebaseActorSovereigntyFieldWriteAfterMigration\.toString\(\)/u);
+    assert.match(fingerprintSource, /persistNpcDesignTicketBatch\.toString\(\)/u);
+    assert.match(fingerprintSource, /assistantTargetHasPriorRealPlayerInput\.toString\(\)/u);
+    assert.match(fingerprintSource, /captureTarget\.toString\(\)/u);
+    assert.match(fingerprintSource, /markActorSchedulingNotReachedByProfile\.toString\(\)/u);
+    assert.match(fingerprintSource, /createPrivacySafeDiagnosticProjection\.toString\(\)/u);
+    assert.match(fingerprintSource, /acceptFinalGeneration\.toString\(\)/u);
+    assert.match(fingerprintSource, /runContinuityTarget\.toString\(\)/u);
+    assert.match(fingerprintSource, /commitPreparedWorldCandidate\.toString\(\)/u);
+    assert.match(fingerprintSource, /precomposeNextTurnConsumer\.toString\(\)/u);
+    assert.match(fingerprintSource, /commitNextTurnConsumer\.toString\(\)/u);
+    assert.doesNotMatch(fingerprintSource, /[0-9a-f]{7,40}/u);
+});
+
+test('changing any recovery helper implementation changes the critical manifest fingerprint', () => {
+    const names = [
+        'normalizeActorProfileRecoverySourceRef',
+        'actorProfileRecoverySourceDigest',
+        'actorProfileRecoverySourceMatches',
+        'actorProfileTicketBatchDigestPayload',
+        'actorProfileTicketBatchShapeValid',
+        'actorProfileTicketBatchPersistenceDigest',
+        'sealActorProfileTicketBatchForPersistence',
+        'actorProfileTicketBatchPersistenceMatches',
+        'createActorProfileRetryReceipt',
+        'actorProfileRetryReceiptMatches',
+    ];
+    const baseline = actorProfileRecoveryCriticalFingerprint();
+    for (const name of names) {
+        assert.notEqual(
+            actorProfileRecoveryCriticalFingerprint({ [name]: `function ${name}(){return 'changed'}` }),
+            baseline,
+            name,
+        );
+    }
+});
+
+test('ticket persistence errors become bounded privacy-safe P1 and P3 upstream codes', () => {
+    const helperSource = sourceBetween(
+        indexSource,
+        'function actorProfileTicketPersistenceFailureCode',
+        'async function runActorProfileTarget',
+    );
+    const normalize = Function(`${helperSource}; return actorProfileTicketPersistenceFailureCode;`)();
+    for (const raw of [
+        'host_save_readback_mismatch',
+        'write_precondition_failed',
+        'migration.write_rebase_field_changed',
+    ]) {
+        const code = normalize({ migrationReason: raw });
+        assert.equal(code, `actor_profile.ticket_persistence.${raw}`);
+        const projected = createPrivacySafeDiagnosticProjection({
+            statuses: { profile: { lastFailureCodes: [code] } },
+            actorShards: {
+                status: 'not_reached_by_p1',
+                failureCodes: ['actor_scheduling.not_reached_by_p1'],
+                upstreamFailureCodes: [code],
+            },
+        });
+        assert.deepEqual(projected.latestStatuses.profile.lastFailureCodes, [code]);
+        assert.deepEqual(projected.actorScheduling.upstreamFailureCodes, [code]);
+    }
+    assert.equal(normalize({ migrationReason: 'private text / payload' }),
+        'actor_profile.ticket_persistence.unknown');
+});
+
+test('namespace writer rebases the selected field after first migration and before CAS preparation', () => {
+    const writer = sourceBetween(
+        indexSource,
+        'async function writeChatNamespace',
+        'function rebaseIdenticalNamespaceFields',
+    );
+    const before = writer.indexOf('const beforeMigrationNamespace = readChatNamespace(context)');
+    const migrate = writer.indexOf('ensureActorSovereigntyMigrationPersisted');
+    const replay = writer.indexOf('rebaseActorSovereigntyFieldWriteAfterMigration');
+    const prepare = writer.indexOf('prepareActorSovereigntyFieldWriteCandidate');
+    assert.ok(before >= 0 && before < migrate && migrate < replay && replay < prepare);
+    assert.match(writer, /migration\.write_rebase_field_changed[\s\S]*?'stale_namespace_revision'/u);
+});
+
+test('P1 failure explicitly marks P3 actor scheduling as not reached', () => {
+    const marker = sourceBetween(
+        indexSource,
+        'function markActorSchedulingNotReachedByProfile',
+        'function markActorSchedulingSettled',
+    );
+    assert.match(marker, /status:\s*'not_reached_by_p1'/u);
+    assert.match(marker, /actor_scheduling\.not_reached_by_p1/u);
+    const enqueue = sourceBetween(indexSource, 'async function enqueueActorProfiles', 'async function confirmDangerousAction');
+    assert.match(enqueue, /!\['atomic_readback', 'no_candidates'\]\.includes\(result\?\.status\)[\s\S]*?markActorSchedulingNotReachedByProfile/u);
 });
 
 test('profile recovery merges with world failures and outranks blue busy', () => {
