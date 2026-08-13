@@ -2975,6 +2975,8 @@ function doctorRuntimeCriticalFingerprint() {
         completeActorProfileBatchTransaction.toString(),
         runActorProfileTarget.toString(),
         assistantTargetHasPriorRealPlayerInput.toString(),
+        runtimeGenerationSerialFloor.toString(),
+        runtimeGenerationSerialForMessage.toString(),
         captureTarget.toString(),
         markActorSchedulingNotReachedByProfile.toString(),
         createPrivacySafeDiagnosticProjection.toString(),
@@ -2997,6 +2999,7 @@ function doctorRuntimeCriticalFingerprint() {
         commitPreparedWorldCandidate.toString(),
         precomposeNextTurnConsumer.toString(),
         commitNextTurnConsumer.toString(),
+        bindEvents.toString(),
     ].join('\n'))}`;
 }
 
@@ -3223,26 +3226,41 @@ function currentSwipeInfo(message) {
         : null;
 }
 
+function runtimeGenerationSerialFloor(context) {
+    let assistantOrdinal = -1;
+    return (Array.isArray(context?.chat) ? context.chat : []).reduce((maximum, message) => {
+        if (!message?.is_user && !message?.is_system && String(message?.mes || '').trim()) {
+            assistantOrdinal += 1;
+        }
+        const swipeInfo = currentSwipeInfo(message);
+        const serial = Number(
+            swipeInfo?.extra?.mvu_auto_doctor_generation_serial
+            ?? message?.extra?.mvu_auto_doctor_generation_serial,
+        );
+        return Number.isInteger(serial) && serial >= 0
+            ? Math.max(maximum, serial)
+            : Math.max(maximum, assistantOrdinal);
+    }, -1);
+}
+
+function runtimeGenerationSerialForMessage(context, index) {
+    return (Array.isArray(context?.chat) ? context.chat : [])
+        .slice(0, Math.max(0, Number(index) || 0) + 1)
+        .filter((message) => (
+            !message?.is_user
+            && !message?.is_system
+            && String(message?.mes || '').trim()
+        )).length - 1;
+}
+
 function ensureRuntimeTargetIdentity(context, message, index, messageId) {
     const swipeId = Number(message?.swipe_id) || 0;
     const swipeInfo = currentSwipeInfo(message);
-    const holders = [message, swipeInfo].filter(Boolean);
-    for (const holder of holders) {
-        if (!isPlainObject(holder.extra)) holder.extra = {};
-    }
     let generationId = String(
         swipeInfo?.extra?.mvu_auto_doctor_generation_id
         || message?.extra?.mvu_auto_doctor_generation_id
         || '',
     );
-    const latest = latestAiMessage(context);
-    if (
-        lastGeneration.serial > 0
-        && lastGeneration.id
-        && latest.index === Number(index)
-    ) {
-        generationId = lastGeneration.id;
-    }
     if (!generationId) {
         generationId = ['generation', fingerprint(JSON.stringify([
             context?.chatId || '',
@@ -3261,30 +3279,10 @@ function ensureRuntimeTargetIdentity(context, message, index, messageId) {
         || message?.extra?.mvu_auto_doctor_generation_type
         || '',
     );
-    if (latest.index === Number(index) && Number(lastGeneration.serial) > 0) {
-        stableGenerationSerial = Number(lastGeneration.serial);
-        stableGenerationType = String(lastGeneration.type || 'normal');
-    }
     if (!Number.isInteger(stableGenerationSerial) || stableGenerationSerial < 0) {
-        stableGenerationSerial = 0;
+        stableGenerationSerial = Math.max(0, runtimeGenerationSerialForMessage(context, index));
     }
     if (!stableGenerationType) stableGenerationType = 'normal';
-    let changed = false;
-    for (const holder of holders) {
-        if (holder.extra.mvu_auto_doctor_generation_id !== generationId) {
-            holder.extra.mvu_auto_doctor_generation_id = generationId;
-            changed = true;
-        }
-        if (holder.extra.mvu_auto_doctor_generation_serial !== stableGenerationSerial) {
-            holder.extra.mvu_auto_doctor_generation_serial = stableGenerationSerial;
-            changed = true;
-        }
-        if (holder.extra.mvu_auto_doctor_generation_type !== stableGenerationType) {
-            holder.extra.mvu_auto_doctor_generation_type = stableGenerationType;
-            changed = true;
-        }
-    }
-    if (changed) scheduleSafeChatSave(context, context?.chatId);
     return {
         generationId,
         generationSerial: stableGenerationSerial,
@@ -19520,7 +19518,10 @@ function bindEvents() {
                 oldOperation: oldOperationEpoch,
                 newOperation: operationEpoch,
             });
-            generationSerial += 1;
+            generationSerial = Math.max(
+                generationSerial,
+                runtimeGenerationSerialFloor(current),
+            ) + 1;
             const baseline = acceptedFinalSnapshot(current);
             lastGeneration = {
                 serial: generationSerial,
@@ -19623,7 +19624,6 @@ function bindEvents() {
         types.GENERATION_ENDED || 'generation_ended',
         () => {
             const session = activeGenerationSession;
-            activeGenerationSession = null;
             if (!session) {
                 const context = getContext();
                 const knownLifecycle = lastGeneration?.id
@@ -19642,6 +19642,7 @@ function bindEvents() {
                 }
                 return;
             }
+            activeGenerationSession = null;
             const rootEpoch = session.epoch;
             if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
             recordGenerationLifecycleTrace('ended', {

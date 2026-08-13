@@ -402,6 +402,8 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /persistNpcDesignTicketBatch\.toString\(\)/u);
     assert.match(fingerprintSource, /assistantTargetHasPriorRealPlayerInput\.toString\(\)/u);
     assert.match(fingerprintSource, /captureTarget\.toString\(\)/u);
+    assert.match(fingerprintSource, /runtimeGenerationSerialFloor\.toString\(\)/u);
+    assert.match(fingerprintSource, /runtimeGenerationSerialForMessage\.toString\(\)/u);
     assert.match(fingerprintSource, /actorProfileNoCandidatesTerminalReadbackMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /runActorProfileTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /actorActionTargetOf\.toString\(\)/u);
@@ -422,6 +424,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /commitPreparedWorldCandidate\.toString\(\)/u);
     assert.match(fingerprintSource, /precomposeNextTurnConsumer\.toString\(\)/u);
     assert.match(fingerprintSource, /commitNextTurnConsumer\.toString\(\)/u);
+    assert.match(fingerprintSource, /bindEvents\.toString\(\)/u);
     assert.doesNotMatch(fingerprintSource, /[0-9a-f]{7,40}/u);
 });
 

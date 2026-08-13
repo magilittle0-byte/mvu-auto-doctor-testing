@@ -8,6 +8,7 @@ const lifecycleVmStubs = `
 let generationLifecycleTrace = [];
 function fixedGenerationLifecycleReason(value) { return String(value || 'other'); }
 function recordGenerationLifecycleTrace() {}
+function runtimeGenerationSerialFloor() { return -1; }
 `;
 
 function sourceSection(start, end) {
@@ -894,6 +895,7 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
         currentGenerationEpoch: 4,
         generationSerial: 8,
         operationEpoch: 12,
+        runtimeGenerationSerialFloor: () => -1,
         activeGenerationSession: null,
         activeNextTurnConsumer: null,
         document: { body: { dataset: {} } },
@@ -1449,6 +1451,225 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
     assert.equal(state.fallbackText, 'ticket');
     assert.equal(await sandbox.acceptFinalGeneration(sandbox.lastGeneration), true);
     assert.equal(messages['chat-a'].extra.mvu_auto_doctor_generation_id, 'generation-return-a');
+});
+
+test('P4 reads the prior producer without rewriting identity and three accepted replies stay unique across refresh', async () => {
+    const runtimeIdentity = sourceSection(
+        'function runtimeGenerationSerialFloor(context) {',
+        'function cardScopeIdentity(context, character) {',
+    );
+    const candidate = sourceSection(
+        'function generationCandidateAllowed(type, params, dryRun)',
+        'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
+    );
+    const acceptedIdentity = sourceSection(
+        'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
+        'function acceptedFinalEnvelopeMatchesContext(context, envelope, session)',
+    );
+    const support = sourceSection(
+        'function acceptedFinalScopeDecision(generation, scopeDigest)',
+        'async function moduleTargetForAcceptedFinal(envelope)',
+    );
+    const accept = sourceSection(
+        'async function acceptFinalGeneration(generation)',
+        'function frozenIdentityScopeId(scope)',
+    );
+    const bind = sourceSection(
+        'function bindEvents()',
+        'async function mutateActorProfileV6',
+    );
+    const state = {
+        callbacks: new Map(), timers: [], dispatches: [], leases: [], consumeProofs: [],
+        p4Captures: [], saves: 0,
+    };
+    const chat = [{ mes: 'opening', is_user: false, is_system: false, swipe_id: 0 }];
+    const context = {
+        chatId: 'chat-sequence',
+        chat,
+        eventTypes: {
+            GENERATION_STARTED: 'generation_started',
+            GENERATION_ENDED: 'generation_ended',
+            GENERATION_STOPPED: 'generation_stopped',
+        },
+        eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
+    };
+    const scope = { id: 'scope-sequence' };
+    const sandbox = {
+        currentGenerationEpoch: 0, operationEpoch: 3, generationSerial: 0,
+        activeGenerationSession: null, activeNextTurnConsumer: null,
+        lastGeneration: { id: '', serial: 0, type: 'normal' },
+        pendingAcceptedFinalTimer: null, lastInjectionInspection: {}, continuationIdentityHint: null,
+        document: { body: { dataset: {} } }, ui: {}, window: {},
+        getContext: () => context,
+        currentSwipeInfo: (message) => {
+            const swipeId = Number(message?.swipe_id) || 0;
+            return Array.isArray(message?.swipe_info) ? message.swipe_info[swipeId] || null : null;
+        },
+        currentFinalAssistant: (value) => {
+            const index = value.chat.length - 1;
+            const message = value.chat[index];
+            return message && !message.is_user && !message.is_system && String(message.mes || '').trim()
+                ? { index, message } : { index: -1, message: null };
+        },
+        isPlainObject: (value) => !!value && typeof value === 'object' && !Array.isArray(value),
+        fingerprint: (value) => `fp:${String(value)}`,
+        scheduleSafeChatSave: () => { state.saves += 1; },
+        ensureMessageStableId: (_context, message, index) => {
+            if (!message.extra) message.extra = {};
+            if (!message.extra.mvu_auto_doctor_source_id) {
+                message.extra.mvu_auto_doctor_source_id = `message-${index}`;
+            }
+            return message.extra.mvu_auto_doctor_source_id;
+        },
+        generationCandidateAllowed: undefined,
+        acceptedFinalSnapshot: () => {
+            const latest = sandbox.currentFinalAssistant(context);
+            return {
+                index: latest.index,
+                swipeId: Number(latest.message?.swipe_id) || 0,
+                contentFingerprint: latest.message ? `content:${latest.message.mes}` : '',
+            };
+        },
+        acceptedContentFingerprint: (text) => `content:${text}`,
+        sovereigntyNarrativeEligible: (text) => Boolean(String(text || '').trim()),
+        currentActorSovereigntyScope: () => scope,
+        actorSovereigntyScopeDigest: (value) => value.id,
+        actorSovereigntyScopesMatch: (left, right) => left.id === right.id,
+        createActorSovereigntyScope: (value) => ({ ...value }),
+        resolveCurrentActorSovereigntyScope: async () => ({ resolved: true, scope }),
+        precomposeNextTurnConsumer: async (session) => {
+            const producer = chat.filter((message) => !message.is_user).at(-1);
+            const producerIndex = chat.indexOf(producer);
+            const before = structuredClone(producer.extra || {});
+            const capturedIdentity = sandbox.ensureRuntimeTargetIdentity(
+                context,
+                producer,
+                producerIndex,
+                `message-${producerIndex}`,
+            );
+            assert.deepEqual(producer.extra || {}, before);
+            state.p4Captures.push(capturedIdentity);
+            const lease = {
+                generationId: session.id,
+                generationSerial: session.serial,
+                generationType: session.type,
+                state: 'reserved',
+            };
+            state.leases.push(lease);
+            sandbox.activeNextTurnConsumer = { generationId: session.id, lease };
+            session.frozenScopeDigest = scope.id;
+            session.p4PlacementScopeDigest = scope.id;
+        },
+        commitNextTurnConsumer: async (session, envelope) => {
+            const active = sandbox.activeNextTurnConsumer;
+            assert.equal(active?.generationId, session.id);
+            const proof = {
+                generationId: session.id,
+                generationSerial: session.serial,
+                index: envelope.index,
+                messageId: envelope.messageId,
+                contentFingerprint: envelope.contentFingerprint,
+            };
+            state.consumeProofs.push(proof);
+            sandbox.activeNextTurnConsumer = null;
+            return true;
+        },
+        releaseNextTurnConsumer: async () => true,
+        dispatchAcceptedFinal: (envelope) => state.dispatches.push(envelope),
+        invalidateOperations: () => undefined,
+        resetCurrentModelCallStats: () => undefined,
+        recordGenerationLifecycleTrace: () => undefined,
+        fixedGenerationLifecycleReason: (value) => String(value || 'other'),
+        setStatus: () => undefined,
+        clearTimeout: () => undefined,
+        setTimeout: (callback) => { state.timers.push(callback); return state.timers.length; },
+        Date, Math,
+    };
+    vm.runInNewContext(
+        `${runtimeIdentity}\n${candidate}\n${acceptedIdentity}\n${support}\n${accept}\n${bind}`
+        + '\nthis.bindEvents = bindEvents; this.ensureRuntimeTargetIdentity = ensureRuntimeTargetIdentity;',
+        sandbox,
+    );
+    sandbox.bindEvents();
+    const openingIdentity = sandbox.ensureRuntimeTargetIdentity(context, chat[0], 0, 'message-0');
+
+    for (let turn = 1; turn <= 3; turn += 1) {
+        chat.push({ mes: `player-${turn}`, is_user: true, is_system: false });
+        await state.callbacks.get('generation_started')('normal', {}, false);
+        const rootSessionId = sandbox.lastGeneration.id;
+        await state.callbacks.get('generation_started')('normal', {}, false);
+        assert.equal(sandbox.lastGeneration.id, rootSessionId, 'nested allowed STARTED keeps one root session');
+        assert.equal(state.leases.length, turn, 'nested STARTED must not place a second lease');
+        const previousReply = chat.filter((message) => !message.is_user).at(-1);
+        const previousIndex = chat.indexOf(previousReply);
+        const previousExtra = structuredClone(previousReply.extra || {});
+        const previousIdentity = sandbox.ensureRuntimeTargetIdentity(
+            context,
+            previousReply,
+            previousIndex,
+            `message-${previousIndex}`,
+        );
+        assert.deepEqual(previousReply.extra || {}, previousExtra, 'P4 capture must not rewrite old identity');
+        if (turn > 1) {
+            assert.equal(previousIdentity.generationId, state.consumeProofs.at(-1).generationId);
+        }
+        const priorExtra = structuredClone(previousReply.extra || {});
+        const reply = {
+            mes: `natural-reply-${turn}`, is_user: false, is_system: false, swipe_id: 0,
+            extra: priorExtra,
+        };
+        chat.push(reply);
+        const index = chat.length - 1;
+        sandbox.ensureRuntimeTargetIdentity(context, reply, index, `message-${index}`);
+        state.callbacks.get('generation_ended')();
+        assert.equal(state.timers.length, turn, 'ENDED schedules exactly one 500ms final read');
+        const sessionBeforeTailDryRun = sandbox.lastGeneration.id;
+        await state.callbacks.get('generation_started')('normal', {}, true);
+        assert.equal(sandbox.lastGeneration.id, sessionBeforeTailDryRun);
+        assert.equal(state.timers.length, turn, 'tail dryRun STARTED remains ignored');
+        state.timers.at(-1)();
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    const assistants = chat.filter((message) => !message.is_user);
+    const identities = [openingIdentity.generationId, ...assistants.slice(1)
+        .map((message) => message.extra.mvu_auto_doctor_generation_id)];
+    const serials = [openingIdentity.generationSerial, ...assistants.slice(1)
+        .map((message) => message.extra.mvu_auto_doctor_generation_serial)];
+    assert.equal(new Set(identities).size, 4);
+    assert.deepEqual(serials, [0, 1, 2, 3]);
+    assert.equal(state.leases.length, 3);
+    assert.equal(state.p4Captures.length, 3);
+    assert.equal(state.p4Captures[0].generationId, openingIdentity.generationId);
+    assert.equal(state.p4Captures[1].generationId, state.consumeProofs[0].generationId);
+    assert.equal(state.p4Captures[2].generationId, state.consumeProofs[1].generationId);
+    assert.equal(state.consumeProofs.length, 3);
+    assert.equal(state.dispatches.length, 3);
+    const thirdReply = assistants.at(-1);
+    const thirdProof = state.consumeProofs.at(-1);
+    assert.equal(thirdProof.generationId, thirdReply.extra.mvu_auto_doctor_generation_id);
+    assert.equal(thirdProof.generationSerial, 3);
+    assert.equal(thirdProof.index, chat.length - 1);
+    assert.equal(thirdProof.messageId, thirdReply.extra.mvu_auto_doctor_source_id);
+
+    const beforeRefresh = structuredClone({ identities, serials, proofs: state.consumeProofs });
+    sandbox.generationSerial = 0;
+    sandbox.lastGeneration = { id: '', serial: 0, type: 'normal' };
+    sandbox.activeGenerationSession = null;
+    const refreshed = assistants.map((message) => {
+        const index = chat.indexOf(message);
+        return sandbox.ensureRuntimeTargetIdentity(context, message, index, `message-${index}`);
+    });
+    assert.deepEqual(
+        refreshed.map((identity) => identity.generationId),
+        beforeRefresh.identities,
+    );
+    assert.deepEqual(
+        refreshed.map((identity) => identity.generationSerial),
+        beforeRefresh.serials,
+    );
+    assert.deepEqual(state.consumeProofs, beforeRefresh.proofs);
+    assert.equal(state.dispatches.length, 3, 'refresh must not redispatch or consume again');
 });
 
 test('fresh accepted scope is authoritative when P4 did not place a slot', () => {
