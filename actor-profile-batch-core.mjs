@@ -45,11 +45,19 @@ function failureFor(candidate, reason, extras = {}) {
 }
 
 const SAFE_IDENTITY_RETRY_GUIDANCE = Object.freeze({
-    'actor_candidate.identity_missing_or_short': '\u5220\u9664\u8be5\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u660e\u786e\u3001\u4e0d\u5c11\u4e8e\u4e24\u4e2a\u5b57\u7b26\u7684\u771f\u5b9e\u4eba\u540d\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
-    'actor_candidate.identity_system': '\u5220\u9664\u7cfb\u7edf\u3001\u65c1\u767d\u3001\u73af\u5883\u6216\u6e38\u620f\u63d0\u793a\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u771f\u5b9e\u65b0\u4eba\u7269\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
-    'actor_candidate.identity_group': '\u5220\u9664\u7ec4\u7ec7\u3001\u56e2\u4f53\u6216\u7fa4\u4f53\u540d\u79f0\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u6709\u660e\u786e\u59d3\u540d\u7684\u771f\u5b9e\u65b0\u4eba\u7269\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_profile.discovery_coverage_unit_missing': '\u91cd\u53d1\u5b8c\u6574 coverage unit \u96c6\u5408\uff1b\u6bcf\u4e2a\u7ed9\u5b9a id/digest \u6070\u597d\u4e00\u6b21\uff0c\u6709\u65b0\u4eba\u5c31\u5728\u8be5\u5355\u5143\u5185\u8f93\u51fa profile-target\uff0c\u65e0\u65b0\u4eba\u5219\u53ea\u8f93\u51fa <no-new/>\u3002',
+    'actor_profile.discovery_coverage_unit_duplicate': '\u5220\u9664\u91cd\u590d coverage unit\uff0c\u5e76\u6309\u7ed9\u5b9a\u987a\u5e8f\u5bf9\u6bcf\u4e2a id/digest \u6070\u597d\u56de\u5e94\u4e00\u6b21\u3002',
+    'actor_profile.discovery_coverage_unit_unknown': '\u5220\u9664\u81ea\u521b coverage unit\uff0c\u53ea\u4f7f\u7528\u7ed9\u5b9a id/digest \u5e76\u5b8c\u6574\u56de\u5e94\u6240\u6709\u5355\u5143\u3002',
+    'actor_profile.discovery_coverage_digest_mismatch': '\u4e0d\u5f97\u6539\u5199 coverage id/digest\uff1b\u4ece\u7528\u6237\u63d0\u4f9b\u7684 coverage units \u9010\u5b57\u590d\u5236\u3002',
+    'actor_profile.discovery_coverage_disposition_invalid': '\u6bcf\u4e2a coverage unit \u4e8c\u9009\u4e00\uff1a\u8f93\u51fa\u4e00\u4e2a\u6216\u591a\u4e2a profile-target\uff0c\u6216\u53ea\u8f93\u51fa <no-new/>\uff0c\u4e0d\u5f97\u6df7\u7528\u6216\u7559\u7a7a\u3002',
+    'actor_profile.discovery_coverage_extra_content': '\u5220\u9664 coverage-unit \u4e4b\u5916\u7684\u6587\u5b57\uff0c\u4e14\u6bcf\u4e2a\u5355\u5143\u5185\u53ea\u4fdd\u7559 profile-target \u6216 <no-new/>\u3002',
+    'actor_profile.discovery_name_not_in_coverage_unit': '\u5220\u9664\u8be5\u5355\u5143\u4e2d\u7684\u8de8\u5355\u5143\u6216\u675c\u64b0\u884c\u952e\uff1b\u4ec5\u4ece\u5f53\u524d coverage unit \u6587\u672c\u9010\u5b57\u590d\u5236\u7a33\u5b9a\u4eba\u7269\u884c\u952e\u3002',
+    'actor_profile.discovery_name_not_in_narrative': '\u5220\u9664\u8be5\u675c\u64b0\u884c\u952e\u5019\u9009\uff1b\u4e0d\u8981\u6539\u5199\u3001\u7f29\u5199\u6216\u65b0\u53d6\u540d\uff0c\u53ea\u80fd\u4ece\u201c\u5df2\u63a5\u53d7\u6b63\u6587\u201d\u4e2d\u9010\u5b57\u590d\u5236\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u4f5c\u4e3a actor="new" \u7684 name\uff1b\u53ef\u4ee5\u662f\u771f\u540d\u3001\u7f16\u53f7\u79f0\u8c13\u6216\u6b63\u6587\u4e2d\u53ef\u6307\u5411\u4e00\u4eba\u7684\u7a33\u5b9a\u63cf\u8ff0\u6027\u79f0\u8c13\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_missing_or_short': '\u5220\u9664\u8be5\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u660e\u786e\u3001\u4e0d\u5c11\u4e8e\u4e24\u4e2a\u5b57\u7b26\u7684\u7a33\u5b9a\u4eba\u7269\u884c\u952e\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_system': '\u5220\u9664\u7cfb\u7edf\u3001\u65c1\u767d\u3001\u73af\u5883\u6216\u6e38\u620f\u63d0\u793a\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u7a33\u5b9a\u4eba\u7269\u884c\u952e\uff08\u53ef\u4e3a\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u63cf\u8ff0\u6027\u79f0\u8c13\uff09\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_group': '\u5220\u9664\u7ec4\u7ec7\u3001\u56e2\u4f53\u6216\u7fa4\u4f53\u540d\u79f0\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u9010\u5b57\u7a33\u5b9a\u3001\u53ef\u6307\u5411\u4e00\u4eba\u7684\u4eba\u7269\u884c\u952e\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
     'actor_candidate.identity_excluded': '\u5220\u9664\u8be5\u53d7\u4fdd\u62a4\u8eab\u4efd\u5019\u9009\uff0c\u7edd\u4e0d\u5c06\u5176\u8f93\u51fa\u4e3a new\uff1b\u7ee7\u7eed\u67e5\u627e\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u65b0\u4eba\u7269\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
-    'actor_candidate.identity_internal_id': '\u5220\u9664 ActorRef\u3001\u5185\u90e8 ID \u6216\u8def\u7531\u6807\u8bc6\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u51fa\u73b0\u7684\u4eba\u7269\u59d3\u540d\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_candidate.identity_internal_id': '\u5220\u9664 ActorRef\u3001\u5185\u90e8 ID \u6216\u8def\u7531\u6807\u8bc6\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u51fa\u73b0\u7684\u7a33\u5b9a\u4eba\u7269\u884c\u952e\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
     'actor_candidate.identity_registry_conflict': '\u5220\u9664\u5df2\u767b\u8bb0\u4eba\u7269\u3001\u522b\u540d\u6216\u4e0e Registry \u51b2\u7a81\u7684\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u5176\u4ed6\u672a\u767b\u8bb0\u65b0\u4eba\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
     'actor_candidate.identity_quarantined': '\u5220\u9664\u88ab\u672c\u5730\u8eab\u4efd\u9694\u79bb\u7684\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u5176\u4ed6\u80fd\u901a\u8fc7\u8eab\u4efd\u9884\u68c0\u7684\u660e\u786e\u65b0\u4eba\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
 });
@@ -252,7 +260,10 @@ export async function completeActorProfileBatchTransaction({
         forceDiscoveryRetry = false,
     ) => {
         const attemptDiscoveryContext = attempt === 0
-            ? discoveryContext
+            ? {
+                ...(discoveryContext || {}),
+                discoveryEnabled: allowDiscovery === true,
+            }
             : {
                 ...(discoveryContext || {}),
                 discoveryEnabled: discoveryRetryTargets.length > 0 || forceDiscoveryRetry,
@@ -262,6 +273,7 @@ export async function completeActorProfileBatchTransaction({
             candidate,
             sections: clone(candidate?.previousProfile?.narrativeSections || {}),
         }]));
+        const completedModulesByActor = new Map();
         const discoveries = new Map();
         const groupDiagnostics = [];
         const callGroup = async (group, groupAttempt = 0, groupFeedback = validationFeedback) => {
@@ -333,6 +345,12 @@ export async function completeActorProfileBatchTransaction({
                     discoveryUpdates.push({ key, value: { name, sourceAnchor, sections: clone(entry.modules) } });
                     continue;
                 }
+                if (group.key === 'identity_bootstrap' && !group.modules.length) {
+                    // Discovery owns only new literal route keys. Existing
+                    // ActorRefs are filled by character_core from the same
+                    // transaction-local working set.
+                    continue;
+                }
                 const row = profileById.get(cleanText(entry.actorId, 120));
                 const scheduledModules = scheduledByActor.get(cleanText(entry.actorId, 120));
                 if (!row || !scheduledModules || (entry.name && cleanText(entry.name, 160) !== candidateName(row.candidate))) {
@@ -358,17 +376,33 @@ export async function completeActorProfileBatchTransaction({
             return { failures, sectionUpdates, discoveryUpdates };
         };
         const commitGroupApply = (preparedApply) => {
-            for (const update of preparedApply.sectionUpdates) Object.assign(update.row.sections, update.modules);
+            for (const update of preparedApply.sectionUpdates) {
+                for (const [moduleKey, text] of Object.entries(update.modules || {})) {
+                    update.row.sections[moduleKey] = { text };
+                }
+                const actorId = candidateActorId(update.row.candidate);
+                if (!completedModulesByActor.has(actorId)) completedModulesByActor.set(actorId, new Set());
+                for (const moduleKey of Object.keys(update.modules || {})) {
+                    completedModulesByActor.get(actorId).add(moduleKey);
+                }
+            }
             for (const update of preparedApply.discoveryUpdates) discoveries.set(update.key, update.value);
         };
-        const workingCandidates = () => [...profileById.values()].map(({ candidate, sections }) => ({
-            ...candidate,
-            previousProfile: {
-                ...(candidate?.previousProfile || {}),
-                profileFormat: 'narrative-v1',
-                narrativeSections: clone(sections),
-            },
-        }));
+        const workingCandidates = () => [...profileById.values()].map(({ candidate, sections }) => {
+            const actorId = candidateActorId(candidate);
+            const completed = completedModulesByActor.get(actorId) || new Set();
+            return {
+                ...candidate,
+                refreshProfileModules: Array.isArray(candidate?.refreshProfileModules)
+                    ? candidate.refreshProfileModules.filter((moduleKey) => !completed.has(moduleKey))
+                    : candidate?.refreshProfileModules,
+                previousProfile: {
+                    ...(candidate?.previousProfile || {}),
+                    profileFormat: 'narrative-v1',
+                    narrativeSections: clone(sections),
+                },
+            };
+        });
         const retryFeedbackFor = (preparedApply, parsed, group = null) => {
             const structured = [
             ...(preparedApply?.failures || []),
@@ -478,25 +512,27 @@ export async function completeActorProfileBatchTransaction({
                 validCandidateCount: Math.max(0, Number(result?.validCandidateCount) || 0),
             };
         };
-        let plan = actorProfileCompletionGroupPlan(subset, { allowDiscovery: attemptDiscoveryContext?.discoveryEnabled !== false });
+        let plan = actorProfileCompletionGroupPlan(subset, {
+            allowDiscovery: attemptDiscoveryContext?.discoveryEnabled !== false,
+            acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
+        });
         const identity = plan.find((group) => group.key === 'identity_bootstrap');
         if (identity) {
             let parsed = await callGroup(identity, 0);
             if (parsed.stale || parsed.requestFailure) return parsed;
             let preparedApply = prepareGroupApply(identity, parsed);
-            const firstIdentityHadProtocolFailure = parsed.formatUnrecoverable
-                || preparedApply.failures.length > 0;
             let preflight = parsed.formatUnrecoverable
                 ? { stale: false, failures: [] }
                 : await preflightIdentityDiscoveries(preparedApply, identity, 0);
             if (preflight.stale) return { stale: true };
-            const firstIdentityAllDeterministicFalsePositives =
-                !firstIdentityHadProtocolFailure
-                && preflight.allDiscoveriesDeterministicallyInvalid === true
-                && preflight.validCandidateCount === 0;
             preparedApply.failures.push(...preflight.failures);
-            if (parsed.explicitEmpty && identity.targetCount === 0 && !preparedApply.failures.length) {
-                return { entries: [], discoveries: [], unresolved: [], failures: [], unexpected: [], explicitEmpty: true, batchMeta: { moduleGroups: groupDiagnostics } };
+            if (parsed.explicitEmpty && profileById.size === 0 && !preparedApply.failures.length) {
+                return {
+                    entries: [], discoveries: [], unresolved: [], failures: [], unexpected: [],
+                    explicitEmpty: true,
+                    coverageProof: clone(parsed.coverageProof),
+                    batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
+                };
             }
             const firstIdentityFailures = clone(preparedApply.failures);
             if ((parsed.formatUnrecoverable || preparedApply.failures.length) && semanticRetry) {
@@ -508,25 +544,18 @@ export async function completeActorProfileBatchTransaction({
                     : await preflightIdentityDiscoveries(preparedApply, identity, 1);
                 if (preflight.stale) return { stale: true };
                 preparedApply.failures.push(...preflight.failures);
-                if (
-                    parsed.explicitEmpty
-                    && identity.targetCount === 0
-                    && preparedApply.failures.length === 0
-                    && firstIdentityAllDeterministicFalsePositives
-                ) {
-                    return {
-                        entries: [], discoveries: [], unresolved: [], failures: [], unexpected: [],
-                        explicitEmpty: true,
-                        batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
-                    };
-                }
                 if (parsed.explicitEmpty) {
                     preparedApply.failures.push(...(firstIdentityFailures.length
                         ? firstIdentityFailures
-                        : [{ actorId: '', reason: 'actor_profile.identity_retry_erased_failure' }]));
+                        : [{ actorId: '', reason: 'actor_profile.identity_retry_erased_failure', groupKey: identity.key }]));
                 }
             }
-            if (parsed.formatUnrecoverable || preparedApply.failures.length) return { entries: [], discoveries: [], unresolved: preparedApply.failures.map((entry) => ({ ...entry, retryable: false })), failures: preparedApply.failures.map((entry) => ({ ...entry, retryable: false })), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics } };
+            if (parsed.formatUnrecoverable || preparedApply.failures.length) {
+                const terminalFailures = parsed.formatUnrecoverable && !preparedApply.failures.length
+                    ? [{ actorId: '', reason: 'actor_profile.format_unrecoverable', groupKey: identity.key }]
+                    : preparedApply.failures;
+                return { entries: [], discoveries: [], unresolved: terminalFailures.map((entry) => ({ ...entry, retryable: false })), failures: terminalFailures.map((entry) => ({ ...entry, retryable: false })), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics } };
+            }
             commitGroupApply(preparedApply);
         }
         const acceptedNarrative = String(attemptDiscoveryContext?.acceptedNarrative || '');
@@ -580,7 +609,7 @@ export async function completeActorProfileBatchTransaction({
             .filter((group) => group.key !== 'identity_bootstrap');
         const results = [];
         for (const scheduledGroup of plan) {
-            const group = actorProfileCompletionGroupPlan(workingCandidates(), { allowDiscovery: false })
+            let group = actorProfileCompletionGroupPlan(workingCandidates(), { allowDiscovery: false })
                 .find((entry) => entry.key === scheduledGroup.key);
             if (!group) continue;
             let parsed = await callGroup(group, 0);
@@ -590,8 +619,40 @@ export async function completeActorProfileBatchTransaction({
             }
             let preparedApply = prepareGroupApply(group, parsed);
             if ((parsed.formatUnrecoverable || preparedApply.failures.length) && semanticRetry) {
-                parsed = await callGroup(group, 1, retryFeedbackFor(preparedApply, parsed, group));
-                if (!parsed.stale && !parsed.requestFailure) preparedApply = prepareGroupApply(group, parsed);
+                const firstFailures = clone(preparedApply.failures);
+                const firstFormatFailure = parsed.formatUnrecoverable === true;
+                if (!firstFormatFailure) commitGroupApply({
+                    sectionUpdates: preparedApply.sectionUpdates,
+                    discoveryUpdates: [],
+                });
+                const missingOnlyGroup = actorProfileCompletionGroupPlan(workingCandidates(), { allowDiscovery: false })
+                    .find((entry) => entry.key === scheduledGroup.key);
+                const retryModules = (missingOnlyGroup?.modules || [])
+                    .filter((moduleKey) => (missingOnlyGroup?.targets?.[moduleKey] || []).length > 0);
+                const retryGroup = missingOnlyGroup
+                    ? {
+                        ...missingOnlyGroup,
+                        modules: retryModules,
+                        targets: Object.fromEntries(retryModules.map((moduleKey) => [
+                            moduleKey,
+                            missingOnlyGroup.targets[moduleKey],
+                        ])),
+                    }
+                    : group;
+                parsed = await callGroup(retryGroup, 1, retryFeedbackFor(preparedApply, parsed, group));
+                group = retryGroup;
+                if (!parsed.stale && !parsed.requestFailure) {
+                    preparedApply = prepareGroupApply(retryGroup, parsed);
+                    if (parsed.formatUnrecoverable || preparedApply.failures.length) {
+                        preparedApply.failures = [
+                            ...firstFailures,
+                            ...preparedApply.failures,
+                            ...(parsed.formatUnrecoverable && !preparedApply.failures.length
+                                ? [{ actorId: '', reason: 'actor_profile.format_unrecoverable', groupKey: retryGroup.key }]
+                                : []),
+                        ];
+                    }
+                }
             }
             results.push({ group, parsed, preparedApply });
             if (parsed.stale || parsed.requestFailure || parsed.formatUnrecoverable || preparedApply?.failures.length) break;
@@ -601,6 +662,17 @@ export async function completeActorProfileBatchTransaction({
         if (terminal?.parsed?.stale) return { stale: true };
         if (terminal?.parsed?.requestFailure) return { requestFailure: terminal.parsed.requestFailure };
         const failures = results.flatMap(({ preparedApply }) => preparedApply?.failures || []).map((entry) => ({ ...entry, retryable: false }));
+        if (terminal) {
+            return {
+                entries: [],
+                discoveries: [],
+                unresolved: failures.filter((entry) => !entry.actorId),
+                failures: failures.filter((entry) => entry.actorId),
+                unexpected: [],
+                explicitEmpty: false,
+                batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
+            };
+        }
         const entries = [];
         const discoveryRows = [];
         for (const { candidate, sections } of profileById.values()) {
@@ -708,6 +780,7 @@ export async function completeActorProfileBatchTransaction({
     let discoveries = [...(first.discoveries || [])];
     let unresolved = [...(first.unresolved || [])];
     const explicitEmpty = first.explicitEmpty === true;
+    const coverageProof = clone(first.coverageProof || null);
     const retryCandidates = semanticRetry && !batchFormatReplacementAttempted
         ? selected.filter((candidate) => (
             failureById.get(candidateActorId(candidate))?.retryable
@@ -941,9 +1014,11 @@ export async function completeActorProfileBatchTransaction({
             persistenceStatus: explicitEmpty
                 && !rejected.length
                 && !discoveryFailures.length
+                && coverageProof
                 ? 'no_candidates'
                 : 'not_completed',
             explicitEmpty,
+            coverageProof,
             registry: clone(resolved.registry || null),
         };
     }

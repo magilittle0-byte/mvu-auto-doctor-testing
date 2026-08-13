@@ -138,6 +138,7 @@ import {
 } from './model-queue.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
+    actorProfileDiscoveryCoverageProofMatches,
     actorProfileRecoveryCriticalFingerprint,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
@@ -12587,7 +12588,10 @@ async function persistActorProfileRecoveryState(captured, result) {
             ));
         namespace.actorProfileRetryReceipt = null;
         namespace.actorProfileNoCandidatesTerminalProof = status === 'no_candidates'
-            ? createActorProfileNoCandidatesTerminalProof({ sourceRef: acceptedTarget })
+            ? createActorProfileNoCandidatesTerminalProof({
+                sourceRef: acceptedTarget,
+                coverageProof: result?.profileBatch?.coverageProof,
+            })
             : null;
     } else if (retryable) {
         namespace.actorProfileNoCandidatesTerminalProof = null;
@@ -13414,7 +13418,7 @@ async function runActorProfileTarget(captured, {
         && quarantined.length === 0
         && unresolved.length === 0;
     const noCandidates = profileCompletion.persistenceStatus === 'no_candidates'
-        && profileCompletion.modelCalls === 1
+        && actorProfileDiscoveryCoverageProofMatches(profileCompletion.coverageProof)
         && profileCompletion.explicitEmpty === true
         && !hasCandidates
         && unfinishedCurrentSource.length === 0
@@ -13462,6 +13466,7 @@ async function runActorProfileTarget(captured, {
             })),
             validationDiagnostic: narrativeValidationDiagnostic,
             readbackVerified: profileCompletion.readbackVerified === true,
+            coverageProof: deepClone(profileCompletion.coverageProof || null),
             ticketBound: profileCompletion.registry?.ticketBound === true,
         },
         ticketPoolExhausted: deepClone(

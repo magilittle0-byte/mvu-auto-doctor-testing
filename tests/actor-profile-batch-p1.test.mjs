@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
     actorProfileReadyForAction,
+    actorProfileDiscoveryCoveragePlan,
     bindCharacterCreationTicketsToRegisteredActors,
     buildActorProfileCompletionMessages,
     issueCharacterCreationTicket,
@@ -89,6 +90,72 @@ function registryPreflight(fixture, acceptedNarrative, {
                 && validCandidateCount === 0
                 && failures.length > 0
                 && failures.every((entry) => deterministic.has(entry.reason)),
+        };
+    };
+}
+
+function resolveLiteralDiscoveries(fixture, acceptedNarrative, {
+    excludedActorNames = [],
+} = {}) {
+    const source = narrativeDiscoverySourceRef(fixture.ref);
+    return async ({ discoveries }) => {
+        const discovered = discoverActorsFromTurnSources(fixture.ledger, {
+            acceptedContent: acceptedNarrative,
+            excludedActorNames,
+            sourceRef: source,
+            turn: fixture.ref.generation,
+            modelProfileDiscoveries: structuredClone(discoveries),
+        });
+        const upsert = runActorRegistryUpsert(discovered.ledger, discovered.candidates, {
+            chatId: fixture.ledger.chatId,
+            identityScopeId: fixture.ref.identityScopeId,
+            scopeDigest: fixture.ref.scopeDigest,
+            allowScopeDigestFill: true,
+            expectedSourceRef: fixture.ref,
+            turn: fixture.ref.generation,
+            excludedActorNames,
+        });
+        const registration = promoteActorCandidatesToRegistry(
+            upsert.ledger,
+            discovered.candidates,
+            {
+                chatId: fixture.ledger.chatId,
+                identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref,
+                turn: fixture.ref.generation,
+                excludedActorNames,
+            },
+        );
+        const prepared = prepareActorLedgerProfilesV6(registration.ledger, {
+            mode: 'full', turn: fixture.ref.generation,
+        }).ledger;
+        const promotedIds = registration.promoted.map((entry) => entry.actorRef.actorId);
+        const candidates = selectActorProfileCompletionCandidates(prepared, {
+            initialActorIds: promotedIds,
+            maintenanceMaxActors: 0,
+            turn: fixture.ref.generation,
+        });
+        return {
+            ok: true,
+            ledger: registration.ledger,
+            candidates,
+            entries: registration.promoted.map((promotion) => ({
+                candidateId: promotion.candidateId,
+                actorRef: {
+                    actorId: promotion.actorRef.actorId,
+                    name: promotion.actorRef.displayName,
+                },
+                candidate: discoveries.find((entry) => (
+                    entry.candidateRef.name === promotion.actorRef.displayName
+                )).candidate,
+                repairs: [],
+            })),
+            failures: [],
+            rejected: [],
+            snapshot: { fieldRevision: 0 },
+            registry: registration,
         };
     };
 }
@@ -372,8 +439,51 @@ async function runBatch(fixture, {
                                 : candidate?.physiology;
         return `这是测试适配器投影的${key}模块：${JSON.stringify(source || {})}。${'内容保持自然、完整并可供行动使用。'.repeat(4)}`;
     };
+    const wrapIdentityCoverage = (raw) => {
+        const text = String(raw || '').trim();
+        if (/<coverage-unit\b/iu.test(text)) return text;
+        const coverage = actorProfileDiscoveryCoveragePlan(discoveryContext?.acceptedNarrative || '');
+        if (!coverage.units.length) return text;
+        const targets = [...text.matchAll(/<profile-target\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*?(?:<\/profile-target>|$)/giu)]
+            .map((match) => ({ name: match[1], text: match[0] }));
+        const strictEmpty = /^\s*(?:\[\s*\]|\u65e0\u4eba\u7269\u6863\u6848)\s*$/u.test(text);
+        if (!targets.length && !strictEmpty) return text;
+        return coverage.units.map((unit, unitIndex) => {
+            const rows = targets.filter((target) => (
+                unit.text.includes(target.name)
+                || (unitIndex === 0 && !coverage.units.some((candidate) => candidate.text.includes(target.name)))
+            ));
+            return `<coverage-unit id="${unit.id}" digest="${unit.digest}">\n${rows.length ? rows.map((row) => row.text).join('\n') : '<no-new/>'}\n</coverage-unit>`;
+        }).join('\n');
+    };
     const adaptedRequestBatch = async (args) => {
         if (!args.groupKey) return requestBatch(args);
+        if (args.groupKey === 'identity_bootstrap') {
+            const raw = await requestBatch(args);
+            if (/^\s*\u65e0\u4eba\u7269\u6863\u6848/u.test(String(raw || ''))) {
+                return wrapIdentityCoverage('\u65e0\u4eba\u7269\u6863\u6848');
+            }
+            if (/^\s*[\[{]/u.test(String(raw || '')) && !/^\s*\[\s*\]\s*$/u.test(String(raw || ''))) {
+                return raw;
+            }
+            const discoveryOnly = parseActorProfileCompletionBatchOutput(raw, {
+                candidates: [],
+                discoveryContext,
+            });
+            if (discoveryOnly.batchMeta?.formatUnrecoverable) return raw;
+            const routes = [
+                ...(discoveryOnly.discoveries || []),
+                ...(discoveryOnly.unresolved || []).filter((entry) => entry?.candidateRef?.name),
+            ].map((entry) => (
+                `<profile-target actor="new" name="${entry.candidateRef?.name}"></profile-target>`
+            ));
+            for (const entry of discoveryOnly.unresolved || []) {
+                if (entry?.reason === 'actor_profile.discovery_ref_duplicate' && entry?.candidateRef?.name) {
+                    routes.push(`<profile-target actor="new" name="${entry.candidateRef.name}"></profile-target>`);
+                }
+            }
+            return wrapIdentityCoverage(routes.length ? routes.join('\n') : '\u65e0\u4eba\u7269\u6863\u6848');
+        }
         if (args.groupKey === 'identity_bootstrap' && (cachedAttempt !== args.attempt || !cachedLegacy)) {
             const raw = await requestBatch(args);
             cachedAttempt = args.attempt;
@@ -412,6 +522,11 @@ async function runBatch(fixture, {
             '</profile-target>',
         ].join('\n')).join('\n');
     };
+    const moduleRequestBatch = async (args) => {
+        const raw = await requestBatch(args);
+        if (args.groupKey !== 'identity_bootstrap') return raw;
+        return wrapIdentityCoverage(!String(raw || '').trim() ? '\u65e0\u4eba\u7269\u6863\u6848' : raw);
+    };
     const result = await completeActorProfileBatchTransaction({
         ledger: fixture.ledger,
         candidates: fixture.candidates,
@@ -422,7 +537,9 @@ async function runBatch(fixture, {
         allowDiscovery,
         discoveryContext,
         preflightDiscoveries,
-        requestBatch: moduleProtocol ? requestBatch : adaptedRequestBatch,
+        requestBatch: moduleProtocol === 'raw'
+            ? requestBatch
+            : moduleProtocol ? moduleRequestBatch : adaptedRequestBatch,
         resolveDiscoveries: resolveDiscoveries || (async () => ({
             ok: true,
             ledger: structuredClone(fixture.ledger),
@@ -732,21 +849,27 @@ test('rowless nonempty batch output keeps only bounded parse metadata', () => {
 test('rowless current-source discovery response gets one full replacement and then atomic readback', async () => {
     const fixture = prepareRegisteredBatch(1);
     const resolvedCandidates = structuredClone(fixture.candidates);
-    const anchor = `新人1 enters the scene.`;
-    const discoveryRow = completeCandidate(fixture.candidates[0]);
-    delete discoveryRow.actorRef;
-    discoveryRow.candidateRef = {
-        name: fixture.candidates[0].actorRef.name,
-        sourceAnchor: anchor,
-    };
+    const name = fixture.candidates[0].actorRef.name;
+    const anchor = `${name} enters the scene.`;
     const calls = [];
     let resolverCalls = 0;
+    const moduleText = (key) => `${key}：${'这是完整自然中文模块内容，包含稳定事实、现实限制与后续行动依据。'.repeat(5)}`;
     const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
         allowDiscovery: true,
         discoveryContext: { acceptedNarrative: anchor, completionMode: 'full' },
-        requestBatch: ({ candidates, attempt }) => {
-            calls.push({ attempt, count: candidates.length });
-            return attempt === 0 ? 'not a profile array' : JSON.stringify([discoveryRow]);
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({ groupKey, attempt, count: candidates.length });
+            if (groupKey === 'identity_bootstrap') {
+                return attempt === 0
+                    ? 'not a profile array'
+                    : `<profile-target actor="new" name="${name}"></profile-target>`;
+            }
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
         },
         resolveDiscoveries: async ({ discoveries }) => {
             resolverCalls += 1;
@@ -766,12 +889,163 @@ test('rowless current-source discovery response gets one full replacement and th
             };
         },
     });
-    assert.deepEqual(calls, [{ attempt: 0, count: 0 }, { attempt: 1, count: 0 }]);
+    assert.deepEqual(calls.slice(0, 2), [
+        { groupKey: 'identity_bootstrap', attempt: 0, count: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1, count: 0 },
+    ]);
     assert.equal(resolverCalls, 1);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.result.batchFormatReplacementAttempted, false);
     assert.equal(run.result.batchMeta.protocol, 'module-groups-v1');
     assert.equal(run.saveCount, 2);
+});
+
+test('holdout invented discovery name gets executable retry guidance and a literal newcomer commits atomically', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-literal-retry' });
+    const literalName = '\u9646\u7d20\u82e9';
+    const inventedName = '\u6c88\u96fe\u9065';
+    const probeNoise = 'PROBE_MODULE_MUST_NEVER_ENTER_WORKING_PROFILE';
+    const lockedCore = 'LOCKED_CHARACTER_CORE_PERSON';
+    const acceptedNarrative = `\u5e18\u5b50\u88ab\u6311\u8d77\u65f6\uff0c${literalName}\u62b1\u7740\u4e00\u53e0\u8d26\u9875\u8d70\u8fdb\u6765\uff0c\u6e05\u695a\u5730\u62a5\u4e0a\u81ea\u5df1\u7684\u59d3\u540d\u3002`;
+    const calls = [];
+    const moduleText = (key, name) => `${name}${key}\uff1a${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u6863\u6848\u6bb5\u843d\uff0c\u5305\u542b\u660e\u786e\u4e8b\u5b9e\u3001\u73b0\u5b9e\u9650\u5236\u3001\u884c\u52a8\u4f9d\u636e\u4e0e\u540e\u7eed\u53d1\u5c55\u7a7a\u95f4\u3002'.repeat(4)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt, messages }) => {
+            calls.push({ groupKey, attempt, messages });
+            if (groupKey === 'identity_bootstrap') {
+                const name = attempt === 0 ? inventedName : literalName;
+                return [
+                    `<profile-target actor="new" name="${name}">`,
+                    `<module key="person">${moduleText(probeNoise, name)}</module>`,
+                    '</profile-target>',
+                ].join('\n');
+            }
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key === 'person' ? lockedCore : key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.deepEqual(calls.slice(0, 2).map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
+        { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
+    ]);
+    const retryPrompt = calls[1].messages.map((entry) => entry.content).join('\n');
+    assert.match(retryPrompt, /actor_profile\.discovery_name_not_in_narrative/u);
+    assert.match(retryPrompt, /\u5220\u9664\u8be5\u675c\u64b0\u884c\u952e\u5019\u9009/u);
+    assert.match(retryPrompt, /\u5df2\u63a5\u53d7\u6b63\u6587/u);
+    assert.match(retryPrompt, /\u9010\u5b57\u590d\u5236/u);
+    assert.match(retryPrompt, /\u65e0\u4eba\u7269\u6863\u6848/u);
+    assert.doesNotMatch(retryPrompt, new RegExp(inventedName, 'u'));
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.readbackVerified, true);
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.persistencePayloads[1].ledger.actors[0]?.name, literalName);
+    const personText = run.persistencePayloads[1].ledger.actors[0]?.profileV6?.narrativeSections?.person?.text || '';
+    assert.match(personText, new RegExp(lockedCore, 'u'));
+    assert.doesNotMatch(personText, new RegExp(probeNoise, 'u'));
+    assert.equal(actorProfileReadyForAction(run.persistencePayloads[1].ledger.actors[0]), true);
+});
+
+test('an invented-only first identity answer cannot be erased by retry strict no-candidates', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-empty-retry' });
+    const inventedName = '\u97e9\u77f3\u8c61';
+    const acceptedNarrative = '\u7a7a\u8d70\u5eca\u91cc\u53ea\u6709\u98ce\u5439\u52a8\u5e18\u5b50\uff0c\u6ca1\u6709\u4efb\u4f55\u5177\u540d\u4eba\u7269\u51fa\u573a\u3002';
+    let retryPrompt = '';
+    let identityCalls = 0;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full' },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        requestBatch: ({ attempt, messages }) => {
+            identityCalls += 1;
+            if (attempt === 1) {
+                retryPrompt = messages.map((entry) => entry.content).join('\n');
+                return '\u65e0\u4eba\u7269\u6863\u6848';
+            }
+            return [
+                `<profile-target actor="new" name="${inventedName}">`,
+                `<module key="person">${'\u8fd9\u662f\u957f\u5ea6\u8db3\u591f\u4f46\u59d3\u540d\u5e76\u4e0d\u5b58\u5728\u4e8e\u6b63\u6587\u7684\u8eab\u4efd\u6a21\u5757\u5185\u5bb9\u3002'.repeat(6)}</module>`,
+                '</profile-target>',
+            ].join('\n');
+        },
+    });
+    assert.match(retryPrompt, /actor_profile\.discovery_name_not_in_narrative/u);
+    assert.doesNotMatch(retryPrompt, new RegExp(inventedName, 'u'));
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.ok(run.result.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_name_not_in_narrative'
+    )));
+    assert.equal(run.result.readbackVerified, false);
+    assert.equal(run.saveCount, 0);
+    assert.equal(identityCalls, 2);
+});
+
+test('full unit coverage with no-new still fills an existing incomplete ActorRef', async () => {
+    const fixture = prepareRegisteredBatch(1, { chatId: 'chat-covered-empty-existing' });
+    const calls = [];
+    const moduleText = (key) => `${key}\uff1a${'\u8fd9\u662f\u5b8c\u6574\u81ea\u7136\u4e2d\u6587\u6a21\u5757\u5185\u5bb9\uff0c\u5305\u542b\u7a33\u5b9a\u4e8b\u5b9e\u3001\u73b0\u5b9e\u9650\u5236\u4e0e\u540e\u7eed\u884c\u52a8\u4f9d\u636e\u3002'.repeat(5)}`;
+    const run = await runBatch(fixture, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative: '\u73b0\u573a\u6ca1\u6709\u65b0\u4eba\u7269\u51fa\u573a\u3002', completionMode: 'full' },
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({ groupKey, attempt });
+            if (groupKey === 'identity_bootstrap') return '\u65e0\u4eba\u7269\u6863\u6848';
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(calls[0].groupKey, 'identity_bootstrap');
+    assert.deepEqual(calls.slice(1).map((entry) => entry.groupKey), ['character_core', 'operational_profile']);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.accepted.length, 1);
+    assert.equal(run.saveCount, 2);
+});
+
+test('two naked empty answers and coverage retry failures stay fail-closed', async () => {
+    for (const mode of ['empty', 'transport', 'format']) {
+        const fixture = prepareRegisteredBatch(0, { chatId: `chat-empty-${mode}` });
+        let calls = 0;
+        const run = await runBatch(fixture, {
+            moduleProtocol: 'raw',
+            allowDiscovery: true,
+            discoveryContext: { acceptedNarrative: '\u53ea\u6709\u7a7a\u8d70\u5eca\u4e0e\u98ce\u58f0\u3002', completionMode: 'full' },
+            requestBatch: ({ attempt }) => {
+                calls += 1;
+                if (attempt === 0 || mode === 'empty') return '\u65e0\u4eba\u7269\u6863\u6848';
+                if (mode === 'transport') {
+                    const error = new Error('synthetic coverage transport failure');
+                    error.routeDiagnostic = {
+                        requestKind: 'actor_profile_batch',
+                        requestStarted: true,
+                        failureKind: 'transport',
+                    };
+                    throw error;
+                }
+                return 'not a profile route';
+            },
+        });
+        assert.equal(calls, 2, mode);
+        assert.equal(run.result.modelCalls, 2, mode);
+        assert.equal(run.result.persistenceStatus, 'not_completed', mode);
+        assert.equal(run.saveCount, 0, mode);
+        assert.ok(run.result.failures.length > 0, mode);
+    }
 });
 
 test('a valid identity retry still fails closed when resolver drops its discovery', async () => {
@@ -803,10 +1077,12 @@ test('a valid identity retry still fails closed when resolver drops its discover
                 : narrativeProfileBlock(literalName);
         },
     });
-    assert.deepEqual(calls.map(({ attempt, actorIds }) => ({ attempt, actorIds })), [
-        { attempt: 0, actorIds: [registered.actorRef.actorId] },
+    assert.deepEqual(calls.slice(0, 2).map(({ attempt, actorIds }) => ({ attempt, actorIds })), [
+        { attempt: 0, actorIds: [] },
+        { attempt: 1, actorIds: [] },
     ]);
-    assert.equal(run.result.modelCalls, 3);
+    assert.ok(calls.at(-1).actorIds.includes(registered.actorRef.actorId));
+    assert.equal(run.result.modelCalls, 4);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
 });
@@ -855,7 +1131,7 @@ test('invalid narrative discovery rows fail closed before Registry or profile pe
                 };
             },
         });
-        assert.deepEqual(calls, [0, 1], label);
+        assert.deepEqual(calls.slice(0, 2), [0, 1], label);
         assert.ok(run.result.modelCalls >= 2 && run.result.modelCalls <= 4, label);
         assert.equal(run.result.persistenceStatus, 'not_completed', label);
         assert.equal(run.result.readbackVerified, false, `${label}: must not issue a P3 no-candidate permit`);
@@ -915,7 +1191,11 @@ test('a rejected narrative discovery blocks a first-pass ActorRef peer from dura
             };
         },
     });
-    assert.deepEqual(calls, [{ attempt: 0, actorIds: [registered.actorRef.actorId] }]);
+    assert.deepEqual(calls.slice(0, 2), [
+        { attempt: 0, actorIds: [] },
+        { attempt: 1, actorIds: [] },
+    ]);
+    assert.ok(calls.every((entry) => entry.actorIds.length === 0));
     assert.equal(resolverCalls, 1);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.result.accepted.length, 0);
@@ -987,7 +1267,10 @@ test('a rejected narrative discovery blocks a first-pass discovery peer from dur
             };
         },
     });
-    assert.deepEqual(calls, [{ attempt: 0, actorIds: [] }]);
+    assert.deepEqual(calls.slice(0, 2), [
+        { attempt: 0, actorIds: [] },
+        { attempt: 1, actorIds: [] },
+    ]);
     assert.equal(resolverCalls, 1);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.result.accepted.length, 0);
@@ -1034,8 +1317,8 @@ test('valid existing plus valid discovery silently dropped by resolver keeps the
             ].join('\n');
         },
     });
-    assert.deepEqual(mixedCalls, [0]);
-    assert.equal(mixed.result.modelCalls, 3);
+    assert.deepEqual(mixedCalls, [0, 1]);
+    assert.equal(mixed.result.modelCalls, 2);
     assert.equal(mixed.saveCount, 0);
 
     const fixture = prepareRegisteredBatch(1);
@@ -1170,7 +1453,7 @@ test('identity preflight retries only bootstrap with the exact safe local reason
     )));
 });
 
-test('all deterministic identity false positives may retry to strict no-candidates without later groups', async () => {
+test('a deterministic-invalid identity row cannot be erased by a retry empty', async () => {
     const fixture = prepareRegisteredBatch(0);
     const invalidName = '系统';
     const acceptedNarrative = `${invalidName}广播出现在这段合成材料中。`;
@@ -1196,9 +1479,10 @@ test('all deterministic identity false positives may retry to strict no-candidat
         { groupKey: 'identity_bootstrap', attempt: 1 },
     ]);
     assert.match(calls[1].prompt, /actor_candidate\.identity_system/u);
-    assert.equal(run.result.persistenceStatus, 'no_candidates');
+    assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
-    assert.equal(run.result.failures.length, 0);
+    assert.ok(run.result.failures.length > 0);
+    assert.ok(run.result.failures.some((failure) => failure.groupKey === 'identity_bootstrap'));
 });
 
 test('mixed valid and deterministic-invalid identity candidates cannot be erased by retry empty', async () => {
@@ -1257,7 +1541,7 @@ test('identity module or format failure cannot be erased by retry empty', async 
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
     assert.ok(run.result.failures.some((failure) => (
-        failure.reason === 'actor_profile.identity_retry_erased_failure'
+        failure.groupKey === 'identity_bootstrap' && String(failure.reason || '').length > 0
     )));
 });
 
@@ -1617,7 +1901,6 @@ test('format-unrecoverable module retry receives safe group feedback and retries
     assert.match(retry.prompt, /actor_profile\.format_unrecoverable/u);
     assert.match(retry.prompt, /character_core/u);
     assert.deepEqual(calls.map(({ groupKey, attempt }) => [groupKey, attempt]), [
-        ['identity_bootstrap', 0],
         ['character_core', 0],
         ['character_core', 1],
         ['operational_profile', 0],
@@ -1757,11 +2040,15 @@ test('a second rowless discovery response fails closed with a fixed parse code a
     assert.equal(run.saveCount, 0);
 });
 
-test('an explicit empty discovery batch stays no-candidates and never consumes the replacement', async () => {
+test('a complete unit-level no-new response is sufficient for strict no-candidates', async () => {
     const fixture = prepareRegisteredBatch(0);
     let calls = 0;
     const run = await runBatch(fixture, {
         allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative: '\u53ea\u6709\u7a7a\u8d70\u5eca\u4e0e\u98ce\u58f0\u3002',
+            completionMode: 'full',
+        },
         requestBatch: () => {
             calls += 1;
             return '[]';
@@ -1769,6 +2056,7 @@ test('an explicit empty discovery batch stays no-candidates and never consumes t
     });
     assert.equal(calls, 1);
     assert.equal(run.result.persistenceStatus, 'no_candidates');
+    assert.ok(run.result.coverageProof);
     assert.equal(run.result.batchFormatReplacementAttempted, false);
     assert.equal(run.saveCount, 0);
 });
@@ -1783,7 +2071,10 @@ test('a parsed row with an expected ActorRef keeps the existing row path and no 
             return JSON.stringify(candidates.map(completeCandidate));
         },
     });
-    assert.deepEqual(calls, [{ attempt: 0, count: 1 }]);
+    assert.deepEqual(calls, [
+        { attempt: 0, count: 0 },
+        { attempt: 0, count: 1 },
+    ]);
     assert.equal(run.result.batchFormatReplacementAttempted, false);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
 });
@@ -1808,50 +2099,127 @@ test('a locally repairable batch needs one model call', async () => {
     assert.equal(run.saveCount, 2);
 });
 
-test('one incomplete actor gets one subset replacement while valid peers stay accepted', async () => {
+test('one incomplete actor retries only its missing module while valid peers stay in the local clone', async () => {
     const fixture = prepareRegisteredBatch(3);
     const calls = [];
+    const moduleText = (key) => `${key}：${'这是完整自然中文模块内容，包含稳定事实、现实限制与后续行动依据。'.repeat(5)}`;
     const run = await runBatch(fixture, {
-        requestBatch: ({ candidates, attempt }) => {
-            calls.push(candidates.map((candidate) => candidate.actorId));
-            const rows = candidates.map(completeCandidate);
-            if (attempt === 0) delete rows[1].identity.role;
-            return JSON.stringify(rows);
+        moduleProtocol: true,
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({ groupKey, attempt, actorIds: candidates.map((candidate) => candidate.actorRef.actorId) });
+            return candidates.map((candidate, index) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.filter((key) => !(groupKey === 'character_core' && attempt === 0 && index === 1 && key === 'person'))
+                    .map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
         },
     });
-    assert.equal(calls.length, 2);
-    assert.deepEqual(calls[1], fixture.candidates.map((candidate) => candidate.actorId));
+    const coreCalls = calls.filter((entry) => entry.groupKey === 'character_core');
+    assert.deepEqual(coreCalls.map((entry) => entry.attempt), [0, 1]);
+    assert.deepEqual(coreCalls[1].actorIds, [fixture.candidates[1].actorRef.actorId]);
     assert.deepEqual(
         run.result.batchMeta.moduleGroups.filter((entry) => entry.attempt === 1).map((entry) => entry.groupKey),
-        ['identity_bootstrap'],
+        ['character_core'],
     );
     assert.equal(run.result.accepted.length, 3);
     assert.equal(run.saveCount, 2);
     assert.equal(run.readbackCount, 2);
 });
 
+test('six actors keep validated operational modules in the transaction-local clone and retry only missing modules', async () => {
+    const fixture = prepareRegisteredBatch(6, { chatId: 'chat-six-local-module-merge' });
+    const calls = [];
+    const moduleText = (key, actorId) => `${actorId} ${key}: ${'complete natural-language profile evidence with stable facts, limits, and usable action context. '.repeat(5)}`;
+    const run = await runBatch(fixture, {
+        moduleProtocol: true,
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({
+                groupKey,
+                attempt,
+                moduleKeys: [...moduleKeys],
+                actorIds: candidates.map((candidate) => candidate.actorRef.actorId),
+            });
+            const emittedKeys = groupKey === 'operational_profile' && attempt === 0
+                ? ['knowledgeCapabilitiesResources']
+                : moduleKeys;
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...emittedKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.actorId)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    const operational = calls.filter((entry) => entry.groupKey === 'operational_profile');
+    assert.deepEqual(operational.map((entry) => ({ attempt: entry.attempt, moduleKeys: entry.moduleKeys })), [
+        { attempt: 0, moduleKeys: ['currentState', 'knowledgeCapabilitiesResources'] },
+        { attempt: 1, moduleKeys: ['currentState'] },
+    ]);
+    assert.deepEqual(operational[1].actorIds, fixture.candidates.map((candidate) => candidate.actorRef.actorId));
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.accepted.length, 6);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.readbackCount, 2);
+});
+
+test('a tampered or still-missing operational retry abandons the local clone and preserves S0', async () => {
+    for (const mode of ['tampered', 'missing']) {
+        const fixture = prepareRegisteredBatch(6, { chatId: `chat-six-local-module-${mode}` });
+        const moduleText = (key) => `${key}: ${'complete natural-language profile evidence with stable facts, limits, and usable action context. '.repeat(5)}`;
+        const run = await runBatch(fixture, {
+            moduleProtocol: true,
+            requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+                let emittedKeys = moduleKeys;
+                if (groupKey === 'operational_profile' && attempt === 0) emittedKeys = ['knowledgeCapabilitiesResources'];
+                if (groupKey === 'operational_profile' && attempt === 1 && mode === 'missing') emittedKeys = [];
+                return candidates.map((candidate, index) => [
+                    `<profile-target actor="${candidate.actorRef.actorId}" name="${groupKey === 'operational_profile' && attempt === 1 && mode === 'tampered' && index === 0 ? 'tampered-row-key' : candidate.actorRef.name}">`,
+                    ...emittedKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+                    '</profile-target>',
+                ].join('\n')).join('\n');
+            },
+        });
+        assert.equal(run.result.persistenceStatus, 'not_completed', mode);
+        assert.equal(run.result.accepted.length, 0, mode);
+        assert.equal(run.saveCount, 0, mode);
+        assert.deepEqual(run.result.ledger, fixture.ledger, mode);
+        assert.ok(
+            run.result.failures.some((failure) => failure.groupKey === 'operational_profile'),
+            `${mode}: ${JSON.stringify(run.result.failures)}`,
+        );
+    }
+});
+
 test('duplicate or unknown output retries only the failed group and then commits atomically', async () => {
     const fixture = prepareRegisteredBatch(2);
     const calls = [];
+    const moduleText = (key) => `${key}：${'这是完整自然中文模块内容，包含稳定事实、现实限制与后续行动依据。'.repeat(5)}`;
     const run = await runBatch(fixture, {
-        requestBatch: ({ candidates, attempt }) => {
-            calls.push(candidates.map((candidate) => candidate.actorId));
-            if (attempt === 1) return JSON.stringify(candidates.map(completeCandidate));
-            const first = completeCandidate(candidates[0]);
-            const second = completeCandidate(candidates[1]);
-            const unknown = structuredClone(first);
-            unknown.actorRef = { actorId: 'NPC-UNKNOWN', name: '未知额外人物' };
-            return JSON.stringify([first, structuredClone(first), second, unknown]);
+        moduleProtocol: true,
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({ groupKey, attempt, actorIds: candidates.map((candidate) => candidate.actorRef.actorId) });
+            const rows = candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+                '</profile-target>',
+            ].join('\n'));
+            if (groupKey === 'character_core' && attempt === 0) {
+                rows.push(rows[0]);
+                rows.push(`<profile-target actor="NPC-UNKNOWN" name="未知额外人物"><module key="person">${moduleText('person')}</module></profile-target>`);
+            }
+            return rows.join('\n');
         },
     });
-    assert.equal(calls.length, 2);
-    assert.deepEqual(calls[1], fixture.candidates.map((candidate) => candidate.actorId));
+    const coreCalls = calls.filter((entry) => entry.groupKey === 'character_core');
+    assert.deepEqual(coreCalls.map((entry) => entry.attempt), [0, 1]);
+    assert.deepEqual(coreCalls[1].actorIds, fixture.candidates.map((candidate) => candidate.actorRef.actorId));
     assert.equal(run.result.accepted.length, 2);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.saveCount, 2);
     assert.deepEqual(
         run.result.batchMeta.moduleGroups.filter((entry) => entry.attempt === 1).map((entry) => entry.groupKey),
-        ['identity_bootstrap'],
+        ['character_core'],
     );
 });
 
@@ -1878,17 +2246,22 @@ test('duplicate input ActorIds fail closed instead of being swallowed by Map', a
 
 test('one unrecoverable actor keeps the whole current-source group at S0', async () => {
     const fixture = prepareRegisteredBatch(2);
+    const moduleText = (key) => `${key}：${'这是完整自然中文模块内容，包含稳定事实、现实限制与后续行动依据。'.repeat(5)}`;
     const run = await runBatch(fixture, {
+        moduleProtocol: true,
         semanticRetry: false,
-        requestBatch: ({ candidates }) => {
-            const good = completeCandidate(candidates[0]);
-            const crossActor = completeCandidate(candidates[1]);
-            crossActor.actorRef.name = '错误姓名';
-            return JSON.stringify([good, crossActor]);
+        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+            return candidates.map((candidate, index) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${groupKey === 'character_core' && index === 1 ? '错误姓名' : candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
         },
     });
     assert.equal(run.result.accepted.length, 0);
-    assert.ok(['actor_profile.actor_ref_mismatch', 'actor_profile.module_missing'].includes(run.result.failures[0].reason));
+    assert.ok(run.result.failures.some((entry) => (
+        ['actor_profile.actor_ref_mismatch', 'actor_profile.module_missing', 'actor_profile.schema_incomplete'].includes(entry.reason)
+    )), JSON.stringify(run.result.failures));
     assert.equal(run.saveCount, 0);
     assert.deepEqual(run.result.ledger, fixture.ledger);
 });

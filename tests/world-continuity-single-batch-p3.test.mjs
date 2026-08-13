@@ -21,6 +21,7 @@ import {
 } from '../sovereignty-runtime-core.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
+    actorProfileDiscoveryCoveragePlan,
     actorProfileRecoverySourceMatches,
     createActorProfileNoCandidatesTerminalProof,
 } from '../actor-profile-v6-core.mjs';
@@ -1365,8 +1366,9 @@ test('saved no-candidates proof survives refresh and reopens P3 without rerunnin
         characterCreationTicketBatches: [],
         actorProfileNoCandidatesTerminalProof: null,
     });
+    const coverageProof = actorProfileDiscoveryCoveragePlan('风声掠过空旷走廊，没有人物进入场景。');
     assert.equal(await persistence.persist(captured, {
-        status: 'no_candidates', profileBatch: { readbackVerified: false },
+        status: 'no_candidates', profileBatch: { readbackVerified: false, coverageProof },
     }), true);
     assert.equal(persistence.state.writes, 1);
     const savedNamespace = JSON.parse(JSON.stringify(persistence.state.persisted));

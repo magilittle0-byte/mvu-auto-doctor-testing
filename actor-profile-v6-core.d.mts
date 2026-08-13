@@ -78,6 +78,9 @@ export function sealActorProfileTicketBatchForPersistence(value: unknown, accept
 export function actorProfileTicketBatchPersistenceMatches(value: unknown, options?: object): boolean;
 export function createActorProfileRetryReceipt(options?: object): object | null;
 export function actorProfileRetryReceiptMatches(value: unknown, options?: object): boolean;
+export function actorProfileDiscoveryCoveragePlan(acceptedNarrative: unknown): object;
+export function actorProfileDiscoveryCoverageProofMatches(value: unknown): boolean;
+export function isVagueActorProfileDiscoveryName(name: unknown): boolean;
 export function createActorProfileNoCandidatesTerminalProof(options?: object): object | null;
 export function actorProfileNoCandidatesTerminalProofMatches(value: unknown, options?: object): boolean;
 export function actorProfileRecoveryCriticalFingerprint(overrides?: Record<string, unknown>): string;

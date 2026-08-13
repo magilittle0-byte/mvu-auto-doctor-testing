@@ -9,6 +9,7 @@ import {
     ACTOR_PROFILE_V6_VERSION,
     actorProfileActionReadiness,
     actorProfileBaselineDigest,
+    isVagueActorProfileDiscoveryName,
     normalizeActorProfileV6,
     validateActorProfileDiscoveryAnchor,
 } from './actor-profile-v6-core.mjs';
@@ -42,8 +43,8 @@ const ACTOR_CANDIDATE_SOURCES = new Set([
 const PRIVATE_NARRATION = /(?:心想|暗想|暗自|内心|心底|心理|秘密想|私下决定|未说出口|回忆起|玩家的秘密|玩家私密)/u;
 const PLAYER_SOVEREIGNTY = /(?:让|迫使|命令|说服|要求)(?:了)?玩家(?:接受|同意|服从|支付|交出|前往|离开|攻击|回答|承诺|决定)|玩家(?:接受了|同意了|服从了|支付了|交出了|前往了|离开了|攻击了|回答了|承诺了|决定了)/u;
 const GENERIC_WAIT = /^(?:等待|继续等待|暂时不动|按兵不动|保持现状|没有变化|暂无变化|无事发生|条件未成熟)[。.!！]?$/u;
-const GROUP_NAME = /(?:队|小队|团队|军|军团|旅团|兵团|团|协会|组织|公司|集团|家族|势力|帮派|教会|政府|部门|机构|委员会|居民|商户|人群|群众|议会|公会|商会)$/u;
-const NON_ACTOR_NAME = /^(?:玩家|player|user|系统(?:播报|提示|公告|通知)?|system(?:\s+(?:broadcast|message|notice|announcement))?|环境|environment|世界|world|旁白|narrator|场景|scene|规则播报|任务提示|游戏提示|主持人|gm|game master)$/iu;
+const GROUP_NAME = /(?:队|小队|团队|军|军团|旅团|兵团|团|协会|组织|公司|集团|家族|势力|帮派|教会|政府|部门|机构|委员会|人群|群众|议会|公会|商会)$/u;
+const NON_ACTOR_NAME = /^(?:玩家|player|user|系统(?:播报|提示|公告|通知)?|system(?:\s+(?:broadcast|message|notice|announcement))?|环境|environment|世界|world|旁白|narrator|场景|scene|规则播报|任务提示|游戏提示|主持人|gm|game master|他|她|它|牠|他们|她们|它们|你|你们|您|我|我们|咱|咱们|俺|俺们|某人|某某|某甲|某乙|谁|谁人|何人|大家|众人|人们|群众|群体|各位|诸位)$/iu;
 const PLAYER_DEPENDENT_GOAL = /(?:等待|等候|直到|由|让|需要|必须等)(?:玩家|主角|主人|user|player)|(?:玩家|主角|主人|user|player).{0,24}(?:决定|联系|召唤|下令|命令|批准|同意|前往|到来|选择|处置)/iu;
 const DIRECT_OBSERVATION = /(?:看见|看到|目睹|注意到|发现|听见|听到|闻到|察觉|收到|读到|被告知|获悉|亲历|遭遇|触碰|检查到|观察到)/u;
 const OBSERVATION_NEGATION = /(?:没看见|没有看见|未看见|没听见|没有听见|未听见|一无所知|并不知道|不知情|尚未知晓)/u;
@@ -107,6 +108,7 @@ export function classifyActorRegistryTargetName(value, excludedActorNames = []) 
     if (!name || name.length < 2) return 'actor_candidate.identity_missing_or_short';
     if (NON_ACTOR_NAME.test(name)) return 'actor_candidate.identity_system';
     if (GROUP_NAME.test(name)) return 'actor_candidate.identity_group';
+    if (isVagueActorProfileDiscoveryName(name)) return 'actor_candidate.identity_missing_or_short';
     const excluded = excludedActorNames instanceof Set
         ? excludedActorNames
         : normalizeExcludedActorNames(excludedActorNames);

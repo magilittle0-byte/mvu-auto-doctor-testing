@@ -88,7 +88,7 @@ test('module prompt contains per-module notes, fresh current rows and no visible
     assert.doesNotMatch(all, /七个标题|人物档案：姓名/u);
 });
 
-test('identity bootstrap receives registered index and same-turn tickets once', () => {
+test('identity bootstrap is a route-only row-key probe isolated from dossier authority', () => {
     const group = actorProfileCompletionGroupPlan([], { allowDiscovery: true })[0];
     const messages = buildActorProfileModuleGroupMessages(group, { discoveryContext: {
         acceptedNarrative: '新人物明璃真正出场。',
@@ -97,6 +97,24 @@ test('identity bootstrap receives registered index and same-turn tickets once', 
     } });
     const all = messages.map((message) => message.content).join('\n');
     assert.equal(all.match(/NPC-old/gu)?.length, 1);
-    assert.equal(all.match(/ticket-1/gu)?.length, 1);
-    assert.match(all, /所有真正出场/u);
+    assert.equal(all.includes('ticket-1'), false);
+    assert.match(all, /Registry displayName\/\u884c\u952e/u);
+    assert.match(all, /\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u63cf\u8ff0\u6027\u79f0\u8c13/u);
+    assert.doesNotMatch(all, /\u58eb\u5175A|\u53d7\u4f24\u7684\u8b66\u536b/u);
+    assert.doesNotMatch(all, /\u6743\u5a01\u6750\u6599|\u5168\u5c40\u9644\u52a0\u63d0\u793a/u);
+    assert.deepEqual(group.modules, []);
+    assert.match(all, /真正出场/u);
+});
+
+test('identity route parser discards dossier module noise instead of promoting it', () => {
+    const group = actorProfileCompletionGroupPlan([], { allowDiscovery: true })[0];
+    const parsed = parseActorProfileModuleGroupOutput([
+        '<profile-target actor="new" name="\u53d7\u4f24\u7684\u5546\u6237">',
+        `<module key="person">${prose('\u4e0d\u5e94\u8fdb\u5165\u6863\u6848')}</module>`,
+        '</profile-target>',
+    ].join('\n'), group, { acceptedNarrative: '\u53d7\u4f24\u7684\u5546\u6237\u6276\u7740\u95e8\u6846\u8d70\u8fdb\u6765\u3002' });
+    assert.equal(parsed.formatUnrecoverable, false);
+    assert.deepEqual(parsed.failures, []);
+    assert.deepEqual(parsed.entries[0].modules, {});
+    assert.equal(parsed.entries[0].name, '\u53d7\u4f24\u7684\u5546\u6237');
 });

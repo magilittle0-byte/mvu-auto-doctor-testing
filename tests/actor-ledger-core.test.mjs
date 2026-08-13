@@ -4,6 +4,7 @@ import {
     ACTOR_LEDGER_VERSION,
     actorActionCandidatesFromShard,
     actorLedgerView,
+    classifyActorRegistryTargetName,
     applyAcceptedContentObservations,
     discoverActorsFromTurnSources,
     emptyActorLedger,
@@ -885,6 +886,18 @@ test('migration excludes player system environment and group labels from the act
         { allowLegacyRegistration: true },
     );
     assert.deepEqual(migrated.actors.map((item) => item.name), ['艾达']);
+});
+
+test('Registry row keys accept stable literal individual labels while rejecting structural non-actors', () => {
+    for (const name of ['\u6821\u957f', '\u9ed1\u5e02\u5546\u4eba', '\u58eb\u5175A', '\u53d7\u4f24\u7684\u8b66\u536b', '\u53d7\u4f24\u7684\u5546\u6237']) {
+        assert.equal(classifyActorRegistryTargetName(name), '', name);
+    }
+    for (const name of ['\u4ed6\u4eec', '\u4f17\u4eba', '\u67d0\u67d0', '\u7cfb\u7edf\u63d0\u793a', '\u67d0\u67d0\u516c\u53f8']) {
+        assert.notEqual(classifyActorRegistryTargetName(name), '', name);
+    }
+    for (const unstableKey of ['\u8def\u4eba', '\u964c\u751f\u4eba', '\u7537\u4eba', '\u5b69\u5b50']) {
+        assert.notEqual(classifyActorRegistryTargetName(unstableKey), '', unstableKey);
+    }
 });
 
 test('runtime migration removes the named player and converts event beats into stimuli instead of goals', () => {

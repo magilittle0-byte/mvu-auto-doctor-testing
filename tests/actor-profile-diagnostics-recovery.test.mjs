@@ -4,6 +4,7 @@ import test from 'node:test';
 import { createDoctorRuntimePresentation, createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
+    actorProfileDiscoveryCoveragePlan,
     actorProfileRecoveryCriticalFingerprint,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
@@ -217,8 +218,14 @@ test('current retry receipt seals diagnostic arrays while bounded V2 compatibili
 
 test('no-candidates terminal receipt reuses recovery source identity and seals its payload', () => {
     const current = recoverySource();
-    const proof = createActorProfileNoCandidatesTerminalProof({ sourceRef: current });
+    const coverageProof = actorProfileDiscoveryCoveragePlan('只有环境状态变化，没有人物出场。');
+    const proof = createActorProfileNoCandidatesTerminalProof({
+        sourceRef: current,
+        coverageProof,
+    });
     assert.ok(proof);
+    assert.equal(createActorProfileNoCandidatesTerminalProof({ sourceRef: current }), null,
+        'a legacy empty-only receipt cannot authorize P3 without full narrative coverage');
     assert.equal(actorProfileNoCandidatesTerminalProofMatches(proof, {
         currentSourceRef: structuredClone(current), expectedProof: structuredClone(proof),
     }), true);

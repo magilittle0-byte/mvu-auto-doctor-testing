@@ -1377,6 +1377,22 @@ test('narrative first-literal discovery remains parser-only and fail-closed for 
     assert.equal(vague.discoveries.length, 0);
     assert.equal(vague.unresolved[0].reason, 'actor_profile.discovery_name_vague');
 
+    for (const rowKey of ['\u6821\u957f', '\u9ed1\u5e02\u5546\u4eba', '\u58eb\u5175A', '\u53d7\u4f24\u7684\u8b66\u536b', '\u53d7\u4f24\u7684\u5546\u6237']) {
+        const literal = validateActorProfileDiscoveryAnchor({
+            name: rowKey,
+            sourceAnchor: `${rowKey}\u6b63\u5728\u73b0\u573a\u5904\u7406\u4e8b\u60c5\u3002`,
+        }, `${rowKey}\u6b63\u5728\u73b0\u573a\u5904\u7406\u4e8b\u60c5\u3002`);
+        assert.equal(literal.ok, true, rowKey);
+    }
+    for (const vagueRowKey of ['\u8def\u4eba', '\u964c\u751f\u4eba', '\u7537\u4eba', '\u5b69\u5b50']) {
+        const vagueLiteral = validateActorProfileDiscoveryAnchor({
+            name: vagueRowKey,
+            sourceAnchor: `${vagueRowKey}\u6b63\u5728\u73b0\u573a\u5904\u7406\u4e8b\u60c5\u3002`,
+        }, `${vagueRowKey}\u6b63\u5728\u73b0\u573a\u5904\u7406\u4e8b\u60c5\u3002`);
+        assert.equal(vagueLiteral.ok, false, vagueRowKey);
+        assert.equal(vagueLiteral.reason, 'actor_profile.discovery_name_vague', vagueRowKey);
+    }
+
     const duplicate = parseActorProfileCompletionBatchOutput([
         narrativeBlock(name), narrativeBlock(name),
     ].join('\n'), { candidates: [], discoveryContext: context });
