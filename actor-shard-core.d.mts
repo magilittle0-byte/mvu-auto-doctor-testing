@@ -90,6 +90,11 @@ export function selectActorShardCandidates(input?: {
     maxWorkers?: number;
     excludedActorNames?: string[];
 }): ActorShardCandidate[];
+
+export function actorNarrativeShardBasis(actor?: unknown): {
+    knowledgeBasis: string[];
+    goals: string[];
+};
 export function buildActorShardMessages(
     candidate: ActorShardCandidate,
     options?: {

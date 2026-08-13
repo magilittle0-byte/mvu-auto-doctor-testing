@@ -222,6 +222,26 @@ export function formatUserNarrativeInstruction(label, value) {
     ].join('\n');
 }
 
+export function actorNarrativeShardBasis(actor) {
+    const narrativeSections = actor?.profileV6?.profileFormat === 'narrative-v1'
+        && actor?.profileV6?.narrativeSections
+        && typeof actor.profileV6.narrativeSections === 'object'
+        ? actor.profileV6.narrativeSections
+        : {};
+    return {
+        knowledgeBasis: cleanList([
+            narrativeSections.knowledgeCapabilitiesResources?.text,
+            narrativeSections.currentState?.text,
+            narrativeSections.relationshipsMotives?.text,
+            narrativeSections.personality?.text,
+        ], 4, 1200),
+        goals: cleanList([
+            narrativeSections.currentState?.text,
+            narrativeSections.relationshipsMotives?.text,
+        ], 2, 1200),
+    };
+}
+
 export function selectActorShardCandidates({
     continuity,
     actorLedger = null,
@@ -299,9 +319,16 @@ export function selectActorShardCandidates({
                 claim: cleanText(item?.claim, 400),
             }))
             .filter((item) => item.id && item.claim);
+        // Narrative V6 dossiers are action-ready without projecting inferred
+        // prose back into the confirmed Actor Ledger goal/knowledge columns.
+        // Reuse those already-validated dossier sections as a read-only shard
+        // view so a freshly completed actor is not scheduled without a
+        // corresponding validation candidate.
+        const narrativeActionBasis = actorNarrativeShardBasis(actor);
         const privatePlanBasis = cleanList([
             actor?.plan?.summary,
             ...(actor?.currentGoals || []),
+            ...narrativeActionBasis.knowledgeBasis,
         ], 4, 400);
         const stimuli = (Array.isArray(actor?.stimuli) ? actor.stimuli : [])
             .filter((item) => item?.status === 'unreviewed')
@@ -338,6 +365,7 @@ export function selectActorShardCandidates({
                 ...(actor?.currentGoals || []),
                 actor?.plan?.summary,
                 ...(actor?.longTermGoals || []),
+                ...narrativeActionBasis.goals,
             ], 6, 400),
             stimuli,
             sourceThreads: cleanList([

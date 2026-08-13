@@ -4,6 +4,7 @@ import {
     buildActorShardBatchMessages,
     buildActorShardRepairMessages,
     buildActorShardMessages,
+    actorNarrativeShardBasis,
     convergeActorShardProposals,
     formatUserNarrativeInstruction,
     parseActorShardProposal,
@@ -671,6 +672,22 @@ test('an explicitly empty interaction allow-list rejects invented actors', () =>
         })), { candidate }).error,
         undefined,
     );
+});
+
+test('a narrative dossier supplies a read-only action basis before live goals exist', () => {
+    const basis = actorNarrativeShardBasis({
+        profileV6: {
+            profileFormat: 'narrative-v1',
+            narrativeSections: {
+                currentState: { text: 'Ada is currently weighing a concrete next move from the accepted scene.' },
+                relationshipsMotives: { text: 'Ada has a specific motive and an unresolved relationship boundary.' },
+                knowledgeCapabilitiesResources: { text: 'Ada retains the dossier knowledge needed to choose a bounded attempt.' },
+                personality: { text: 'Ada acts according to the established dossier rather than a new invented trait.' },
+            },
+        },
+    });
+    assert.ok(basis.knowledgeBasis.some((item) => item.includes('dossier knowledge')));
+    assert.ok(basis.goals.some((item) => item.includes('concrete next move')));
 });
 
 test('convergence is order-independent and keeps time/location/causal conflicts independent', () => {

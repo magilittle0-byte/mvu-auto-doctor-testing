@@ -69,6 +69,7 @@ import {
     WORLD_WIND_TYPE_LABELS,
 } from './continuity-core.mjs';
 import {
+    actorNarrativeShardBasis,
     formatUserNarrativeInstruction,
     normalizeUserPromptSlot,
     parseActorShardProposal,
@@ -3078,6 +3079,7 @@ function doctorRuntimeCriticalFingerprint() {
         classifyActorRegistryTargetName.toString(),
         mergeActorIdentityReveal.toString(),
         parseActorShardProposal.toString(),
+        actorNarrativeShardBasis.toString(),
         callModel.toString(),
         worldCallReservedForUserCancellation.toString(),
         clearUserCancelledWorldCallReservation.toString(),
