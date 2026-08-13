@@ -242,13 +242,16 @@ export function actorProfileDiscoveryCoveragePlan(acceptedNarrative) {
     const texts = [];
     let start = 0;
     while (start < source.length) {
-        const hardEnd = Math.min(source.length, start + 900);
+        // Keep discovery mechanically exhaustive without asking the model to
+        // reason across an essay-sized row.  This is a transport partition,
+        // not NER: every accepted character remains in exactly one unit.
+        const hardEnd = Math.min(source.length, start + 420);
         let end = hardEnd;
         if (hardEnd < source.length) {
-            const bounded = source.slice(start + 180, hardEnd);
+            const bounded = source.slice(start + 120, hardEnd);
             let lastBoundary = -1;
             for (const match of bounded.matchAll(/[。！？!?；;\n]/gu)) lastBoundary = match.index;
-            if (lastBoundary >= 0) end = start + 180 + lastBoundary + 1;
+            if (lastBoundary >= 0) end = start + 120 + lastBoundary + 1;
         }
         texts.push(source.slice(start, end));
         start = end;
@@ -349,20 +352,41 @@ export function buildActorProfileModuleGroupMessages(group, {
     // source used by Registry preflight.  The model may consume it, but must
     // never manufacture or extend it.
     const excludedActorNames = cleanList(discoveryContext?.excludedActorNames, 24, 160);
-    const authorityProjection = (candidate) => ({
-        profileV6: candidate?.profileV6 || candidate?.previousProfile || null,
-        designRolls: candidate?.designRolls || candidate?.characterCreationTicket?.designRolls || null,
-        characterCreationTicket: candidate?.characterCreationTicket || null,
-        ticketPolicy: candidate?.__discoveryKey && candidate?.characterCreationTicket
-            ? {
-                status: 'provisional_working_context',
-                precedence: 'authority_then_accepted_narrative_then_existing_profile_then_ticket',
-                rule: 'conflicting ticket axes are ignored; local post-promotion binding is the only authority',
-            }
-            : { status: 'locally_bound_or_absent' },
-        confirmed: candidate?.confirmed || candidate?.previousProfile?.confirmed || null,
-        locks: candidate?.locks || candidate?.previousProfile?.locks || null,
-    });
+    const authorityProjection = (candidate, moduleKeys) => {
+        const context = actorProfilePromptContext(candidate);
+        const wanted = new Set(moduleKeys || []);
+        const confirmed = {};
+        if (wanted.has('person') || wanted.has('history') || wanted.has('physiology')) {
+            confirmed.identity = context.confirmedAnchors.identity;
+        }
+        if (wanted.has('personality')) confirmed.personality = context.confirmedAnchors.personality;
+        if (wanted.has('history') || wanted.has('relationshipsMotives') || wanted.has('currentState')) {
+            confirmed.goals = context.confirmedAnchors.goals;
+        }
+        if (wanted.has('relationshipsMotives')) confirmed.relationships = context.confirmedAnchors.relationships;
+        if (wanted.has('knowledgeCapabilitiesResources')) {
+            confirmed.knowledge = context.confirmedAnchors.knowledge;
+            confirmed.resourcesCapabilities = context.confirmedAnchors.resourcesCapabilities;
+        }
+        const additionalConfirmed = candidate?.confirmed || candidate?.previousProfile?.confirmed;
+        if (additionalConfirmed && typeof additionalConfirmed === 'object') {
+            confirmed.additional = clone(additionalConfirmed);
+        }
+        const ticket = wanted.has('person') || wanted.has('personality')
+            || wanted.has('history') || wanted.has('relationshipsMotives')
+            ? context.characterCreationTicket
+            : null;
+        return {
+            confirmed,
+            locks: clone(candidate?.locks || candidate?.previousProfile?.locks || {}),
+            ...(ticket ? {
+                characterCreationTicket: ticket,
+                ticketPolicy: candidate?.__discoveryKey
+                    ? 'provisional_working_context'
+                    : 'locally_bound',
+            } : {}),
+        };
+    };
     const requestedModules = Object.fromEntries(Object.entries(group?.targets || {}).map(([key, rows]) => [
         key,
         (rows || []).map((candidate) => candidateActorIdForPrompt(candidate)),
@@ -375,18 +399,24 @@ export function buildActorProfileModuleGroupMessages(group, {
     }
     const targetRows = {
         requestedModules,
-        actors: [...actorById.values()].map((candidate) => ({
-            actorId: candidateActorIdForPrompt(candidate),
-            name: cleanText(candidate?.actorRef?.name || candidate?.name, 160),
-            identityContext: narrativeText(
-                candidate?.previousProfile?.narrativeSections?.person?.text
-                    ?? candidate?.profileV6?.narrativeSections?.person?.text
-                    ?? candidate?.narrativeSections?.person?.text,
-                4000,
-            ),
-            workingModules: candidate?.previousProfile?.narrativeSections || {},
-            authority: authorityProjection(candidate),
-        })),
+        actors: [...actorById.values()].map((candidate) => {
+            const actorId = candidateActorIdForPrompt(candidate);
+            const moduleKeys = Object.entries(requestedModules)
+                .filter(([, actorIds]) => actorIds.includes(actorId))
+                .map(([moduleKey]) => moduleKey);
+            const sections = candidate?.previousProfile?.narrativeSections
+                || candidate?.profileV6?.narrativeSections
+                || candidate?.narrativeSections || {};
+            return {
+                actorId,
+                name: cleanText(candidate?.actorRef?.name || candidate?.name, 160),
+                current: Object.fromEntries(moduleKeys.map((moduleKey) => [
+                    moduleKey,
+                    narrativeText(sections?.[moduleKey]?.text ?? sections?.[moduleKey], 4000),
+                ])),
+                authority: authorityProjection(candidate, moduleKeys),
+            };
+        }),
     };
     const guides = (group?.modules || []).map((key) => `${key}: ${PROFILE_MODULE_NOTES[key]}`).join('\n');
     if (discoveryOnly) return [{ role: 'system', content: [
@@ -2326,6 +2356,8 @@ export function actorProfileGenerationCriticalFingerprint(overrides = {}) {
         vagueDiscoveryTerms: [...DISCOVERY_NAME_VAGUE_TERMS].sort(),
         completionGroupPlan: String(actorProfileCompletionGroupPlan),
         buildGroupMessages: String(buildActorProfileModuleGroupMessages),
+        promptContext: String(actorProfilePromptContext),
+        designRollNormalizer: String(normalizeActorProfileDesignRolls),
         parseGroupOutput: String(parseActorProfileModuleGroupOutput),
         physiologyCoverageValidation: String(validatePhysiologyCoverage),
         identityEvidenceSurface: String(actorProfileIdentityEvidenceSurface),
@@ -3338,7 +3370,9 @@ function actorProfilePromptContext(candidate) {
                 capabilities: capabilities.editable || [],
             },
         },
-        characterCreationTicket: normalizeActorProfileDesignRolls(candidate.designRolls),
+        characterCreationTicket: normalizeActorProfileDesignRolls(
+            candidate.designRolls || candidate.characterCreationTicket,
+        ),
     };
 }
 

@@ -512,6 +512,7 @@ const openingSyncPendingKeys = new Set();
 const openingSyncCompletedKeys = new Set();
 const actorProfilePendingKeys = new Map();
 const actorProfileCompletedKeys = new Set();
+const userCancelledActorProfileKeys = new Set();
 let actorProfileReadShadow = null;
 const continuityPendingKeys = new Set();
 const continuityCompletedKeys = new Set();
@@ -534,25 +535,50 @@ let latestActorProfileDiagnostic = {
 };
 
 function hydratedActorProfileDiagnostic(namespace = readChatNamespace()) {
-    if (latestActorProfileDiagnostic.status !== 'waiting') return latestActorProfileDiagnostic;
-    const receipt = namespace?.actorProfileRetryReceipt;
-    if (!receipt) return latestActorProfileDiagnostic;
     const latest = latestAiMessage(getContext());
     const current = latest.index >= 0 ? captureTarget(getContext(), latest.index) : null;
     const currentSourceRef = sourceRefOf(current);
+    const project = (value) => ({
+        status: String(value?.status || 'waiting'),
+        failingModules: (value?.failingModules || []).slice(0, 8),
+        lastFailureCodes: (value?.lastFailureCodes || []).slice(0, 8),
+        canRetry: value?.canRetry === true,
+        ...(value?.abortCause === 'cancelled' ? { abortCause: 'cancelled' } : {}),
+    });
+    if (
+        latestActorProfileDiagnostic.status !== 'waiting'
+        && latestActorProfileDiagnostic.status !== 'no_candidates'
+        && actorProfileRecoverySourceMatches(
+            latestActorProfileDiagnostic.sourceRef,
+            currentSourceRef,
+        )
+    ) return project(latestActorProfileDiagnostic);
+    if (actorProfileNoCandidatesTerminalReadbackMatches(namespace, currentSourceRef)) {
+        return {
+            status: 'no_candidates', failingModules: [], lastFailureCodes: [], canRetry: false,
+        };
+    }
+    const receipt = namespace?.actorProfileRetryReceipt;
+    if (!receipt) return {
+        status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false,
+    };
     const ticketBatch = (namespace?.characterCreationTicketBatches || [])
         .find((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
             acceptedTarget: currentSourceRef,
             expectedDigest: receipt?.ticketBatchDigest || '',
         })) || null;
     return actorProfileRetryReceiptMatches(receipt, { currentSourceRef, ticketBatch })
-        ? {
+        ? project({
             status: 'not_completed',
             failingModules: receipt.failingModules || [],
             lastFailureCodes: receipt.failureCodes || [],
             canRetry: true,
-        }
-        : latestActorProfileDiagnostic;
+            abortCause: (receipt.failureCodes || []).includes('actor_profile.cancelled')
+                ? 'cancelled' : '',
+        })
+        : {
+            status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false,
+        };
 }
 let latestActorShardDiagnostics = {
     status: 'disabled',
@@ -679,6 +705,7 @@ function resetChatScopedRuntimeDiagnostics() {
     modelRouteHealth.fast.clear();
     modelRouteSlotCursors.strict = 0;
     modelRouteSlotCursors.fast = 0;
+    userCancelledActorProfileKeys.clear();
     latestActorProfileDiagnostic = {
         status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false,
     };
@@ -2580,6 +2607,18 @@ async function clearUserCancelledWorldCallReservation(captured) {
     });
 }
 
+function markUserCancelledActorProfileControllers(controllers = activeModelControllers) {
+    const targets = [...controllers]
+        .map((controller) => controller?.mvuadActorProfileTarget)
+        .filter(Boolean)
+        .map((target) => deepClone(target));
+    for (const target of targets) {
+        const key = capturedTargetKey(target);
+        if (key) userCancelledActorProfileKeys.add(key);
+    }
+    return targets;
+}
+
 async function cancelRunningSovereigntyTasks(reason = 'user_cancelled') {
     const context = getContext();
     const chatId = context?.chatId || '';
@@ -2628,6 +2667,7 @@ function cancelCurrentOperations() {
         .map((controller) => controller?.mvuadWorldReservationTarget)
         .filter(Boolean)
         .map((target) => deepClone(target));
+    markUserCancelledActorProfileControllers(activeModelControllers);
     void cancelRunningSovereigntyTasks('user_cancelled');
     invalidateOperations('用户停止了当前后台任务');
     setStatus('已停止当前后台任务；迟到结果不会写入聊天或变量', '');
@@ -3076,6 +3116,7 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileRecoveryCriticalFingerprint(),
         actorProfileGenerationCriticalFingerprint(),
         actorProfileBatchSemanticFingerprint(),
+        hydratedActorProfileDiagnostic.toString(),
         classifyActorRegistryTargetName.toString(),
         mergeActorIdentityReveal.toString(),
         parseActorShardProposal.toString(),
@@ -3083,6 +3124,8 @@ function doctorRuntimeCriticalFingerprint() {
         callModel.toString(),
         worldCallReservedForUserCancellation.toString(),
         clearUserCancelledWorldCallReservation.toString(),
+        markUserCancelledActorProfileControllers.toString(),
+        cancelCurrentOperations.toString(),
         verifyPersistedChatNamespace.toString(),
         writeChatNamespace.toString(),
         rebaseActorSovereigntyFieldWriteAfterMigration.toString(),
@@ -3090,6 +3133,7 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileNoCandidatesTerminalReadbackMatches.toString(),
         persistActorProfileRecoveryState.toString(),
         finalizeActorProfileRecoveryOutcome.toString(),
+        finalizeUserCancelledActorProfileCompletion.toString(),
         actorProfileCompletionGroupPlan.toString(),
         buildActorProfileModuleGroupMessages.toString(),
         parseActorProfileModuleGroupOutput.toString(),
@@ -3254,6 +3298,9 @@ function diagnosticPayload() {
                     failingModules: deepClone(profileDiagnostic.failingModules),
                     lastFailureCodes: deepClone(profileDiagnostic.lastFailureCodes),
                     canRetry: profileDiagnostic.canRetry === true,
+                    ...(profileDiagnostic.abortCause === 'cancelled'
+                        ? { abortCause: 'cancelled' }
+                        : {}),
                     noCandidatesTerminalProof,
                 },
                 continuity: { kind: latestContinuityKind },
@@ -8168,6 +8215,12 @@ async function callModel(messages, options = {}) {
             enumerable: false,
         });
     }
+    if (options.actorProfileTarget) {
+        Object.defineProperty(controller, 'mvuadActorProfileTarget', {
+            value: deepClone(options.actorProfileTarget),
+            enumerable: false,
+        });
+    }
     const externalSignal = options.signal || null;
     const abortFromExternal = () => controller.abort(
         externalSignal?.reason || '模型任务已被上游取消',
@@ -12528,14 +12581,16 @@ async function completeActorProfilesForTurn(captured, {
         isTargetCurrent: () => (
             !token || continuityTargetIsCurrent(captured, token).ok
         ),
-        requestBatch: async ({ messages, attempt, groupKey = '', moduleKeys = [] }) => {
+        requestBatch: async ({
+            messages, attempt, groupKey = '', moduleKeys = [],
+        }) => {
             const freshScope = await freshFrozenScopeGuard(captured).catch(() => ({ ok: false }));
             if (!freshScope.ok) {
                 throw localBatchFailure('scope_stale');
             }
             const output = await callModel(messages, {
-                // Zero delegates the output ceiling to the selected connection.
-                // Profile batches do not borrow the actor action worker token cap.
+                // The selected connection remains the sole output ceiling.
+                // Doctor does not impose a lower per-group token budget.
                 maxTokens: 0,
                 task: attempt === 0
                     ? `人物档案模块组：${groupKey}`
@@ -12550,6 +12605,7 @@ async function completeActorProfilesForTurn(captured, {
                 maxFailovers: 1,
                 runUntilCancelled: false,
                 noTimeout: true,
+                actorProfileTarget: captured,
                 requestKind: 'actor_profile_batch',
                 routeDiagnosticContext: { groupKey, moduleKeys },
             });
@@ -12890,6 +12946,36 @@ async function finalizeActorProfileRecoveryOutcome(captured, result, {
     // before exposing this recoverable failure to UI or P3 dispatch.
     const recoverySaved = await persistRecoveryState(captured, failedResult);
     return { result: failedResult, recoverySaved: recoverySaved === true };
+}
+
+async function finalizeUserCancelledActorProfileCompletion(expected, result, {
+    persistRecoveryState = persistActorProfileRecoveryState,
+} = {}) {
+    const key = capturedTargetKey(expected);
+    if (!key || !userCancelledActorProfileKeys.has(key)) {
+        return { handled: false, result, recoverySaved: false };
+    }
+    userCancelledActorProfileKeys.delete(key);
+    const failureCodes = (result?.profileBatch?.failed || [])
+        .map((entry) => compactActorProfileFailureCode(entry?.reason));
+    if (!failureCodes.includes('actor_profile.cancelled')) {
+        return { handled: false, result, recoverySaved: false };
+    }
+    const context = getContext();
+    if (String(context?.chatId || '') !== String(expected?.chatId || '')) {
+        return { handled: false, result, recoverySaved: false };
+    }
+    const fresh = captureTarget(context, expected.index, {
+        frozenScope: expected.actorSovereigntyScope,
+        unscoped: !expected.scopeDigest,
+    });
+    if (!actorProfileRecoverySourceMatches(sourceRefOf(expected), sourceRefOf(fresh))) {
+        return { handled: false, result, recoverySaved: false };
+    }
+    const recovery = await finalizeActorProfileRecoveryOutcome(expected, result, {
+        persistRecoveryState,
+    });
+    return { handled: true, ...recovery };
 }
 
 function compactActorProfileFailureCode(value) {
@@ -15198,8 +15284,11 @@ async function enqueueActorProfiles(targetId, {
             });
         })
         .then(async (result) => {
-            if (!actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) return result;
-            const recovery = await finalizeActorProfileRecoveryOutcome(expected, result);
+            const currentOwner = actorProfileTargetStateIsCurrent(taskEpoch, taskChatId);
+            const recovery = currentOwner
+                ? await finalizeActorProfileRecoveryOutcome(expected, result)
+                : await finalizeUserCancelledActorProfileCompletion(expected, result);
+            if (!currentOwner && recovery.handled !== true) return result;
             result = recovery.result;
             const recoverySaved = recovery.recoverySaved;
             if (['atomic_readback', 'no_candidates'].includes(result?.status)) {
@@ -15210,6 +15299,7 @@ async function enqueueActorProfiles(targetId, {
                 ? result.profileBatch.failed : [];
             latestActorProfileDiagnostic = {
                 status: String(result?.status || 'not_completed'),
+                sourceRef: sourceRefOf(expected),
                 failingModules: [...new Set([
                     ...(validation.failingGroups || []),
                     ...(validation.missingModules || []),
@@ -15225,6 +15315,9 @@ async function enqueueActorProfiles(targetId, {
                             unscoped: !expected.scopeDigest,
                         })),
                     )),
+                abortCause: failed.some((entry) => (
+                    compactActorProfileFailureCode(entry.reason) === 'actor_profile.cancelled'
+                )) ? 'cancelled' : '',
             };
             if (!['atomic_readback', 'no_candidates'].includes(result?.status)) {
                 markActorSchedulingNotReachedByProfile(
@@ -15261,6 +15354,7 @@ async function enqueueActorProfiles(targetId, {
                 latestActorProfileDiagnostic = {
                     status: 'not_completed', failingModules: ['profile'],
                     lastFailureCodes: ['actor_profile.unhandled_failure'], canRetry: true,
+                    sourceRef: sourceRefOf(expected),
                 };
                 markActorSchedulingNotReachedByProfile('actor_profile.unhandled_failure');
                 setActorProfileStatus(`人物档案未完成：${error.message || error}`, 'error');
@@ -15268,6 +15362,7 @@ async function enqueueActorProfiles(targetId, {
             return result;
         })
         .finally(() => {
+            userCancelledActorProfileKeys.delete(dedupeKey);
             if (actorProfilePendingKeys.get(dedupeKey) === owner) {
                 actorProfilePendingKeys.delete(dedupeKey);
             }

@@ -439,6 +439,9 @@ export function createPrivacySafeDiagnosticProjection({
                 lastFailureCodes: (value?.lastFailureCodes || []).map(cleanRuntimeCode).filter(Boolean).slice(0, 8),
                 canRetry: value?.canRetry === true,
                 noCandidatesTerminalProof: value?.noCandidatesTerminalProof === true,
+                ...(value?.abortCause === 'cancelled'
+                    ? { abortCause: 'cancelled' }
+                    : {}),
             } : { kind: String(value?.kind || '') },
         ]),
     );

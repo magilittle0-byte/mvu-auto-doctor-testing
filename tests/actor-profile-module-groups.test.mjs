@@ -5,9 +5,13 @@ import {
     ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
     ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
     actorProfileCompletionGroupPlan,
+    actorProfileDiscoveryCoveragePlan,
     buildActorProfileModuleGroupMessages,
     parseActorProfileModuleGroupOutput,
 } from '../actor-profile-v6-core.mjs';
+import {
+    actorProfileModuleGroupChunks,
+} from '../actor-profile-batch-core.mjs';
 
 const actor = (id = 'NPC-1', previousProfile = null, mode = 'full') => ({
     actorRef: { actorId: id, name: `人物${id}` },
@@ -205,6 +209,70 @@ test('module prompt contains per-module notes, fresh current rows and no visible
     assert.equal(all.match(/"authority"/gu)?.length, 1);
     assert.equal(all.match(/最终接受正文只出现一次/u)?.length, 1);
     assert.doesNotMatch(all, /七个标题|人物档案：姓名/u);
+});
+
+test('compact projector bounds six and twenty-four long rows without repeating full profiles or raw tickets', () => {
+    const acceptedNarrative = `ACCEPTED_ONCE_${'N'.repeat(41986)}`;
+    const evidenceText = `AUTHORITY_ONCE_${'A'.repeat(41985)}`;
+    const makeLongActor = (index) => ({
+        ...actor(`NPC-pressure-${index}`, null, 'full_adult'),
+        refreshProfileModules: [
+            'person', 'personality', 'history', 'relationshipsMotives',
+            'currentState', 'knowledgeCapabilitiesResources', 'physiology',
+        ],
+        previousProfile: {
+            profileFormat: 'narrative-v1',
+            narrativeSections: Object.fromEntries([
+                'person', 'personality', 'history', 'relationshipsMotives',
+                'currentState', 'knowledgeCapabilitiesResources', 'physiology',
+            ].map((key) => [key, { text: `${key}-${index}-${'x'.repeat(3900)}` }])),
+            privateUnrequestedPayload: `FULL_PROFILE_SENTINEL_${index}_${'z'.repeat(12000)}`,
+        },
+        characterCreationTicket: {
+            id: `RAW_TICKET_SENTINEL_${index}`,
+            rawAuthority: 'r'.repeat(12000),
+        },
+    });
+    for (const count of [6, 24]) {
+        const candidates = Array.from({ length: count }, (_, index) => makeLongActor(index));
+        const core = actorProfileCompletionGroupPlan(candidates, { allowDiscovery: false })
+            .find((entry) => entry.key === 'character_core');
+        const buildMessages = (chunk) => buildActorProfileModuleGroupMessages(chunk, {
+            evidenceText,
+            discoveryContext: { acceptedNarrative },
+        });
+        const chunks = actorProfileModuleGroupChunks(core);
+        assert.equal(chunks.length, Math.ceil(count / 6));
+        for (const chunk of chunks) {
+            const prompt = buildMessages(chunk).map((message) => message.content).join('\n');
+            assert.equal(prompt.match(/ACCEPTED_ONCE_/gu)?.length, 1);
+            assert.equal(prompt.match(/AUTHORITY_ONCE_/gu)?.length, 1);
+            assert.doesNotMatch(prompt, /FULL_PROFILE_SENTINEL|RAW_TICKET_SENTINEL/u);
+            assert.doesNotMatch(prompt, /workingModules|identityContext|"profileV6"/u);
+            assert.doesNotMatch(prompt, /physiology-\d+-/u);
+            const omittedLegacyEnvelopeChars = Number(chunk.transportChunk.actorCount) * 24_000;
+            assert.ok(omittedLegacyEnvelopeChars >= 144_000);
+        }
+    }
+});
+
+test('identity coverage uses small mechanical units while preserving the complete accepted text once', () => {
+    const acceptedNarrative = Array.from({ length: 80 }, (_, index) => (
+        `mechanical paragraph ${index} ${'q'.repeat(90)}。`
+    )).join('\n');
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    assert.ok(coverage.unitCount > 1);
+    assert.ok(coverage.units.every((unit) => unit.text.length <= 420));
+    assert.equal(coverage.units.map((unit) => unit.text).join(''), acceptedNarrative);
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const prompt = buildActorProfileModuleGroupMessages(group, {
+        discoveryContext: { acceptedNarrative, registeredActorIndex: [], excludedActorNames: [] },
+    }).map((message) => message.content).join('\n');
+    assert.equal(prompt.match(/mechanical paragraph 0/gu)?.length, 1);
+    assert.equal(group.discoveryCoverage.coverageDigest, coverage.coverageDigest);
 });
 
 test('identity bootstrap is a route-only row-key probe isolated from dossier authority', () => {

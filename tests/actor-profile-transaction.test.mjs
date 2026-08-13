@@ -25,6 +25,7 @@ test('profile runtime delegates one grouped transaction and contains no per-acto
     assert.doesNotMatch(source, /mergeActorProfileCompletionPatches/u);
     assert.match(completion, /completeActorProfileBatchTransaction/u);
     assert.match(completion, /maxTokens: 0/u);
+    assert.doesNotMatch(completion, /minimumOutputTokens|requestedTokens|PROMPT_CHAR_LIMIT/u);
     assert.match(completion, /channel: 'fast'/u);
     assert.match(completion, /jsonMode: false/u);
     assert.match(completion, /requestKind: 'actor_profile_batch'/u);

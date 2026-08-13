@@ -498,13 +498,27 @@ async function runBatch(fixture, {
                 });
             }
         }
-        if (!cachedLegacy) {
+        const cachedNames = new Set([
+            ...(cachedLegacy?.entries || []).map((entry) => entry.name),
+            ...(cachedLegacy?.discoveries || []).map((entry) => entry.candidateRef?.name),
+        ]);
+        if (!cachedLegacy || args.candidates.some((candidate) => (
+            !cachedNames.has(candidate.actorRef?.name || candidate.name)
+        ))) {
             const raw = await requestBatch(args);
             cachedAttempt = args.attempt;
-            cachedLegacy = parseActorProfileCompletionBatchOutput(raw, {
+            const nextLegacy = parseActorProfileCompletionBatchOutput(raw, {
                 candidates: args.candidates,
                 discoveryContext,
             });
+            cachedLegacy = cachedLegacy
+                ? {
+                    ...cachedLegacy,
+                    entries: [...(cachedLegacy.entries || []), ...(nextLegacy.entries || [])],
+                    discoveries: [...(cachedLegacy.discoveries || []), ...(nextLegacy.discoveries || [])],
+                    unresolved: [...(cachedLegacy.unresolved || []), ...(nextLegacy.unresolved || [])],
+                }
+                : nextLegacy;
         }
         if (cachedLegacy.explicitEmpty) return '无人物档案';
         const parsedRows = [
@@ -588,7 +602,7 @@ for (const count of [0, 1, 3, 6, 8]) {
                 return JSON.stringify(candidates.map(completeCandidate));
             },
         });
-        assert.equal(calls.length, count ? 1 : 0);
+        assert.equal(calls.length, count ? Math.ceil(count / 6) : 0);
         assert.equal(run.saveCount, count ? 2 : 0);
         assert.equal(run.readbackCount, count ? 2 : 0);
         assert.equal(run.result.accepted.length, count);
@@ -1083,7 +1097,9 @@ test('a valid identity retry still fails closed when resolver drops its discover
         { attempt: 0, actorIds: [] },
         { attempt: 1, actorIds: [] },
     ]);
-    assert.ok(calls.at(-1).actorIds.includes(registered.actorRef.actorId));
+    assert.ok(calls.slice(2).some(({ actorIds }) => (
+        actorIds.includes(registered.actorRef.actorId)
+    )));
     assert.equal(run.result.modelCalls, 4);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
@@ -1398,12 +1414,13 @@ test('module protocol carries working identity, ticket authority and targeted re
     });
     const coreFirst = observed.find((entry) => entry.groupKey === 'character_core' && entry.attempt === 0);
     const coreRetry = observed.find((entry) => entry.groupKey === 'character_core' && entry.attempt === 1);
-    assert.match(coreFirst.prompt, /ticket-working-context/u);
+    assert.doesNotMatch(coreFirst.prompt, /ticket-working-context/u);
+    assert.match(coreFirst.prompt, /characterCreationTicket/u);
     assert.match(coreFirst.prompt, /locked-role/u);
     assert.match(coreFirst.prompt, /person/u);
     assert.match(coreRetry.prompt, /actor_profile\.module_missing/u);
     assert.match(coreRetry.prompt, /history/u);
-    assert.match(coreRetry.prompt, /personality/u);
+    assert.doesNotMatch(coreRetry.prompt, /"personality":\[/u);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.result.readbackVerified, true);
     assert.equal(run.saveCount, 2);
@@ -1894,7 +1911,11 @@ test('module protocol sorts reversed discoveries by accepted first offset before
     const acceptedNarrative = '\u7532\u660e\u5148\u8d70\u8fdb\u5927\u5385\u5e76\u62a5\u4e0a\u59d3\u540d\u3002\u8fc7\u4e86\u7247\u523b\uff0c\u4e59\u5b81\u624d\u4ece\u4fa7\u95e8\u51fa\u73b0\u5e76\u4e0e\u4f17\u4eba\u4ea4\u8c08\u3002';
     const source = narrativeDiscoverySourceRef(fixture.ref);
     const batch = ticketBatch(fixture.ref, 2);
+    batch.tickets.forEach((ticket, index) => {
+        ticket.rawEnvelopeMarker = `RAW_DISC_TICKET_${index + 1}`;
+    });
     const ticketIds = batch.tickets.map((ticket) => ticket.ticketId);
+    const ticketAxisValues = batch.tickets.map((ticket) => ticket.axes.temperament.result);
     const seenLaterGroups = [];
     const moduleText = (key, name) => `${name}${key}\uff1a${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u4eba\u7269\u6863\u6848\u5185\u5bb9\uff0c\u5305\u542b\u7a33\u5b9a\u4e8b\u5b9e\u3001\u9650\u5236\u3001\u9009\u62e9\u4f9d\u636e\u4e0e\u540e\u7eed\u53d1\u5c55\u7a7a\u95f4\u3002'.repeat(4)}`;
     const run = await runBatch({ ...fixture, candidates: [] }, {
@@ -1907,7 +1928,7 @@ test('module protocol sorts reversed discoveries by accepted first offset before
             characterCreationTickets: structuredClone(batch.tickets),
         },
         preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
-        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+        requestBatch: ({ candidates, groupKey, moduleKeys, messages }) => {
             if (groupKey === 'identity_bootstrap') {
                 return [...names].reverse().map((name) => [
                     `<profile-target actor="new" name="${name}">`,
@@ -1917,6 +1938,7 @@ test('module protocol sorts reversed discoveries by accepted first offset before
             }
             seenLaterGroups.push({
                 groupKey,
+                prompt: messages.map((message) => message.content).join('\n'),
                 rows: candidates.map((candidate) => ({
                     name: candidate.actorRef.name,
                     ticketId: candidate.characterCreationTicket?.ticketId,
@@ -2008,6 +2030,12 @@ test('module protocol sorts reversed discoveries by accepted first offset before
             { name: names[1], ticketId: ticketIds[1] },
         ], group.groupKey);
     }
+    const corePrompt = seenLaterGroups.find((group) => group.groupKey === 'character_core')?.prompt || '';
+    for (let index = 0; index < ticketIds.length; index += 1) {
+        assert.equal(corePrompt.split(ticketIds[index]).length - 1, 1);
+        assert.match(corePrompt, new RegExp(ticketAxisValues[index].replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    }
+    assert.doesNotMatch(corePrompt, /RAW_DISC_TICKET_/u);
     assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify({
         failures: run.result.failures,
         rejected: run.result.rejected,
@@ -2107,7 +2135,7 @@ test('one narrative response carries more than 256 ordinary discoveries through 
         },
     });
     assert.equal(resolverVerified, true);
-    assert.equal(run.result.modelCalls, 2);
+    assert.equal(run.result.modelCalls, 1 + Math.ceil(names.length / 6));
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(
         (run.result.failures || []).some((failure) => failure?.reason === 'actor_profile.discovery_failed'),
@@ -2304,6 +2332,154 @@ test('six actors keep validated profile modules in the transaction-local clone a
     assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
     assert.equal(run.saveCount, 2);
     assert.equal(run.readbackCount, 2);
+});
+
+test('full_adult identity, core and physiology share one atomic working transaction', async () => {
+    const fixture = prepareRegisteredBatch(1, { chatId: 'chat-full-adult-atomic-groups' });
+    fixture.candidates[0].completionMode = 'full_adult';
+    const acceptedNarrative = '走廊中只有已登记人物继续完成日常工作。';
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    const calls = [];
+    const moduleText = (key) => `${key}: ${'complete natural Chinese dossier content with stable facts, limits, and actionable context. '.repeat(6)}`;
+    const physiologyClauses = [
+        'general baseline remains stable and is described in a complete natural sentence',
+        'reproductive anatomy follows the confirmed species and physiological sex without guessing measurements',
+        'secondary traits are stated objectively as a durable baseline instead of a transient condition',
+        'reproductive function and cycles distinguish applicable facts from explicitly inapplicable structures',
+        'sexual response describes only bodily physiology and never invents preference consent or experience',
+        'limitations separate durable physiology from injury clothing machinery and current clinical urgency',
+    ];
+    const coverageKeys = [
+        'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
+        'reproductiveFunction', 'sexualResponse', 'limitations',
+    ];
+    const physiologyBody = `${physiologyClauses.join('. ')}. ${moduleText('physiology')}`;
+    const physiologyCoverage = coverageKeys.map((key, index) => (
+        `<physiology-coverage key="${key}">${physiologyClauses[index]}</physiology-coverage>`
+    )).join('');
+    const run = await runBatch(fixture, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full_adult' },
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({ groupKey, attempt, moduleKeys: [...moduleKeys] });
+            if (groupKey === 'identity_bootstrap') return coverage.units.map((unit) => (
+                `<coverage-unit id="${unit.id}" digest="${unit.digest}"><no-new/></coverage-unit>`
+            )).join('\n');
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${key === 'physiology' ? `${physiologyBody}${physiologyCoverage}` : moduleText(key)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.deepEqual(calls.map(({ groupKey, attempt }) => [groupKey, attempt]), [
+        ['identity_bootstrap', 0],
+        ['character_core', 0],
+        ['physiology_optional', 0],
+    ]);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.accepted.length, 1);
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.readbackCount, 2);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+});
+
+test('twenty-four full_adult rows finish every transport chunk before one atomic save', async () => {
+    const fixture = prepareRegisteredBatch(24, { chatId: 'chat-full-adult-24-atomic' });
+    fixture.candidates.forEach((candidate) => {
+        candidate.completionMode = 'full_adult';
+    });
+    const acceptedNarrative = 'The accepted turn contains only already registered actors continuing ordinary work.';
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    const calls = [];
+    const moduleText = (key, name) => `${name} ${key}. ${'Complete natural dossier prose records stable facts, constraints, choices, and future action context. '.repeat(6)}`;
+    const physiologyClauses = [
+        'The durable general baseline is described objectively and separately from transient condition',
+        'Reproductive anatomy follows the established species and physiological sex without invented measurement',
+        'Secondary traits are recorded as stable bodily features rather than clothing or current injury',
+        'Reproductive function and cycles distinguish applicable facts from explicitly inapplicable structures',
+        'Sexual response covers bodily physiology only and never invents consent preference experience or action',
+        'Limitations separate durable physiology from immediate clinical urgency machinery and temporary state',
+    ];
+    const physiologyKeys = [
+        'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
+        'reproductiveFunction', 'sexualResponse', 'limitations',
+    ];
+    const before = structuredClone(fixture.ledger);
+    const run = await runBatch(fixture, {
+        moduleProtocol: true,
+        semanticRetry: false,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full_adult' },
+        requestBatch: ({ candidates, groupKey, moduleKeys, transportChunk }) => {
+            calls.push({ groupKey, transportChunk, count: candidates.length });
+            if (groupKey === 'identity_bootstrap') return coverage.units.map((unit) => (
+                `<coverage-unit id="${unit.id}" digest="${unit.digest}"><no-new/></coverage-unit>`
+            )).join('\n');
+            return candidates.map((candidate) => {
+                const modules = moduleKeys.map((key) => {
+                    if (key !== 'physiology') {
+                        return `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`;
+                    }
+                    const body = `${physiologyClauses.join('. ')}. ${moduleText(key, candidate.actorRef.name)}`;
+                    const proof = physiologyKeys.map((coverageKey, index) => (
+                        `<physiology-coverage key="${coverageKey}">${physiologyClauses[index]}</physiology-coverage>`
+                    )).join('');
+                    return `<module key="physiology">${body}${proof}</module>`;
+                });
+                return [
+                    `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                    ...modules,
+                    '</profile-target>',
+                ].join('\n');
+            }).join('\n');
+        },
+    });
+    assert.equal(calls.length, 9);
+    assert.deepEqual(calls.filter((entry) => entry.groupKey !== 'identity_bootstrap')
+        .map((entry) => entry.count), Array(8).fill(6));
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.accepted.length, 24);
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.readbackCount, 2);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+    assert.notDeepEqual(run.result.ledger, before);
+});
+
+test('a failed middle full_adult chunk keeps all twenty-four rows at S0', async () => {
+    const fixture = prepareRegisteredBatch(24, { chatId: 'chat-full-adult-24-middle-failure' });
+    fixture.candidates.forEach((candidate) => {
+        candidate.completionMode = 'full_adult';
+    });
+    const acceptedNarrative = 'The accepted turn contains only registered actors and no new identity row.';
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    const before = structuredClone(fixture.ledger);
+    const coreChunks = [];
+    const moduleText = (key, name) => `${name} ${key}. ${'Complete stable dossier prose with facts constraints and usable action context. '.repeat(7)}`;
+    const run = await runBatch(fixture, {
+        moduleProtocol: true,
+        semanticRetry: false,
+        allowDiscovery: true,
+        discoveryContext: { acceptedNarrative, completionMode: 'full_adult' },
+        requestBatch: ({ candidates, groupKey, moduleKeys, transportChunk }) => {
+            if (groupKey === 'identity_bootstrap') return coverage.units.map((unit) => (
+                `<coverage-unit id="${unit.id}" digest="${unit.digest}"><no-new/></coverage-unit>`
+            )).join('\n');
+            if (groupKey === 'character_core') coreChunks.push(transportChunk.index);
+            if (groupKey === 'character_core' && transportChunk.index === 1) return 'malformed middle chunk';
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.deepEqual(coreChunks, [0, 1, 2, 3]);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.readbackCount, 0);
+    assert.deepEqual(run.result.ledger, before);
 });
 
 test('a tampered or still-missing profile retry abandons the local clone and preserves S0', async () => {
@@ -2908,6 +3084,7 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /maintenanceMaxActors: includeMaintenance/u);
     assert.match(profileFunction, /completeActorProfileBatchTransaction/u);
     assert.match(profileFunction, /maxTokens: 0/u);
+    assert.doesNotMatch(profileFunction, /minimumOutputTokens|requestedTokens|PROMPT_CHAR_LIMIT/u);
     assert.match(profileFunction, /requestKind: 'actor_profile_batch'/u);
     assert.match(profileFunction, /maxFailovers: 1/u);
     assert.match(profileFunction, /noTimeout: true/u);

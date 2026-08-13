@@ -83,10 +83,47 @@ const SAFE_PROFILE_RETRY_CODES = new Set([
     'actor_profile.actor_ref_mismatch',
 ]);
 
+// Transport rows are bounded, not actors. Every row remains in the same
+// transaction-local working clone and the batch is persisted only after all
+// chunks validate. This mirrors TavernDB's targetSheetKeys batching shape.
+export const ACTOR_PROFILE_GROUP_TRANSPORT_ROWS = 6;
+
+export function actorProfileModuleGroupChunks(group, rowLimit = ACTOR_PROFILE_GROUP_TRANSPORT_ROWS) {
+    if (group?.key === 'identity_bootstrap') return [group];
+    const actorById = new Map();
+    for (const rows of Object.values(group?.targets || {})) {
+        for (const candidate of rows || []) {
+            const actorId = candidateActorId(candidate);
+            if (actorId && !actorById.has(actorId)) actorById.set(actorId, candidate);
+        }
+    }
+    const actorIds = [...actorById.keys()];
+    if (!actorIds.length) return [group];
+    const limit = Math.max(1, Math.floor(Number(rowLimit) || ACTOR_PROFILE_GROUP_TRANSPORT_ROWS));
+    const chunks = [];
+    for (let start = 0; start < actorIds.length; start += limit) {
+        const wanted = new Set(actorIds.slice(start, start + limit));
+        const targets = Object.fromEntries((group?.modules || []).map((moduleKey) => [
+            moduleKey,
+            (group?.targets?.[moduleKey] || [])
+                .filter((candidate) => wanted.has(candidateActorId(candidate))),
+        ]));
+        chunks.push({
+            ...group,
+            targets,
+            targetCount: Object.values(targets).reduce((sum, rows) => sum + rows.length, 0),
+            transportChunk: { index: chunks.length, actorCount: wanted.size },
+        });
+    }
+    return chunks.filter((chunk) => chunk.targetCount > 0);
+}
+
 export function actorProfileBatchSemanticFingerprint(overrides = {}) {
     return `actor-profile-batch:${fingerprint(JSON.stringify({
         identityRetryGuidance: SAFE_IDENTITY_RETRY_GUIDANCE,
         profileRetryCodes: [...SAFE_PROFILE_RETRY_CODES].sort(),
+        transportRows: ACTOR_PROFILE_GROUP_TRANSPORT_ROWS,
+        groupChunks: String(actorProfileModuleGroupChunks),
         ...(overrides || {}),
     }))}`;
 }
@@ -299,33 +336,57 @@ export async function completeActorProfileBatchTransaction({
             // the existing Phase1 writer later enforces the exact fresh base
             // revision/digest CAS before any cached group can become durable.
             if (!await current()) return { stale: true };
-            const messages = buildActorProfileModuleGroupMessages(group, {
+            const buildMessages = (chunk) => buildActorProfileModuleGroupMessages(chunk, {
                 evidenceText, customPrompt, validationFeedback: groupFeedback,
                 discoveryContext: attemptDiscoveryContext,
             });
-            let output;
-            try {
-                const groupCandidates = [...new Map(Object.values(group.targets || {})
-                    .flat()
-                    .map((candidate) => [candidateActorId(candidate), candidate])).values()];
-                output = await requestBatch({
-                    candidates: clone(groupCandidates), messages, attempt: groupAttempt,
-                    groupKey: group.key, moduleKeys: clone(group.modules),
+            const chunks = actorProfileModuleGroupChunks(group);
+            const aggregate = {
+                entries: [], failures: [], explicitEmpty: false,
+                formatUnrecoverable: false, coverageProof: null,
+            };
+            for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+                const chunk = chunks[chunkIndex];
+                const messages = buildMessages(chunk);
+                let output;
+                try {
+                    const groupCandidates = [...new Map(Object.values(chunk.targets || {})
+                        .flat()
+                        .map((candidate) => [candidateActorId(candidate), candidate])).values()];
+                    output = await requestBatch({
+                        candidates: clone(groupCandidates), messages, attempt: groupAttempt,
+                        groupKey: chunk.key, moduleKeys: clone(chunk.modules),
+                        transportChunk: clone(chunk.transportChunk || null),
+                    });
+                    modelCalls += 1;
+                } catch (error) {
+                    const failure = profileBatchRequestFailure(error);
+                    if (failure.routeDiagnostic?.requestStarted === true) modelCalls += 1;
+                    groupDiagnostics.push({ groupKey: chunk.key, attempt: groupAttempt, transportChunk: clone(chunk.transportChunk || null), status: 'transport_failed', routeDiagnostic: failure.routeDiagnostic });
+                    return { requestFailure: failure };
+                }
+                if (!await current()) return { stale: true };
+                const parsed = parseActorProfileModuleGroupOutput(output, chunk, {
+                    acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
+                    registeredActorIndex: attemptDiscoveryContext?.registeredActorIndex || [],
                 });
-                modelCalls += 1;
-            } catch (error) {
-                const failure = profileBatchRequestFailure(error);
-                if (failure.routeDiagnostic?.requestStarted === true) modelCalls += 1;
-                groupDiagnostics.push({ groupKey: group.key, attempt: groupAttempt, status: 'transport_failed', routeDiagnostic: failure.routeDiagnostic });
-                return { requestFailure: failure };
+                groupDiagnostics.push({ groupKey: chunk.key, moduleKeys: clone(chunk.modules), targetCount: chunk.targetCount, attempt: groupAttempt, transportChunk: clone(chunk.transportChunk || null), status: parsed.formatUnrecoverable ? 'format_failed' : 'parsed' });
+                if (chunks.length === 1) return parsed;
+                aggregate.entries.push(...(parsed.entries || []));
+                aggregate.failures.push(...(parsed.failures || []));
+                if (parsed.formatUnrecoverable) {
+                    for (const rows of Object.values(chunk.targets || {})) {
+                        for (const candidate of rows || []) {
+                            aggregate.failures.push(failureFor(
+                                candidate,
+                                'actor_profile.format_unrecoverable',
+                                { groupKey: chunk.key },
+                            ));
+                        }
+                    }
+                }
             }
-            if (!await current()) return { stale: true };
-            let parsed = parseActorProfileModuleGroupOutput(output, group, {
-                acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
-                registeredActorIndex: attemptDiscoveryContext?.registeredActorIndex || [],
-            });
-            groupDiagnostics.push({ groupKey: group.key, moduleKeys: clone(group.modules), targetCount: group.targetCount, attempt: groupAttempt, status: parsed.formatUnrecoverable ? 'format_failed' : 'parsed' });
-            return parsed;
+            return aggregate;
         };
         const prepareGroupApply = (group, parsed) => {
             const failures = (parsed.failures || []).map((entry) => ({
