@@ -1011,7 +1011,7 @@ test('full unit coverage with no-new still fills an existing incomplete ActorRef
         },
     });
     assert.equal(calls[0].groupKey, 'identity_bootstrap');
-    assert.deepEqual(calls.slice(1).map((entry) => entry.groupKey), ['character_core', 'operational_profile']);
+    assert.deepEqual(calls.slice(1).map((entry) => entry.groupKey), ['character_core']);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.result.accepted.length, 1);
     assert.equal(run.saveCount, 2);
@@ -1358,9 +1358,9 @@ test('valid existing plus valid discovery silently dropped by resolver keeps the
             snapshot: { fieldRevision: 0 },
         }),
     });
-    assert.equal(combined.result.modelCalls, 3);
+    assert.equal(combined.result.modelCalls, 2);
     assert.deepEqual(combined.result.batchMeta.moduleGroups.map((entry) => entry.groupKey), [
-        'identity_bootstrap', 'character_core', 'operational_profile',
+        'identity_bootstrap', 'character_core',
     ]);
     assert.equal(combined.result.persistenceStatus, 'not_completed');
     assert.equal(combined.saveCount, 0);
@@ -1396,13 +1396,12 @@ test('module protocol carries working identity, ticket authority and targeted re
     });
     const coreFirst = observed.find((entry) => entry.groupKey === 'character_core' && entry.attempt === 0);
     const coreRetry = observed.find((entry) => entry.groupKey === 'character_core' && entry.attempt === 1);
-    const operational = observed.find((entry) => entry.groupKey === 'operational_profile');
     assert.match(coreFirst.prompt, /ticket-working-context/u);
     assert.match(coreFirst.prompt, /locked-role/u);
     assert.match(coreFirst.prompt, /person/u);
     assert.match(coreRetry.prompt, /actor_profile\.module_missing/u);
     assert.match(coreRetry.prompt, /history/u);
-    assert.match(operational.prompt, /personality/u);
+    assert.match(coreRetry.prompt, /personality/u);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.result.readbackVerified, true);
     assert.equal(run.saveCount, 2);
@@ -1446,7 +1445,7 @@ test('identity preflight retries only bootstrap with the exact safe local reason
     assert.match(calls[1].prompt, /actor_candidate\.identity_system/u);
     assert.ok(calls.slice(2).every((entry) => entry.groupKey !== 'identity_bootstrap'));
     assert.deepEqual(calls.slice(2).map((entry) => entry.groupKey), [
-        'character_core', 'operational_profile',
+        'character_core',
     ]);
     assert.ok(run.result.failures.some((failure) => (
         failure.reason === 'actor_profile.discovery_promotion_mapping_missing'
@@ -1857,7 +1856,7 @@ test('module protocol sorts reversed discoveries by accepted first offset before
             };
         },
     });
-    assert.ok(seenLaterGroups.length >= 2);
+    assert.ok(seenLaterGroups.length >= 1);
     for (const group of seenLaterGroups) {
         assert.deepEqual(group.rows, [
             { name: names[0], ticketId: ticketIds[0] },
@@ -1903,7 +1902,6 @@ test('format-unrecoverable module retry receives safe group feedback and retries
     assert.deepEqual(calls.map(({ groupKey, attempt }) => [groupKey, attempt]), [
         ['character_core', 0],
         ['character_core', 1],
-        ['operational_profile', 0],
     ]);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
 });
@@ -1964,7 +1962,7 @@ test('one narrative response carries more than 256 ordinary discoveries through 
         },
     });
     assert.equal(resolverVerified, true);
-    assert.equal(run.result.modelCalls, 3);
+    assert.equal(run.result.modelCalls, 2);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(
         (run.result.failures || []).some((failure) => failure?.reason === 'actor_profile.discovery_failed'),
@@ -2013,7 +2011,7 @@ test('parsed narrative discoveries remain ordinary local data within one resolut
             };
         },
     });
-    assert.equal(run.result.modelCalls, 3);
+    assert.equal(run.result.modelCalls, 2);
     const replay = discoverActorsFromTurnSources(emptyActorLedger(fixture.ledger.chatId), {
         acceptedContent: acceptedNarrative,
         sourceRef: discoverySourceRef,
@@ -2127,7 +2125,7 @@ test('one incomplete actor retries only its missing module while valid peers sta
     assert.equal(run.readbackCount, 2);
 });
 
-test('six actors keep validated operational modules in the transaction-local clone and retry only missing modules', async () => {
+test('six actors keep validated profile modules in the transaction-local clone and retry only missing modules', async () => {
     const fixture = prepareRegisteredBatch(6, { chatId: 'chat-six-local-module-merge' });
     const calls = [];
     const moduleText = (key, actorId) => `${actorId} ${key}: ${'complete natural-language profile evidence with stable facts, limits, and usable action context. '.repeat(5)}`;
@@ -2140,8 +2138,8 @@ test('six actors keep validated operational modules in the transaction-local clo
                 moduleKeys: [...moduleKeys],
                 actorIds: candidates.map((candidate) => candidate.actorRef.actorId),
             });
-            const emittedKeys = groupKey === 'operational_profile' && attempt === 0
-                ? ['knowledgeCapabilitiesResources']
+            const emittedKeys = groupKey === 'character_core' && attempt === 0
+                ? moduleKeys.filter((key) => key !== 'currentState')
                 : moduleKeys;
             return candidates.map((candidate) => [
                 `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
@@ -2150,12 +2148,12 @@ test('six actors keep validated operational modules in the transaction-local clo
             ].join('\n')).join('\n');
         },
     });
-    const operational = calls.filter((entry) => entry.groupKey === 'operational_profile');
-    assert.deepEqual(operational.map((entry) => ({ attempt: entry.attempt, moduleKeys: entry.moduleKeys })), [
-        { attempt: 0, moduleKeys: ['currentState', 'knowledgeCapabilitiesResources'] },
+    const core = calls.filter((entry) => entry.groupKey === 'character_core');
+    assert.deepEqual(core.map((entry) => ({ attempt: entry.attempt, moduleKeys: entry.moduleKeys })), [
+        { attempt: 0, moduleKeys: ['person', 'personality', 'history', 'relationshipsMotives', 'currentState', 'knowledgeCapabilitiesResources'] },
         { attempt: 1, moduleKeys: ['currentState'] },
     ]);
-    assert.deepEqual(operational[1].actorIds, fixture.candidates.map((candidate) => candidate.actorRef.actorId));
+    assert.deepEqual(core[1].actorIds, fixture.candidates.map((candidate) => candidate.actorRef.actorId));
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.result.accepted.length, 6);
     assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
@@ -2163,7 +2161,7 @@ test('six actors keep validated operational modules in the transaction-local clo
     assert.equal(run.readbackCount, 2);
 });
 
-test('a tampered or still-missing operational retry abandons the local clone and preserves S0', async () => {
+test('a tampered or still-missing profile retry abandons the local clone and preserves S0', async () => {
     for (const mode of ['tampered', 'missing']) {
         const fixture = prepareRegisteredBatch(6, { chatId: `chat-six-local-module-${mode}` });
         const moduleText = (key) => `${key}: ${'complete natural-language profile evidence with stable facts, limits, and usable action context. '.repeat(5)}`;
@@ -2171,10 +2169,10 @@ test('a tampered or still-missing operational retry abandons the local clone and
             moduleProtocol: true,
             requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
                 let emittedKeys = moduleKeys;
-                if (groupKey === 'operational_profile' && attempt === 0) emittedKeys = ['knowledgeCapabilitiesResources'];
-                if (groupKey === 'operational_profile' && attempt === 1 && mode === 'missing') emittedKeys = [];
+                if (groupKey === 'character_core' && attempt === 0) emittedKeys = moduleKeys.filter((key) => key !== 'currentState');
+                if (groupKey === 'character_core' && attempt === 1 && mode === 'missing') emittedKeys = [];
                 return candidates.map((candidate, index) => [
-                    `<profile-target actor="${candidate.actorRef.actorId}" name="${groupKey === 'operational_profile' && attempt === 1 && mode === 'tampered' && index === 0 ? 'tampered-row-key' : candidate.actorRef.name}">`,
+                    `<profile-target actor="${candidate.actorRef.actorId}" name="${groupKey === 'character_core' && attempt === 1 && mode === 'tampered' && index === 0 ? 'tampered-row-key' : candidate.actorRef.name}">`,
                     ...emittedKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
                     '</profile-target>',
                 ].join('\n')).join('\n');
@@ -2185,7 +2183,7 @@ test('a tampered or still-missing operational retry abandons the local clone and
         assert.equal(run.saveCount, 0, mode);
         assert.deepEqual(run.result.ledger, fixture.ledger, mode);
         assert.ok(
-            run.result.failures.some((failure) => failure.groupKey === 'operational_profile'),
+            run.result.failures.some((failure) => failure.groupKey === 'character_core'),
             `${mode}: ${JSON.stringify(run.result.failures)}`,
         );
     }

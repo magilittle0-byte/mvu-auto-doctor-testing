@@ -3060,8 +3060,7 @@ function doctorRuntimeCriticalFingerprint() {
         stage3PreparedWorldCheckpointMatches.toString(),
         stage3PreparedPhase1StatesMatch.toString(),
         extractFirstBalancedJsonObject.toString(),
-        stage3RecallSelection.toString(),
-        generateWorldRecallPacket.toString(),
+        stage3LocalRecallPacket.toString(),
         generateWorldContinuitySingleBatch.toString(),
         actorActionCandidatesFromShard.toString(),
         stage3SettlementProofMatchesTarget.toString(),
@@ -11528,109 +11527,58 @@ function continuityTickPlan(context, base, captured, namespace = readChatNamespa
     };
 }
 
-function stage3RecallSelection(output, { mustActorIds = [], mustThreadIds = [], mustLaneIds = [], availableActorIds = [], availableThreadIds = [], availableLaneIds = [], worldbookKeys = [] } = {}) {
-    const extracted = extractFirstBalancedJsonObject(String(output || ''));
-    if (extracted.error) return null;
-    const value = extracted.value;
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const uniqueKnown = (items, known) => [...new Set((Array.isArray(items) ? items : [])
-        .map((item) => String(item || '').trim())
-        .filter((item) => known.has(item)))].sort();
-    const actors = uniqueKnown(value.actorIds, new Set(availableActorIds));
-    const threads = uniqueKnown(value.threadIds, new Set(availableThreadIds));
-    const lanes = uniqueKnown(value.laneIds, new Set(availableLaneIds));
-    if (mustActorIds.some((id) => !actors.includes(id)) || mustThreadIds.some((id) => !threads.includes(id)) || mustLaneIds.some((id) => !lanes.includes(id))) return null;
-    const packet = {
-        version: 1,
-        actorIds: actors,
-        threadIds: threads,
-        laneIds: lanes,
-        worldbookKeys: [...new Set(worldbookKeys.map((key) => String(key || '').trim()).filter(Boolean))].sort(),
-        reasons: Array.isArray(value.reasons) ? value.reasons
-            .map((reason) => String(reason || '').trim()).filter(Boolean).slice(0, 24) : [],
-        mustActorIds: [...new Set(mustActorIds)].sort(),
-        mustThreadIds: [...new Set(mustThreadIds)].sort(),
-        mustLaneIds: [...new Set(mustLaneIds)].sort(),
-    };
-    packet.digest = fingerprint(JSON.stringify(packet));
-    return packet;
-}
-
-function buildWorldRecallMessages({
-    captured,
+function stage3LocalRecallPacket({
     actorLedger,
     base,
     worldLaneSchedule,
-    worldContext,
     mustActorIds = [],
     mustThreadIds = [],
     mustLaneIds = [],
+    worldbookKeys = [],
 } = {}) {
-    const actors = Object.values(actorLedger?.actors || {}).map((actor) => ({
-        actorId: String(actor?.id || ''), name: String(actor?.name || ''), status: String(actor?.status || ''),
-        goals: actor?.currentGoals || actor?.longTermGoals || [],
-        commitments: actor?.commitments || [], lastSemanticTurn: Number(actor?.lastSemanticTurn) || 0,
-    })).filter((actor) => actor.actorId);
-    const threads = (base?.threads || []).filter((thread) => thread?.stage !== 'resolved').map((thread) => ({
-        id: String(thread?.id || ''), title: String(thread?.title || ''), origin: thread?.origin || '',
-        relation: thread?.relation || '', stage: thread?.stage || '', urgency: Number(thread?.urgency) || 0,
-        lastAdvancedTurn: Number(thread?.lastAdvancedTurn) || 0, trigger: String(thread?.trigger || ''),
-        actors: thread?.actors || [], locations: thread?.locations || [], nextBeat: String(thread?.nextBeat || ''),
-    })).filter((thread) => thread.id);
-    const lanes = (worldLaneSchedule?.candidates || []).map((lane) => ({
-        id: String(lane?.sourceId || lane?.id || ''), laneType: lane?.laneType || '', channel: lane?.channel || '',
-        label: String(lane?.label || ''), due: lane?.due === true, dueReason: String(lane?.dueReason || ''),
-        score: Number(lane?.score) || 0, silenceTurns: Number(lane?.silenceTurns) || 0,
-        sourceThreads: lane?.sourceThreads || [], knowledge: lane?.knowledge || '',
-        independentOfActors: lane?.independentOfActors === true,
-    })).filter((lane) => lane.id);
-    const user = [
-        '你是只读世界召回器。你不推进、不裁决、不产生NPC行动、不写状态。',
-        '必须保留全部mustActorIds、mustThreadIds和mustLaneIds；它们由本地持久时钟、截止、冷却、人物目标、未完承诺、势力/环境/经济/趋势轨计算，不能因当前正文无关、不可见或幕后而删除。',
-        '你只能从给出的持久人物、未结线程、结构世界轨与世界设定中选择本轮推进所需的支持材料；可增加相关后台项，但不要按当前场景或converging过滤。',
-        '只返回JSON：{"actorIds":[],"threadIds":[],"laneIds":[],"reasons":[]}。不要输出正文、尝试、裁决、世界结果或注入文本。',
-        `目标=${safeJson(stage3AcceptedTarget(captured), 0)}`,
-        `mustActorIds=${safeJson([...new Set(mustActorIds)].sort(), 0)}`,
-        `mustThreadIds=${safeJson([...new Set(mustThreadIds)].sort(), 0)}`,
-        `mustLaneIds=${safeJson([...new Set(mustLaneIds)].sort(), 0)}`,
-        `人物索引=${safeJson(actors, 0)}`,
-        `未结线程索引=${safeJson(threads, 0)}`,
-        `结构世界轨=${safeJson(lanes, 0)}`,
-        `世界设定取材池=${cropText(String(worldContext?.text || ''), 7000, '召回世界设定')}`,
-    ].join('\n\n');
-    return [{ role: 'system', content: '只读召回；不得生成或改变任何权威状态。' }, { role: 'user', content: user }];
-}
+    const actors = actorLedger?.actors || [];
+    const threads = (base?.threads || []).filter((thread) => thread?.stage !== 'resolved');
+    const lanes = worldLaneSchedule?.candidates || [];
+    const knownActorIds = new Set(actors.map((actor) => String(actor?.id || '')).filter(Boolean));
+    const knownThreadIds = new Set(threads.map((thread) => String(thread?.id || '')).filter(Boolean));
+    const knownLaneIds = new Set(lanes.map((lane) => String(lane?.sourceId || lane?.id || '')).filter(Boolean));
+    const actorIds = [...new Set(mustActorIds.map((id) => String(id || '')).filter(Boolean))].sort();
+    const laneIds = [...new Set(mustLaneIds.map((id) => String(id || '')).filter(Boolean))].sort();
+    if (actorIds.some((id) => !knownActorIds.has(id)) || laneIds.some((id) => !knownLaneIds.has(id))) return null;
 
-async function generateWorldRecallPacket(messages, {
-    captured,
-    settings,
-    mustActorIds,
-    mustThreadIds,
-    mustLaneIds,
-    availableActorIds,
-    availableThreadIds,
-    availableLaneIds,
-    worldbookKeys,
-    isCurrent,
-} = {}) {
-    const current = () => typeof isCurrent !== 'function' || isCurrent() === true;
-    if (!current()) throw new Error('world_recall.target_stale_before_call');
-    const output = await callModel(messages, {
-        // Recall and Advance share the configured world output budget. The
-        // connection layer still applies its own max-token ceiling, including
-        // for reasoning models whose hidden reasoning consumes this budget.
-        maxTokens: settings?.continuityMaxTokens,
-        noTimeout: true,
-        task: '活世界召回', channel: 'fast', instructionModule: 'world_recall',
-        targetIndex: captured.index, jsonMode: true, failover: false, maxFailovers: 0,
-        validateOutput: (candidate) => stage3RecallSelection(candidate, {
-            mustActorIds, mustThreadIds, mustLaneIds, availableActorIds, availableThreadIds, availableLaneIds, worldbookKeys,
-        }) ? true : { valid: false, reason: 'world_recall_invalid_or_must_include_missing' },
-    });
-    if (!current()) throw new Error('world_recall.target_stale_after_call');
-    return stage3RecallSelection(output, {
-        mustActorIds, mustThreadIds, mustLaneIds, availableActorIds, availableThreadIds, availableLaneIds, worldbookKeys,
-    });
+    const actorKeys = new Set();
+    for (const actor of actors) {
+        if (!actorIds.includes(String(actor?.id || ''))) continue;
+        actorKeys.add(String(actor?.id || ''));
+        if (actor?.name) actorKeys.add(String(actor.name));
+    }
+    const linkedThreadIds = threads.filter((thread) => (
+        (thread?.actors || []).some((actorKey) => actorKeys.has(String(actorKey || '')))
+    )).map((thread) => String(thread?.id || '')).filter(Boolean);
+    const laneThreadIds = lanes.filter((lane) => laneIds.includes(String(lane?.sourceId || lane?.id || '')))
+        .flatMap((lane) => lane?.sourceThreads || [])
+        .map((id) => String(id || '')).filter(Boolean);
+    const threadIds = [...new Set([
+        ...mustThreadIds.map((id) => String(id || '')).filter(Boolean),
+        ...linkedThreadIds,
+        ...laneThreadIds,
+    ])].filter((id) => knownThreadIds.has(id)).sort();
+    if (mustThreadIds.some((id) => !threadIds.includes(String(id || '')))) return null;
+
+    const packet = {
+        version: 2,
+        selection: 'local_structured_schedule',
+        actorIds,
+        threadIds,
+        laneIds,
+        worldbookKeys: [...new Set(worldbookKeys.map((key) => String(key || '').trim()).filter(Boolean))].sort(),
+        reasons: ['local_must_include', 'scheduled_lane_sources', 'scheduled_actor_threads'],
+        mustActorIds: [...actorIds],
+        mustThreadIds: [...new Set(mustThreadIds.map((id) => String(id || '')).filter(Boolean))].sort(),
+        mustLaneIds: [...laneIds],
+    };
+    packet.digest = fingerprint(JSON.stringify(packet));
+    return packet;
 }
 
 function buildContinuityMessages({
@@ -14042,9 +13990,10 @@ async function runContinuityTarget(captured, {
     } else if (profileGate.noActorPermit && pendingActions.attempts.length) {
         return { status: 'blocked', reason: 'no_candidates_with_pending_attempts', module: 'world' };
     }
-    // Database-style recall is a separate, read-only API.  The local schedulers
-    // decide mustInclude first, so a scene-relevance model cannot drop overdue
-    // offscreen people, factions, environment, economy or independent threads.
+    // The structured ledgers already provide stable row keys and due schedules.
+    // Build the read-only recall packet locally, preserving every mustInclude
+    // item and its linked threads, instead of asking a second model to reselect
+    // targets that the local schedulers have already made authoritative.
     const mustActorIds = [...new Set([
         ...scheduledActorIds,
         ...pendingActions.attempts.map((attempt) => String(attempt?.actorId || '')).filter(Boolean),
@@ -14065,37 +14014,16 @@ async function runContinuityTarget(captured, {
     ].map((id) => String(id || '')).filter((id) => (
         (scheduledBase.threads || []).some((thread) => String(thread?.id || '') === id)
     )))].sort();
-    let recallPacket = null;
-    try {
-        recallPacket = await generateWorldRecallPacket(buildWorldRecallMessages({
-            captured,
-            actorLedger: actionLedger,
-            base: scheduledBase,
-            worldLaneSchedule,
-            worldContext,
-            mustActorIds,
-            mustThreadIds,
-            mustLaneIds,
-        }), {
-            captured,
-            settings,
-            mustActorIds,
-            mustThreadIds,
-            mustLaneIds,
-            availableActorIds: (actionLedger?.actors || []).map((actor) => String(actor?.id || '')).filter(Boolean),
-            availableThreadIds: (scheduledBase.threads || []).map((thread) => String(thread?.id || '')).filter(Boolean),
-            availableLaneIds: recallLaneCandidates.map((lane) => String(lane?.sourceId || lane?.id || '')).filter(Boolean),
-            worldbookKeys: captured?.actorSovereigntyScope?.worldbookSelectorKeys || [],
-            isCurrent: () => stage3TaskOwnsCurrent(captured, token) && stage3TargetIsCurrent(captured, token).ok,
-        });
-    } catch (error) {
-        return {
-            status: stage3TargetIsCurrent(captured, token).ok ? 'failed' : 'stale',
-            reason: `world_recall_failed:${String(error?.message || error)}`,
-            module: 'world',
-        };
-    }
-    if (!recallPacket) return { status: 'failed', reason: 'world_recall_invalid', module: 'world' };
+    const recallPacket = stage3LocalRecallPacket({
+        actorLedger: actionLedger,
+        base: scheduledBase,
+        worldLaneSchedule,
+        mustActorIds,
+        mustThreadIds,
+        mustLaneIds,
+        worldbookKeys: captured?.actorSovereigntyScope?.worldbookSelectorKeys || [],
+    });
+    if (!recallPacket) return { status: 'failed', reason: 'world_recall_local_material_missing', module: 'world' };
     if (!stage3TaskOwnsCurrent(captured, token)) {
         return { status: 'stale', reason: 'world_task_owner_changed' };
     }

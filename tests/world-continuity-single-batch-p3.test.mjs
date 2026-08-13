@@ -36,38 +36,16 @@ function sourceSection(start, end) {
     return source.slice(from, to);
 }
 
-function loadStage3RecallSelection() {
+function loadStage3LocalRecallPacket() {
     const code = sourceSection(
-        'function stage3RecallSelection(output, {',
-        'function buildWorldRecallMessages({',
-    );
-    const sandbox = {
-        extractFirstBalancedJsonObject,
-        fingerprint: (value) => `test-digest:${String(value).length}`,
-    };
-    vm.runInNewContext(`${code}\nthis.selectRecall = stage3RecallSelection;`, sandbox);
-    return sandbox.selectRecall;
-}
-
-function loadWorldRecallGenerator(callModel) {
-    const selection = sourceSection(
-        'function stage3RecallSelection(output, {',
-        'function buildWorldRecallMessages({',
-    );
-    const generator = sourceSection(
-        'async function generateWorldRecallPacket(messages, {',
+        'function stage3LocalRecallPacket({',
         'function buildContinuityMessages({',
     );
     const sandbox = {
-        callModel,
-        extractFirstBalancedJsonObject,
         fingerprint: (value) => `test-digest:${String(value).length}`,
     };
-    vm.runInNewContext(
-        `${selection}${generator}\nthis.generateRecall = generateWorldRecallPacket;`,
-        sandbox,
-    );
-    return sandbox.generateRecall;
+    vm.runInNewContext(`${code}\nthis.buildRecall = stage3LocalRecallPacket;`, sandbox);
+    return sandbox.buildRecall;
 }
 
 function loadCancelledWorldReservationHarness({ checkpointPhase = 'world_call_reserved' } = {}) {
@@ -241,6 +219,10 @@ function loadStage3LegacyManualReconciliationRunner(state) {
         stage3TargetIsCurrent: () => ({ ok: true }),
         sovereigntyNarrativeEligible: () => true,
         stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: {} }),
+        stage3LocalRecallPacket: () => ({
+            version: 2, actorIds: [], threadIds: [], laneIds: [],
+            mustActorIds: [], mustThreadIds: [], mustLaneIds: [], digest: 'local-recall',
+        }),
         getSettings: () => ({}),
         getContext: () => ({ chatId: state.captured.chatId, chat: [{ mes: 'natural narrative' }] }),
         readChatNamespace: () => state.namespace,
@@ -650,26 +632,15 @@ test('explicit user cancellation clears only an exact owned empty reservation', 
     assert.equal(exact.state.writes, 1);
     assert.equal(exact.state.namespace.continuityCheckpoint, null);
 
-    let recallCalls = 0;
     let advanceCalls = 0;
-    const recall = loadWorldRecallGenerator(async (_messages, options) => {
-        recallCalls += 1;
-        assert.equal(options.noTimeout, true);
-        return JSON.stringify({ actorIds: [], threadIds: [], laneIds: [], reasons: [] });
-    });
+    const recall = loadStage3LocalRecallPacket();
     const advance = loadWorldGenerator(async (_messages, options) => {
         advanceCalls += 1;
         assert.equal(options.noTimeout, true);
         return validWorldOutput();
     });
-    await recall([], {
-        captured: exact.target, settings: generatorSettings,
-        mustActorIds: [], mustThreadIds: [], mustLaneIds: [],
-        availableActorIds: [], availableThreadIds: [], availableLaneIds: [], worldbookKeys: [],
-        isCurrent: () => true,
-    });
+    assert.ok(recall({ actorLedger: { actors: [] }, base: { threads: [] }, worldLaneSchedule: { candidates: [] } }));
     await advance([], { captured: exact.target, settings: generatorSettings, isCurrent: () => true });
-    assert.equal(recallCalls, 1);
     assert.equal(advanceCalls, 1);
 
     const drift = loadCancelledWorldReservationHarness();
@@ -1100,7 +1071,7 @@ test('committed checkpoint authority cannot be bypassed by an exact persisted wo
                 stage3LegacyTargetNeedsManualReconciliation: () => false,
                 markActorSchedulingSettled: () => {},
                 deepClone: (value) => structuredClone(value),
-                generateWorldRecallPacket: () => { recallCalls += 1; },
+                stage3LocalRecallPacket: () => { recallCalls += 1; return { digest: 'local' }; },
                 generateWorldContinuitySingleBatch: () => { modelCalls += 1; },
                 writeChatNamespace: () => { writes += 1; },
             },
@@ -1313,8 +1284,7 @@ test('a fully committed prior generation becomes history only for a strictly new
             scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
             detectContinuityDirector: () => 'balanced',
             pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
-            buildWorldRecallMessages: () => [],
-            generateWorldRecallPacket: async () => {
+            stage3LocalRecallPacket: () => {
                 recallCalls += 1;
                 return { digest: 'recall', actorIds: [], threadIds: [], laneIds: [] };
             },
@@ -1374,7 +1344,7 @@ test('a fully committed prior generation becomes history only for a strictly new
                 getSettings: () => ({ continuityMaxThreads: 12 }),
                 getContext: () => ({ chatId: candidateCurrent.chatId, chat: candidateChat }),
                 stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: candidateLedger }),
-                generateWorldRecallPacket: () => { modelCalls += 1; },
+                stage3LocalRecallPacket: () => ({ digest: 'local' }),
                 generateWorldContinuitySingleBatch: () => { modelCalls += 1; },
             },
         });
@@ -1918,14 +1888,14 @@ test('P3 Phase1 readback requires one shared advanced transaction revision', () 
     );
 });
 
-test('P3 wiring uses Recall then one Advance call, with ATT plus prepared checkpoint before Phase2', () => {
+test('P3 wiring uses local structured recall then one Advance call, with ATT plus prepared checkpoint before Phase2', () => {
     const run = sourceSection(
         'async function runContinuityTarget(captured, {',
         'function sameTargetExceptContent(left, right)',
     );
     assert.doesNotMatch(run, /callModel\(/u);
     assert.doesNotMatch(run, /buildContinuityRepairMessages/u);
-    const recallAt = run.indexOf('await generateWorldRecallPacket');
+    const recallAt = run.indexOf('stage3LocalRecallPacket({');
     const reserveAt = run.indexOf("stage3Phase: 'world_call_reserved'");
     const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', reserveAt);
     const proposalAt = run.indexOf('actorActionCandidatesFromShard', worldAt);
@@ -2017,7 +1987,7 @@ test('P3 keeps full persistent thread history while P4 remains a separate visibl
 
 test('P3 source retains every scheduled ActorRef without a Doctor-owned prompt ceiling', () => {
     const advance = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
-    const recall = sourceSection('function buildWorldRecallMessages({', 'async function generateWorldRecallPacket(');
+    const recall = sourceSection('function stage3LocalRecallPacket({', 'function buildContinuityMessages({');
     assert.match(advance, /recalledActors = \[\.\.\.\(actorLedger\?\.actors \|\| \[\]\)\]/u);
     assert.match(advance, /world_recall_missing_scheduled_actor_material/u);
     assert.doesNotMatch(advance, /world_recall_capacity_unavailable/u);
@@ -2026,103 +1996,57 @@ test('P3 source retains every scheduled ActorRef without a Doctor-owned prompt c
     assert.doesNotMatch(advance, /recalledActors\.slice\(/u);
     assert.doesNotMatch(recall, /world_recall_capacity_unavailable/u);
     assert.doesNotMatch(recall, /recallBudget/u);
-    assert.doesNotMatch(recall, /cropText\(user/u);
+    assert.doesNotMatch(recall, /callModel\(|cropText\(/u);
     const runner = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
     assert.match(runner, /actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);
     assert.doesNotMatch(runner, /actor_schedule_empty/u);
 });
 
-test('P3 Recall consumes the production balanced-object extractor result', () => {
-    const selectRecall = loadStage3RecallSelection();
+test('P3 local recall preserves every scheduled ID and adds linked structured support', () => {
+    const buildRecall = loadStage3LocalRecallPacket();
     const options = {
         mustActorIds: ['actor-must'],
         mustThreadIds: ['thread-must'],
         mustLaneIds: ['lane-must'],
-        availableActorIds: ['actor-must', 'actor-known'],
-        availableThreadIds: ['thread-must', 'thread-known'],
-        availableLaneIds: ['lane-must', 'lane-known'],
         worldbookKeys: ['world-b', 'world-a', 'world-a'],
+        actorLedger: { actors: [
+            { id: 'actor-must', name: '人物甲' },
+            { id: 'actor-known', name: '人物乙' },
+        ] },
+        base: { threads: [
+            { id: 'thread-must', stage: 'advancing', actors: [] },
+            { id: 'thread-linked', stage: 'advancing', actors: ['actor-must'] },
+            { id: 'thread-lane', stage: 'advancing', actors: [] },
+            { id: 'thread-unrelated', stage: 'advancing', actors: [] },
+            { id: 'thread-resolved', stage: 'resolved', actors: ['actor-must'] },
+        ] },
+        worldLaneSchedule: { candidates: [
+            { sourceId: 'lane-must', sourceThreads: ['thread-lane'] },
+            { sourceId: 'lane-known', sourceThreads: ['thread-unrelated'] },
+        ] },
     };
-    const valid = JSON.stringify({
-        actorIds: ['actor-known', 'unknown-actor', 'actor-must', 'actor-must'],
-        threadIds: ['unknown-thread', 'thread-must'],
-        laneIds: ['lane-must', 'unknown-lane'],
-        reasons: ['must retain', 'known only'],
-    });
-    const extracted = extractFirstBalancedJsonObject(valid);
-    assert.deepEqual(Object.keys(extracted).sort(), ['end', 'source', 'start', 'value']);
-    assert.deepEqual(extracted.value.actorIds, [
-        'actor-known', 'unknown-actor', 'actor-must', 'actor-must',
-    ]);
-
-    for (const output of [valid, `\`\`\`json\n${valid}\n\`\`\``, `前文\n${valid}\n后文`]) {
-        const packet = selectRecall(output, options);
-        assert.ok(packet);
-        assert.deepEqual(Array.from(packet.actorIds), ['actor-known', 'actor-must']);
-        assert.deepEqual(Array.from(packet.threadIds), ['thread-must']);
-        assert.deepEqual(Array.from(packet.laneIds), ['lane-must']);
-        assert.deepEqual(Array.from(packet.mustActorIds), ['actor-must']);
-        assert.deepEqual(Array.from(packet.worldbookKeys), ['world-a', 'world-b']);
-    }
-
-    assert.deepEqual(extractFirstBalancedJsonObject('{bad json}'), {
-        error: 'json_object_missing',
-    });
-    assert.equal(selectRecall('{bad json}', options), null);
-    assert.equal(selectRecall(JSON.stringify({
-        actorIds: ['actor-known'], threadIds: ['thread-must'], laneIds: ['lane-must'],
-    }), options), null, 'must actor omission remains fail-closed');
+    const packet = buildRecall(options);
+    assert.ok(packet);
+    assert.equal(packet.version, 2);
+    assert.equal(packet.selection, 'local_structured_schedule');
+    assert.deepEqual(Array.from(packet.actorIds), ['actor-must']);
+    assert.deepEqual(Array.from(packet.threadIds), ['thread-lane', 'thread-linked', 'thread-must']);
+    assert.deepEqual(Array.from(packet.laneIds), ['lane-must']);
+    assert.deepEqual(Array.from(packet.mustActorIds), ['actor-must']);
+    assert.deepEqual(Array.from(packet.worldbookKeys), ['world-a', 'world-b']);
+    assert.equal(buildRecall({ ...options, mustActorIds: ['actor-unknown'] }), null);
+    assert.equal(buildRecall({ ...options, mustThreadIds: ['thread-unknown'] }), null);
+    assert.equal(buildRecall({ ...options, mustLaneIds: ['lane-unknown'] }), null);
 });
 
-test('P3 Recall shares the configured world output budget and remains one fail-closed call', async () => {
-    const valid = JSON.stringify({
-        actorIds: ['actor-must'],
-        threadIds: ['thread-must'],
-        laneIds: ['lane-must'],
-        reasons: ['required persistent support'],
-    });
-    const calls = [];
-    const generateRecall = loadWorldRecallGenerator(async (_messages, options) => {
-        calls.push(options);
-        assert.equal(options.validateOutput(valid), true);
-        assert.equal(JSON.stringify(options.validateOutput('{bad json}')), JSON.stringify({
-            valid: false,
-            reason: 'world_recall_invalid_or_must_include_missing',
-        }));
-        assert.equal(JSON.stringify(options.validateOutput(JSON.stringify({
-            actorIds: [], threadIds: ['thread-must'], laneIds: ['lane-must'], reasons: [],
-        }))), JSON.stringify({
-            valid: false,
-            reason: 'world_recall_invalid_or_must_include_missing',
-        }));
-        return valid;
-    });
-    const packet = await generateRecall([{ role: 'user', content: 'bounded recall input' }], {
-        captured: { index: 3 },
-        settings: { continuityMaxTokens: 12_288, sovereigntyHardTimeoutMs: 30_000 },
-        mustActorIds: ['actor-must'],
-        mustThreadIds: ['thread-must'],
-        mustLaneIds: ['lane-must'],
-        availableActorIds: ['actor-must'],
-        availableThreadIds: ['thread-must'],
-        availableLaneIds: ['lane-must'],
-        worldbookKeys: [],
-        isCurrent: () => true,
-    });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].maxTokens, 12_288);
-    assert.equal(calls[0].noTimeout, true);
-    assert.equal(calls[0].timeoutMs, undefined);
-    assert.equal(calls[0].failover, false);
-    assert.equal(calls[0].maxFailovers, 0);
-    assert.deepEqual(Array.from(packet.actorIds), ['actor-must']);
-    const generatorSource = sourceSection(
-        'async function generateWorldRecallPacket(messages, {',
-        'function buildContinuityMessages({',
-    );
-    assert.match(generatorSource, /maxTokens: settings\?\.continuityMaxTokens/u);
-    assert.doesNotMatch(generatorSource, /Math\.min\(1200/u);
-    assert.equal((generatorSource.match(/await callModel\(/gu) || []).length, 1);
+test('P3 local recall is deterministic and adds zero model calls', () => {
+    const recallSource = sourceSection('function stage3LocalRecallPacket({', 'function buildContinuityMessages({');
+    assert.doesNotMatch(recallSource, /callModel\(|await |maxTokens|timeout|failover/u);
+    assert.match(recallSource, /local_structured_schedule/u);
+    assert.match(recallSource, /packet\.digest = fingerprint\(JSON\.stringify\(packet\)\)/u);
+    const run = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
+    assert.equal((run.match(/generateWorldContinuitySingleBatch\(/gu) || []).length, 1);
+    assert.equal((run.match(/stage3LocalRecallPacket\(/gu) || []).length, 1);
 });
 
 test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudications', () => {

@@ -169,13 +169,13 @@ test('canonical world projection remains strict about text and visible thread ID
     );
 });
 
-test('P3 uses Recall then one Advance call; no separate actor proposal model or repair path', async () => {
+test('P3 uses local structured recall then one Advance call; no separate actor proposal model or repair path', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const runStart = source.indexOf('async function runContinuityTarget(captured, {');
     const runEnd = source.indexOf('\nfunction sameTargetExceptContent', runStart);
     assert.ok(runStart >= 0 && runEnd > runStart);
     const run = source.slice(runStart, runEnd);
-    const recall = run.indexOf('await generateWorldRecallPacket');
+    const recall = run.indexOf('stage3LocalRecallPacket({');
     const advance = run.indexOf('await generateWorldContinuitySingleBatch', recall);
     const prepare = run.indexOf('prepareActorActionAttempts', advance);
     const persist = run.indexOf('await persistActorActionAttemptsForTurn', prepare);
@@ -400,7 +400,7 @@ test('P4 cleanup failure fails closed and never restarts a producer or legacy br
     );
 });
 
-test('P3 keeps due actors outside optional budgets through Recall and Advance, while P4 stays a single consumer', async () => {
+test('P3 keeps due actors outside optional budgets through local recall and one Advance, while P4 stays a single consumer', async () => {
     const [ledger, source] = await Promise.all([
         readFile(new URL('../actor-ledger-core.mjs', import.meta.url), 'utf8'),
         readFile(new URL('../index.js', import.meta.url), 'utf8'),
@@ -408,7 +408,7 @@ test('P3 keeps due actors outside optional budgets through Recall and Advance, w
     assert.match(ledger, /const mustInclude = scored\.filter\(isMustInclude\)/u);
     assert.match(ledger, /const optional = scored\.filter\(\(item\) => !isMustInclude\(item\)\)\.slice\(0, coreLimit\)/u);
     assert.match(source, /scheduledActorIds = actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);
-    assert.match(source, /await generateWorldRecallPacket[\s\S]*?await generateWorldContinuitySingleBatch/u);
+    assert.match(source, /stage3LocalRecallPacket\(\{[\s\S]*?await generateWorldContinuitySingleBatch/u);
     assert.match(source, /await persistActorActionAttemptsForTurn[\s\S]*?stage3Phase: 'world_candidate_prepared'/u);
     assert.doesNotMatch(source, /collectActorShardProposals|runActorShardProposalBatch/u);
     assert.match(source, /precomposeNextTurnConsumer/u);

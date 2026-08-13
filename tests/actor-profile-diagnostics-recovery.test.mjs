@@ -422,8 +422,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /stage3PreparedWorldCheckpointMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3PreparedPhase1StatesMatch\.toString\(\)/u);
     assert.match(fingerprintSource, /extractFirstBalancedJsonObject\.toString\(\)/u);
-    assert.match(fingerprintSource, /stage3RecallSelection\.toString\(\)/u);
-    assert.match(fingerprintSource, /generateWorldRecallPacket\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3LocalRecallPacket\.toString\(\)/u);
     assert.match(fingerprintSource, /generateWorldContinuitySingleBatch\.toString\(\)/u);
     assert.match(fingerprintSource, /actorActionCandidatesFromShard\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3SettlementProofMatchesTarget\.toString\(\)/u);
@@ -587,7 +586,7 @@ test('production actor scheduling diagnostics records schedule and pending ATT r
 
 test('P3 settings expose the real exploration budget and inject actor addon only into Advance', () => {
     const settingsPanel = sourceBetween(indexSource, 'function buildSettingsPanel', "wrapper.querySelector('.mvuad-health-refresh')");
-    const recall = sourceBetween(indexSource, 'function buildWorldRecallMessages', 'async function generateWorldRecallPacket');
+    const recall = sourceBetween(indexSource, 'function stage3LocalRecallPacket', 'function buildContinuityMessages');
     const advance = sourceBetween(indexSource, 'function buildContinuityMessages', 'async function generateWorldContinuitySingleBatch');
     const profile = sourceBetween(indexSource, 'async function completeActorProfilesForTurn', 'async function runActorProfileTarget');
     assert.doesNotMatch(settingsPanel, /mvuad-actor-shard-mode|关闭（0 次额外调用）|每名入选人物最多增加一次轻量调用/u);

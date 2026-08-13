@@ -9,9 +9,8 @@ ActorLedger、数据库、receipt 数组、第二 store 或旧 `continuityInject
 
 | 机制 | 成熟实现 | 分类 | P3 接法 |
 |---|---|---|---|
-| 只读召回 | Stitches Reborn V 的 `recall` task（只选 AM/支持材料）与 TavernDB `prepareAIInput_ACU` 的持久快照输入 | 最小适配 | 本地时钟先给出不可删除的 due 人物/线程/世界轨；Recall 只从持久 Profile、Continuity、世界书选择支持材料，零权威写。 |
-| Recall JSON 提取 | 现有 `sovereignty-runtime-core.extractFirstBalancedJsonObject`，其宽容边界来自项目已复用的 shujuku/repair parser 路径 | 原样复用 | `stage3RecallSelection` 直接消费生产 extractor 的 `{value, source, start, end}` 返回契约；围栏/前后文由同一 extractor 处理，`{error}` 继续 fail-closed。没有新增 parser 或复制 balanced-object 扫描。 |
-| Recall 输出预算与生命周期 | 数据库/shujuku compatible group call 的统一模型连接配置、既有 World Advance `continuityMaxTokens`，以及 P1/callModel `noTimeout:true` + active controller 取消合同 | 原样复用 + 最小适配 | Recall 与 Advance 传入同一可配置 world 输出预算，连接层继续使用宿主/模型实际能力；Doctor 不再叠加 18k/26k/40k 字符总量门或独立 30 秒计时器，也不再有旧 1200 输出上限。Recall 仍仅一次调用、无 failover/盲重试，malformed 或缺 must ID 继续 fail-closed，且 reservation 前取消保持零写。 |
+| 只读召回 | Stitches Reborn V 的 `recall` task（先选支持材料）与 TavernDB `targetSheetKeys -> prepareAIInput_ACU`（宿主先锁定稳定目标，再把目标材料送入同组调用） | 最小适配 | Doctor 的 ActorRef、线程ID和世界轨ID已经是结构化稳定行键，本地调度器也已算出 due/selected/mustInclude；因此 `stage3LocalRecallPacket` 直接物化这些目标及其关联线程，不再用第二次模型调用重新选择。没有新增 store、parser 或状态机。 |
+| 召回完整性 | 既有 `scheduleActorTurns`、`scheduleWorldLanes` 与 Actor/Thread/Lane 持久ID | 原样复用 | 所有 must actor、must thread、must lane 必须存在于 fresh ledger；本地再加入已调度人物关联线程和已选世界轨来源线程，缺任一权威ID即 fail-closed。召回包带确定性 digest，只读且零写。 |
 | 世界推进 | Stitches Reborn V 的 `act,scene` 推进任务、既有 `generateWorldContinuitySingleBatch` | 最小适配 | Advance 读取 canonical recall packet 与最终正文；一次输出 NPC proposals、按 actorId 的裁决和世界/线程变化，`failover:false`、`maxFailovers:0`。 |
 | Advance 生命周期 | 既有 `callModel`、`activeModelControllers` 取消链与 P1 `noTimeout:true` 调用形状；现有 `world_call_reserved -> world_candidate_prepared` checkpoint | 原样复用 + 最小适配 | Advance 不再把 30 秒 sovereignty hard timeout 当作用户取消；它复用 P1 的无计时器调用路径，仍由同一个 AbortSignal/取消按钮立即终止，真实运输错误仍原样失败且绝不 failover/重演。长调用保持在既有 reserved 阶段，成功响应后才沿原子 prepared/readback 继续，因此不新增恢复状态或第二次世界调用。 |
 | 用户取消 reserved 清理 | 既有 `cancelCurrentOperations -> invalidateOperations`、`activeModelControllers`、同 namespace 字段 CAS/readback 与严格 Stage3 target matcher | 最小适配 | 仅由显式用户取消触发，并且 controller 仍持有当前 Advance 的 exact target、checkpoint 仍为同 target/producer 的 `world_call_reserved`、没有该 target 的 ATT/prepared/package 时，才 CAS 清除该 reservation，让用户可重新启动正常单次 Recall/Advance。target 漂移、prepared 竞态、transport/crash/refresh reserved 均不清理，继续 0 模型人工协调；未新增 retry、store 或状态机。 |
@@ -50,8 +49,8 @@ P3 每次自行 fresh-read ActorRegistry/ActorLedger/Profile：
 fresh ledger readback
   -> scheduleActorTurns
   -> local mustInclude (人物目标/承诺/冷却/截止优先；独立世界轨可并列)
-  -> Recall API: only select persistent supporting profiles/threads/lanes/WI, preserve all mustInclude
-  -> Advance API: actor proposals first, actorId adjudications + world/thread changes
+  -> local recall packet: materialize scheduled profiles/threads/lanes/WI, preserve all mustInclude
+  -> one Advance API: actor proposals first, actorId adjudications + world/thread changes
   -> actorActionCandidatesFromShard（Advance 的尝试候选）
   -> prepareActorActionAttempts
   -> recordActorActionAttempts

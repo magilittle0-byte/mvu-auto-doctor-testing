@@ -27,17 +27,17 @@ test('module scheduler skips ready rows and enables only missing or explicit ref
     ready.refreshProfileModules = ['currentState'];
     const refresh = actorProfileCompletionGroupPlan([ready], { allowDiscovery: false });
     assert.equal(refresh.length, 1);
-    assert.equal(refresh[0].key, 'operational_profile');
+    assert.equal(refresh[0].key, 'character_core');
     assert.deepEqual(refresh[0].targets.currentState.map((row) => row.actorId), ['NPC-ready']);
     assert.equal(refresh[0].targets.knowledgeCapabilitiesResources.length, 0);
 });
 
 test('full and full_adult plans have bounded compatible groups instead of one call per module', () => {
     assert.deepEqual(actorProfileCompletionGroupPlan([actor()], { allowDiscovery: true }).map((group) => group.key), [
-        'identity_bootstrap', 'character_core', 'operational_profile',
+        'identity_bootstrap', 'character_core',
     ]);
     assert.deepEqual(actorProfileCompletionGroupPlan([actor('NPC-A', null, 'full_adult')], { allowDiscovery: true }).map((group) => group.key), [
-        'identity_bootstrap', 'character_core', 'operational_profile', 'physiology_optional',
+        'identity_bootstrap', 'character_core', 'physiology_optional',
     ]);
 });
 
@@ -65,7 +65,7 @@ test('group parser rejects lone dossier prose, short shells, duplicates and unex
         + `<module key="personality">太短</module>`
         + `<module key="personality">${prose('首次')}</module>`
         + `<module key="personality">${prose('重复')}</module>`
-        + `<module key="currentState">${prose('越界')}</module>`
+        + `<module key="physiology">${prose('越界')}</module>`
         + `</profile-target>`;
     const parsed = parseActorProfileModuleGroupOutput(broken, group);
     assert.ok(parsed.failures.some((failure) => failure.reason === 'actor_profile.module_content_incomplete'));
@@ -75,7 +75,7 @@ test('group parser rejects lone dossier prose, short shells, duplicates and unex
 
 test('module prompt contains per-module notes, fresh current rows and no visible seven-heading dossier contract', () => {
     const group = actorProfileCompletionGroupPlan([actor()], { allowDiscovery: false })
-        .find((entry) => entry.key === 'operational_profile');
+        .find((entry) => entry.key === 'character_core');
     const messages = buildActorProfileModuleGroupMessages(group, {
         evidenceText: '权威材料',
         discoveryContext: { acceptedNarrative: '最终接受正文只出现一次。' },

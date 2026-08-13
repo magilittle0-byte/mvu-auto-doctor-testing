@@ -49,8 +49,17 @@ export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS = Object.freeze([
 ]);
 export const ACTOR_PROFILE_COMPLETION_GROUPS = Object.freeze([
     { key: 'identity_bootstrap', modules: [] },
-    { key: 'character_core', modules: ['person', 'personality', 'history', 'relationshipsMotives'] },
-    { key: 'operational_profile', modules: ['currentState', 'knowledgeCapabilitiesResources'] },
+    {
+        key: 'character_core',
+        modules: [
+            'person',
+            'personality',
+            'history',
+            'relationshipsMotives',
+            'currentState',
+            'knowledgeCapabilitiesResources',
+        ],
+    },
     { key: 'physiology_optional', modules: ['physiology'], adultOnly: true },
 ]);
 const ACTOR_PROFILE_NARRATIVE_TITLES = Object.freeze({
