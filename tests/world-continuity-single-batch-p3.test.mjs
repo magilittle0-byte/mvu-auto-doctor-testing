@@ -958,6 +958,17 @@ test('a fully committed prior generation becomes history only for a strictly new
         stage3ProducerTarget: structuredClone(previous),
     };
     assert.equal(
+        persisted.stage3PersistedPackageForTarget(continuity, ledger, previous),
+        null,
+        'same-target recovery keeps its strict whole-ledger digest contract',
+    );
+    assert.ok(
+        persisted.stage3PersistedPackageForTarget(continuity, ledger, previous, {
+            allowUnrelatedLedgerEvolution: true,
+        }),
+        'the cross-turn consumer keeps the old target proof while allowing unrelated P1 ledger evolution',
+    );
+    assert.equal(
         persisted.stage3CommittedCheckpointIsPriorTerminal(
             checkpoint, continuity, ledger, current,
         ),
@@ -1224,7 +1235,7 @@ test('P3 target, recovery key, and legacy reconciliation require generation ID a
 
     const settlement = sourceSection(
         'function stage3CanonicalSettlementProof(ledger, results = [], captured) {',
-        'function stage3PersistedPackageForTarget(state, ledger, captured) {',
+        'function stage3PersistedPackageForTarget(state, ledger, captured, {',
     );
     assert.match(settlement, /producerTarget,/u);
     assert.match(settlement, /stage3AcceptedTargetsMatch\(proof\.producerTarget, producerTarget\)/u);

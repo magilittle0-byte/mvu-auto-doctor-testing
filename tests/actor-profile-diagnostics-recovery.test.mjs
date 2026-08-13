@@ -416,6 +416,8 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /actorActionCandidatesFromShard\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3SettlementProofMatchesTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3PersistedPackageForTarget\.toString\(\)/u);
+    assert.match(fingerprintSource, /buildContinuityInjection\.toString\(\)/u);
+    assert.match(fingerprintSource, /buildContinuityConsumerPayload\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3CommittedCheckpointIsPriorTerminal\.toString\(\)/u);
     assert.match(fingerprintSource, /markActorSchedulingNotReachedByProfile\.toString\(\)/u);
     assert.match(fingerprintSource, /createPrivacySafeDiagnosticProjection\.toString\(\)/u);
@@ -423,6 +425,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /runContinuityTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /commitPreparedWorldCandidate\.toString\(\)/u);
     assert.match(fingerprintSource, /precomposeNextTurnConsumer\.toString\(\)/u);
+    assert.match(fingerprintSource, /recordNextTurnConsumerInspection\.toString\(\)/u);
     assert.match(fingerprintSource, /commitNextTurnConsumer\.toString\(\)/u);
     assert.match(fingerprintSource, /bindEvents\.toString\(\)/u);
     assert.doesNotMatch(fingerprintSource, /[0-9a-f]{7,40}/u);

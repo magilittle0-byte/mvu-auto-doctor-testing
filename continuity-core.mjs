@@ -2877,9 +2877,17 @@ export function buildContinuityInjection(state, {
                     : director === 'mixed'
                         ? '预设、缝合怪或世界引擎负责剧情与世界提案；本账本只做去重、接续与回收。'
                         : '当前没有检测到外部剧情推进器；可按账本低频推进世界支线。';
+    const requestedVisible = Number(maxVisible);
     const visibleLimit = Math.min(
         4,
-        Math.max(1, Math.round(Number(maxVisible) || 2)),
+        Math.max(
+            0,
+            Number.isFinite(requestedVisible)
+                && maxVisible !== null
+                && maxVisible !== ''
+                ? Math.round(requestedVisible)
+                : 2,
+        ),
     );
     const candidateLimit = visibleLimit;
     const rows = active
@@ -3015,36 +3023,50 @@ export function buildContinuityConsumerPayload(state, packet) {
     const rawText = typeof rawPacket?.payload?.text === 'string'
         ? rawPacket.payload.text
         : '';
+    const canonicalText = cleanText(rawText, 12000);
     if (
         !normalizedPacket
         || normalizedPacket.version !== 1
-        || !rawText
+        || !canonicalText
         || !normalizedPacket.settlementProof
-        || rawText !== normalizedPacket.payload.text
+        || canonicalText !== normalizedPacket.payload.text
     ) return { ok: false, reason: 'legacy_packet_invalid' };
 
-    const matches = [];
+    const candidates = new Map();
     for (const director of LEGACY_CONSUMER_DIRECTORS) {
         for (const rawMaxVisible of LEGACY_CONSUMER_RAW_MAX_VISIBLE) {
             const legacyText = buildContinuityInjection(normalizedState, {
                 director,
                 maxVisible: rawMaxVisible,
             });
+            const fullCanonicalLegacyText = cleanText(
+                legacyText,
+                Number.MAX_SAFE_INTEGER,
+            );
+            const canonicalLegacyText = cleanText(legacyText, 12000);
             const visibleProjection = exactLegacyVisibleProjection(
                 normalizedState,
                 rawMaxVisible,
             );
-            if (
-                legacyText === rawText
-                && exactStringListMatches(
-                    visibleProjection,
-                    normalizedPacket.payload.visibleThreadIds,
-                )
-            ) {
-                matches.push({ director, rawMaxVisible, legacyText });
-            }
+            const key = JSON.stringify([canonicalLegacyText, visibleProjection]);
+            if (!candidates.has(key)) candidates.set(key, {
+                director,
+                rawMaxVisible,
+                legacyText,
+                canonicalLegacyText,
+                truncated: fullCanonicalLegacyText !== canonicalLegacyText,
+                visibleProjection,
+            });
         }
     }
+    const matches = [...candidates.values()].filter((candidate) => (
+        !candidate.truncated
+        && candidate.canonicalLegacyText === canonicalText
+        && exactStringListMatches(
+            candidate.visibleProjection,
+            normalizedPacket.payload.visibleThreadIds,
+        )
+    ));
     if (matches.length !== 1) {
         return {
             ok: false,
@@ -3052,7 +3074,7 @@ export function buildContinuityConsumerPayload(state, packet) {
         };
     }
 
-    const lines = rawText.split('\n');
+    const lines = matches[0].legacyText.split('\n');
     if (
         lines.length < 4
         || lines[0] !== '<World_Continuity_Package>'
@@ -3066,11 +3088,11 @@ export function buildContinuityConsumerPayload(state, packet) {
 
     return {
         ok: true,
-        text: [
+        text: cleanText([
             '<World_Continuity_Package>',
             ...lines.slice(2, -1),
             '</World_Continuity_Package>',
-        ].join('\n'),
+        ].join('\n'), 12000),
         legacy: {
             director: matches[0].director,
             rawMaxVisible: matches[0].rawMaxVisible,

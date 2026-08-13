@@ -14,7 +14,7 @@ P4 在每个合法 generation 的 placement 前，仅以宿主 `setExtensionProm
 
 通用 provider 的前提是已有、有效且可写入 `consumerLease` 的 P3 package；这不是按 Beast/数据库硬编码，而是任何注册 provider 的持久 lease 安全要求。无 P3 package、world 无效或 world-CAS 退化后的 ticket-only payload 只使用唯一 SillyTavern fallback，绝不交给外部 provider。
 
-P3 package 只在 producer target scope 与当前 frozen scope 相同、`stage3PersistedPackageForTarget` 复验 settlement proof/actor-ledger/action target、且严格 legacy projection 成功时进入 world 段。package 已消费、被占用、proof/digest/scope/projection 失效时只释放其旧 world lease，世界段留空；当前 generation 仍独立准备原样 P5 ticket，允许 ticket-only 单槽 placement。
+P3 package 只在 producer target scope 与当前 frozen scope 相同、`stage3PersistedPackageForTarget(..., {allowUnrelatedLedgerEvolution:true})` 复验 packet producer、continuity digest、settlement proof、旧 target 的 attempt/result/ActorRef 与无 pending、且严格 legacy projection 成功时进入 world 段。P3 同 target 恢复仍使用默认整本 ActorLedger digest 严格模式；只有跨回合 P4 消费允许变量/P1 对无关人物档案的合法演化，旧 target 删除或篡改仍拒绝。package 已消费、被占用、proof/digest/scope/projection 失效时只释放其旧 world lease，世界段留空；当前 generation 仍独立准备原样 P5 ticket，允许 ticket-only 单槽 placement。
 
 world lease 的 CAS/readback 并发失败也只重新读取、释放或丢弃 world 段；只要没有 `cleanup_failed` 阻断，当前 generation 已生成的 ticket batch 保留并以 ticket-only payload 继续唯一 placement。只有实际 slot cleanup/provider callback/provider receipt/fallback 失败才会使整 payload fail-closed。
 
@@ -43,7 +43,7 @@ world package 与 ticket 不属于同一 producer：前者来自上一 accepted 
 |---|---|---|---|
 | 世界事实与玩家边界 | `continuity-core.mjs:buildContinuityInjection` | 原样复用内层行，最小容器适配 | 不投递旧 bridge 外壳或 fixed director 行 |
 | legacy package | P3 `index.js` 在 world durable readback 前写 `nextTurnInjection.payload.text/visibleThreadIds` | 只读验证 | P4 不覆盖 payload、producerTarget、digest 或 settlementProof |
-| 无桥投影 | `continuity-core.mjs:buildContinuityConsumerPayload` | 必要新胶水 | 对 director x rawMaxVisible 的原 renderer 输出与独立 visible projection 做严格三元组验证；不使用正则/HTML 清洗 |
+| 无桥投影 | `continuity-core.mjs:buildContinuityConsumerPayload` | 必要新胶水 | 原样复用 `normalizeNextTurnInjection` 已使用的 `cleanText(..., 12000)` canonical 形态，对 director x rawMaxVisible 的原 renderer 输出与独立 visible projection 做严格验证；不使用新 parser、正则或 HTML 清洗 |
 | 人物票据文本 | `index.js:npcDesignTicketPrompt(batch)` | 原样复用 | 禁止另造人格池、票据提示词或二次掷骰 |
 | P5 预设读取 | `fair-director-preset-core.mjs:CHARACTER_DIVERSITY_CONTRACT` | 原样复用 | 读取 `<Original_NPC_Dice_Tickets>`，票据仅在 P2 注册/readback 后逐人消费 |
 | 单一宿主回退 | SillyTavern `setExtensionPrompt` | 最小适配 | 唯一 key `mvu-auto-doctor-next-turn-consumer`，IN_CHAT/depth 1/system；无 verified provider 时才使用 |
@@ -66,13 +66,14 @@ threads
   .map(thread => thread.id)
 ```
 
-只有 `(director, rawMaxVisible, visibleProjection)` 三元组同时满足 `legacyText === payload.text` 和 `visibleProjection === payload.visibleThreadIds` 且唯一时，才将旧第一行 bridge 外壳及第二行固定 director 行剥离。其余内层行逐字不变，换为 `<World_Continuity_Package>` 容器。`rawMaxVisible=0` 的 visible projection 为 `[]`，即使旧 renderer 内部默认展示值不同也不混淆。
+P3 namespace normalize 与 P4 重演均复用 `cleanText(..., 12000)` 形成同一 canonical 文本；枚举先按 `(canonicalText, visibleProjection)` 去重，再要求 canonical 文本与 `payload.text`、visible projection 与 `payload.visibleThreadIds` 同时精确且唯一匹配，才将旧第一行 bridge 外壳及第二行固定 director 行剥离。`maxVisible=0` 在 renderer 中显式保留为 0，不再被默认值 2 覆盖；当 0/2 因无可见支线而产生完全相同的文本与投影时，它们属于同一 canonical 候选而不是伪歧义。renderer canonical 全文若超过 12000 而在持久化时截断，则投影 fail-closed，禁止从重演全文补回持久包中不存在的尾部。
 
 不匹配、缺闭合、未知版本、多个三元组匹配、callback throw 或 receipt digest 不符，均 release + fail-closed，绝不投 legacy bridge 文本。
 
 ## 消费、释放与退化
 
 - `consumerLease/consumeProof` 是 `nextTurnInjection` 的唯一 P4 写入面，且只保存身份、slot/provider receipt 与 `consumerPayloadDigest`，不存第二副全文。
+- `recordNextTurnConsumerInspection` 只记录受控 `verified/ticket_only` 与固定失败码，不记录 prompt、正文、人物或世界内容；成功 fallback/provider placement 不再停留在含混的 `disabled`。
 - stop、dry、quiet、chat switch、scope 变化、未接受正文、swipe/regenerate 替代均清空唯一 ST key 并释放未绑定 ticket batch；刷新不恢复内存 ticket。
 - accepted final 后仅在 scope、final target 与 digest 严格匹配时写 consume proof；P2 仍按既有 ActorRef 注册/readback 逐人绑定票据。
 - 当前缝合怪只有归档配置、TavernDB 默认召回没有第三方 verified slot；两者均不会自动注册，也不会被医生写入其 prompt/finalMessage/injects/user_input。TavernDB `GENERATION_ENDED` 填表保持独立。

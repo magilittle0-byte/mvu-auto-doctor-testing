@@ -2997,7 +2997,10 @@ function doctorRuntimeCriticalFingerprint() {
         stage3CommittedCheckpointIsPriorTerminal.toString(),
         runContinuityTarget.toString(),
         commitPreparedWorldCandidate.toString(),
+        buildContinuityInjection.toString(),
+        buildContinuityConsumerPayload.toString(),
         precomposeNextTurnConsumer.toString(),
+        recordNextTurnConsumerInspection.toString(),
         commitNextTurnConsumer.toString(),
         bindEvents.toString(),
     ].join('\n'))}`;
@@ -10920,8 +10923,37 @@ function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope) {
         namespace?.continuity,
         ledger,
         captured,
+        { allowUnrelatedLedgerEvolution: true },
     );
     return persisted ? { packet: persisted, captured } : null;
+}
+
+function recordNextTurnConsumerInspection(session, {
+    placed = false,
+    worldPackage = '',
+    reason = '',
+} = {}) {
+    lastInjectionInspection = {
+        status: placed ? 'success' : 'skipped',
+        checkedAt: Date.now(),
+        registered: placed,
+        landed: placed,
+        socialRegistered: false,
+        socialLanded: false,
+        serendipityRegistered: false,
+        serendipityLanded: false,
+        apiType: 'next-turn-consumer',
+        generationId: String(session?.id || ''),
+        generationSerial: Math.max(0, Number(session?.serial) || 0),
+        worldPackage: ['verified', 'ticket_only'].includes(worldPackage)
+            ? worldPackage
+            : '',
+        reason: [
+            'world_package_proof_invalid',
+            'world_package_projection_invalid',
+            'world_lease_readback_failed',
+        ].includes(reason) ? reason : '',
+    };
 }
 
 async function precomposeNextTurnConsumer(session) {
@@ -10977,6 +11009,14 @@ async function precomposeNextTurnConsumer(session) {
             ? buildContinuityConsumerPayload(namespace.continuity, verified.packet)
             : { ok: false, reason: 'world_package_proof_invalid' };
         if (!verified || !projection.ok || packet.consumeProof || packet.consumerLease?.state === 'reserved') {
+            session.p4WorldPackageReason = !verified
+                ? 'world_package_proof_invalid'
+                : !projection.ok
+                    ? 'world_package_projection_invalid'
+                    : 'world_lease_readback_failed';
+            recordNextTurnConsumerInspection(session, {
+                reason: session.p4WorldPackageReason,
+            });
             await convergePersistedStaleNextTurnWorldLease(
                 session,
                 projection.reason || 'world_package_unavailable',
@@ -11009,6 +11049,10 @@ async function precomposeNextTurnConsumer(session) {
         )
         : { ok: true };
     if (!lease.ok && packet) {
+        session.p4WorldPackageReason = 'world_lease_readback_failed';
+        recordNextTurnConsumerInspection(session, {
+            reason: session.p4WorldPackageReason,
+        });
         const refreshedPacket = readChatNamespace(getContext())?.continuity?.nextTurnInjection;
         if (refreshedPacket?.consumerLease?.state === 'cleanup_failed') {
             lastInjectionInspection.status = 'blocked';
@@ -11087,6 +11131,11 @@ async function precomposeNextTurnConsumer(session) {
         tentative.slotId = String(receipt.slotId || selected.provider.id);
         tentative.pending = false;
         session.p4PlacementScopeDigest = scopeDigest;
+        recordNextTurnConsumerInspection(session, {
+            placed: true,
+            worldPackage: packet ? 'verified' : 'ticket_only',
+            reason: session.p4WorldPackageReason,
+        });
         return;
     }
     if (!setNextTurnConsumerFallback(payload.text)) {
@@ -11103,6 +11152,11 @@ async function precomposeNextTurnConsumer(session) {
     // Ticket-only fallback is deliberately not a world-package lease.  It
     // must not turn a P4 downgrade into an accepted-final scope barrier.
     if (packet) session.p4PlacementScopeDigest = scopeDigest;
+    recordNextTurnConsumerInspection(session, {
+        placed: true,
+        worldPackage: packet ? 'verified' : 'ticket_only',
+        reason: session.p4WorldPackageReason,
+    });
 }
 
 async function commitNextTurnConsumer(session, envelope) {
@@ -13569,7 +13623,9 @@ function stage3SettlementProofMatchesLedger(proof, ledger, captured) {
         && stage3SettlementProofMatchesTarget(proof, ledger, captured);
 }
 
-function stage3PersistedPackageForTarget(state, ledger, captured) {
+function stage3PersistedPackageForTarget(state, ledger, captured, {
+    allowUnrelatedLedgerEvolution = false,
+} = {}) {
     const normalized = normalizeContinuityState(state, {
         chatId: captured?.chatId || '',
         maxThreads: getSettings().continuityMaxThreads,
@@ -13578,7 +13634,9 @@ function stage3PersistedPackageForTarget(state, ledger, captured) {
     return packet
         && stage3AcceptedTargetsMatch(packet.producerTarget, stage3AcceptedTarget(captured))
         && packet.sourceContinuityDigest === stage3ContinuityDigestWithoutInjection(normalized)
-        && stage3SettlementProofMatchesLedger(
+        && (allowUnrelatedLedgerEvolution
+            ? stage3SettlementProofMatchesTarget
+            : stage3SettlementProofMatchesLedger)(
             packet.settlementProof,
             ledger,
             captured,
@@ -13608,18 +13666,9 @@ function stage3CommittedCheckpointIsPriorTerminal(checkpoint, state, ledger, cap
         stage3AcceptedTarget(normalized.lastSource),
         producer,
     )
-        && !!normalized.nextTurnInjection
-        && stage3AcceptedTargetsMatch(
-            normalized.nextTurnInjection.producerTarget,
-            producer,
-        )
-        && normalized.nextTurnInjection.sourceContinuityDigest
-            === stage3ContinuityDigestWithoutInjection(normalized)
-        && stage3SettlementProofMatchesTarget(
-            normalized.nextTurnInjection.settlementProof,
-            ledger,
-            producer,
-        );
+        && !!stage3PersistedPackageForTarget(normalized, ledger, producer, {
+            allowUnrelatedLedgerEvolution: true,
+        });
 }
 
 function stage3NoActorPermitMatches(permit, captured) {

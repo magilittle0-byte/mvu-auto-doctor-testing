@@ -9,6 +9,7 @@ let generationLifecycleTrace = [];
 function fixedGenerationLifecycleReason(value) { return String(value || 'other'); }
 function recordGenerationLifecycleTrace() {}
 function runtimeGenerationSerialFloor() { return -1; }
+function recordNextTurnConsumerInspection() {}
 `;
 
 function sourceSection(start, end) {
@@ -801,6 +802,7 @@ function loadP4StaleLeasePrecomposeHarness({
         selectNextTurnConsumerProvider: () => ({ provider: null, conflict: false }),
         setNextTurnConsumerFallback: (text) => { state.fallbackText = text; return true; },
         lastInjectionInspection: state.injectionInspection,
+        recordNextTurnConsumerInspection: () => undefined,
         Date: { now: () => 1 },
     };
     vm.runInNewContext(`${sessionSupport}\n${ownership}\n${precompose}\nthis.precomposeNextTurnConsumer = precomposeNextTurnConsumer;`, sandbox);

@@ -3,6 +3,85 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
+import {
+    buildContinuityConsumerPayload,
+    buildContinuityInjection,
+    normalizeContinuityState,
+} from '../continuity-core.mjs';
+
+function persistedWorldPacket({
+    maxVisible,
+    visibleThreadIds,
+    producerTarget: suppliedTarget,
+    oversized = false,
+}) {
+    const producerTarget = suppliedTarget || {
+        chatId: 'chat-canonical-world',
+        messageId: 'message-world-1',
+        generationId: 'generation-world-1',
+        generationSerial: 1,
+        generationType: 'normal',
+        scopeDigest: 'scope-canonical-world',
+        contentFingerprint: 'content-world-1',
+        index: 2,
+        swipeId: 0,
+    };
+    const chatId = producerTarget.chatId;
+    const state = normalizeContinuityState({
+        chatId,
+        threads: Array.from({ length: oversized ? 4 : 1 }, (_, index) => ({
+            id: oversized ? `thread-converging-${index}` : 'thread-converging',
+            title: `A converging thread ${index}`,
+            summary: oversized
+                ? `summary-${index}`.padEnd(700, 's')
+                : 'A visible consequence approaches.',
+            offscreenBeat: oversized ? `offscreen-${index}`.padEnd(500, 'o') : '',
+            nextBeat: oversized ? `next-${index}`.padEnd(500, 'n') : '',
+            trigger: oversized ? `trigger-${index}`.padEnd(350, 't') : '',
+            intersection: oversized ? `intersection-${index}`.padEnd(450, 'i') : '',
+            effects: oversized
+                ? Array.from({ length: 12 }, (_, effect) => `effect-${effect}`.padEnd(80, 'e'))
+                : [],
+            stage: 'advancing',
+            origin: 'main_derivative',
+            relation: 'converging',
+            knowledge: 'observed',
+        })),
+        world: {
+            trends: Array.from({ length: oversized ? 12 : 1 }, (_, index) => ({
+                id: `trend-world-${index}`,
+                name: `World trend ${index}`,
+                summary: oversized
+                    ? `${index}:`.padEnd(700, String(index % 10))
+                    : 'The wider world keeps changing.',
+                knowledge: 'observed',
+                status: 'active',
+            })),
+        },
+    }, { chatId });
+    const options = { director: 'standalone' };
+    if (maxVisible !== undefined) options.maxVisible = maxVisible;
+    const legacyText = buildContinuityInjection(state, options);
+    const saved = normalizeContinuityState({
+        ...state,
+        nextTurnInjection: {
+            version: 1,
+            status: 'pending',
+            producerTarget,
+            sourceContinuityDigest: 'continuity-before-world-1',
+            payload: { text: legacyText, visibleThreadIds },
+            settlementProof: {
+                producerTarget,
+                actorLedgerDigest: 'empty-actor-ledger',
+                digest: 'world-only-settlement',
+                orderedResults: [],
+            },
+            createdAt: 1,
+        },
+    }, { chatId });
+    return { legacyText, saved, packet: saved.nextTurnInjection };
+}
+
 async function loadClearLegacyNextTurnSlots(context) {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const start = source.indexOf('function clearLegacyNextTurnSlots() {');
@@ -22,6 +101,73 @@ async function loadClearLegacyNextTurnSlots(context) {
     );
     return sandbox.clearLegacyNextTurnSlots;
 }
+
+test('P3 saved canonical world package projects through the real P4 consumer helper', () => {
+    const zero = persistedWorldPacket({ maxVisible: 0, visibleThreadIds: [] });
+    assert.match(zero.legacyText, /\n/u, 'P3 renderer starts with its legacy multiline shape');
+    assert.doesNotMatch(
+        zero.packet.payload.text,
+        /\n/u,
+        'the production normalizer persists the canonical single-line shape',
+    );
+    const zeroConsumer = buildContinuityConsumerPayload(zero.saved, zero.packet);
+    assert.equal(zeroConsumer.ok, true);
+    assert.equal(zeroConsumer.legacy.rawMaxVisible, 0);
+    assert.doesNotMatch(zeroConsumer.text, /\n/u);
+    assert.match(zeroConsumer.text, /^<World_Continuity_Package> /u);
+    assert.match(zeroConsumer.text, / <\/World_Continuity_Package>$/u);
+
+    const defaultTwo = persistedWorldPacket({
+        maxVisible: undefined,
+        visibleThreadIds: ['thread-converging'],
+    });
+    const defaultConsumer = buildContinuityConsumerPayload(
+        defaultTwo.saved,
+        defaultTwo.packet,
+    );
+    assert.equal(defaultConsumer.ok, true);
+    assert.equal(defaultConsumer.legacy.rawMaxVisible, 2);
+    assert.match(defaultConsumer.text, /thread-converging/u);
+});
+
+test('canonical world projection remains strict about text and visible thread IDs', () => {
+    const fixture = persistedWorldPacket({
+        maxVisible: undefined,
+        visibleThreadIds: ['thread-converging'],
+    });
+    const textTampered = structuredClone(fixture.packet);
+    textTampered.payload.text += ' tampered';
+    assert.equal(
+        buildContinuityConsumerPayload(fixture.saved, textTampered).ok,
+        false,
+    );
+
+    const visibleIdsTampered = structuredClone(fixture.packet);
+    visibleIdsTampered.payload.visibleThreadIds = [];
+    assert.deepEqual(
+        buildContinuityConsumerPayload(fixture.saved, visibleIdsTampered),
+        { ok: false, reason: 'legacy_projection_mismatch' },
+    );
+
+    const oversized = persistedWorldPacket({
+        maxVisible: 4,
+        visibleThreadIds: Array.from(
+            { length: 4 },
+            (_, index) => `thread-converging-${index}`,
+        ),
+        oversized: true,
+    });
+    assert.ok(
+        oversized.legacyText.replace(/\s+/gu, ' ').trim().length > 12000,
+        'fixture must cross the production persistence limit',
+    );
+    assert.equal(oversized.packet.payload.text.length, 12000);
+    assert.deepEqual(
+        buildContinuityConsumerPayload(oversized.saved, oversized.packet),
+        { ok: false, reason: 'legacy_projection_mismatch' },
+        'a truncated persisted renderer cannot regain an unseen tail during P4 projection',
+    );
+});
 
 test('P3 uses Recall then one Advance call; no separate actor proposal model or repair path', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
@@ -68,6 +214,7 @@ test('P4 has one strict next-turn consumer: verified world package plus ticket p
     assert.ok(fallbackAt > providerAt);
     assert.match(consumer, /receipt\?\.placementConfirmed !== true[\s\S]*?receipt\?\.consumerPayloadDigest !== payload\.digest/u);
     assert.match(consumer, /providerId: 'sillytavern-fallback'/u);
+    assert.match(consumer, /recordNextTurnConsumerInspection\(session,[\s\S]*?worldPackage: packet \? 'verified' : 'ticket_only'/u);
     assert.doesNotMatch(
         consumer,
         /runSovereigntyAgentPool|CONTINUITY_INJECTION_NAME|SOCIAL_INJECTION_NAME|SERENDIPITY_INJECTION_NAME/u,
@@ -80,6 +227,124 @@ test('P4 has one strict next-turn consumer: verified world package plus ticket p
     assert.match(providerRegistration, /typeof provider\?\.precompose !== 'function'/u);
     assert.match(providerRegistration, /typeof provider\?\.cleanup !== 'function'/u);
     assert.doesNotMatch(providerRegistration, /window\.|Stitches|TavernDB|combined/u);
+});
+
+test('fresh-chat P3 build, normalize and P4 projection receive the current generation lease after P1 evolution', async () => {
+    const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const identityStart = source.indexOf('function runtimeGenerationSerialFloor(context) {');
+    const identityEnd = source.indexOf('\nfunction cardScopeIdentity(context, character)', identityStart);
+    const verifyStart = source.indexOf('function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope)');
+    const verifyEnd = source.indexOf('\nasync function precomposeNextTurnConsumer(session)', verifyStart);
+    const leaseStart = source.indexOf('async function writeNextTurnConsumerLease(session, scopeDigest, payload, provider, leaseToken = \'\')');
+    const leaseEnd = source.indexOf('\nasync function cleanupNextTurnProvider(active, reason)', leaseStart);
+    assert.ok(identityStart >= 0 && identityEnd > identityStart);
+    assert.ok(verifyStart >= 0 && verifyEnd > verifyStart);
+    assert.ok(leaseStart >= 0 && leaseEnd > leaseStart);
+
+    const previous = {
+        chatId: 'chat-fresh-world', index: 2, messageId: 'message-2', swipeId: 0,
+        generationSerial: 1, generationId: 'generation-1', generationType: 'normal',
+        scopeDigest: 'scope-fresh-world', contentFingerprint: 'content-1',
+    };
+    const oldReply = {
+        mes: 'old accepted reply', is_user: false, is_system: false, swipe_id: 0,
+        extra: {
+            mvu_auto_doctor_source_id: previous.messageId,
+            mvu_auto_doctor_generation_id: previous.generationId,
+            mvu_auto_doctor_generation_serial: previous.generationSerial,
+            mvu_auto_doctor_generation_type: previous.generationType,
+        },
+    };
+    const context = {
+        chatId: previous.chatId,
+        chat: [
+            { mes: 'opening', is_user: false, is_system: false },
+            { mes: 'player one', is_user: true, is_system: false },
+            oldReply,
+            { mes: 'player two', is_user: true, is_system: false },
+        ],
+    };
+    const persistedWorld = persistedWorldPacket({
+        maxVisible: 0,
+        visibleThreadIds: [],
+        producerTarget: previous,
+    });
+    const packet = persistedWorld.packet;
+    const evolvedLedger = { actors: [{ id: 'NPC-P1-NEW', profileStatus: 'ready' }] };
+    const namespace = { actorLedger: evolvedLedger, continuity: persistedWorld.saved };
+    let persistedOptions = null;
+    const sandbox = {
+        currentSwipeInfo: () => null,
+        fingerprint: (value) => `fp:${String(value)}`,
+        actorSovereigntyScopeDigest: (scope) => scope.id,
+        frozenIdentityScopeId: () => 'identity-scope',
+        normalizeActorLedger: (ledger) => ledger,
+        stage3AcceptedTarget: (target) => target,
+        stage3AcceptedTargetsMatch: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+        captureTarget: (_context, index) => {
+            const before = structuredClone(oldReply.extra);
+            const identity = sandbox.ensureRuntimeTargetIdentity(
+                context, oldReply, index, previous.messageId,
+            );
+            assert.deepEqual(oldReply.extra, before, 'P4 read must not rewrite the old producer extra');
+            return { ...previous, ...identity };
+        },
+        stage3PersistedPackageForTarget: (_continuity, ledger, captured, options) => {
+            assert.equal(ledger, evolvedLedger);
+            assert.deepEqual(captured, previous);
+            persistedOptions = structuredClone(options);
+            return options?.allowUnrelatedLedgerEvolution === true ? packet : null;
+        },
+        getContext: () => context,
+        currentActorSovereigntyScope: () => ({ id: previous.scopeDigest }),
+        readChatNamespace: () => namespace,
+        deepClone: (value) => structuredClone(value),
+        activeGenerationSession: null,
+        nextTurnLeaseMatches: (lease, session) => (
+            lease?.state === 'reserved'
+            && lease.generationId === session.id
+            && lease.generationSerial === session.serial
+        ),
+        writeChatNamespace: async (next, _chatId, options) => {
+            if (!options.precondition()) return false;
+            namespace.continuity = structuredClone(next.continuity);
+            return options.contentValidator(namespace);
+        },
+        Date: { now: () => 3 },
+        NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+    };
+    vm.runInNewContext(
+        `${source.slice(identityStart, identityEnd)}\n${source.slice(verifyStart, verifyEnd)}`
+        + `\n${source.slice(leaseStart, leaseEnd)}`
+        + '\nthis.ensureRuntimeTargetIdentity = ensureRuntimeTargetIdentity;'
+        + 'this.verifiedNextTurnWorldPackage = verifiedNextTurnWorldPackage;'
+        + 'this.writeNextTurnConsumerLease = writeNextTurnConsumerLease;',
+        sandbox,
+    );
+    const verified = sandbox.verifiedNextTurnWorldPackage(
+        context, namespace, packet, { id: previous.scopeDigest },
+    );
+    assert.ok(verified);
+    assert.deepEqual(persistedOptions, { allowUnrelatedLedgerEvolution: true });
+    const projection = buildContinuityConsumerPayload(namespace.continuity, verified.packet);
+    assert.equal(projection.ok, true);
+    assert.ok(projection.text);
+
+    const session = {
+        id: 'generation-2', serial: 2, type: 'normal', chatId: previous.chatId,
+        frozenScopeDigest: previous.scopeDigest, start: { index: 3 },
+    };
+    sandbox.activeGenerationSession = session;
+    const lease = await sandbox.writeNextTurnConsumerLease(
+        session,
+        previous.scopeDigest,
+        { digest: 'payload-digest', text: projection.text },
+        null,
+    );
+    assert.equal(lease.ok, true);
+    assert.equal(namespace.continuity.nextTurnInjection.consumerLease.state, 'reserved');
+    assert.equal(namespace.continuity.nextTurnInjection.consumerLease.generationId, session.id);
+    assert.equal(namespace.continuity.nextTurnInjection.consumerLease.generationSerial, session.serial);
 });
 
 test('P4 clears exactly the three retired host slots before the sole consumer is placed', async () => {
