@@ -2014,7 +2014,6 @@ async function retrySovereigntyNow() {
     if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
     return enqueueActorProfiles(latest.index, {
         force: true,
-        includeMaintenance: false,
         expectedTarget: captured,
     });
 }
@@ -3044,6 +3043,7 @@ function doctorRuntimeCriticalFingerprint() {
         finalizeActorProfileRecoveryOutcome.toString(),
         completeActorProfileBatchTransaction.toString(),
         runActorProfileTarget.toString(),
+        enqueueActorProfiles.toString(),
         assistantTargetHasPriorRealPlayerInput.toString(),
         runtimeGenerationSerialFloor.toString(),
         runtimeGenerationSerialForMessage.toString(),
@@ -3061,12 +3061,14 @@ function doctorRuntimeCriticalFingerprint() {
         stage3PreparedPhase1StatesMatch.toString(),
         extractFirstBalancedJsonObject.toString(),
         stage3LocalRecallPacket.toString(),
+        buildContinuityMessages.toString(),
         generateWorldContinuitySingleBatch.toString(),
         actorActionCandidatesFromShard.toString(),
         stage3SettlementProofMatchesTarget.toString(),
         stage3PersistedPackageForTarget.toString(),
         stage3CommittedCheckpointIsPriorTerminal.toString(),
         runContinuityTarget.toString(),
+        enqueueContinuity.toString(),
         commitPreparedWorldCandidate.toString(),
         buildContinuityInjection.toString(),
         buildContinuityConsumerPayload.toString(),
@@ -5139,7 +5141,6 @@ function dispatchAcceptedFinal(envelope) {
     launchScoped('人物档案', (target) => {
         const profileTask = enqueueActorProfiles(envelope.index, {
             expectedTarget: target,
-            includeMaintenance: false,
         });
         void profileTask.then((result) => {
             if (!['atomic_readback', 'no_candidates'].includes(result?.status)) return;
@@ -11847,7 +11848,12 @@ function buildContinuityMessages({
         lastAction: actor.lastAction || null, lastSemanticTurn: actor.lastSemanticTurn || 0,
         nextActionTurn: actor.nextActionTurn || 0, deadlineTurn: actor.deadlineTurn || 0,
         stateFacts: actor.stateFacts || [], capabilities: actor.capabilities || [], hidden: actor.hidden || {},
-        evidence: actor.evidence || [], profile: actor.profileV6 || null,
+        evidence: actor.evidence || [],
+        // The full profile owns durable tickets, commit proofs, locks and
+        // version history.  World reasoning needs the canonical read-only
+        // profile view: all natural narrative sections and readiness facts,
+        // without duplicating persistence machinery in every prompt.
+        profile: actor.profileV6 ? actorProfileV6View(actor) : null,
     });
     const recalledActors = [...(actorLedger?.actors || [])]
         .filter((actor) => recalledActorIds.has(actor.id))
@@ -14424,6 +14430,12 @@ async function enqueueContinuity(targetId, {
             if (!ownsCurrentTask) return result;
             if (result?.status === 'applied') {
                 continuityCompletedKeys.add(dedupeKey);
+                setContinuityStatus(
+                    result?.recovered
+                        ? '世界连续性：本回合已完成，持久记录已确认。'
+                        : '世界连续性：本回合因果已整理并保存。',
+                    'ok',
+                );
             }
             if (result?.status === 'blocked') {
                 setContinuityStatus(`世界连续性未启动：${safeDiagnosticReason(result.reason)}`, '');
@@ -14723,7 +14735,7 @@ async function commitPreparedWorldCandidate(captured, {
 
 async function enqueueActorProfiles(targetId, {
     force = false,
-    includeMaintenance = false,
+    includeMaintenance = null,
     expectedTarget = null,
 } = {}) {
     const context = getContext();
@@ -14791,7 +14803,17 @@ async function enqueueActorProfiles(targetId, {
             if (!freshScope.ok) {
                 return actorProfileTransientResult('stale', { reason: freshScope.reason });
             }
-            return runActorProfileTarget(current, { force, includeMaintenance });
+            // Adult physiology is explicitly opt-in. Once enabled, the queue
+            // itself admits only bounded missing-physiology maintenance rows;
+            // accepted-final stays independent of settings and completed core
+            // modules are not regenerated.
+            const effectiveMaintenance = includeMaintenance == null
+                ? getSettings().actorProfileCompletionMode === 'full_adult'
+                : includeMaintenance === true;
+            return runActorProfileTarget(current, {
+                force,
+                includeMaintenance: effectiveMaintenance,
+            });
         })
         .then(async (result) => {
             if (!actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) return result;
@@ -17771,7 +17793,8 @@ function buildFloatingUi() {
                         <button class="menu_button mvuad-floating-director" type="button">打开导演台</button>
                         <button class="menu_button mvuad-floating-repair" type="button">检查变量</button>
                     <button class="menu_button mvuad-floating-world" type="button">补全人物档案（含历史欠账）</button>
-                        <button class="menu_button mvuad-floating-sovereignty-retry" type="button">立即恢复</button>
+                        <button class="menu_button mvuad-floating-continuity-run" type="button">继续/恢复世界连续性</button>
+                        <button class="menu_button mvuad-floating-sovereignty-retry" type="button">重试当前正文人物档案</button>
                         <button class="menu_button mvuad-floating-sovereignty-restore" type="button">恢复检查点</button>
                         <button class="menu_button mvuad-floating-cancel-task" type="button" hidden>停止当前后台任务</button>
                     </div>
@@ -17847,6 +17870,9 @@ function buildFloatingUi() {
     });
     panel.querySelector('.mvuad-floating-world').addEventListener('click', () => {
         enqueueActorProfiles(null, { force: true, includeMaintenance: true });
+    });
+    panel.querySelector('.mvuad-floating-continuity-run').addEventListener('click', () => {
+        enqueueContinuity(null, { force: true });
     });
     panel.querySelector('.mvuad-floating-sovereignty-retry').addEventListener(
         'click',
@@ -18722,6 +18748,10 @@ function buildSettingsPanel() {
                                     <option value="full_adult">完整＋成人生理</option>
                                 </select>
                             </label>
+                            <div class="mvuad-description">
+                                切换到“完整＋成人生理”后，医生会立即为现有缺项人物补全生理档案；
+                                已完成的其他档案模块不会重新生成。
+                            </div>
                             <label class="mvuad-number">
                                 <span>生成前原创人物票据池容量</span>
                                 <input class="text_pole mvuad-character-ticket-pool-capacity"
@@ -18879,6 +18909,7 @@ function buildSettingsPanel() {
                             <div class="mvuad-actions">
                                 <button class="menu_button mvuad-continuity-open" type="button">打开世界、人物与事件面板</button>
                                 <button class="menu_button mvuad-continuity-run" type="button">补全人物档案（含历史欠账）</button>
+                                <button class="menu_button mvuad-world-run" type="button">继续/恢复世界连续性</button>
                                 <button class="menu_button mvuad-continuity-clear mvuad-danger" type="button">清空世界账本</button>
                             </div>
                             <div class="mvuad-status mvuad-continuity-status" role="status"></div>
@@ -19089,11 +19120,19 @@ function buildSettingsPanel() {
     const profileCompletionMode = wrapper.querySelector('.mvuad-profile-completion-mode');
     profileCompletionMode.value = getSettings().actorProfileCompletionMode;
     profileCompletionMode.addEventListener('change', () => {
-        getSettings().actorProfileCompletionMode = ['off', 'basic', 'full', 'full_adult']
+        const nextMode = ['off', 'basic', 'full', 'full_adult']
             .includes(profileCompletionMode.value)
             ? profileCompletionMode.value
             : 'full';
+        getSettings().actorProfileCompletionMode = nextMode;
         saveSettings();
+        if (nextMode === 'full_adult') {
+            setActorProfileStatus('人物档案：成人生理已启用，正在补全现有人物缺项…', 'busy');
+            void enqueueActorProfiles(null, {
+                force: true,
+                includeMaintenance: true,
+            });
+        }
     });
     const profileSemanticRetries = wrapper.querySelector('.mvuad-profile-semantic-retries');
     profileSemanticRetries.value = String(getSettings().actorProfileSemanticRetries);
@@ -19344,6 +19383,9 @@ function buildSettingsPanel() {
     );
     wrapper.querySelector('.mvuad-continuity-run').addEventListener('click', () => {
         enqueueActorProfiles(null, { force: true, includeMaintenance: true });
+    });
+    wrapper.querySelector('.mvuad-world-run').addEventListener('click', () => {
+        enqueueContinuity(null, { force: true });
     });
     wrapper.querySelector('.mvuad-continuity-open').addEventListener('click', () => {
         showFloatingPanel();

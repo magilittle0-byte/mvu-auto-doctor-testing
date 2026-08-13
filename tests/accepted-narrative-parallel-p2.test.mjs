@@ -1786,6 +1786,7 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
         starts: 0,
         writes: 0,
         autoRetries: 0,
+        statuses: [],
     };
     const sandbox = {
         operationEpoch: 7,
@@ -1858,7 +1859,7 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
             return { status: 'applied' };
         },
         safeDiagnosticReason: (value) => String(value || ''),
-        setContinuityStatus: () => undefined,
+        setContinuityStatus: (...args) => state.statuses.push(args),
         scheduleSovereigntyAutoRetry: () => {
             state.autoRetries += 1;
         },
@@ -1958,6 +1959,10 @@ test('existing continuity queue dedupes event storms and performs zero writes fo
     storm.gate.resolve();
     assert.equal((await first).status, 'applied');
     assert.equal(storm.state.writes, 1);
+    assert.deepEqual(
+        storm.state.statuses.at(-1),
+        ['世界连续性：本回合因果已整理并保存。', 'ok'],
+    );
 
     const mechanism = loadContinuityQueueHarness({
         expected: target,
@@ -1966,6 +1971,16 @@ test('existing continuity queue dedupes event storms and performs zero writes fo
     });
     assert.equal((await mechanism.enqueue()).status, 'applied');
     assert.equal(mechanism.state.starts, 1);
+
+    const recovered = loadContinuityQueueHarness({
+        expected: target,
+        worldResult: { status: 'applied', recovered: true, worldModelCalls: 0 },
+    });
+    assert.equal((await recovered.enqueue()).status, 'applied');
+    assert.deepEqual(
+        recovered.state.statuses.at(-1),
+        ['世界连续性：本回合已完成，持久记录已确认。', 'ok'],
+    );
 
     for (const changed of [
         { contentFingerprint: 'accepted-b' },

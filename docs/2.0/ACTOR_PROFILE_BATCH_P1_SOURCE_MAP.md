@@ -122,7 +122,7 @@ public runContinuity / enqueueContinuity / runContinuityTarget
 | 数据库 important role 行键与整行填表 + `actor-ledger-core.mjs/discoverActorsFromTurnSources(modelProfileDiscoveries)` | **T：**复用数据库非空唯一 display label/行键与整行填表语义，不要求户籍式姓名；**A：**Doctor 先用 route-only identity probe 只读 accepted narrative、registered/excluded 索引，允许正文逐字姓名、代号、编号、职业或描述性称谓作为兼容 `name` 行键，再用既有 literal sourceAnchor、SourceRef、ActorRef、Registry/CAS/readback 加强来源安全。不增加姓名扫描器、parser、store 或状态机；无效/重复锚点进入 unresolved。|
 | `actor-ledger-core.mjs/actorLedgerDigest` 与 `actorProfilePendingWriteSetDigest` | canonical actorLedger CAS；pending write-set 投影包含 ActorRef/schema/commitId/profileDigest/pending/readback=false/not-ready/locks/manualOverrides 和 preparedFieldRevision |
 | `actor-ledger-core.mjs/actorProfileReadinessInLedger` | 单 actor helper 只作第一层快速否定；持久 ready 必须从 final ledger 重建整批 pending 投影并核对 verification、当前 ActorRef/schema/profile digest |
-| `actor-profile-v6-core.mjs/selectActorProfileCompletionCandidates` | current-source initialActorIds 不限人数、不受 8/24 截断；历史欠账只在显式 maintenance 下受 actorProfileBatchCapacity 预算 |
+| `actor-profile-v6-core.mjs/selectActorProfileCompletionCandidates` | current-source initialActorIds 不限人数、不受 8/24 截断；历史欠账只在 maintenance 下受 actorProfileBatchCapacity 预算。用户明确切换到 `full_adult` 后，既有核心档案会作为生理缺项 maintenance 候选，只运行 `physiology_optional`，不重生已完成模块。 |
 | `actor-profile-v6-core.mjs/actorProfileCompletionGroupPlan + buildActorProfileModuleGroupMessages` | 从 fresh canonical profile 选择 missing/refresh module targets；每个兼容 group 的 Notes 只注入一次；隐藏 JSON 只作人物/module 路由，模块值保持自然中文；后续 group 读取同一 transaction working row 与权威投影 |
 | `actor-profile-v6-core.mjs/parseActorProfileModuleGroupOutput` | 去围栏/前后文、宽容标签引号/中文标点/alias；严格拒绝重复、越界、缺 target/module；不按中文语义关键词猜槽，不把旧整篇档案 parser 带回生产协议 |
 | `actor-profile-batch-core.mjs/completeActorProfileBatchTransaction` | identity bootstrap → dependency-ordered groups；每组先在 group-local clone 验完再并入 transaction working clone；失败只携真实安全反馈重试该组；任一终局失败整批 S0；全部成功才进入 pending/final 两阶段读回并 ready |
@@ -135,7 +135,7 @@ public runContinuity / enqueueContinuity / runContinuityTarget
 - 1、3、6、超过 3、超过 24 个本回合新人物：全部 current-source initial 进入同一个正常批次，不设人物上限，不拆成人均调用。
 - Registry 已成功保存但档案批次失败：显式手动 retry 通过 Registry.sourceRefs 与 captured source 的全字段精确匹配找回未 ready ActorRef；不按姓名猜，不提升历史来源。
 - 历史欠账：自动 accepted-final 不处理；只有手动 includeMaintenance=true 时才按可配置预算加入同一批次。
-- 正常 full 批次最多三个兼容 group 调用，`full_adult` 最多四个；已 ready module 不重调。每个失败 group 仅允许携其真实解析/结构错误做一次定向重试，先前成功 group 只缓存在本次 transaction 内存；运输失败只由 route/failover 处理，不伪装成语义成功。
+- 正常 full 批次最多两个兼容 group 调用，`full_adult` 最多三个；已 ready module 不重调。每个失败 group 仅允许携其真实解析/结构错误做一次定向重试，先前成功 group 只缓存在本次 transaction 内存；运输失败只由 route/failover 处理，不伪装成语义成功。
 
 ## 权威、同票与完整度
 

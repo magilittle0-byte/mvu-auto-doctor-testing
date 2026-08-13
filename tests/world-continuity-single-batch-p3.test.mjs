@@ -28,6 +28,23 @@ import {
 
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 
+test('world prompts reuse the canonical read-only profile view and expose a separate recovery control', () => {
+    const messages = sourceSection(
+        'function buildContinuityMessages({',
+        'async function generateWorldContinuitySingleBatch',
+    );
+    const promptView = messages.slice(
+        messages.indexOf('const actorPromptView = (actor) => ({'),
+        messages.indexOf('const recalledActors ='),
+    );
+    assert.match(promptView, /profile: actor\.profileV6 \? actorProfileV6View\(actor\) : null/u);
+    assert.doesNotMatch(promptView, /profile: actor\.profileV6\s*(?:\|\||[,}])/u);
+    assert.match(source, /mvuad-floating-continuity-run[^>]*>继续\/恢复世界连续性</u);
+    assert.match(source, /mvuad-world-run[^>]*>继续\/恢复世界连续性</u);
+    assert.match(source, /mvuad-floating-continuity-run'[\s\S]*?enqueueContinuity\(null, \{ force: true \}\)/u);
+    assert.match(source, /mvuad-world-run'[\s\S]*?enqueueContinuity\(null, \{ force: true \}\)/u);
+});
+
 function sourceSection(start, end) {
     const from = source.indexOf(start);
     const to = source.indexOf(end, from + start.length);

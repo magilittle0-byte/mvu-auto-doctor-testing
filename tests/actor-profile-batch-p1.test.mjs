@@ -2815,3 +2815,21 @@ test('production path keeps current-source profiles untruncated and commits thro
         'completeActorProfilesForTurn',
     ]) assert.doesNotMatch(continuityFunction, new RegExp(p1Step, 'u'));
 });
+
+test('enabling adult physiology schedules bounded maintenance instead of leaving existing dossiers unchanged', async () => {
+    const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const settings = source.slice(
+        source.indexOf("const profileCompletionMode = wrapper.querySelector('.mvuad-profile-completion-mode')"),
+        source.indexOf("const profileSemanticRetries = wrapper.querySelector('.mvuad-profile-semantic-retries')"),
+    );
+    assert.match(settings, /nextMode === 'full_adult'/u);
+    assert.match(settings, /enqueueActorProfiles\(null, \{[\s\S]*?force: true,[\s\S]*?includeMaintenance: true/u);
+    const queue = source.slice(
+        source.indexOf('async function enqueueActorProfiles'),
+        source.indexOf('async function confirmDangerousAction'),
+    );
+    assert.match(
+        queue,
+        /const effectiveMaintenance = includeMaintenance == null[\s\S]*?actorProfileCompletionMode === 'full_adult'[\s\S]*?includeMaintenance: effectiveMaintenance/u,
+    );
+});

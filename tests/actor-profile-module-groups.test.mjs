@@ -41,6 +41,21 @@ test('full and full_adult plans have bounded compatible groups instead of one ca
     ]);
 });
 
+test('adult upgrade of a completed core dossier requests physiology only', () => {
+    const coreSections = Object.fromEntries([
+        'person', 'personality', 'history', 'currentState',
+        'relationshipsMotives', 'knowledgeCapabilitiesResources',
+    ].map((key) => [key, { text: prose(key) }]));
+    const upgrade = actor('NPC-adult-upgrade', {
+        completionMode: 'full_adult',
+        profileFormat: 'narrative-v1',
+        narrativeSections: coreSections,
+    }, 'full_adult');
+    const plan = actorProfileCompletionGroupPlan([upgrade], { allowDiscovery: false });
+    assert.deepEqual(plan.map((group) => group.key), ['physiology_optional']);
+    assert.deepEqual(plan[0].targets.physiology.map((row) => row.actorId), ['NPC-adult-upgrade']);
+});
+
 test('group parser accepts fences, surrounding prose, unheaded Chinese values, aliases and loose attributes', () => {
     const group = actorProfileCompletionGroupPlan([actor()], { allowDiscovery: false })
         .find((entry) => entry.key === 'character_core');

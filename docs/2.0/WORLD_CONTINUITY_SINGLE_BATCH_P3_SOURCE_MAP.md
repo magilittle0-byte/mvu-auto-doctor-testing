@@ -9,7 +9,7 @@ ActorLedger、数据库、receipt 数组、第二 store 或旧 `continuityInject
 
 | 机制 | 成熟实现 | 分类 | P3 接法 |
 |---|---|---|---|
-| 只读召回 | Stitches Reborn V 的 `recall` task（先选支持材料）与 TavernDB `targetSheetKeys -> prepareAIInput_ACU`（宿主先锁定稳定目标，再把目标材料送入同组调用） | 最小适配 | Doctor 的 ActorRef、线程ID和世界轨ID已经是结构化稳定行键，本地调度器也已算出 due/selected/mustInclude；因此 `stage3LocalRecallPacket` 直接物化这些目标及其关联线程，不再用第二次模型调用重新选择。没有新增 store、parser 或状态机。 |
+| 只读召回 | Stitches Reborn V 的 `recall` task（先选支持材料）、TavernDB `targetSheetKeys -> prepareAIInput_ACU`（宿主先锁定稳定目标，再把目标材料送入同组调用），以及既有 `actorProfileV6View` 只读档案投影 | 原样复用 + 最小适配 | Doctor 的 ActorRef、线程ID和世界轨ID已经是结构化稳定行键，本地调度器也已算出 due/selected/mustInclude；因此 `stage3LocalRecallPacket` 直接物化这些目标及其关联线程，不再用第二次模型调用重新选择。Advance 对人物读取现有档案视图中的全部自然叙事模块与就绪事实，不再重复注入完整档案内的票据、提交证明、锁和版本历史；持久档案本身不裁剪、不限人物数。没有新增 store、parser 或状态机。 |
 | 召回完整性 | 既有 `scheduleActorTurns`、`scheduleWorldLanes` 与 Actor/Thread/Lane 持久ID | 原样复用 | 所有 must actor、must thread、must lane 必须存在于 fresh ledger；本地再加入已调度人物关联线程和已选世界轨来源线程，缺任一权威ID即 fail-closed。召回包带确定性 digest，只读且零写。 |
 | 世界推进 | Stitches Reborn V 的 `act,scene` 推进任务、既有 `generateWorldContinuitySingleBatch` | 最小适配 | Advance 读取 canonical recall packet 与最终正文；一次输出 NPC proposals、按 actorId 的裁决和世界/线程变化，`failover:false`、`maxFailovers:0`。 |
 | Advance 生命周期 | 既有 `callModel`、`activeModelControllers` 取消链与 P1 `noTimeout:true` 调用形状；现有 `world_call_reserved -> world_candidate_prepared` checkpoint | 原样复用 + 最小适配 | Advance 不再把 30 秒 sovereignty hard timeout 当作用户取消；它复用 P1 的无计时器调用路径，仍由同一个 AbortSignal/取消按钮立即终止，真实运输错误仍原样失败且绝不 failover/重演。长调用保持在既有 reserved 阶段，成功响应后才沿原子 prepared/readback 继续，因此不新增恢复状态或第二次世界调用。 |
@@ -30,7 +30,7 @@ ActorLedger、数据库、receipt 数组、第二 store 或旧 `continuityInject
 
 P1/P3 的 current-source Registry lookup 统一复用既有 `actorProfileRecoverySourceMatches`。Registry 的持久 SourceRef 只保存 identity/scope 的规范键，因此比较前仅去掉未持久的冗余 scope 对象；`identityScopeId`、`scopeDigest`、generation、swipe 与正文 `contentFingerprint` 仍严格。宿主在 MVU/机制块写回后产生的 full `hash` 漂移可恢复，但正文、身份或作用域漂移仍 fail-closed；没有新增 matcher、store 或兼容身份猜测。
 
-自动 accepted-final 仅在 P1 完整档案 readback 或严格 `no_candidates` 后才唤醒 P3；P3 自己 fresh-read ledger，不把瞬时 P1 result 当持久权威。手动世界入口直接 `enqueueContinuity(force)`，也只凭同一 fresh durable ledger gate 准入，不重跑 P1；手动人物档案入口才会重试 P1。
+自动 accepted-final 仅在 P1 完整档案 readback 或严格 `no_candidates` 后才唤醒 P3；P3 自己 fresh-read ledger，不把瞬时 P1 result 当持久权威。界面中的“继续/恢复世界连续性”直接 `enqueueContinuity(force)`，也只凭同一 fresh durable ledger gate 准入，不重跑 P1；“补全/重试人物档案”才会运行 P1。P3 `applied` 后必须把用户状态收口为“已保存”或“持久记录已确认”，不能残留蓝色 busy。
 
 P3 每次自行 fresh-read ActorRegistry/ActorLedger/Profile：
 
