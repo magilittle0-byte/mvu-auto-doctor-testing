@@ -70,6 +70,125 @@ function loadWorldRecallGenerator(callModel) {
     return sandbox.generateRecall;
 }
 
+function loadCancelledWorldReservationHarness({ checkpointPhase = 'world_call_reserved' } = {}) {
+    const target = {
+        chatId: 'chat-cancel-reserved', index: 4, logicalIndex: 4,
+        messageId: 'message-4', swipeId: 0, generationSerial: 4, generation: 4,
+        generationId: 'generation-4', generationType: 'normal',
+        identityScopeId: 'scope-id', scopeDigest: 'scope-cancel',
+        contentFingerprint: 'content-4', contentHash: 'content-4',
+    };
+    const actionTarget = { ...target };
+    const state = {
+        writes: 0,
+        context: { chatId: target.chatId },
+        currentTarget: structuredClone(target),
+        namespace: {
+            fieldRevisions: { continuityCheckpoint: 7 },
+            actorLedger: { actionAttempts: [] },
+            continuity: { nextTurnInjection: null },
+            continuityCheckpoint: {
+                stage3Phase: checkpointPhase,
+                target: structuredClone(actionTarget),
+                stage3ProducerTarget: structuredClone(target),
+            },
+        },
+    };
+    const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const sandbox = {
+        getContext: () => state.context,
+        captureTarget: () => structuredClone(state.currentTarget),
+        readChatNamespace: () => structuredClone(state.namespace),
+        normalizeActorLedger: (value) => structuredClone(value || { actionAttempts: [] }),
+        actorActionTargetOf: () => structuredClone(actionTarget),
+        stage3AcceptedTarget: (value) => value ? structuredClone(value) : null,
+        actorActionTargetMatches: exact,
+        stage3AcceptedTargetsMatch: exact,
+        stage3FieldState: (namespace, field) => ({
+            revision: namespace.fieldRevisions[field],
+            digest: JSON.stringify(namespace[field]),
+        }),
+        writeChatNamespace: async (candidate, chatId, options) => {
+            if (chatId !== state.context.chatId || options.precondition() !== true) return false;
+            if (JSON.stringify(state.namespace.continuityCheckpoint)
+                !== options.expectedFieldStates.continuityCheckpoint.digest) return false;
+            state.writes += 1;
+            state.namespace = structuredClone(candidate);
+            return options.contentValidator(state.namespace) === true;
+        },
+    };
+    const code = sourceSection(
+        'function worldCallReservedForUserCancellation(namespace, captured) {',
+        "async function cancelRunningSovereigntyTasks(reason = 'user_cancelled') {",
+    );
+    vm.runInNewContext(
+        `${code}\nthis.matches = worldCallReservedForUserCancellation;`
+        + 'this.clear = clearUserCancelledWorldCallReservation;',
+        sandbox,
+    );
+    return { state, target, actionTarget, matches: sandbox.matches, clear: sandbox.clear };
+}
+
+function loadProductionCallModel(callDirectModel) {
+    const activeModelControllers = new Set();
+    const profile = {
+        provider: 'direct', viaBackend: false, maxTokens: 4096,
+        model: 'synthetic-local-model', name: 'synthetic-local-route',
+    };
+    const sandbox = {
+        AbortController,
+        setTimeout,
+        clearTimeout,
+        MAX_MODEL_TIMEOUT_MS: 1000,
+        MIN_MODEL_TIMEOUT_MS: 1,
+        DEFAULTS: { maxTokens: 4096 },
+        generationSerial: 1,
+        lastPromptSnapshot: null,
+        activeModelControllers,
+        getSettings: () => ({ modelTimeoutMs: 10, maxTokens: 4096 }),
+        selectChannelConnectionProfile: () => ({ profile, slotIndex: 0 }),
+        modelConnectionKey: () => 'synthetic-local-route',
+        syncTaskCancelButtons: () => {},
+        scopedModelMessages: (messages) => messages,
+        modelInstructionModule: () => 'world',
+        normalizeConnectionMaxTokens: (value) => value,
+        modelInputLengthBucket: () => 'tiny',
+        renderPromptSnapshot: () => {},
+        modelConnectionScheduler: { enqueue: async (_key, run) => run() },
+        modelTaskPriority: () => 0,
+        modelFailureKind: (error, controller) => (
+            controller?.signal?.aborted || error?.name === 'AbortError'
+                ? 'cancelled' : 'transport-error'
+        ),
+        safeRouteDiagnostic: ({ failureKind }) => ({ failureKind }),
+        structuredOutputShape: () => ({}),
+        channelConnectionProfiles: () => [],
+        recordModelCall: () => {},
+        markModelRouteHealth: () => {},
+        recordModelDiagnostic: () => {},
+        normalizedProviderUsage: () => ({}),
+        callDirectModel,
+        extractFirstBalancedJsonObject,
+        deepClone: (value) => structuredClone(value),
+        renderSovereigntyHealth: () => {},
+        updateFloatingOrb: () => {},
+        recordOperation: () => {},
+    };
+    const withTimeoutSource = sourceSection(
+        'async function withTimeout(promise, milliseconds, label, {',
+        'function modelInputLengthBucket(messages) {',
+    );
+    const callSource = sourceSection(
+        'function assertUsableModelOutput(output, options = {}) {',
+        'async function probeModelChannelConnections(channel =',
+    );
+    vm.runInNewContext(
+        `${withTimeoutSource}\n${callSource}\nthis.callModelUnderTest = callModel;`,
+        sandbox,
+    );
+    return { callModel: sandbox.callModelUnderTest, activeModelControllers };
+}
+
 function loadStage3PreparedPhase1RevisionGate() {
     const fieldState = sourceSection(
         'function stage3FieldState(namespace, field) {',
@@ -273,6 +392,7 @@ function loadWorldGenerator(callModel) {
     const sandbox = {
         callModel,
         parseContinuityOutput,
+        stage3AcceptedTarget: (value) => value ? structuredClone(value) : null,
         validateWorldAdjudicationBatch: () => ({ valid: true, errors: [] }),
         freshFrozenScopeGuard: async (captured) => (
             captured?.scopeDigest
@@ -426,7 +546,8 @@ test('0/1/3/6 world events each use exactly one production world-model call', as
         calls.push({ messages, options });
         assert.equal(options.failover, false);
         assert.equal(options.maxFailovers, 0);
-        assert.equal(options.timeoutMs, 0);
+        assert.equal(options.noTimeout, true);
+        assert.equal(options.timeoutMs, undefined);
         const output = validWorldOutput();
         assert.equal(options.validateOutput(output), true);
         return output;
@@ -444,6 +565,153 @@ test('0/1/3/6 world events each use exactly one production world-model call', as
         });
         assert.equal(calls.length - before, 1, `${count} events must remain one batch`);
     }
+});
+
+test('Advance outlives the old hard timeout but remains immediately cancellable', async () => {
+    let resolved = false;
+    const generateLong = loadWorldGenerator(async (_messages, options) => {
+        assert.equal(options.noTimeout, true);
+        assert.equal(options.failover, false);
+        await new Promise((resolve) => setTimeout(resolve, 45));
+        resolved = true;
+        return validWorldOutput();
+    });
+    const startedAt = Date.now();
+    const output = await generateLong([], {
+        captured,
+        settings: { ...generatorSettings, sovereigntyHardTimeoutMs: 30 },
+        isCurrent: () => true,
+    });
+    assert.equal(resolved, true);
+    assert.ok(Date.now() - startedAt >= 30, 'the former hard timeout must not win the race');
+    assert.equal(typeof output, 'string');
+
+    const controller = new AbortController();
+    let calls = 0;
+    const generateCancelled = loadWorldGenerator((_messages, options) => {
+        calls += 1;
+        assert.equal(options.noTimeout, true);
+        return new Promise((_resolve, reject) => {
+            const cancel = () => reject(Object.assign(new Error('cancelled by user'), {
+                name: 'AbortError',
+            }));
+            options.signal.addEventListener('abort', cancel, { once: true });
+            if (options.signal.aborted) cancel();
+        });
+    });
+    const pending = generateCancelled([], {
+        captured,
+        settings: { ...generatorSettings, sovereigntyHardTimeoutMs: 30 },
+        signal: controller.signal,
+        isCurrent: () => true,
+    });
+    controller.abort('cancelled by user');
+    await assert.rejects(pending, /cancelled by user/u);
+    assert.equal(calls, 1);
+});
+
+test('production callModel honors noTimeout while its existing controller still cancels', async () => {
+    const long = loadProductionCallModel(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return 'resolved after configured timeout';
+    });
+    const startedAt = Date.now();
+    assert.equal(await long.callModel([{ role: 'user', content: 'synthetic' }], {
+        task: 'synthetic world lifecycle', channel: 'fast', noTimeout: true,
+        failover: false, maxFailovers: 0,
+    }), 'resolved after configured timeout');
+    assert.ok(Date.now() - startedAt >= 10);
+    assert.equal(long.activeModelControllers.size, 0);
+
+    const cancelled = loadProductionCallModel((_messages, { signal }) => (
+        new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), {
+                name: 'AbortError',
+            })), { once: true });
+        })
+    ));
+    const pending = cancelled.callModel([{ role: 'user', content: 'synthetic' }], {
+        task: 'synthetic world cancellation', channel: 'fast', noTimeout: true,
+        failover: false, maxFailovers: 0,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(cancelled.activeModelControllers.size, 1);
+    for (const controller of cancelled.activeModelControllers) controller.abort('user_cancelled');
+    await assert.rejects(pending, (error) => (
+        error?.name === 'AbortError' && error?.failureKind === 'cancelled'
+    ));
+    assert.equal(cancelled.activeModelControllers.size, 0);
+});
+
+test('explicit user cancellation clears only an exact owned empty reservation', async () => {
+    const exact = loadCancelledWorldReservationHarness();
+    assert.equal(exact.matches(exact.state.namespace, exact.target), true);
+    assert.equal(await exact.clear(exact.target), true);
+    assert.equal(exact.state.writes, 1);
+    assert.equal(exact.state.namespace.continuityCheckpoint, null);
+
+    let recallCalls = 0;
+    let advanceCalls = 0;
+    const recall = loadWorldRecallGenerator(async (_messages, options) => {
+        recallCalls += 1;
+        assert.equal(options.noTimeout, true);
+        return JSON.stringify({ actorIds: [], threadIds: [], laneIds: [], reasons: [] });
+    });
+    const advance = loadWorldGenerator(async (_messages, options) => {
+        advanceCalls += 1;
+        assert.equal(options.noTimeout, true);
+        return validWorldOutput();
+    });
+    await recall([], {
+        captured: exact.target, settings: generatorSettings,
+        mustActorIds: [], mustThreadIds: [], mustLaneIds: [],
+        availableActorIds: [], availableThreadIds: [], availableLaneIds: [], worldbookKeys: [],
+        isCurrent: () => true,
+    });
+    await advance([], { captured: exact.target, settings: generatorSettings, isCurrent: () => true });
+    assert.equal(recallCalls, 1);
+    assert.equal(advanceCalls, 1);
+
+    const drift = loadCancelledWorldReservationHarness();
+    drift.state.currentTarget.generationId = 'generation-drift';
+    assert.equal(await drift.clear(drift.target), false);
+    assert.equal(drift.state.writes, 0);
+    assert.equal(drift.state.namespace.continuityCheckpoint.stage3Phase, 'world_call_reserved');
+
+    const prepared = loadCancelledWorldReservationHarness({ checkpointPhase: 'world_candidate_prepared' });
+    assert.equal(await prepared.clear(prepared.target), false);
+    assert.equal(prepared.state.writes, 0);
+    assert.equal(prepared.state.namespace.continuityCheckpoint.stage3Phase, 'world_candidate_prepared');
+
+    const withAttempt = loadCancelledWorldReservationHarness();
+    withAttempt.state.namespace.actorLedger.actionAttempts.push({
+        id: 'ATT-1', target: structuredClone(withAttempt.actionTarget),
+    });
+    assert.equal(await withAttempt.clear(withAttempt.target), false);
+    assert.equal(withAttempt.state.writes, 0);
+
+    const cancelSource = sourceSection('function cancelCurrentOperations() {', 'function promptSnapshotText(');
+    assert.match(cancelSource, /mvuadWorldReservationTarget/u);
+    assert.match(cancelSource, /invalidateOperations\(/u);
+    assert.match(cancelSource, /clearUserCancelledWorldCallReservation/u);
+    assert.ok(
+        cancelSource.indexOf('invalidateOperations(')
+            < cancelSource.indexOf('clearUserCancelledWorldCallReservation('),
+        'the controller is aborted and the epoch invalidated before the exact reserved cleanup runs',
+    );
+});
+
+test('transport failure preserves reserved recovery authority for manual reconciliation', async () => {
+    const reserved = loadCancelledWorldReservationHarness();
+    const advance = loadWorldGenerator(async () => {
+        throw new Error('transport down');
+    });
+    await assert.rejects(
+        advance([], { captured: reserved.target, settings: generatorSettings, isCurrent: () => true }),
+        /transport down/u,
+    );
+    assert.equal(reserved.state.namespace.continuityCheckpoint.stage3Phase, 'world_call_reserved');
+    assert.equal(reserved.state.writes, 0);
 });
 
 test('transport failure, validation failure, and stale targets never trigger hidden failover', async () => {
@@ -1840,6 +2108,8 @@ test('P3 Recall shares the configured world output budget and remains one fail-c
     });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].maxTokens, 12_288);
+    assert.equal(calls[0].noTimeout, true);
+    assert.equal(calls[0].timeoutMs, undefined);
     assert.equal(calls[0].failover, false);
     assert.equal(calls[0].maxFailovers, 0);
     assert.deepEqual(Array.from(packet.actorIds), ['actor-must']);

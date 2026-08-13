@@ -2479,6 +2479,66 @@ function invalidateOperations(reason = '', { persistProgress = true } = {}) {
     if (reason) console.info('[MVU Auto Doctor] 旧任务已失效：', reason);
 }
 
+function worldCallReservedForUserCancellation(namespace, captured) {
+    const checkpoint = namespace?.continuityCheckpoint;
+    const actionTarget = actorActionTargetOf(captured);
+    const producerTarget = stage3AcceptedTarget(captured);
+    const ledger = normalizeActorLedger(namespace?.actorLedger, {
+        chatId: captured?.chatId || '',
+        identityScopeId: captured?.identityScopeId || '',
+        scopeDigest: captured?.scopeDigest || '',
+    });
+    const exactAttempts = (ledger?.actionAttempts || []).filter((attempt) => (
+        actorActionTargetMatches(attempt?.target, actionTarget)
+    ));
+    const packet = namespace?.continuity?.nextTurnInjection;
+    return checkpoint?.stage3Phase === 'world_call_reserved'
+        && actorActionTargetMatches(checkpoint?.target, actionTarget)
+        && stage3AcceptedTargetsMatch(checkpoint?.stage3ProducerTarget, producerTarget)
+        && exactAttempts.length === 0
+        && !stage3AcceptedTargetsMatch(packet?.producerTarget, producerTarget);
+}
+
+async function clearUserCancelledWorldCallReservation(captured) {
+    const context = getContext();
+    if (!captured?.chatId || context?.chatId !== captured.chatId) return false;
+    const fresh = captureTarget(context, captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    });
+    if (!stage3AcceptedTargetsMatch(stage3AcceptedTarget(fresh), stage3AcceptedTarget(captured))) {
+        return false;
+    }
+    const namespace = readChatNamespace(context);
+    if (!worldCallReservedForUserCancellation(namespace, captured)) return false;
+    const expectedFieldStates = {
+        continuityCheckpoint: stage3FieldState(namespace, 'continuityCheckpoint'),
+    };
+    namespace.continuityCheckpoint = null;
+    return writeChatNamespace(namespace, captured.chatId, {
+        fields: ['continuityCheckpoint'],
+        durable: true,
+        requireReadback: true,
+        expectedFieldStates,
+        precondition: () => {
+            const currentContext = getContext();
+            if (currentContext?.chatId !== captured.chatId) return false;
+            const currentTarget = captureTarget(currentContext, captured.index, {
+                frozenScope: captured.actorSovereigntyScope,
+                unscoped: !captured.scopeDigest,
+            });
+            return stage3AcceptedTargetsMatch(
+                stage3AcceptedTarget(currentTarget),
+                stage3AcceptedTarget(captured),
+            ) && worldCallReservedForUserCancellation(
+                readChatNamespace(currentContext),
+                captured,
+            );
+        },
+        contentValidator: (persisted) => persisted?.continuityCheckpoint == null,
+    });
+}
+
 async function cancelRunningSovereigntyTasks(reason = 'user_cancelled') {
     const context = getContext();
     const chatId = context?.chatId || '';
@@ -2523,6 +2583,10 @@ function cancelCurrentOperations() {
         toast('info', '当前没有正在执行的模型任务。');
         return false;
     }
+    const cancelledWorldTargets = [...activeModelControllers]
+        .map((controller) => controller?.mvuadWorldReservationTarget)
+        .filter(Boolean)
+        .map((target) => deepClone(target));
     void cancelRunningSovereigntyTasks('user_cancelled');
     invalidateOperations('用户停止了当前后台任务');
     setStatus('已停止当前后台任务；迟到结果不会写入聊天或变量', '');
@@ -2531,6 +2595,9 @@ function cancelCurrentOperations() {
     if (latestContinuityKind === 'busy') setContinuityStatus('世界连续性：本次处理已取消', '');
     if (latestForumKind === 'busy') setForumStatus('论坛：本次处理已取消', '');
     toast('info', '已停止当前后台任务；若上游不支持取消，迟到结果也会被安全丢弃。');
+    for (const target of cancelledWorldTargets) {
+        void clearUserCancelledWorldCallReservation(target);
+    }
     return true;
 }
 
@@ -2966,6 +3033,9 @@ function doctorRuntimeCriticalFingerprint() {
     return `runtime-critical:${fingerprint([
         VERSION,
         actorProfileRecoveryCriticalFingerprint(),
+        callModel.toString(),
+        worldCallReservedForUserCancellation.toString(),
+        clearUserCancelledWorldCallReservation.toString(),
         verifyPersistedChatNamespace.toString(),
         writeChatNamespace.toString(),
         rebaseActorSovereigntyFieldWriteAfterMigration.toString(),
@@ -2992,6 +3062,7 @@ function doctorRuntimeCriticalFingerprint() {
         extractFirstBalancedJsonObject.toString(),
         stage3RecallSelection.toString(),
         generateWorldRecallPacket.toString(),
+        generateWorldContinuitySingleBatch.toString(),
         actorActionCandidatesFromShard.toString(),
         stage3SettlementProofMatchesTarget.toString(),
         stage3PersistedPackageForTarget.toString(),
@@ -8004,6 +8075,12 @@ async function callModel(messages, options = {}) {
         )
         : timeoutMs;
     const controller = new AbortController();
+    if (options.worldReservationTarget) {
+        Object.defineProperty(controller, 'mvuadWorldReservationTarget', {
+            value: deepClone(options.worldReservationTarget),
+            enumerable: false,
+        });
+    }
     const externalSignal = options.signal || null;
     const abortFromExternal = () => controller.abort(
         externalSignal?.reason || '模型任务已被上游取消',
@@ -11539,7 +11616,7 @@ async function generateWorldRecallPacket(messages, {
         // connection layer still applies its own max-token ceiling, including
         // for reasoning models whose hidden reasoning consumes this budget.
         maxTokens: settings?.continuityMaxTokens,
-        timeoutMs: settings?.sovereigntyHardTimeoutMs,
+        noTimeout: true,
         task: '活世界召回', channel: 'fast', instructionModule: 'world_recall',
         targetIndex: captured.index, jsonMode: true, failover: false, maxFailovers: 0,
         validateOutput: (candidate) => stage3RecallSelection(candidate, {
@@ -11960,7 +12037,12 @@ async function generateWorldContinuitySingleBatch(messages, {
     }
     const output = await callModel(messages, {
         maxTokens: settings.continuityMaxTokens,
-        timeoutMs: runUntilCancelled ? 0 : settings.sovereigntyHardTimeoutMs,
+        // Advance owns a durable world_call_reserved checkpoint and must stay
+        // in flight until it returns, raises a real transport error, or the
+        // existing model-task controller is explicitly cancelled. Reuse P1's
+        // no-timeout callModel path; this does not add a second model call.
+        noTimeout: true,
+        worldReservationTarget: stage3AcceptedTarget(captured),
         task: '活世界整理',
         channel: 'fast',
         instructionModule: 'world',

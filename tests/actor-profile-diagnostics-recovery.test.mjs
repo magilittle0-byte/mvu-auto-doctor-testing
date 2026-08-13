@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { fingerprint } from '../core.mjs';
 import { createDoctorRuntimePresentation, createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
@@ -401,6 +402,9 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
         'function diagnosticPayload',
     );
     assert.match(fingerprintSource, /actorProfileRecoveryCriticalFingerprint\(\)/u);
+    assert.match(fingerprintSource, /callModel\.toString\(\)/u);
+    assert.match(fingerprintSource, /worldCallReservedForUserCancellation\.toString\(\)/u);
+    assert.match(fingerprintSource, /clearUserCancelledWorldCallReservation\.toString\(\)/u);
     assert.match(fingerprintSource, /finalizeActorProfileRecoveryOutcome\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3NoActorPermitMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3LedgerReadbackGate\.toString\(\)/u);
@@ -420,6 +424,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /extractFirstBalancedJsonObject\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3RecallSelection\.toString\(\)/u);
     assert.match(fingerprintSource, /generateWorldRecallPacket\.toString\(\)/u);
+    assert.match(fingerprintSource, /generateWorldContinuitySingleBatch\.toString\(\)/u);
     assert.match(fingerprintSource, /actorActionCandidatesFromShard\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3SettlementProofMatchesTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3PersistedPackageForTarget\.toString\(\)/u);
@@ -436,6 +441,20 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /commitNextTurnConsumer\.toString\(\)/u);
     assert.match(fingerprintSource, /bindEvents\.toString\(\)/u);
     assert.doesNotMatch(fingerprintSource, /[0-9a-f]{7,40}/u);
+});
+
+test('changing the model-controller world reservation ownership changes the runtime manifest input', () => {
+    const callModelSource = sourceBetween(
+        indexSource,
+        'async function callModel',
+        'async function probeModelChannelConnections',
+    );
+    const withoutReservationOwnership = callModelSource.replace(
+        /\s*if \(options\.worldReservationTarget\) \{[\s\S]*?\n\s*\}\n/u,
+        '\n',
+    );
+    assert.notEqual(withoutReservationOwnership, callModelSource);
+    assert.notEqual(fingerprint(withoutReservationOwnership), fingerprint(callModelSource));
 });
 
 test('changing any recovery helper implementation changes the critical manifest fingerprint', () => {
