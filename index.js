@@ -2982,6 +2982,9 @@ function doctorRuntimeCriticalFingerprint() {
         dispatchAcceptedFinal.toString(),
         stage3NoActorPermitMatches.toString(),
         stage3LedgerReadbackGate.toString(),
+        actorActionTargetOf.toString(),
+        stage3PreparedWorldCheckpoint.toString(),
+        stage3PreparedWorldCheckpointMatches.toString(),
         extractFirstBalancedJsonObject.toString(),
         stage3RecallSelection.toString(),
         runContinuityTarget.toString(),
@@ -13648,8 +13651,14 @@ async function runContinuityTarget(captured, {
     const context = getContext();
     const messageText = String(context?.chat?.[captured.index]?.mes || '');
     let namespace = readChatNamespace(context);
+    const storedCheckpoint = namespace?.continuityCheckpoint;
+    const activeCheckpoint = storedCheckpoint
+        && storedCheckpoint.compatibilityOnly !== true
+        && storedCheckpoint.restorable !== false
+        ? storedCheckpoint
+        : null;
     const legacyTarget = [
-        namespace?.continuityCheckpoint?.stage3ProducerTarget,
+        activeCheckpoint?.stage3ProducerTarget,
         namespace?.continuity?.nextTurnInjection?.producerTarget,
     ].find((target) => stage3LegacyTargetNeedsManualReconciliation(target, captured));
     if (legacyTarget) {
@@ -13660,15 +13669,35 @@ async function runContinuityTarget(captured, {
             compatibilityOnly: true,
         };
     }
-    if (
-        namespace?.continuityCheckpoint?.stage3Phase === 'world_candidate_prepared'
-        && stage3AcceptedTargetsMatch(
-            namespace.continuityCheckpoint.stage3ProducerTarget,
+    if (activeCheckpoint) {
+        const checkpointPhase = String(activeCheckpoint.stage3Phase || '');
+        const knownPhase = [
+            'world_call_reserved',
+            'world_candidate_prepared',
+            'world_committed',
+        ].includes(checkpointPhase);
+        const checkpointTargetMatches = actorActionTargetMatches(
+            activeCheckpoint.target,
+            actorActionTargetOf(captured),
+        );
+        const checkpointProducerMatches = stage3AcceptedTargetsMatch(
+            activeCheckpoint.stage3ProducerTarget,
             stage3AcceptedTarget(captured),
-        )
+        );
+        if (!knownPhase || !checkpointTargetMatches || !checkpointProducerMatches) {
+            const reason = checkpointPhase === 'world_call_reserved'
+                ? 'world_call_reserved_manual_reconciliation'
+                : checkpointPhase === 'world_candidate_prepared'
+                    ? 'world_candidate_manual_reconciliation'
+                    : 'world_committed_manual_reconciliation';
+            return { status: 'failed', reason, module: 'world' };
+        }
+    }
+    if (
+        activeCheckpoint?.stage3Phase === 'world_candidate_prepared'
     ) {
         if (!stage3PreparedPhase1StatesMatch(
-            namespace.continuityCheckpoint,
+            activeCheckpoint,
             namespace,
             profileGate.actorLedger,
             captured,
@@ -13679,25 +13708,39 @@ async function runContinuityTarget(captured, {
             token,
             settings,
             namespace,
-            checkpoint: namespace.continuityCheckpoint,
+            checkpoint: activeCheckpoint,
             ledger: profileGate.actorLedger,
         });
     }
     if (
-        namespace?.continuityCheckpoint?.stage3Phase === 'world_call_reserved'
-        && stage3AcceptedTargetsMatch(
-            namespace.continuityCheckpoint.stage3ProducerTarget,
-            stage3AcceptedTarget(captured),
-        )
+        activeCheckpoint?.stage3Phase === 'world_call_reserved'
     ) {
         return { status: 'failed', reason: 'world_call_reserved_manual_reconciliation', module: 'world' };
     }
+    const committedCheckpoint = activeCheckpoint;
     const existingPacket = stage3PersistedPackageForTarget(
         namespace?.continuity,
         profileGate.actorLedger,
         captured,
     );
     if (existingPacket) {
+        if (
+            committedCheckpoint?.stage3Phase !== 'world_committed'
+            || !actorActionTargetMatches(
+                committedCheckpoint.target,
+                actorActionTargetOf(captured),
+            )
+            || !stage3AcceptedTargetsMatch(
+                committedCheckpoint.stage3ProducerTarget,
+                stage3AcceptedTarget(captured),
+            )
+        ) {
+            return {
+                status: 'failed',
+                reason: 'world_committed_manual_reconciliation',
+                module: 'world',
+            };
+        }
         markActorSchedulingSettled(existingPacket?.settlementProof?.orderedResults || [], {
             recovered: true,
         });
@@ -13709,13 +13752,7 @@ async function runContinuityTarget(captured, {
             nextTurnInjection: deepClone(existingPacket),
         };
     }
-    if (
-        namespace?.continuityCheckpoint?.stage3Phase === 'world_committed'
-        && stage3AcceptedTargetsMatch(
-            namespace.continuityCheckpoint.stage3ProducerTarget,
-            stage3AcceptedTarget(captured),
-        )
-    ) {
+    if (committedCheckpoint?.stage3Phase === 'world_committed') {
         return {
             status: 'failed',
             reason: 'world_committed_manual_reconciliation',
@@ -13862,20 +13899,27 @@ async function runContinuityTarget(captured, {
         messageId: captured.messageId,
         swipeId: captured.swipeId,
         scopeDigest: captured.scopeDigest,
+        target: deepClone(actionTarget),
         stage3ProducerTarget: stage3AcceptedTarget(captured),
         stage3Phase: 'world_call_reserved',
         state: checkpointBase,
     };
+    const reservationFailureSink = {};
     const reservationSaved = await writeChatNamespace(namespace, captured.chatId, {
         fields: ['continuityCheckpoint'],
         durable: true,
         requireReadback: true,
+        failureSink: reservationFailureSink,
         precondition: () => (
             stage3TaskOwnsCurrent(captured, token)
             && stage3TargetIsCurrent(captured, token).ok
         ),
         contentValidator: (persisted) => (
             persisted?.continuityCheckpoint?.stage3Phase === 'world_call_reserved'
+            && actorActionTargetMatches(
+                persisted?.continuityCheckpoint?.target,
+                actionTarget,
+            )
             && stage3AcceptedTargetsMatch(
                 persisted?.continuityCheckpoint?.stage3ProducerTarget,
                 stage3AcceptedTarget(captured),
@@ -13883,7 +13927,11 @@ async function runContinuityTarget(captured, {
         ),
     });
     if (!reservationSaved) {
-        return { status: 'failed', reason: 'world_call_reservation_failed', module: 'world' };
+        return {
+            status: 'failed',
+            reason: reservationFailureSink.code || 'world_call_reservation_failed',
+            module: 'world',
+        };
     }
     if (!stage3TaskOwnsCurrent(captured, token) || !stage3TargetIsCurrent(captured, token).ok) {
         return { status: 'stale', reason: 'world_task_owner_changed' };
@@ -14340,6 +14388,7 @@ function stage3PreparedWorldCheckpoint({
         messageId: captured.messageId,
         swipeId: captured.swipeId,
         scopeDigest: captured.scopeDigest,
+        target: deepClone(actionTarget),
         stage3ProducerTarget: producerTarget,
         stage3Phase: 'world_candidate_prepared',
         state: deepClone(checkpointBase || {}),
@@ -14352,6 +14401,7 @@ function stage3PreparedWorldCheckpointMatches(checkpoint, ledger, captured) {
     if (
         checkpoint?.stage3Phase !== 'world_candidate_prepared'
         || !prepared
+        || !actorActionTargetMatches(checkpoint?.target, actorActionTargetOf(captured))
         || !stage3AcceptedTargetsMatch(checkpoint?.stage3ProducerTarget, stage3AcceptedTarget(captured))
         || !stage3AcceptedTargetsMatch(prepared?.producerTarget, stage3AcceptedTarget(captured))
         || !actorActionTargetMatches(prepared?.actionTarget, actorActionTargetOf(captured))
@@ -14486,7 +14536,8 @@ async function commitPreparedWorldCandidate(captured, {
     namespace.continuity = next;
     namespace.continuityCheckpoint = {
         targetIndex: captured.index, messageId: captured.messageId, swipeId: captured.swipeId,
-        scopeDigest: captured.scopeDigest, stage3ProducerTarget: stage3AcceptedTarget(captured),
+        scopeDigest: captured.scopeDigest, target: deepClone(actionTarget),
+        stage3ProducerTarget: stage3AcceptedTarget(captured),
         stage3Phase: 'world_committed', state: deepClone(prepared.checkpointState || checkpoint.state || {}),
     };
     if (settlement) namespace.actorLedger = settlementLedger;
@@ -14497,11 +14548,25 @@ async function commitPreparedWorldCandidate(captured, {
         fields: ['continuity', 'continuityCheckpoint', ...(settlement ? ['actorLedger'] : []), 'continuityDirector', 'continuityDetected'],
         durable: true, requireReadback: true, readbackAttempts: 1, failureSink, successSink,
         precondition: () => stage3TaskOwnsCurrent(captured, token) && stage3TargetIsCurrent(captured, token).ok,
-        contentValidator: (persisted) => !!stage3PersistedPackageForTarget(
-            persisted?.continuity, persisted?.actorLedger || settlementLedger, captured,
-        ) && (!settlement || actorActionSettlementsMatchLedger(persisted?.actorLedger, {
-            chatId: captured.chatId, target: actionTarget, results: settlement.results,
-        }).ok),
+        contentValidator: (persisted) => (
+            persisted?.continuityCheckpoint?.stage3Phase === 'world_committed'
+            && actorActionTargetMatches(
+                persisted?.continuityCheckpoint?.target,
+                actionTarget,
+            )
+            && stage3AcceptedTargetsMatch(
+                persisted?.continuityCheckpoint?.stage3ProducerTarget,
+                stage3AcceptedTarget(captured),
+            )
+            && !!stage3PersistedPackageForTarget(
+                persisted?.continuity,
+                persisted?.actorLedger || settlementLedger,
+                captured,
+            )
+            && (!settlement || actorActionSettlementsMatchLedger(persisted?.actorLedger, {
+                chatId: captured.chatId, target: actionTarget, results: settlement.results,
+            }).ok)
+        ),
         expectedFieldStates: phase2State,
     });
     if (!saved) {

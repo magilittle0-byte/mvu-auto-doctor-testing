@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { contentAddressedJsonRef } from '../checkpoint-codec-core.mjs';
+import { actorActionTargetMatches } from '../actor-authority-core.mjs';
 
 import {
     ACTOR_SOVEREIGNTY_MIGRATION_VERSION,
@@ -807,6 +808,69 @@ test('current marker is not invalidated by valid dynamic receipts, tasks or chec
     assert.equal(upgraded.ok, true);
     assert.equal(schemaUpgrade.payloadWrites, 1);
     assert.equal(upgraded.report.version, ACTOR_SOVEREIGNTY_MIGRATION_VERSION);
+});
+
+test('P3 checkpoint phases keep the production migration guard current only with a strict target', async () => {
+    const valueScope = scope();
+    const digest = actorSovereigntyScopeDigest(valueScope);
+    const adapter = inMemoryMigrationAdapter(namespace(valueScope));
+    const migrated = await ensureWithAdapter(adapter.persisted, valueScope, adapter);
+    assert.equal(migrated.ok, true);
+    assert.equal(actorSovereigntyMigrationIsCurrent(migrated.namespace, valueScope), true);
+
+    const expectedTarget = strictTarget({ scopeDigest: digest });
+    const legacy = structuredClone(migrated.namespace);
+    legacy.continuityCheckpoint = {
+        scopeDigest: digest,
+        stage3Phase: 'world_call_reserved',
+        stage3ProducerTarget: { generationId: expectedTarget.generationId },
+    };
+    assert.equal(actorSovereigntyMigrationIsCurrent(legacy, valueScope), false);
+
+    for (const stage3Phase of [
+        'world_call_reserved',
+        'world_candidate_prepared',
+        'world_committed',
+    ]) {
+        const candidate = structuredClone(migrated.namespace);
+        candidate.continuityCheckpoint = {
+            scopeDigest: digest,
+            target: structuredClone(expectedTarget),
+            stage3Phase,
+            stage3ProducerTarget: { generationId: expectedTarget.generationId },
+        };
+        assert.equal(
+            actorSovereigntyMigrationIsCurrent(candidate, valueScope),
+            true,
+            `${stage3Phase} candidate must not invalidate guarded writer precondition`,
+        );
+        assert.equal(
+            actorActionTargetMatches(candidate.continuityCheckpoint.target, expectedTarget),
+            true,
+        );
+    }
+
+    for (const [field, changed] of [
+        ['chatId', 'chat-drift'],
+        ['logicalIndex', 5],
+        ['messageId', 'message-drift'],
+        ['swipeId', 1],
+        ['generation', 3],
+        ['generationId', 'generation-drift'],
+        ['generationType', 'swipe'],
+        ['scopeDigest', 'scope-drift'],
+        ['contentHash', 'content-drift'],
+    ]) {
+        const candidate = structuredClone(migrated.namespace);
+        candidate.continuityCheckpoint = {
+            scopeDigest: digest,
+            target: { ...expectedTarget, [field]: changed },
+            stage3Phase: 'world_candidate_prepared',
+        };
+        const guardedTargetMatches = actorSovereigntyMigrationIsCurrent(candidate, valueScope)
+            && actorActionTargetMatches(candidate.continuityCheckpoint.target, expectedTarget);
+        assert.equal(guardedTargetMatches, false, field);
+    }
 });
 
 test('observation-only advances without actions while an explicit gap waits for convergence', () => {

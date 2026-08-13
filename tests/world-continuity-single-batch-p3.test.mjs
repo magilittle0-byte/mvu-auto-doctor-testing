@@ -742,6 +742,115 @@ test('an exact committed world target skips recovery generation and world-domain
     assert.doesNotMatch(run, /worldTaskAlreadyCommitted|applyContinuityInjection|maxAttempts/u);
 });
 
+test('committed checkpoint authority cannot be bypassed by an exact persisted world package', async () => {
+    const captured = {
+        chatId: 'chat-committed-gate', index: 0, messageId: 'message-committed', swipeId: 0,
+        generationSerial: 7, generationId: 'generation-committed', generationType: 'normal',
+        scopeDigest: 'scope-committed', contentFingerprint: 'content-committed',
+    };
+    const actionTarget = {
+        chatId: captured.chatId, logicalIndex: captured.index,
+        messageId: captured.messageId, swipeId: captured.swipeId,
+        generation: captured.generationSerial, generationId: captured.generationId,
+        generationType: captured.generationType, scopeDigest: captured.scopeDigest,
+        contentHash: captured.contentFingerprint,
+    };
+    const producerTarget = structuredClone(captured);
+    const packet = { status: 'pending', settlementProof: { orderedResults: [] } };
+    const runCase = async (checkpoint, { packetAvailable = true } = {}) => {
+        let recallCalls = 0;
+        let modelCalls = 0;
+        let writes = 0;
+        const runner = loadStage3LegacyManualReconciliationRunner({
+            captured,
+            namespace: { continuityCheckpoint: checkpoint, continuity: { nextTurnInjection: packet } },
+            spies: {
+                stage3AcceptedTarget: () => structuredClone(producerTarget),
+                stage3AcceptedTargetsMatch: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+                actorActionTargetOf: () => structuredClone(actionTarget),
+                actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+                stage3PersistedPackageForTarget: () => packetAvailable ? packet : null,
+                stage3LegacyTargetNeedsManualReconciliation: () => false,
+                markActorSchedulingSettled: () => {},
+                deepClone: (value) => structuredClone(value),
+                generateWorldRecallPacket: () => { recallCalls += 1; },
+                generateWorldContinuitySingleBatch: () => { modelCalls += 1; },
+                writeChatNamespace: () => { writes += 1; },
+            },
+        });
+        return { result: await runner(captured), recallCalls, modelCalls, writes };
+    };
+    const exactCheckpoint = {
+        stage3Phase: 'world_committed',
+        target: structuredClone(actionTarget),
+        stage3ProducerTarget: structuredClone(producerTarget),
+    };
+    const exact = await runCase(exactCheckpoint);
+    assert.equal(exact.result.status, 'applied');
+    assert.equal(exact.result.recovered, true);
+    assert.equal(exact.result.worldModelCalls, 0);
+    assert.equal(exact.recallCalls, 0);
+    assert.equal(exact.modelCalls, 0);
+    assert.equal(exact.writes, 0);
+
+    for (const [checkpoint, expectedReason] of [
+        [{ ...structuredClone(exactCheckpoint), target: { ...actionTarget, generationId: 'drift' } },
+            'world_committed_manual_reconciliation'],
+        [{
+            ...structuredClone(exactCheckpoint),
+            stage3ProducerTarget: { ...producerTarget, generationId: 'producer-drift' },
+        }, 'world_committed_manual_reconciliation'],
+        [{
+            stage3Phase: 'world_call_reserved',
+            target: structuredClone(actionTarget),
+            stage3ProducerTarget: { ...producerTarget, generationId: 'reserved-drift' },
+        }, 'world_call_reserved_manual_reconciliation'],
+        [{
+            stage3Phase: 'world_candidate_prepared',
+            target: structuredClone(actionTarget),
+            stage3ProducerTarget: { ...producerTarget, generationId: 'prepared-drift' },
+        }, 'world_candidate_manual_reconciliation'],
+        [{
+            stage3Phase: 'unknown_phase',
+            target: structuredClone(actionTarget),
+            stage3ProducerTarget: structuredClone(producerTarget),
+        }, 'world_committed_manual_reconciliation'],
+        [undefined, 'world_committed_manual_reconciliation'],
+    ]) {
+        const rejected = await runCase(checkpoint);
+        assert.equal(rejected.result.status, 'failed');
+        assert.equal(rejected.result.reason, expectedReason);
+        assert.equal(rejected.recallCalls, 0);
+        assert.equal(rejected.modelCalls, 0);
+        assert.equal(rejected.writes, 0);
+    }
+
+    for (const [checkpoint, expectedReason] of [
+        [{
+            stage3Phase: 'world_call_reserved',
+            target: structuredClone(actionTarget),
+            stage3ProducerTarget: { ...producerTarget, generationId: 'reserved-drift-no-packet' },
+        }, 'world_call_reserved_manual_reconciliation'],
+        [{
+            stage3Phase: 'world_candidate_prepared',
+            target: structuredClone(actionTarget),
+            stage3ProducerTarget: { ...producerTarget, generationId: 'prepared-drift-no-packet' },
+        }, 'world_candidate_manual_reconciliation'],
+        [{
+            stage3Phase: 'unknown_active_phase',
+            target: structuredClone(actionTarget),
+            stage3ProducerTarget: structuredClone(producerTarget),
+        }, 'world_committed_manual_reconciliation'],
+    ]) {
+        const rejected = await runCase(checkpoint, { packetAvailable: false });
+        assert.equal(rejected.result.status, 'failed');
+        assert.equal(rejected.result.reason, expectedReason);
+        assert.equal(rejected.recallCalls, 0);
+        assert.equal(rejected.modelCalls, 0);
+        assert.equal(rejected.writes, 0);
+    }
+});
+
 test('P3 target, recovery key, and legacy reconciliation require generation ID and type', () => {
     const stage3 = loadStage3AcceptedTargetHelpers();
     const current = {
@@ -1115,6 +1224,21 @@ test('P3 wiring uses Recall then one Advance call, with ATT plus prepared checkp
     assert.match(run, /return commitPreparedWorldCandidate\(captured/u);
     assert.match(run, /stage3PreparedWorldCheckpoint\(/u);
     assert.match(run, /stage3PreparedWorldCheckpointMatches\(/u);
+    assert.match(run, /target: deepClone\(actionTarget\),[\s\S]*?stage3Phase: 'world_call_reserved'/u);
+    const preparedCheckpoint = sourceSection(
+        'function stage3PreparedWorldCheckpoint({',
+        'function stage3PreparedWorldCheckpointMatches(',
+    );
+    assert.match(preparedCheckpoint, /target: deepClone\(actionTarget\),[\s\S]*?stage3Phase: 'world_candidate_prepared'/u);
+    const commit = sourceSection(
+        'async function commitPreparedWorldCandidate(captured, {',
+        'async function enqueueActorProfiles(targetId, {',
+    );
+    assert.match(commit, /target: deepClone\(actionTarget\),[\s\S]*?stage3Phase: 'world_committed'/u);
+    assert.match(
+        commit,
+        /contentValidator:[\s\S]*?stage3AcceptedTargetsMatch\([\s\S]*?continuityCheckpoint\?\.stage3ProducerTarget,[\s\S]*?stage3AcceptedTarget\(captured\)/u,
+    );
     assert.match(source, /async function commitPreparedWorldCandidate/u);
     assert.match(source, /expectedFieldStates/u);
     assert.doesNotMatch(source, /collectActorShardProposals/u);

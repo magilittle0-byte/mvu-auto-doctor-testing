@@ -15,6 +15,7 @@ ActorLedger、数据库、receipt 数组、第二 store 或旧 `continuityInject
 | attempt 准备与读回 | `actorActionCandidatesFromShard`、`prepareActorActionAttempts`、`recordActorActionAttempts`、`persistActorActionAttemptsForTurn` | 原样复用 | Advance 返回 proposal/adjudication 草案后，代码在任何 outcome 应用前先 durable ATT + prepared candidate readback。 |
 | 世界裁决与结果 | `validateWorldAdjudicationBatch`、`settleActorActionCandidates`、`mergeActorWorldEventsIntoContinuity` | 原样复用 | attempt 不等于 outcome；不得替玩家行动、同意、感受或结果。 |
 | 世界保存与恢复 | TavernDB `runTableWriteTransaction_ACU` / `runTableUpdateCommit_ACU` 的工作副本→读回→最终提交，既有 `writeChatNamespace` | 最小适配 | 现有 checkpoint 的 `world_candidate_prepared` 与 ActorLedger attempt 同一 CAS/readback；Phase2 只从读回候选结算。 |
+| P3 checkpoint migration guard | 既有 World `world_call_reserved -> world_candidate_prepared -> world_committed` checkpoint，加 Doctor `actorActionTargetOf` 严格目标投影与既有 `actorSovereigntyMigrationIsCurrent` | 最小适配 | 三阶段 checkpoint 都携带同一完整 `target`，让同 namespace migration-guarded writer 在候选应用后仍保持 current；任何 active checkpoint 都在 Recall/Advance 前统一验证已知 phase、action target 与 producer target，unknown/drift 一律人工协调。Existing world package 还必须配套 exact committed checkpoint 才能 0 模型恢复；隔离历史按既有 `compatibilityOnly/restorable` 语义忽略。不放宽 migration schema，不新增 matcher、checkpoint 或状态机。 |
 | 下回合包 | `buildContinuityInjection` + `ContinuityState` | 必要新写 | 只保存为 `nextTurnInjection`；阶段四实际 `precomposeNextTurnConsumer → commitNextTurnConsumer` 是唯一 reserve/consume。 |
 
 ## 代码与提示词的分权
