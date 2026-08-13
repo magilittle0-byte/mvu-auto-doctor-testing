@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { fingerprint } from '../core.mjs';
+import { actorProfileBatchSemanticFingerprint } from '../actor-profile-batch-core.mjs';
 import { createDoctorRuntimePresentation, createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
@@ -703,6 +704,49 @@ test('prompt context and ticket normalizer implementations change generation and
     const baselineRuntime = runtimeFor(baselineGeneration);
     assert.notEqual(runtimeFor(changedPromptContext), baselineRuntime);
     assert.notEqual(runtimeFor(changedTicketNormalizer), baselineRuntime);
+});
+
+test('resolver closure and group failure attribution helpers change batch and runtime fingerprints', () => {
+    const runtimeSource = sourceBetween(
+        indexSource,
+        'function doctorRuntimeCriticalFingerprint',
+        'function diagnosticPayload',
+    );
+    const helperNames = [...new Set([...runtimeSource.matchAll(/\b([A-Za-z_$][\w$]*)\.toString\(\)/gu)]
+        .map((match) => match[1]))];
+    const runtimeFor = (batchFingerprint) => Function(
+        'VERSION',
+        'fingerprint',
+        'actorProfileRecoveryCriticalFingerprint',
+        'actorProfileGenerationCriticalFingerprint',
+        'actorProfileBatchSemanticFingerprint',
+        ...helperNames,
+        `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
+    )(
+        'test-version',
+        fingerprint,
+        () => 'recovery-fingerprint',
+        () => 'generation-fingerprint',
+        () => batchFingerprint,
+        ...helperNames.map((name) => Function(`return function ${name}(){}`)()),
+    )();
+    const baselineBatch = actorProfileBatchSemanticFingerprint();
+    const changedBatches = [
+        actorProfileBatchSemanticFingerprint({
+            resolverPromotionClosure: function actorProfileResolverPromotionClosureChanged() {},
+        }),
+        actorProfileBatchSemanticFingerprint({
+            groupFailureDiagnostic: function actorProfileGroupFailureDiagnosticChanged() {},
+        }),
+        actorProfileBatchSemanticFingerprint({
+            finalCandidateClosure: function actorProfileFinalCandidateClosureChanged() {},
+        }),
+    ];
+    const baselineRuntime = runtimeFor(baselineBatch);
+    for (const changedBatch of changedBatches) {
+        assert.notEqual(changedBatch, baselineBatch);
+        assert.notEqual(runtimeFor(changedBatch), baselineRuntime);
+    }
 });
 
 test('changing the model-controller world reservation ownership changes the runtime manifest input', () => {

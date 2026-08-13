@@ -43,6 +43,18 @@ export type ActorProfileBatchPersistenceCallback =
 export function actorProfileBatchSemanticFingerprint(overrides?: Record<string, unknown>): string;
 export const ACTOR_PROFILE_GROUP_TRANSPORT_ROWS: number;
 export function actorProfileModuleGroupChunks(group: object, rowLimit?: number): object[];
+export function actorProfileGroupFailureDiagnostic(
+    group: object,
+    attempt: number,
+    parsed: object,
+    failures?: object[],
+): object | null;
+export function actorProfileResolverPromotionClosure(options?: Record<string, unknown>): object[];
+export function actorProfileFinalCandidateClosure(options?: Record<string, unknown>): {
+    allCandidates: object[];
+    resolutionFailures: object[];
+    groupRowFailures: object[];
+};
 
 export function completeActorProfileBatchTransaction(options?: {
     persistPendingBatch?: ActorProfileBatchPersistenceCallback;

@@ -13835,6 +13835,13 @@ async function runActorProfileTarget(captured, {
             targetCount: Math.max(0, Number(entry?.targetCount) || 0),
             attempt: Math.max(0, Number(entry?.attempt) || 0),
             status: String(entry?.status || '').slice(0, 40),
+            parsedRowCount: Math.max(0, Number(entry?.parsedRowCount) || 0),
+            failureCodes: (Array.isArray(entry?.failureCodes) ? entry.failureCodes : [])
+                .filter((code) => /^actor_profile\.[a-z0-9_.-]+$/u.test(code))
+                .slice(0, 8),
+            missingModules: (Array.isArray(entry?.missingModules) ? entry.missingModules : [])
+                .filter((moduleKey) => /^[a-z][a-zA-Z0-9]*$/u.test(moduleKey))
+                .slice(0, 7),
         })),
         parsedRowCount: Math.min(128, Math.max(0, Number(profileCompletion.batchMeta?.parsedRowCount) || 0)),
         missingModules: [...new Set(failures.flatMap((failure) => (

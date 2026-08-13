@@ -118,6 +118,109 @@ export function actorProfileModuleGroupChunks(group, rowLimit = ACTOR_PROFILE_GR
     return chunks.filter((chunk) => chunk.targetCount > 0);
 }
 
+export function actorProfileGroupFailureDiagnostic(group, attempt, parsed, failures = []) {
+    if (!Array.isArray(failures) || !failures.length) return null;
+    const failureCodes = [...new Set(failures
+        .map((entry) => cleanText(entry?.reason, 120))
+        .filter((code) => /^actor_profile\.[a-z0-9_.-]+$/u.test(code)))].slice(0, 8);
+    const missingModules = [...new Set(failures.flatMap((entry) => [
+        cleanText(entry?.moduleKey, 80),
+        ...(entry?.missingFields || []).map((path) => cleanText(path, 160).split('.').at(-1)),
+    ]).filter((moduleKey) => /^[a-z][a-zA-Z0-9]*$/u.test(moduleKey)))].slice(0, 7);
+    return {
+        groupKey: group?.key || '',
+        moduleKeys: clone(group?.modules || []),
+        targetCount: Math.max(0, Number(group?.targetCount) || 0),
+        attempt: Math.max(0, Number(attempt) || 0),
+        transportChunk: null,
+        status: 'semantic_failed',
+        parsedRowCount: Math.max(0, Number(parsed?.entries?.length) || 0),
+        failureCodes,
+        missingModules,
+    };
+}
+
+export function actorProfileResolverPromotionClosure({
+    discoveries = [],
+    resolvedPromotionEntries = [],
+    resolvedCandidates = [],
+} = {}) {
+    const resolvedCandidateById = new Map(resolvedCandidates.map((candidate) => [
+        candidateActorId(candidate),
+        candidate,
+    ]));
+    const discoveryCompletionByName = new Map(discoveries.map((entry) => [
+        cleanText(entry?.candidateRef?.name, 160),
+        entry,
+    ]).filter(([name]) => name));
+    return resolvedPromotionEntries.map((entry) => {
+        const actorId = cleanText(entry?.actorRef?.actorId, 120);
+        const promotionName = cleanText(
+            entry?.actorRef?.name
+                || entry?.actorRef?.displayName
+                || entry?.candidate?.actorRef?.name
+                || entry?.candidate?.candidateRef?.name,
+            160,
+        );
+        return {
+            actorId,
+            candidateId: cleanText(entry?.candidateId, 120),
+            context: resolvedCandidateById.get(actorId) || null,
+            profileCandidate: clone(
+                discoveryCompletionByName.get(promotionName)?.candidate || entry?.candidate,
+            ),
+            repairs: clone(entry?.repairs || []),
+        };
+    });
+}
+
+export function actorProfileFinalCandidateClosure({
+    selected = [],
+    resolvedCandidates = [],
+    resolvedPromotionEntries = [],
+    identityReveals = [],
+    acceptedById = new Map(),
+    failureById = new Map(),
+    discoveryFailures = [],
+} = {}) {
+    const candidateById = new Map();
+    const selectedActorIds = new Set(selected.map(candidateActorId).filter(Boolean));
+    const resolvedMappedActorIds = new Set([
+        ...resolvedPromotionEntries.map((entry) => cleanText(entry?.actorRef?.actorId, 120)),
+        ...identityReveals.map((entry) => cleanText(entry?.actorId, 120)),
+    ].filter(Boolean));
+    for (const candidate of selected) {
+        const actorId = candidateActorId(candidate);
+        if (actorId) candidateById.set(actorId, candidate);
+    }
+    const resolutionFailures = [];
+    for (const candidate of resolvedCandidates) {
+        const actorId = candidateActorId(candidate);
+        if (!actorId) continue;
+        if (selectedActorIds.has(actorId) || resolvedMappedActorIds.has(actorId)) {
+            candidateById.set(actorId, candidate);
+        } else {
+            resolutionFailures.push(failureFor(
+                candidate,
+                'actor_profile.discovery_promotion_mapping_missing',
+            ));
+        }
+    }
+    const allCandidates = [...candidateById.values()];
+    const attributedFailureActorIds = new Set([
+        ...failureById.keys(),
+        ...discoveryFailures.map((failure) => cleanText(failure?.actorId, 120)),
+        ...resolutionFailures.map((failure) => cleanText(failure?.actorId, 120)),
+    ].filter(Boolean));
+    const groupRowFailures = allCandidates
+        .filter((candidate) => (
+            !acceptedById.has(candidateActorId(candidate))
+            && !attributedFailureActorIds.has(candidateActorId(candidate))
+        ))
+        .map((candidate) => failureFor(candidate, 'actor_profile.group_row_missing'));
+    return { allCandidates, resolutionFailures, groupRowFailures };
+}
+
 export function actorProfileBatchSemanticFingerprint(overrides = {}) {
     return `actor-profile-batch:${fingerprint(JSON.stringify({
         identityRetryGuidance: SAFE_IDENTITY_RETRY_GUIDANCE,
@@ -125,6 +228,15 @@ export function actorProfileBatchSemanticFingerprint(overrides = {}) {
         transportRows: ACTOR_PROFILE_GROUP_TRANSPORT_ROWS,
         groupChunks: String(actorProfileModuleGroupChunks),
         ...(overrides || {}),
+        groupFailureDiagnostic: String(
+            overrides?.groupFailureDiagnostic || actorProfileGroupFailureDiagnostic,
+        ),
+        resolverPromotionClosure: String(
+            overrides?.resolverPromotionClosure || actorProfileResolverPromotionClosure,
+        ),
+        finalCandidateClosure: String(
+            overrides?.finalCandidateClosure || actorProfileFinalCandidateClosure,
+        ),
     }))}`;
 }
 
@@ -370,7 +482,26 @@ export async function completeActorProfileBatchTransaction({
                     acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
                     registeredActorIndex: attemptDiscoveryContext?.registeredActorIndex || [],
                 });
-                groupDiagnostics.push({ groupKey: chunk.key, moduleKeys: clone(chunk.modules), targetCount: chunk.targetCount, attempt: groupAttempt, transportChunk: clone(chunk.transportChunk || null), status: parsed.formatUnrecoverable ? 'format_failed' : 'parsed' });
+                const parsedFailureCodes = [...new Set((parsed.failures || [])
+                    .map((entry) => cleanText(entry?.reason, 120))
+                    .filter((code) => /^actor_profile\.[a-z0-9_.-]+$/u.test(code)))].slice(0, 8);
+                const parsedMissingModules = [...new Set((parsed.failures || []).flatMap((entry) => [
+                    cleanText(entry?.moduleKey, 80),
+                    ...(entry?.missingFields || []).map((path) => cleanText(path, 160).split('.').at(-1)),
+                ]).filter((moduleKey) => /^[a-z][a-zA-Z0-9]*$/u.test(moduleKey)))].slice(0, 7);
+                groupDiagnostics.push({
+                    groupKey: chunk.key,
+                    moduleKeys: clone(chunk.modules),
+                    targetCount: chunk.targetCount,
+                    attempt: groupAttempt,
+                    transportChunk: clone(chunk.transportChunk || null),
+                    status: parsed.formatUnrecoverable
+                        ? 'format_failed'
+                        : parsedFailureCodes.length ? 'semantic_failed' : 'parsed',
+                    parsedRowCount: Math.max(0, Number(parsed.entries?.length) || 0),
+                    failureCodes: parsedFailureCodes,
+                    missingModules: parsedMissingModules,
+                });
                 if (chunks.length === 1) return parsed;
                 aggregate.entries.push(...(parsed.entries || []));
                 aggregate.failures.push(...(parsed.failures || []));
@@ -752,6 +883,13 @@ export async function completeActorProfileBatchTransaction({
                 break;
             }
             let preparedApply = prepareGroupApply(group, parsed);
+            const initialFailureDiagnostic = actorProfileGroupFailureDiagnostic(
+                group,
+                0,
+                parsed,
+                preparedApply.failures,
+            );
+            if (initialFailureDiagnostic) groupDiagnostics.push(initialFailureDiagnostic);
             if ((parsed.formatUnrecoverable || preparedApply.failures.length) && semanticRetry) {
                 const firstFailures = clone(preparedApply.failures);
                 const firstFormatFailure = parsed.formatUnrecoverable === true;
@@ -777,6 +915,13 @@ export async function completeActorProfileBatchTransaction({
                 group = retryGroup;
                 if (!parsed.stale && !parsed.requestFailure) {
                     preparedApply = prepareGroupApply(retryGroup, parsed);
+                    const retryFailureDiagnostic = actorProfileGroupFailureDiagnostic(
+                        retryGroup,
+                        1,
+                        parsed,
+                        preparedApply.failures,
+                    );
+                    if (retryFailureDiagnostic) groupDiagnostics.push(retryFailureDiagnostic);
                     if (parsed.formatUnrecoverable || preparedApply.failures.length) {
                         preparedApply.failures = [
                             ...firstFailures,
@@ -1099,17 +1244,21 @@ export async function completeActorProfileBatchTransaction({
             });
         }
     }
-    const resolvedCandidateById = new Map(resolvedCandidates.map((candidate) => [
-        candidateActorId(candidate),
-        candidate,
-    ]));
-    for (const entry of resolvedPromotionEntries) {
-        const actorId = cleanText(entry?.actorRef?.actorId, 120);
-        const context = resolvedCandidateById.get(actorId);
-        const profileCandidate = clone(entry?.candidate);
+    // Profile modules were completed under the transaction-local DISC id.
+    // Registry resolution owns the final ActorId, so close that identity
+    // transition explicitly by row key before validating the final row.
+    const promotionClosures = actorProfileResolverPromotionClosure({
+        discoveries,
+        resolvedPromotionEntries,
+        resolvedCandidates,
+    });
+    for (const closure of promotionClosures) {
+        const {
+            actorId, candidateId, context, profileCandidate, repairs,
+        } = closure;
         if (!actorId || !context || !profileCandidate) {
             discoveryFailures.push({
-                candidateId: cleanText(entry?.candidateId, 120),
+                candidateId,
                 reason: 'actor_profile.discovery_promotion_mapping_missing',
             });
             continue;
@@ -1130,7 +1279,7 @@ export async function completeActorProfileBatchTransaction({
             actorId,
             name: candidateName(context),
             candidate: validation.candidate,
-            repairs: entry.repairs || [],
+            repairs,
             resolutions: validation.resolutions || [],
         });
     }
@@ -1139,16 +1288,17 @@ export async function completeActorProfileBatchTransaction({
     // explicit reveal keeps the ActorId but replaces the old display label and
     // refresh plan; retaining the pre-resolution row here would immediately
     // turn the valid reveal into a false target_stale failure.
-    const candidateById = new Map();
-    for (const candidate of selected) {
-        const actorId = candidateActorId(candidate);
-        if (actorId) candidateById.set(actorId, candidate);
-    }
-    for (const candidate of resolvedCandidates) {
-        const actorId = candidateActorId(candidate);
-        if (actorId) candidateById.set(actorId, candidate);
-    }
-    const allCandidates = [...candidateById.values()];
+    const candidateClosure = actorProfileFinalCandidateClosure({
+        selected,
+        resolvedCandidates,
+        resolvedPromotionEntries,
+        identityReveals,
+        acceptedById,
+        failureById,
+        discoveryFailures,
+    });
+    discoveryFailures.push(...candidateClosure.resolutionFailures);
+    const { allCandidates } = candidateClosure;
     if (!allCandidates.length) {
         return {
             ...base,
@@ -1181,9 +1331,7 @@ export async function completeActorProfileBatchTransaction({
         ...allCandidates
             .map((candidate) => failureById.get(candidateActorId(candidate)))
             .filter(Boolean),
-        ...allCandidates
-            .filter((candidate) => !acceptedById.has(candidateActorId(candidate)))
-            .map((candidate) => failureFor(candidate, 'actor_profile.group_row_missing')),
+        ...candidateClosure.groupRowFailures,
     ];
     if (groupFailuresBeforePersist.length) {
         return {

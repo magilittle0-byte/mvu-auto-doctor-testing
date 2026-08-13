@@ -1385,6 +1385,9 @@ test('valid existing plus valid discovery silently dropped by resolver keeps the
     assert.ok(combined.result.failures.some((failure) => (
         failure.reason === 'actor_profile.discovery_promotion_mapping_missing'
     )));
+    assert.equal(combined.result.failures.some((failure) => (
+        failure.reason === 'actor_profile.group_row_missing'
+    )), false);
     assert.deepEqual(combined.result.ledger, fixture.ledger);
 });
 
@@ -1966,6 +1969,141 @@ test('module protocol sorts reversed discoveries by accepted first offset before
                 expectedSourceRef: fixture.ref,
                 turn: fixture.ref.generation,
             });
+            const registration = promoteActorCandidatesToRegistry(upsert.ledger, discovered.candidates, {
+                chatId: fixture.ledger.chatId,
+                identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref,
+                turn: fixture.ref.generation,
+            });
+            const binding = bindCharacterCreationTicketsToRegisteredActors(registration.ledger, {
+                registration,
+                candidates: discovered.candidates,
+                batch,
+                target: fixture.ref,
+            });
+            assert.deepEqual(binding.bindings.map((entry) => entry.ticketId), ticketIds);
+            const prepared = prepareActorLedgerProfilesV6(binding.ledger, {
+                mode: 'full', turn: fixture.ref.generation,
+            }).ledger;
+            const promotedIds = registration.promoted.map((entry) => entry.actorRef.actorId);
+            const candidates = selectActorProfileCompletionCandidates(prepared, {
+                initialActorIds: promotedIds,
+                maintenanceMaxActors: 0,
+                turn: fixture.ref.generation,
+            });
+            const discoveryByName = new Map(discoveries.map((entry) => [entry.candidateRef.name, entry]));
+            return {
+                ok: true,
+                ledger: binding.ledger,
+                candidates,
+                entries: registration.promoted.map((promotion) => ({
+                    candidateId: promotion.candidateId,
+                    actorRef: {
+                        actorId: promotion.actorRef.actorId,
+                        name: promotion.actorRef.displayName,
+                    },
+                    candidate: discoveryByName.get(promotion.actorRef.displayName).candidate,
+                    repairs: [],
+                })),
+                failures: [],
+                rejected: [],
+                snapshot: { fieldRevision: 0 },
+                registry: {
+                    ...registration,
+                    ticketBound: true,
+                    ticketBindingCount: binding.bindings.length,
+                },
+            };
+        },
+    });
+    assert.ok(seenLaterGroups.length >= 1);
+    for (const group of seenLaterGroups) {
+        assert.deepEqual(group.rows, [
+            { name: names[0], ticketId: ticketIds[0] },
+            { name: names[1], ticketId: ticketIds[1] },
+        ], group.groupKey);
+    }
+    const corePrompt = seenLaterGroups.find((group) => group.groupKey === 'character_core')?.prompt || '';
+    for (let index = 0; index < ticketIds.length; index += 1) {
+        assert.equal(corePrompt.split(ticketIds[index]).length - 1, 1);
+        assert.match(corePrompt, new RegExp(ticketAxisValues[index].replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    }
+    assert.doesNotMatch(corePrompt, /RAW_DISC_TICKET_/u);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.deepEqual(run.result.ledger.actors.map((actor) => ({
+        name: actor.name,
+        ticketId: actor.profileV6?.designRolls?.ticketId,
+    })), [
+        { name: names[0], ticketId: ticketIds[0] },
+        { name: names[1], ticketId: ticketIds[1] },
+    ]);
+});
+
+test('more than six discoveries map DISC completions to final ActorRefs across transport chunks', async () => {
+    const fixture = prepareRegisteredBatch(0);
+    const names = Array.from({ length: 8 }, (_, index) => `\u884c\u952e${index + 1}`);
+    const acceptedNarrative = names.map((name, index) => (
+        `${name}\u5728\u573a\u666f\u4e2d\u7b2c${index + 1}\u6b21\u660e\u786e\u51fa\u573a\u5e76\u5b8c\u6210\u4e86\u53ef\u89c2\u5bdf\u7684\u4ea4\u8c08\u3002`
+    )).join('');
+    const source = narrativeDiscoverySourceRef(fixture.ref);
+    const batch = ticketBatch(fixture.ref, names.length);
+    batch.tickets.forEach((ticket, index) => {
+        ticket.rawEnvelopeMarker = `RAW_DISC_TICKET_${index + 1}`;
+    });
+    const ticketIds = batch.tickets.map((ticket) => ticket.ticketId);
+    const ticketAxisValues = batch.tickets.map((ticket) => ticket.axes.temperament.result);
+    const seenLaterGroups = [];
+    const moduleText = (key, name) => `${name}${key}\uff1a${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u4eba\u7269\u6863\u6848\u5185\u5bb9\uff0c\u5305\u542b\u7a33\u5b9a\u4e8b\u5b9e\u3001\u9650\u5236\u3001\u9009\u62e9\u4f9d\u636e\u4e0e\u540e\u7eed\u53d1\u5c55\u7a7a\u95f4\u3002'.repeat(4)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: source,
+            characterCreationTickets: structuredClone(batch.tickets),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys, messages }) => {
+            if (groupKey === 'identity_bootstrap') {
+                return [...names].reverse().map((name) => [
+                    `<profile-target actor="new" name="${name}">`,
+                    `<module key="person">${moduleText('person', name)}</module>`,
+                    '</profile-target>',
+                ].join('\n')).join('\n');
+            }
+            seenLaterGroups.push({
+                groupKey,
+                prompt: messages.map((message) => message.content).join('\n'),
+                rows: candidates.map((candidate) => ({
+                    name: candidate.actorRef.name,
+                    ticketId: candidate.characterCreationTicket?.ticketId,
+                })),
+            });
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+        resolveDiscoveries: async ({ discoveries }) => {
+            assert.deepEqual(discoveries.map((entry) => entry.candidateRef.name), names);
+            const discovered = discoverActorsFromTurnSources(emptyActorLedger(fixture.ledger.chatId), {
+                acceptedContent: acceptedNarrative,
+                sourceRef: source,
+                turn: fixture.ref.generation,
+                modelProfileDiscoveries: structuredClone(discoveries),
+            });
+            const upsert = runActorRegistryUpsert(discovered.ledger, discovered.candidates, {
+                chatId: fixture.ledger.chatId,
+                identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref,
+                turn: fixture.ref.generation,
+            });
             const registration = promoteActorCandidatesToRegistry(
                 upsert.ledger,
                 discovered.candidates,
@@ -2023,14 +2161,20 @@ test('module protocol sorts reversed discoveries by accepted first offset before
             };
         },
     });
-    assert.ok(seenLaterGroups.length >= 1);
+    assert.ok(seenLaterGroups.length >= 2);
+    const rowsByGroup = new Map();
     for (const group of seenLaterGroups) {
-        assert.deepEqual(group.rows, [
-            { name: names[0], ticketId: ticketIds[0] },
-            { name: names[1], ticketId: ticketIds[1] },
-        ], group.groupKey);
+        if (!rowsByGroup.has(group.groupKey)) rowsByGroup.set(group.groupKey, []);
+        rowsByGroup.get(group.groupKey).push(...group.rows);
     }
-    const corePrompt = seenLaterGroups.find((group) => group.groupKey === 'character_core')?.prompt || '';
+    for (const rows of rowsByGroup.values()) {
+        assert.deepEqual(rows, names.map((name, index) => ({
+            name, ticketId: ticketIds[index],
+        })));
+    }
+    const corePrompt = seenLaterGroups
+        .filter((group) => group.groupKey === 'character_core')
+        .map((group) => group.prompt).join('\n');
     for (let index = 0; index < ticketIds.length; index += 1) {
         assert.equal(corePrompt.split(ticketIds[index]).length - 1, 1);
         assert.match(corePrompt, new RegExp(ticketAxisValues[index].replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
@@ -2044,10 +2188,87 @@ test('module protocol sorts reversed discoveries by accepted first offset before
     assert.deepEqual(run.result.ledger.actors.map((actor) => ({
         name: actor.name,
         ticketId: actor.profileV6?.designRolls?.ticketId,
-    })), [
-        { name: names[0], ticketId: ticketIds[0] },
-        { name: names[1], ticketId: ticketIds[1] },
-    ]);
+    })), names.map((name, index) => ({ name, ticketId: ticketIds[index] })));
+});
+
+test('one omitted final promotion mapping among seven DISC rows is explicit and keeps S0', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-seven-disc-mapping-missing' });
+    const names = Array.from({ length: 7 }, (_, index) => `\u6620\u5c04\u884c${index + 1}`);
+    const acceptedNarrative = names.map((name) => `${name}\u660e\u786e\u51fa\u573a\u5e76\u88ab\u5355\u72ec\u8bc6\u522b\u3002`).join('');
+    const source = narrativeDiscoverySourceRef(fixture.ref);
+    const batch = ticketBatch(fixture.ref, names.length);
+    const before = normalizeActorLedger(fixture.ledger);
+    const moduleText = (key, name) => `${name}${key}. ${'Complete stable dossier prose includes facts constraints choices and future action context. '.repeat(7)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative, completionMode: 'full', sourceRef: source,
+            characterCreationTickets: structuredClone(batch.tickets),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+            if (groupKey === 'identity_bootstrap') return names.map((name) => (
+                `<profile-target actor="new" name="${name}"></profile-target>`
+            )).join('\n');
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+        resolveDiscoveries: async ({ discoveries }) => {
+            const discovered = discoverActorsFromTurnSources(emptyActorLedger(fixture.ledger.chatId), {
+                acceptedContent: acceptedNarrative, sourceRef: source,
+                turn: fixture.ref.generation, modelProfileDiscoveries: structuredClone(discoveries),
+            });
+            const upsert = runActorRegistryUpsert(discovered.ledger, discovered.candidates, {
+                chatId: fixture.ledger.chatId, identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest, allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref, turn: fixture.ref.generation,
+            });
+            const registration = promoteActorCandidatesToRegistry(upsert.ledger, discovered.candidates, {
+                chatId: fixture.ledger.chatId, identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest, allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref, turn: fixture.ref.generation,
+            });
+            const binding = bindCharacterCreationTicketsToRegisteredActors(registration.ledger, {
+                registration, candidates: discovered.candidates, batch, target: fixture.ref,
+            });
+            const prepared = prepareActorLedgerProfilesV6(binding.ledger, {
+                mode: 'full', turn: fixture.ref.generation,
+            }).ledger;
+            const promotedIds = registration.promoted.map((entry) => entry.actorRef.actorId);
+            const candidates = selectActorProfileCompletionCandidates(prepared, {
+                initialActorIds: promotedIds, maintenanceMaxActors: 0, turn: fixture.ref.generation,
+            });
+            const discoveryByName = new Map(discoveries.map((entry) => [entry.candidateRef.name, entry]));
+            return {
+                ok: true, ledger: binding.ledger, candidates,
+                entries: registration.promoted.slice(0, -1).map((promotion) => ({
+                    candidateId: promotion.candidateId,
+                    actorRef: {
+                        actorId: promotion.actorRef.actorId,
+                        name: promotion.actorRef.displayName,
+                    },
+                    candidate: discoveryByName.get(promotion.actorRef.displayName).candidate,
+                    repairs: [],
+                })),
+                failures: [], rejected: [], snapshot: { fieldRevision: 0 },
+                registry: registration,
+            };
+        },
+    });
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.readbackCount, 0);
+    assert.deepEqual(run.result.ledger, before);
+    assert.ok(run.result.failures.some((failure) => (
+        failure.reason === 'actor_profile.discovery_promotion_mapping_missing'
+    )));
+    assert.equal(run.result.failures.some((failure) => (
+        failure.reason === 'actor_profile.group_row_missing'
+    )), false);
 });
 
 test('format-unrecoverable module retry receives safe group feedback and retries no successful group', async () => {
@@ -2334,6 +2555,49 @@ test('six actors keep validated profile modules in the transaction-local clone a
     assert.equal(run.readbackCount, 2);
 });
 
+test('multi-chunk group merges local rows before full validation and retries only one omitted row', async () => {
+    const fixture = prepareRegisteredBatch(8, { chatId: 'chat-multi-chunk-row-merge' });
+    const calls = [];
+    const moduleText = (key, name) => `${name} ${key}. ${'Complete stable dossier prose includes facts constraints choices and usable action context. '.repeat(7)}`;
+    const run = await runBatch(fixture, {
+        moduleProtocol: true,
+        semanticRetry: true,
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt, transportChunk }) => {
+            calls.push({
+                groupKey, attempt, chunk: transportChunk.index,
+                actorIds: candidates.map((candidate) => candidate.actorRef.actorId),
+                moduleKeys: [...moduleKeys],
+            });
+            const emitted = groupKey === 'character_core'
+                && attempt === 0 && transportChunk.index === 1
+                ? candidates.slice(0, -1)
+                : candidates;
+            return emitted.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.deepEqual(calls.slice(0, 2).map((call) => call.actorIds.length), [6, 2]);
+    assert.equal(calls[2].attempt, 1);
+    assert.equal(calls[2].actorIds.length, 1);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.accepted.length, 8);
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.readbackCount, 2);
+    const semanticFailure = run.result.batchMeta.moduleGroups.find((entry) => (
+        entry.groupKey === 'character_core'
+        && entry.attempt === 0
+        && entry.status === 'semantic_failed'
+        && entry.transportChunk == null
+    ));
+    assert.ok(semanticFailure);
+    assert.ok(semanticFailure.parsedRowCount >= 7);
+    assert.ok(semanticFailure.failureCodes.includes('actor_profile.module_missing'));
+    assert.ok(semanticFailure.missingModules.includes('person'));
+});
+
 test('full_adult identity, core and physiology share one atomic working transaction', async () => {
     const fixture = prepareRegisteredBatch(1, { chatId: 'chat-full-adult-atomic-groups' });
     fixture.candidates[0].completionMode = 'full_adult';
@@ -2467,8 +2731,10 @@ test('a failed middle full_adult chunk keeps all twenty-four rows at S0', async 
                 `<coverage-unit id="${unit.id}" digest="${unit.digest}"><no-new/></coverage-unit>`
             )).join('\n');
             if (groupKey === 'character_core') coreChunks.push(transportChunk.index);
-            if (groupKey === 'character_core' && transportChunk.index === 1) return 'malformed middle chunk';
-            return candidates.map((candidate) => [
+            const emittedCandidates = groupKey === 'character_core' && transportChunk.index === 1
+                ? candidates.slice(0, -1)
+                : candidates;
+            return emittedCandidates.map((candidate) => [
                 `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
                 ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
                 '</profile-target>',
@@ -2477,6 +2743,14 @@ test('a failed middle full_adult chunk keeps all twenty-four rows at S0', async 
     });
     assert.deepEqual(coreChunks, [0, 1, 2, 3]);
     assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.ok(run.result.failures.some((failure) => (
+        failure.reason === 'actor_profile.module_missing'
+    )));
+    assert.ok(run.result.batchMeta.moduleGroups.some((entry) => (
+        entry.status === 'semantic_failed'
+        && entry.failureCodes.includes('actor_profile.module_missing')
+        && entry.missingModules.length > 0
+    )));
     assert.equal(run.saveCount, 0);
     assert.equal(run.readbackCount, 0);
     assert.deepEqual(run.result.ledger, before);
