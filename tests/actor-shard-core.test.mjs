@@ -645,6 +645,34 @@ test('persistent actor proposals whitelist resource costs and capabilities befor
     );
 });
 
+test('an explicitly empty interaction allow-list rejects invented actors', () => {
+    const continuity = { threads: [thread('T-alone', 'Ada')] };
+    const actorLedger = actionReadyLedgerForContinuity(continuity);
+    const actorId = actorLedger.actors[0].id;
+    const candidate = selectActorShardCandidates({
+        continuity,
+        actorLedger,
+        schedule: {
+            selected: [{ actorId, score: 10, slot: 'priority', reasons: ['action-due'] }],
+        },
+        maxWorkers: 1,
+    })[0];
+    candidate.knownInteractionTargets = [];
+    assert.deepEqual(candidate.knownInteractionTargets, []);
+    assert.equal(
+        parseActorShardProposal(JSON.stringify(proposal(candidate, {
+            interactionTargets: [{ actorId: 'NPC-FAKE', actorName: 'Invented Stranger' }],
+        })), { candidate }).error,
+        'actor_shard.interaction_targets_invalid',
+    );
+    assert.equal(
+        parseActorShardProposal(JSON.stringify(proposal(candidate, {
+            interactionTargets: [],
+        })), { candidate }).error,
+        undefined,
+    );
+});
+
 test('convergence is order-independent and keeps time/location/causal conflicts independent', () => {
     const candidates = selectActorShardCandidates({
         continuity: {

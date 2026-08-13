@@ -406,6 +406,10 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /worldCallReservedForUserCancellation\.toString\(\)/u);
     assert.match(fingerprintSource, /clearUserCancelledWorldCallReservation\.toString\(\)/u);
     assert.match(fingerprintSource, /finalizeActorProfileRecoveryOutcome\.toString\(\)/u);
+    assert.match(fingerprintSource, /actorProfileCompletionGroupPlan\.toString\(\)/u);
+    assert.match(fingerprintSource, /buildActorProfileModuleGroupMessages\.toString\(\)/u);
+    assert.match(fingerprintSource, /parseActorProfileModuleGroupOutput\.toString\(\)/u);
+    assert.match(fingerprintSource, /materializeActorProfileBaseline\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3NoActorPermitMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3LedgerReadbackGate\.toString\(\)/u);
     assert.match(fingerprintSource, /writeChatNamespace\.toString\(\)/u);

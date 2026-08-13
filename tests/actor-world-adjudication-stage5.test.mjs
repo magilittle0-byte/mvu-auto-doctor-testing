@@ -13,6 +13,7 @@ import {
     validateWorldAdjudicationBatch,
 } from '../actor-authority-core.mjs';
 import {
+    actorActionCandidatesFromShard,
     actorActionAttemptsMatchLedger,
     actorActionSettlementsMatchLedger,
     actorProfileCommitMatchesLedger,
@@ -965,6 +966,100 @@ test('production persists supplied attempts before adjudication and settle has n
     const recordSource = ledgerSource.slice(recordStart, recordEnd);
     assert.doesNotMatch(recordSource, /actionAttempt:\s*attempt/u);
     assert.match(recordSource, /ledger\.actionAttempts\.push/u);
+});
+
+test('production player identity and adjudicated duration remain hard action authorities', async () => {
+    const actor = readyActor();
+    const ledger = ledgerFor(actor);
+    const [candidate] = actorActionCandidatesFromShard(ledger, [{
+        actorId: actor.id,
+        candidateAction: 'Ada asks Aster to leave; Aster may decide whether to respond.',
+        intent: 'execute',
+        time: 'this turn',
+        location: 'South Gate',
+        travelTurns: 1,
+        interactionTargets: [{ actorId: 'PLAYER-ASTER', actorName: 'Aster' }],
+        contact: { mode: 'direct', target: 'Aster', observableConsequence: 'Aster hears the request' },
+        stateChanges: [{ kind: 'location', summary: 'Ada reaches South Gate' }],
+        knowledgeBasis: ['the warehouse ledger is available at North Port'],
+        evidence: ['E1'],
+    }], { turn: 7 });
+    assert.deepEqual(candidate.interactionTargets, [{ actorId: 'PLAYER-ASTER', actorName: 'Aster' }]);
+    const playerCandidate = candidateFor(actor, {
+        action: 'Ada asks Aster to inspect one bounded warehouse record.',
+        interactionTargets: [{ actorName: 'Aster' }],
+        contact: { mode: 'direct', target: 'Aster', observableConsequence: 'Aster hears the request' },
+    });
+    const prepared = prepareActorActionAttempts(ledger, [playerCandidate], {
+        turn: 7,
+        sourceRef: target(),
+        target: target(),
+        playerNames: ['Aster'],
+    });
+    assert.equal(prepared.rejected.length, 0);
+    assert.equal(prepared.attempts[0].playerTargeted, true);
+    assert.equal(prepared.attempts[0].route, 'foreground_attempt');
+
+    const durationCandidate = candidateFor(actor, {
+        location: { from: 'North Port', to: 'South Gate', travelTurns: 1 },
+        stateChanges: [{ kind: 'location', summary: 'Ada reaches South Gate' }],
+    });
+    const durationPrepared = prepareActorActionAttempts(ledger, [durationCandidate], {
+        turn: 7, sourceRef: target(), target: target(), playerNames: ['Aster'],
+    });
+    const recorded = recordActorActionAttempts(
+        durationPrepared.ledger,
+        durationPrepared.attempts,
+        { target: target() },
+    );
+    const attempt = recorded.recorded[0];
+    const settled = settleActorActionCandidates(recorded.ledger, [{
+        ...attempt.candidateSnapshot,
+        attemptId: attempt.id,
+    }], {
+        turn: 7,
+        attempts: [attempt],
+        target: target(),
+        worldAdjudications: [decisionFor(attempt, 'success', {
+            durationTurns: 5,
+            appliedStateChanges: [{ kind: 'location', summary: 'Ada reaches South Gate after five turns' }],
+        })],
+    });
+    const updated = settled.ledger.actors.find((item) => item.id === actor.id);
+    assert.equal(updated.location.sinceTurn, 12);
+    assert.equal(updated.nextActionTurn, 12);
+
+    const failedDurationCandidate = candidateFor(actor, {
+        location: { from: 'North Port', to: 'South Gate', travelTurns: 1 },
+        stateChanges: [{ kind: 'plan', summary: 'Ada attempts the route and must recover' }],
+    });
+    const failedPrepared = prepareActorActionAttempts(ledger, [failedDurationCandidate], {
+        turn: 7, sourceRef: target(), target: target(), playerNames: ['Aster'],
+    });
+    const failedRecorded = recordActorActionAttempts(
+        failedPrepared.ledger, failedPrepared.attempts, { target: target() },
+    );
+    const failedAttempt = failedRecorded.recorded[0];
+    const failed = settleActorActionCandidates(failedRecorded.ledger, [{
+        ...failedAttempt.candidateSnapshot,
+        attemptId: failedAttempt.id,
+    }], {
+        turn: 7,
+        attempts: [failedAttempt],
+        target: target(),
+        worldAdjudications: [decisionFor(failedAttempt, 'failure', { durationTurns: 4 })],
+    });
+    const failedActor = failed.ledger.actors.find((item) => item.id === actor.id);
+    assert.equal(failedActor.location.name, 'North Port');
+    assert.equal(failedActor.nextActionTurn, 11);
+
+    const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const prepareAt = indexSource.indexOf('const prepared = prepareActorActionAttempts');
+    assert.match(indexSource.slice(prepareAt, prepareAt + 500), /playerNames:\s*currentPlayerActorNames\(context\)/u);
+    assert.match(indexSource, /interactionTargets/u);
+    assert.match(indexSource, /knowledge: actor\.knowledge/u);
+    assert.match(indexSource, /resources: actor\.resources/u);
+    assert.match(indexSource, /stimuli: actor\.stimuli/u);
 });
 
 test('formal profile receipt remains self-consistent after the stage5 action flow', () => {

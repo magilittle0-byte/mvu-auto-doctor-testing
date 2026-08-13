@@ -32,6 +32,7 @@ const PROPOSAL_KEYS = Object.freeze([
     'stimulusDecisions',
     'stateChanges',
     'interactionTargets',
+    'contact',
     'resourceCosts',
     'capabilityUsed',
     'waitCondition',
@@ -41,6 +42,7 @@ const PROPOSAL_KEYS = Object.freeze([
 ]);
 const OPTIONAL_PROPOSAL_KEYS = new Set([
     'interactionTargets',
+    'contact',
     'resourceCosts',
     'capabilityUsed',
     'waitCondition',
@@ -490,6 +492,7 @@ function actorShardOutputShape(candidate) {
         })),
         stateChanges: [{ kind: 'knowledge', summary: '一条具名线索被确认、排除或缩小范围' }],
         interactionTargets: [],
+        contact: { mode: 'none', target: '', observableConsequence: '' },
         resourceCosts: [],
         capabilityUsed: '',
         waitCondition: '',
@@ -709,6 +712,9 @@ export function parseActorShardProposal(output, { candidate } = {}) {
         value[key] = clone(fallback);
         locallyDefaulted.push(key);
     }
+    if (!Object.hasOwn(value, 'contact')) {
+        value.contact = { mode: 'none', target: '', observableConsequence: '' };
+    }
     const missingRequired = PROPOSAL_KEYS.some((key) => (
         !OPTIONAL_PROPOSAL_KEYS.has(key) && !Object.hasOwn(value, key)
     ));
@@ -735,6 +741,34 @@ export function parseActorShardProposal(output, { candidate } = {}) {
     ) {
         return { error: 'actor_shard.interaction_targets_invalid' };
     }
+    const knownInteractionTargets = new Map(
+        (Array.isArray(candidate?.knownInteractionTargets)
+            ? candidate.knownInteractionTargets : []).map((item) => [
+            cleanText(item?.actorId, 180),
+            cleanText(item?.actorName, 120),
+        ]).filter(([actorId, actorName]) => actorId && actorName),
+    );
+    if (
+        Array.isArray(candidate?.knownInteractionTargets)
+        && interactionTargets.some((item) => (
+            knownInteractionTargets.get(cleanText(item.actorId, 180))
+                !== cleanText(item.actorName, 120)
+        ))
+    ) {
+        return { error: 'actor_shard.interaction_targets_invalid' };
+    }
+    const rawContact = value.contact === undefined
+        ? { mode: 'none', target: '', observableConsequence: '' }
+        : value.contact;
+    if (!objectRecord(rawContact)) return { error: 'actor_shard.contact_invalid' };
+    const contactMode = cleanText(rawContact.mode, 80);
+    const contactTarget = cleanText(rawContact.target, 180);
+    const contactConsequence = cleanText(rawContact.observableConsequence, 500);
+    if (
+        !['none', 'indirect', 'direct'].includes(contactMode)
+        || (contactMode === 'none' && (contactTarget || contactConsequence))
+        || (contactMode !== 'none' && (!contactTarget || !contactConsequence))
+    ) return { error: 'actor_shard.contact_invalid' };
     const resourceCosts = value.resourceCosts === undefined
         ? []
         : Array.isArray(value.resourceCosts) ? value.resourceCosts : null;
@@ -832,6 +866,11 @@ export function parseActorShardProposal(output, { candidate } = {}) {
             actorId: cleanText(item.actorId, 180),
             actorName: cleanText(item.actorName, 120),
         })),
+        ...(contactMode === 'none' ? {} : { contact: {
+            mode: contactMode,
+            target: contactTarget,
+            observableConsequence: contactConsequence,
+        } }),
         resourceCosts: resourceCosts.map((item) => ({
             resourceId: cleanText(item.resourceId, 100),
             amount: Number(item.amount),

@@ -895,8 +895,8 @@ test('Registry row keys accept stable literal individual labels while rejecting 
     for (const name of ['\u4ed6\u4eec', '\u4f17\u4eba', '\u67d0\u67d0', '\u7cfb\u7edf\u63d0\u793a', '\u67d0\u67d0\u516c\u53f8']) {
         assert.notEqual(classifyActorRegistryTargetName(name), '', name);
     }
-    for (const unstableKey of ['\u8def\u4eba', '\u964c\u751f\u4eba', '\u7537\u4eba', '\u5b69\u5b50']) {
-        assert.notEqual(classifyActorRegistryTargetName(unstableKey), '', unstableKey);
+    for (const vague of ['\u8def\u4eba', '\u964c\u751f\u4eba', '\u7537\u4eba', '\u5973\u4eba', '\u5b69\u5b50', '\u8001\u4eba']) {
+        assert.notEqual(classifyActorRegistryTargetName(vague), '', vague);
     }
 });
 

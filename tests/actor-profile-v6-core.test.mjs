@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
     ACTOR_PROFILE_V6_VERSION,
     actorProfileActionReadiness,
     actorProfileBaselineDigest,
@@ -1211,6 +1212,46 @@ test('adult physiology remains optional and never disguises an incomplete core d
     assert.equal(profile.backgroundPending, true);
 });
 
+test('narrative adult physiology contract is versioned so old generic prose becomes maintenance', () => {
+    const actorRef = { actorId: 'NPC-ADULT-NARRATIVE', name: '成年测试人物' };
+    const sections = Object.fromEntries([
+        'person', 'physiology', 'personality', 'history', 'currentState',
+        'relationshipsMotives', 'knowledgeCapabilitiesResources',
+    ].map((key) => [key, {
+        title: key,
+        text: `${key}：这是一段完整自然的中文档案内容，用于验证版本化成人生理补全。`,
+        source: 'hypothesis',
+        evidence: [],
+    }]));
+    const previous = normalizeActorProfileV6({
+        version: ACTOR_PROFILE_V6_VERSION,
+        actorId: actorRef.actorId,
+        name: actorRef.name,
+        completionMode: 'full_adult',
+        profileFormat: 'narrative-v1',
+        narrativeSections: sections,
+    }, { actorId: actorRef.actorId, name: actorRef.name, mode: 'full_adult' });
+    assert.equal(actorProfileV6View({
+        id: actorRef.actorId,
+        name: actorRef.name,
+        profileV6: previous,
+    }).optionalCoverage, 0);
+    const materialized = materializeActorProfileBaseline(previous, {
+        profileFormat: 'narrative-v1',
+        actorRef,
+        narrativeSections: sections,
+    }, { completionMode: 'full_adult', turn: 2, now: 200 });
+    assert.equal(
+        materialized.narrativeSections.physiology.contractVersion,
+        ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
+    );
+    assert.equal(actorProfileV6View({
+        id: actorRef.actorId,
+        name: actorRef.name,
+        profileV6: materialized,
+    }).optionalCoverage, 100);
+});
+
 test('manual overrides, locks, module regeneration and version history are durable', () => {
     const ada = actor();
     let profile = prepareActorProfileV6(ada, { mode: 'full', turn: 1, now: 100 });
@@ -1384,7 +1425,7 @@ test('narrative first-literal discovery remains parser-only and fail-closed for 
         }, `${rowKey}\u6b63\u5728\u73b0\u573a\u5904\u7406\u4e8b\u60c5\u3002`);
         assert.equal(literal.ok, true, rowKey);
     }
-    for (const vagueRowKey of ['\u8def\u4eba', '\u964c\u751f\u4eba', '\u7537\u4eba', '\u5b69\u5b50']) {
+    for (const vagueRowKey of ['\u4ed6', '\u4f17\u4eba', '\u67d0\u67d0', '\u8fd9\u4e2a\u4eba', '\u8def\u4eba', '\u964c\u751f\u4eba', '\u7537\u4eba', '\u5973\u4eba', '\u5b69\u5b50', '\u8001\u4eba']) {
         const vagueLiteral = validateActorProfileDiscoveryAnchor({
             name: vagueRowKey,
             sourceAnchor: `${vagueRowKey}\u6b63\u5728\u73b0\u573a\u5904\u7406\u4e8b\u60c5\u3002`,

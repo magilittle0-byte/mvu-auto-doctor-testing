@@ -4010,6 +4010,12 @@ export function actorActionCandidatesFromShard(value, proposals, {
         const declaredContact = proposal?.contact && typeof proposal.contact === 'object'
             ? proposal.contact
             : null;
+        const interactionTargets = (Array.isArray(proposal?.interactionTargets)
+            ? proposal.interactionTargets
+            : []).map((target) => ({
+            actorId: cleanText(target?.actorId, 180),
+            actorName: cleanText(target?.actorName, 160),
+        })).filter((target) => target.actorId && target.actorName);
         const knowledgeRefs = (actor.knowledge || [])
             .filter((item) => (proposal?.knowledgeBasis || []).includes(item.claim))
             .map((item) => item.id);
@@ -4067,11 +4073,12 @@ export function actorActionCandidatesFromShard(value, proposals, {
                 amount: number(item?.amount, 0, 1_000_000_000, 0),
             })),
             capabilityUsed: cleanText(proposal?.capabilityUsed, 160),
-            contact: declaredContact
+            interactionTargets,
+            contact: declaredContact && cleanText(declaredContact.mode, 80) !== 'none'
                 ? {
                     mode: cleanText(declaredContact.mode, 80),
                     target: cleanText(
-                        declaredContact.target || proposal?.interactionTargets?.[0]?.actorName || '当前世界',
+                        declaredContact.target || interactionTargets[0]?.actorName || '',
                         180,
                     ),
                     observableConsequence: cleanText(declaredContact.observableConsequence, 500) || action,
@@ -4733,6 +4740,9 @@ export function settleActorActionCandidates(value, candidates, {
         next.lastAttemptTurn = currentTurn;
         const appliesWorldResult = ['settled', 'partial'].includes(result.status)
             && result.worldAdjudicated === true;
+        const adjudicatedDurationTurns = result.worldAdjudicated === true
+            ? integer(result.durationTurns, 0, 10_000, 0)
+            : integer(candidate.location.travelTurns, 0, 10_000, 0);
         if (appliesWorldResult) {
             const stimulusDecisionById = new Map(
                 (Array.isArray(candidate.stimulusDecisions) ? candidate.stimulusDecisions : [])
@@ -4765,7 +4775,7 @@ export function settleActorActionCandidates(value, candidates, {
             ) {
                 next.location = {
                     name: cleanText(candidate.location.to, 180),
-                    sinceTurn: currentTurn + integer(candidate.location.travelTurns, 0, 10_000, 0),
+                    sinceTurn: currentTurn + adjudicatedDurationTurns,
                     evidence: mergeEvidence(next.location.evidence, candidate.evidence, 8),
                 };
             }
@@ -4796,7 +4806,7 @@ export function settleActorActionCandidates(value, candidates, {
         };
         next.nextActionTurn = currentTurn + Math.max(
             1,
-            integer(candidate.location.travelTurns, 0, 10_000, 0),
+            adjudicatedDurationTurns,
         );
         next.silenceTurns = semanticProgress
             ? 0

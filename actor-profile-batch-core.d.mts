@@ -40,6 +40,8 @@ export type ActorProfileBatchPersistenceCallback =
         reason?: string;
     }>;
 
+export function actorProfileBatchSemanticFingerprint(overrides?: Record<string, unknown>): string;
+
 export function completeActorProfileBatchTransaction(options?: {
     persistPendingBatch?: ActorProfileBatchPersistenceCallback;
     persistFinalizedBatch?: ActorProfileBatchPersistenceCallback;

@@ -134,33 +134,14 @@ export function classifySocialAuditNeed({
     mode = 'balanced',
 } = {}) {
     if (mode === 'off') return { needed: false, reasons: [] };
-    const combined = `${userText}\n${replyText}`;
-    const reasons = [];
-    if (changes.length) reasons.push('relationship-change');
-    if (EXTREME_SOCIAL_RE.test(replyText)) reasons.push('extreme-social-language');
-    if (MOTIVE_ATTRIBUTION_RE.test(replyText)) reasons.push('player-motive-attribution');
-    if (COERCION_RE.test(combined) && changes.length) reasons.push('coercion-relation-conflict');
-    if (ORDINARY_CARE_RE.test(userText) && EXTREME_SOCIAL_RE.test(replyText)) {
-        reasons.push('ordinary-care-extreme-interpretation');
-    }
-    const genericExtremeLabels = String(replyText || '').match(GENERIC_EXTREME_LABEL_RE) || [];
-    if (TOTALIZING_IDENTITY_RE.test(replyText)) reasons.push('identity-totalization');
-    if (genericExtremeLabels.length >= 4) reasons.push('stereotype-label-pileup');
-    if (TYPOLOGY_SHORTCUT_RE.test(replyText)) reasons.push('typology-shortcut');
-    if (UNIFORM_GROUP_RE.test(replyText)) reasons.push('group-reaction-homogenization');
-    if (mode === 'strict') {
-        return {
-            needed: changes.length > 0
-                || EXTREME_SOCIAL_RE.test(replyText)
-                || MOTIVE_ATTRIBUTION_RE.test(replyText)
-                || TOTALIZING_IDENTITY_RE.test(replyText)
-                || genericExtremeLabels.length >= 4
-                || TYPOLOGY_SHORTCUT_RE.test(replyText)
-                || UNIFORM_GROUP_RE.test(replyText),
-            reasons: [...new Set(reasons.length ? reasons : ['strict-semantic-review'])],
-        };
-    }
-    return { needed: reasons.length > 0, reasons: [...new Set(reasons)] };
+    // This module owns relationship-state consistency only. Narrative style,
+    // personality, emotion intensity and typology are not Doctor write gates.
+    const paths = [...new Set((changes || []).map((change) => String(change?.path || '')))]
+        .filter(Boolean);
+    return {
+        needed: paths.length > 0,
+        reasons: paths.length ? ['relationship-change'] : [],
+    };
 }
 
 const LOCAL_SOCIAL_WARNING_FLOORS = Object.freeze({
@@ -362,10 +343,13 @@ export function parseSocialAuditOutput(output, knownChanges = []) {
         }))
         .slice(0, 12);
     const decisions = [];
+    const seenPaths = new Set();
     for (const item of Array.isArray(value.decisions) ? value.decisions : []) {
-        if (!isPlainObject(item)) continue;
+        if (!isPlainObject(item)) return { error: 'relationship decision must be an object' };
         const path = String(item.path || '');
-        if (!known.has(path)) continue;
+        if (!known.has(path)) return { error: `unknown relationship path: ${path || '(empty)'}` };
+        if (seenPaths.has(path)) return { error: `duplicate relationship path: ${path}` };
+        seenPaths.add(path);
         const action = item.action === 'revert' ? 'revert' : 'allow';
         decisions.push({
             path,
@@ -373,6 +357,13 @@ export function parseSocialAuditOutput(output, knownChanges = []) {
             reason: String(item.reason || '').slice(0, 600),
             evidence: String(item.evidence || '').slice(0, 500),
         });
+    }
+    const missingPaths = [...known.keys()].filter((path) => !seenPaths.has(path));
+    if (missingPaths.length) {
+        return {
+            error: `missing relationship decisions: ${missingPaths.slice(0, 8).join(', ')}`,
+            localRepairAttempted: extracted.repairAttempted === true,
+        };
     }
     return {
         verdict,

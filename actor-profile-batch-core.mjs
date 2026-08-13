@@ -1,5 +1,6 @@
 import { fingerprint } from './core.mjs';
 import {
+    ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
     actorProfileBaselineDigest,
     actorProfileCompletionGroupPlan,
     buildActorProfileModuleGroupMessages,
@@ -60,6 +61,12 @@ const SAFE_IDENTITY_RETRY_GUIDANCE = Object.freeze({
     'actor_candidate.identity_internal_id': '\u5220\u9664 ActorRef\u3001\u5185\u90e8 ID \u6216\u8def\u7531\u6807\u8bc6\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u51fa\u73b0\u7684\u7a33\u5b9a\u4eba\u7269\u884c\u952e\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
     'actor_candidate.identity_registry_conflict': '\u5220\u9664\u5df2\u767b\u8bb0\u4eba\u7269\u3001\u522b\u540d\u6216\u4e0e Registry \u51b2\u7a81\u7684\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u5176\u4ed6\u672a\u767b\u8bb0\u65b0\u4eba\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
     'actor_candidate.identity_quarantined': '\u5220\u9664\u88ab\u672c\u5730\u8eab\u4efd\u9694\u79bb\u7684\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u5176\u4ed6\u80fd\u901a\u8fc7\u8eab\u4efd\u9884\u68c0\u7684\u660e\u786e\u65b0\u4eba\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_profile.identity_reveal_actor_ref_unknown': '\u5220\u9664\u81ea\u521b\u6216\u8fc7\u671f ActorId\uff1b\u82e5\u6b63\u6587\u660e\u786e\u63ed\u793a\u65e7\u4eba\u7269\u7684\u65b0\u884c\u952e\uff0c\u53ea\u80fd\u4f7f\u7528\u5df2\u767b\u8bb0\u7d22\u5f15\u4e2d\u8be5\u4eba\u7684\u7cbe\u786e actorId\u3002',
+    'actor_profile.identity_reveal_name_not_in_coverage_unit': '\u65b0\u884c\u952e\u5fc5\u987b\u662f\u5f53\u524d coverage unit \u7684\u8fde\u7eed\u9010\u5b57\u5b50\u4e32\uff1b\u4e0d\u5f97\u4ece\u4e16\u754c\u4e66\u3001\u7968\u636e\u6216\u5176\u4ed6\u5355\u5143\u590d\u5236\u3002',
+    'actor_profile.identity_reveal_evidence_invalid': '\u5728 profile-target \u5185\u8865\u4e00\u4e2a <identity-evidence>\uff1a\u53ea\u9010\u5b57\u590d\u5236\u540c\u65f6\u5305\u542b\u8be5\u4eba\u5df2\u767b\u8bb0\u884c\u952e/\u522b\u540d\u4e0e\u65b0\u884c\u952e\u7684\u6700\u77ed\u6b63\u6587\u539f\u53e5\u7247\u6bb5\uff1b\u4e0d\u5f97\u590d\u5236\u6574\u4e2a coverage unit\u3002',
+    'actor_profile.identity_reveal_actor_ambiguous': '\u8bc1\u636e\u7247\u6bb5\u540c\u65f6\u6307\u5411\u591a\u4e2a\u5df2\u767b\u8bb0\u4eba\u7269\uff0c\u6216\u6ca1\u6709\u9010\u5b57\u51fa\u73b0\u8be5 actorId \u7684\u5df2\u767b\u8bb0\u884c\u952e/\u522b\u540d\uff1b\u5220\u9664\u8be5\u5408\u5e76\u8def\u7531\uff0c\u4e0d\u5f97\u731c\u6d4b ActorId\u3002',
+    'actor_profile.identity_reveal_unchanged': '\u5df2\u767b\u8bb0\u59d3\u540d\u6216\u522b\u540d\u6ca1\u6709\u53d1\u751f\u63ed\u793a\u65f6\u4e0d\u8981\u8f93\u51fa profile-target\uff1b\u8be5 coverage unit \u6539\u4e3a <no-new/>\u3002',
+    'actor_profile.identity_reveal_conflict': '\u65b0\u884c\u952e\u5df2\u5c5e\u4e8e\u53e6\u4e00 ActorRef\uff0c\u4e0d\u5f97\u6a21\u7cca\u5408\u5e76\u6216\u590d\u5236\u6863\u6848\uff1b\u4fdd\u7559\u51b2\u7a81\u4f9b\u672c\u5730\u6062\u590d\u3002',
 });
 
 const SAFE_PROFILE_RETRY_CODES = new Set([
@@ -69,11 +76,20 @@ const SAFE_PROFILE_RETRY_CODES = new Set([
     'actor_profile.module_unexpected',
     'actor_profile.module_duplicate',
     'actor_profile.module_content_incomplete',
+    'actor_profile.physiology_coverage_incomplete',
     'actor_profile.module_missing',
     'actor_profile.discovery_name_not_in_narrative',
     'actor_profile.discovery_duplicate',
     'actor_profile.actor_ref_mismatch',
 ]);
+
+export function actorProfileBatchSemanticFingerprint(overrides = {}) {
+    return `actor-profile-batch:${fingerprint(JSON.stringify({
+        identityRetryGuidance: SAFE_IDENTITY_RETRY_GUIDANCE,
+        profileRetryCodes: [...SAFE_PROFILE_RETRY_CODES].sort(),
+        ...(overrides || {}),
+    }))}`;
+}
 
 const PROFILE_BATCH_FAILURE_CATEGORIES = new Set([
     'scope_stale',
@@ -275,6 +291,7 @@ export async function completeActorProfileBatchTransaction({
         }]));
         const completedModulesByActor = new Map();
         const discoveries = new Map();
+        const identityReveals = new Map();
         const groupDiagnostics = [];
         const callGroup = async (group, groupAttempt = 0, groupFeedback = validationFeedback) => {
             // A retry may reuse successful sibling groups only inside this
@@ -305,6 +322,7 @@ export async function completeActorProfileBatchTransaction({
             if (!await current()) return { stale: true };
             let parsed = parseActorProfileModuleGroupOutput(output, group, {
                 acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
+                registeredActorIndex: attemptDiscoveryContext?.registeredActorIndex || [],
             });
             groupDiagnostics.push({ groupKey: group.key, moduleKeys: clone(group.modules), targetCount: group.targetCount, attempt: groupAttempt, status: parsed.formatUnrecoverable ? 'format_failed' : 'parsed' });
             return parsed;
@@ -316,6 +334,7 @@ export async function completeActorProfileBatchTransaction({
             }));
             const sectionUpdates = [];
             const discoveryUpdates = [];
+            const identityRevealUpdates = [];
             const scheduledByActor = new Map();
             for (const [moduleKey, targets] of Object.entries(group.targets || {})) {
                 for (const targetCandidate of targets) {
@@ -346,9 +365,51 @@ export async function completeActorProfileBatchTransaction({
                     continue;
                 }
                 if (group.key === 'identity_bootstrap' && !group.modules.length) {
-                    // Discovery owns only new literal route keys. Existing
-                    // ActorRefs are filled by character_core from the same
-                    // transaction-local working set.
+                    if (entry.identityReveal !== true) continue;
+                    const actorId = cleanText(entry.actorId, 120);
+                    const sourceCandidate = (attemptDiscoveryContext?.registeredProfileCandidates || [])
+                        .find((candidate) => candidateActorId(candidate) === actorId);
+                    if (!sourceCandidate) {
+                        failures.push({
+                            actorId,
+                            name: entry.name,
+                            reason: 'actor_profile.identity_reveal_actor_ref_unknown',
+                            groupKey: group.key,
+                        });
+                        continue;
+                    }
+                    const previousName = candidateName(sourceCandidate);
+                    const nextName = cleanText(entry.name, 160);
+                    const revealCandidate = {
+                        ...clone(sourceCandidate),
+                        actorRef: { actorId, name: nextName },
+                        actorId,
+                        name: nextName,
+                        identity: {
+                            ...clone(sourceCandidate.identity || {}),
+                            aliases: [...new Set([
+                                ...(sourceCandidate.identity?.aliases || []),
+                                previousName,
+                            ].filter((value) => value && value !== nextName))],
+                        },
+                        refreshProfileModules: [...ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES],
+                        __identityReveal: {
+                            actorId,
+                            previousName,
+                            revealedName: nextName,
+                            coverageUnitId: cleanText(entry.coverageUnitId, 80),
+                            sourceAnchor: String(entry.sourceAnchor || '').trim().slice(0, 1200),
+                            evidenceSpan: String(entry.evidenceSpan || '').trim().slice(0, 240),
+                        },
+                    };
+                    profileById.set(actorId, {
+                        candidate: revealCandidate,
+                        sections: clone(sourceCandidate?.previousProfile?.narrativeSections || {}),
+                    });
+                    identityRevealUpdates.push({
+                        key: actorId,
+                        value: clone(revealCandidate.__identityReveal),
+                    });
                     continue;
                 }
                 const row = profileById.get(cleanText(entry.actorId, 120));
@@ -373,7 +434,7 @@ export async function completeActorProfileBatchTransaction({
                     }
                 }
             }
-            return { failures, sectionUpdates, discoveryUpdates };
+            return { failures, sectionUpdates, discoveryUpdates, identityRevealUpdates };
         };
         const commitGroupApply = (preparedApply) => {
             for (const update of preparedApply.sectionUpdates) {
@@ -387,6 +448,9 @@ export async function completeActorProfileBatchTransaction({
                 }
             }
             for (const update of preparedApply.discoveryUpdates) discoveries.set(update.key, update.value);
+            for (const update of preparedApply.identityRevealUpdates || []) {
+                identityReveals.set(update.key, update.value);
+            }
         };
         const workingCandidates = () => [...profileById.values()].map(({ candidate, sections }) => {
             const actorId = candidateActorId(candidate);
@@ -404,10 +468,16 @@ export async function completeActorProfileBatchTransaction({
             };
         });
         const retryFeedbackFor = (preparedApply, parsed, group = null) => {
-            const structured = [
-            ...(preparedApply?.failures || []),
-            ...(parsed?.failures || []),
-            ];
+            const structuredByKey = new Map();
+            for (const entry of [
+                ...(preparedApply?.failures || []),
+                ...(parsed?.failures || []),
+            ]) {
+                const key = [entry?.reason, entry?.actorId, entry?.moduleKey, entry?.groupKey]
+                    .map((value) => cleanText(value, 160)).join('|');
+                if (!structuredByKey.has(key)) structuredByKey.set(key, entry);
+            }
+            const structured = [...structuredByKey.values()];
             if (parsed?.formatUnrecoverable === true && !(parsed?.failures || []).length) {
                 structured.push({
                     reason: 'actor_profile.format_unrecoverable',
@@ -432,7 +502,7 @@ export async function completeActorProfileBatchTransaction({
                 return JSON.stringify({
                     code,
                     action: identityAction
-                        ? `${identityAction}\u82e5\u5220\u9664\u65e0\u6548\u5019\u9009\u540e\u6ca1\u6709\u4efb\u4f55\u5408\u683c\u65b0\u4eba\uff0c\u5219\u53ea\u8f93\u51fa\u4e25\u683c\u7684\u201c\u65e0\u4eba\u7269\u6863\u6848\u201d\u3002`
+                        ? `${identityAction}必须仍按原 coverage unit 全集逐项作答；某个 unit 没有合格人物时在该 unit 内输出 <no-new/>，不得输出裸的“无人物档案”。`
                         : '\u6309\u5f53\u524d\u8def\u7531\u534f\u8bae\u4ec5\u91cd\u53d1\u672c\u7ec4\u5931\u8d25\u5185\u5bb9\uff0c\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u8f93\u51fa\uff0c\u4e0d\u8981\u6dfb\u52a0\u89e3\u91ca\u3002',
                     actorId: safeToken(entry?.actorId),
                     moduleKey: safeToken(entry?.moduleKey, 80),
@@ -455,7 +525,9 @@ export async function completeActorProfileBatchTransaction({
                 },
                 profileFormat: 'narrative-v1',
             }));
-            if (!discoveryRows.length) return {
+            const identityRevealRows = (preparedApply?.identityRevealUpdates || [])
+                .map(({ value }) => clone(value));
+            if (!discoveryRows.length && !identityRevealRows.length) return {
                 stale: false,
                 failures: [],
                 allDiscoveriesDeterministicallyInvalid: false,
@@ -466,6 +538,7 @@ export async function completeActorProfileBatchTransaction({
             try {
                 result = await preflightDiscoveries({
                     discoveries: clone(discoveryRows),
+                    identityReveals: clone(identityRevealRows),
                     groupKey: group.key,
                     attempt: groupAttempt,
                 });
@@ -528,7 +601,7 @@ export async function completeActorProfileBatchTransaction({
             preparedApply.failures.push(...preflight.failures);
             if (parsed.explicitEmpty && profileById.size === 0 && !preparedApply.failures.length) {
                 return {
-                    entries: [], discoveries: [], unresolved: [], failures: [], unexpected: [],
+                    entries: [], discoveries: [], identityReveals: [], unresolved: [], failures: [], unexpected: [],
                     explicitEmpty: true,
                     coverageProof: clone(parsed.coverageProof),
                     batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
@@ -554,7 +627,7 @@ export async function completeActorProfileBatchTransaction({
                 const terminalFailures = parsed.formatUnrecoverable && !preparedApply.failures.length
                     ? [{ actorId: '', reason: 'actor_profile.format_unrecoverable', groupKey: identity.key }]
                     : preparedApply.failures;
-                return { entries: [], discoveries: [], unresolved: terminalFailures.map((entry) => ({ ...entry, retryable: false })), failures: terminalFailures.map((entry) => ({ ...entry, retryable: false })), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics } };
+                return { entries: [], discoveries: [], identityReveals: [], unresolved: terminalFailures.map((entry) => ({ ...entry, retryable: false })), failures: terminalFailures.map((entry) => ({ ...entry, retryable: false })), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics } };
             }
             commitGroupApply(preparedApply);
         }
@@ -589,7 +662,7 @@ export async function completeActorProfileBatchTransaction({
         }
         if (discoveryOrderFailures.length) {
             return {
-                entries: [], discoveries: [], unresolved: discoveryOrderFailures,
+                entries: [], discoveries: [], identityReveals: [], unresolved: discoveryOrderFailures,
                 failures: discoveryOrderFailures, unexpected: [], explicitEmpty: false,
                 batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
             };
@@ -666,6 +739,7 @@ export async function completeActorProfileBatchTransaction({
             return {
                 entries: [],
                 discoveries: [],
+                identityReveals: [],
                 unresolved: failures.filter((entry) => !entry.actorId),
                 failures: failures.filter((entry) => entry.actorId),
                 unexpected: [],
@@ -690,7 +764,7 @@ export async function completeActorProfileBatchTransaction({
                 discoveryRows.push({ candidateRef: { name, sourceAnchor }, candidate: validation.candidate, repairs: [], resolutions: [] });
             } else entries.push({ actorId: candidateActorId(candidate), name: candidateName(candidate), candidate: validation.candidate, repairs: [], resolutions: [] });
         }
-        return { entries, discoveries: discoveryRows, unresolved: failures.filter((entry) => !entry.actorId), failures: failures.filter((entry) => entry.actorId), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' } };
+        return { entries, discoveries: discoveryRows, identityReveals: [...identityReveals.values()].map(clone), unresolved: failures.filter((entry) => !entry.actorId), failures: failures.filter((entry) => entry.actorId), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' } };
     };
 
     let batchMeta = null;
@@ -778,6 +852,7 @@ export async function completeActorProfileBatchTransaction({
     for (const failure of first.failures || []) failureById.set(failure.actorId, failure);
     rejected.push(...(first.unexpected || []));
     let discoveries = [...(first.discoveries || [])];
+    const identityReveals = [...(first.identityReveals || [])];
     let unresolved = [...(first.unresolved || [])];
     const explicitEmpty = first.explicitEmpty === true;
     const coverageProof = clone(first.coverageProof || null);
@@ -902,6 +977,7 @@ export async function completeActorProfileBatchTransaction({
     try {
         resolved = await resolveDiscoveries({
             discoveries: clone(discoveries),
+            identityReveals: clone(identityReveals),
             unresolved: clone(unresolved),
             unexpected: clone(rejected),
             explicitEmpty,
@@ -998,11 +1074,20 @@ export async function completeActorProfileBatchTransaction({
         });
     }
 
-    const allCandidates = [...selected, ...resolvedCandidates]
-        .filter((candidate, index, list) => (
-            candidateActorId(candidate)
-            && list.findIndex((item) => candidateActorId(item) === candidateActorId(candidate)) === index
-        ));
+    // Resolution owns the transaction-local row identity.  In particular, an
+    // explicit reveal keeps the ActorId but replaces the old display label and
+    // refresh plan; retaining the pre-resolution row here would immediately
+    // turn the valid reveal into a false target_stale failure.
+    const candidateById = new Map();
+    for (const candidate of selected) {
+        const actorId = candidateActorId(candidate);
+        if (actorId) candidateById.set(actorId, candidate);
+    }
+    for (const candidate of resolvedCandidates) {
+        const actorId = candidateActorId(candidate);
+        if (actorId) candidateById.set(actorId, candidate);
+    }
+    const allCandidates = [...candidateById.values()];
     if (!allCandidates.length) {
         return {
             ...base,

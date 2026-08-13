@@ -2026,6 +2026,10 @@ test('P3 local recall preserves every scheduled ID and adds linked structured su
         mustThreadIds: ['thread-must'],
         mustLaneIds: ['lane-must'],
         worldbookKeys: ['world-b', 'world-a', 'world-a'],
+        worldbookEntries: [
+            { id: 'entry-b', world: 'embedded', title: '规则乙', keys: ['乙'], content: '完整规则乙' },
+            { id: 'entry-a', world: 'embedded', title: '规则甲', keys: ['甲'], content: '完整规则甲' },
+        ],
         actorLedger: { actors: [
             { id: 'actor-must', name: '人物甲' },
             { id: 'actor-known', name: '人物乙' },
@@ -2051,6 +2055,8 @@ test('P3 local recall preserves every scheduled ID and adds linked structured su
     assert.deepEqual(Array.from(packet.laneIds), ['lane-must']);
     assert.deepEqual(Array.from(packet.mustActorIds), ['actor-must']);
     assert.deepEqual(Array.from(packet.worldbookKeys), ['world-a', 'world-b']);
+    assert.deepEqual(Array.from(packet.worldbookEntryIds), ['entry-a', 'entry-b']);
+    assert.match(packet.worldbookDigest, /^test-digest:/u);
     assert.equal(buildRecall({ ...options, mustActorIds: ['actor-unknown'] }), null);
     assert.equal(buildRecall({ ...options, mustThreadIds: ['thread-unknown'] }), null);
     assert.equal(buildRecall({ ...options, mustLaneIds: ['lane-unknown'] }), null);
@@ -2064,6 +2070,27 @@ test('P3 local recall is deterministic and adds zero model calls', () => {
     const run = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
     assert.equal((run.match(/generateWorldContinuitySingleBatch\(/gu) || []).length, 1);
     assert.equal((run.match(/stage3LocalRecallPacket\(/gu) || []).length, 1);
+});
+
+test('P3 materializes complete embedded worldbook entries instead of key-only projections', () => {
+    const collector = sourceSection(
+        'function usableContinuityWorldEntry(entry)',
+        'function usableForumWorldEntry(entry)',
+    );
+    assert.match(collector, /content,\s*\n\s*contentDigest: fingerprint\(content\)/u);
+    assert.doesNotMatch(collector, /cropText\(content,\s*1400/u);
+    const collection = sourceSection(
+        'async function collectContinuityWorldContextUncached',
+        'async function collectContinuityWorldContext(',
+    );
+    assert.match(collection, /const candidates = \[\.\.\.embedded, \.\.\.external\]/u);
+    assert.match(collection, /__doctorSourceKind: 'embedded'/u);
+    assert.match(collection, /__doctorSourceKind: 'external_active'/u);
+    assert.match(collection, /entries: canonicalEntries/u);
+    assert.doesNotMatch(collection, /worldBlocks\.length >= 12/u);
+    const prompt = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
+    assert.match(prompt, /recalledWorldbookEntries/u);
+    assert.match(prompt, /content: entry\.content/u);
 });
 
 test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudications', () => {

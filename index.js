@@ -71,6 +71,8 @@ import {
 import {
     formatUserNarrativeInstruction,
     normalizeUserPromptSlot,
+    parseActorShardProposal,
+    selectActorShardCandidates,
     userPromptSlotMetadata,
 } from './actor-shard-core.mjs';
 import {
@@ -105,6 +107,7 @@ import {
     recordActorActionAttempts,
     runActorRegistryUpsert,
     promoteActorCandidatesToRegistry,
+    mergeActorIdentityReveal,
     reconcileActorIdentityRevealsFromAcceptedContent,
     reconcileActorLifecycleFromAcceptedContent,
     reconcileActorMutationLineageFromAcceptedContent,
@@ -125,6 +128,7 @@ import {
 } from './serendipity-core.mjs';
 import {
     applyForumUpdate,
+    constrainForumCausalSignals,
     emptyForumState,
     extractForumUpdate,
     forumDigest,
@@ -137,8 +141,12 @@ import {
     nextModelRouteHealth,
 } from './model-queue.mjs';
 import {
+    ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
+    actorProfileCompletionGroupPlan,
     actorProfileNoCandidatesTerminalProofMatches,
     actorProfileDiscoveryCoverageProofMatches,
+    actorProfileGenerationCriticalFingerprint,
+    actorProfileIdentityEvidenceSurface,
     actorProfileRecoveryCriticalFingerprint,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
@@ -147,7 +155,10 @@ import {
     actorProfileV6View,
     applyActorProfileV6Override,
     bindCharacterCreationTicketsToRegisteredActors,
+    buildActorProfileModuleGroupMessages,
     issueCharacterCreationTicket,
+    materializeActorProfileBaseline,
+    parseActorProfileModuleGroupOutput,
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
     createActorProfileRetryReceipt,
@@ -156,7 +167,10 @@ import {
     selectActorProfileCompletionCandidates,
     setActorProfileV6Lock,
 } from './actor-profile-v6-core.mjs';
-import { completeActorProfileBatchTransaction } from './actor-profile-batch-core.mjs';
+import {
+    actorProfileBatchSemanticFingerprint,
+    completeActorProfileBatchTransaction,
+} from './actor-profile-batch-core.mjs';
 import {
     claimDueSovereigntyActorTasks,
     claimNextSovereigntyTask,
@@ -269,9 +283,9 @@ const DEFAULTS = Object.freeze({
     delayMs: 1600,
     contextMessages: 8,
     maxTokens: 8192,
-    variableRetryLimit: 3,
+    variableRetryLimit: 1,
     variablePromptAddon: '',
-    variableAuditSettingsVersion: 3,
+    variableAuditSettingsVersion: 4,
     modelTimeoutMs: 30000,
     sovereigntyMode: 'active',
     sovereigntyForegroundWaitMs: 3000,
@@ -1046,7 +1060,11 @@ function getSettings({ persistMigrations = true } = {}) {
         settings.sovereigntySettingsVersion = 1;
         changed = true;
     }
-    if (!['off', 'basic', 'full', 'full_adult'].includes(settings.actorProfileCompletionMode)) {
+    if (settings.actorProfileCompletionMode === 'basic') {
+        settings.actorProfileCompletionMode = 'full';
+        changed = true;
+    }
+    if (!['off', 'full', 'full_adult'].includes(settings.actorProfileCompletionMode)) {
         settings.actorProfileCompletionMode = DEFAULTS.actorProfileCompletionMode;
         changed = true;
     }
@@ -1111,6 +1129,20 @@ function getSettings({ persistMigrations = true } = {}) {
     }
     if (previousGlobalInstructionSettingsVersion < 1) {
         settings.globalModelInstructionSettingsVersion = 1;
+        changed = true;
+    }
+    const legacyVariablePromptAddon = String(settings.variablePromptAddon || '').trim();
+    if (legacyVariablePromptAddon) {
+        settings.globalModelInstructionEnabled = true;
+        settings.globalModelInstruction = [
+            String(settings.globalModelInstruction || '').trim(),
+            legacyVariablePromptAddon,
+        ].filter(Boolean).join('\n\n');
+        settings.globalModelInstructionScopes = [...new Set([
+            ...(settings.globalModelInstructionScopes || []),
+            'variable',
+        ])];
+        settings.variablePromptAddon = '';
         changed = true;
     }
     if (!['all', 'warnings', 'silent'].includes(settings.notificationLevel)) {
@@ -1326,13 +1358,23 @@ function getSettings({ persistMigrations = true } = {}) {
     if (previousVariableAuditSettingsVersion < 3) {
         // Retries are now user-configurable for both automatic and manual
         // variable checks. The value means retries after the initial request,
-        // not total attempts, so the default 3 allows at most 4 calls inside
-        // one target-bound primary task.
+        // not total attempts. Version 4 below migrates the old default while
+        // preserving explicit advanced values.
         settings.variableRetryLimit = DEFAULTS.variableRetryLimit;
         if (Number(settings.mvuIdleTimeoutMs) === 120000) {
             settings.mvuIdleTimeoutMs = DEFAULTS.mvuIdleTimeoutMs;
         }
         settings.variableAuditSettingsVersion = 3;
+        changed = true;
+    }
+    if (previousVariableAuditSettingsVersion < 4) {
+        // Keep one targeted semantic repair after the first locally-invalid
+        // answer. Transport/auth/config failures never consume this repair.
+        // Preserve explicit non-default values from advanced users.
+        if (Number(settings.variableRetryLimit) === 3) {
+            settings.variableRetryLimit = DEFAULTS.variableRetryLimit;
+        }
+        settings.variableAuditSettingsVersion = 4;
         changed = true;
     }
     settings.variableRetryLimit = Math.min(
@@ -3031,6 +3073,11 @@ function doctorRuntimeCriticalFingerprint() {
     return `runtime-critical:${fingerprint([
         VERSION,
         actorProfileRecoveryCriticalFingerprint(),
+        actorProfileGenerationCriticalFingerprint(),
+        actorProfileBatchSemanticFingerprint(),
+        classifyActorRegistryTargetName.toString(),
+        mergeActorIdentityReveal.toString(),
+        parseActorShardProposal.toString(),
         callModel.toString(),
         worldCallReservedForUserCancellation.toString(),
         clearUserCancelledWorldCallReservation.toString(),
@@ -3041,6 +3088,10 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileNoCandidatesTerminalReadbackMatches.toString(),
         persistActorProfileRecoveryState.toString(),
         finalizeActorProfileRecoveryOutcome.toString(),
+        actorProfileCompletionGroupPlan.toString(),
+        buildActorProfileModuleGroupMessages.toString(),
+        parseActorProfileModuleGroupOutput.toString(),
+        materializeActorProfileBaseline.toString(),
         completeActorProfileBatchTransaction.toString(),
         runActorProfileTarget.toString(),
         enqueueActorProfiles.toString(),
@@ -3061,6 +3112,8 @@ function doctorRuntimeCriticalFingerprint() {
         stage3PreparedPhase1StatesMatch.toString(),
         extractFirstBalancedJsonObject.toString(),
         stage3LocalRecallPacket.toString(),
+        usableContinuityWorldEntry.toString(),
+        collectContinuityWorldContextUncached.toString(),
         buildContinuityMessages.toString(),
         generateWorldContinuitySingleBatch.toString(),
         actorActionCandidatesFromShard.toString(),
@@ -3073,6 +3126,9 @@ function doctorRuntimeCriticalFingerprint() {
         buildContinuityInjection.toString(),
         buildContinuityConsumerPayload.toString(),
         precomposeNextTurnConsumer.toString(),
+        publicContinuityRecordsForForum.toString(),
+        constrainForumCausalSignals.toString(),
+        runForumTarget.toString(),
         recordNextTurnConsumerInspection.toString(),
         commitNextTurnConsumer.toString(),
         bindEvents.toString(),
@@ -4636,12 +4692,20 @@ function usableContinuityWorldEntry(entry) {
         ...(Array.isArray(entry.key) ? entry.key : []),
         ...(Array.isArray(entry.keysecondary) ? entry.keysecondary : []),
     ].map((value) => String(value || '').trim()).filter(Boolean).slice(0, 8);
+    const sourceKind = String(entry.__doctorSourceKind || 'external_active');
+    const world = String(entry.world || '').trim();
+    const nativeId = String(entry.uid || entry.id || fingerprint(`${title}|${content}`));
+    const id = `${sourceKind}:${fingerprint(JSON.stringify([world, nativeId]))}`;
     return {
+        id,
+        sourceKind,
+        nativeId,
         title,
-        world: String(entry.world || '').trim(),
+        world,
         keys,
         constant: entry.constant === true,
-        content: cropText(content, 1400, title),
+        content,
+        contentDigest: fingerprint(content),
     };
 }
 
@@ -4672,7 +4736,10 @@ async function collectContinuityWorldContextUncached(context, character) {
         const sorted = typeof module.getSortedEntries === 'function'
             ? await module.getSortedEntries()
             : [];
-        activeEntries.push(...(Array.isArray(sorted) ? sorted : []));
+        activeEntries.push(...(Array.isArray(sorted) ? sorted : []).map((entry) => ({
+            ...entry,
+            __doctorSourceKind: 'external_active',
+        })));
 
         const names = new Set(
             (sorted || []).map((entry) => entry?.world).filter(Boolean),
@@ -4694,6 +4761,7 @@ async function collectContinuityWorldContextUncached(context, character) {
                 loadedEntries.push(...entriesOfWorldBook(book).map((entry) => ({
                     ...entry,
                     world: entry?.world || name,
+                    __doctorSourceKind: 'external_selected',
                 })));
             } catch (error) {
                 console.warn('[MVU Auto Doctor] 读取活世界设定失败：', name, error);
@@ -4708,16 +4776,22 @@ async function collectContinuityWorldContextUncached(context, character) {
         .filter(Boolean);
     const embedded = embeddedBooks(character)
         .flatMap(entriesOfWorldBook)
+        .map((entry) => ({ ...entry, __doctorSourceKind: 'embedded' }))
         .map(usableContinuityWorldEntry)
         .filter(Boolean);
-    const candidates = external.length ? external : embedded;
+    // Embedded card lore and enabled/selected external lore are independent
+    // active sources. Keep their source identities in one union instead of
+    // silently dropping external material whenever an embedded book exists.
+    const candidates = [...embedded, ...external];
     const worldBlocks = [];
     const forumWorldBlocks = [];
+    const canonicalEntries = [];
     const seen = new Set();
     for (const entry of candidates) {
-        const key = fingerprint(`${entry.title}\n${entry.content}`);
+        const key = `${entry.id}:${entry.contentDigest}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        canonicalEntries.push(deepClone(entry));
         worldBlocks.push([
             `【世界书：${entry.world || '当前角色卡'} / ${entry.title}】`,
             entry.keys.length ? `关键词：${entry.keys.join('、')}` : '',
@@ -4725,7 +4799,6 @@ async function collectContinuityWorldContextUncached(context, character) {
         ].filter(Boolean).join('\n'));
         const forumBlock = usableForumWorldEntry(entry);
         if (forumBlock) forumWorldBlocks.push(forumBlock);
-        if (worldBlocks.length >= 12) break;
     }
     const text = cropText(
         [...characterBlocks, ...worldBlocks].join('\n\n'),
@@ -4736,6 +4809,7 @@ async function collectContinuityWorldContextUncached(context, character) {
         text: text || '未读取到可用的角色卡/世界书叙事设定。',
         hasSetting: characterBlocks.length > 0 || worldBlocks.length > 0,
         sourceCount: characterBlocks.length + worldBlocks.length,
+        entries: canonicalEntries,
         forumText: cropText(
             forumWorldBlocks.join('\n\n'),
             24000,
@@ -7199,8 +7273,14 @@ async function buildAuditMessages({
         ? await collectInitializationStates(context, character)
         : [];
     const characterContext = characterAuditContext(character, context);
-    const promptAddon = String(settings.variablePromptAddon || '').trim();
-
+    const globalVariableInstruction = composeScopedModelInstruction(
+        normalizeGlobalInstructionConfig({
+            enabled: settings.globalModelInstructionEnabled,
+            text: settings.globalModelInstruction,
+            scopes: settings.globalModelInstructionScopes,
+        }),
+        { module: 'variable', channel: 'strict' },
+    );
     const system = [
         '你是一个通用、保守、可验证的 MVU 状态审计与修复引擎。',
         '你面对的是任意角色卡；绝不能套用其他卡的字段、路径、枚举或经验。',
@@ -7247,9 +7327,6 @@ async function buildAuditMessages({
         '- 不得重写、截断、续写、补写、纠正或重新生成正文与选项，不得创建 swipe。',
         '- 即使正文与规则冲突，也只能修正能够由 <content>、当前状态、Schema 与规则共同证明的 MVU 变量；正文原样保留。',
         '',
-        promptAddon
-            ? `【用户自定义模型适配/破限提示】\n${promptAddon}\n这段只调整模型服从与表达方式，不改变上方审计职责、证据标准、玩家控制权或下方机器输出协议。`
-            : '',
         '【唯一允许的输出结构】',
         '只允许完整输出以下变量补丁区块：',
         '<UpdateVariable>',
@@ -8562,6 +8639,32 @@ function buildSocialAuditMessages({
     changes,
     reasons,
 } = {}) {
+    return [{ role: 'system', content: [
+        '你是 MVU 持久关系变量的一致性复核器，不是正文、人格、情绪或文风审查器。',
+        '只检查给出的本轮关系路径变化。不得评价人物是否模板化、极端、黑暗、可爱或符合某种心理类型，也不得改写正文。',
+        '对每一个给出的路径必须恰好返回一条 decision；不得缺失、重复或加入未知路径。',
+        'action 只能是 allow 或 revert。只有本轮证据明确证明该路径变化无依据、把强制状态伪装成自愿关系，或替玩家决定关系/同意时，才可 revert。',
+        '普通照顾、协作或单次事件本身不自动证明持久好感、信任、忠诚或依赖；若 MVU 变化另有明确本轮证据则应 allow。',
+        '只返回一个 JSON 对象，不要代码围栏或解释。',
+        '{"verdict":"pass|warning|violation","summary":"短结论","findings":[{"type":"relationship_evidence|coercion_conflation|player_agency|other","severity":"info|warning|error","reason":"原因","evidence":"本轮证据"}],"decisions":[{"path":"逐字复制给出的路径","action":"allow|revert","reason":"原因","evidence":"本轮证据"}]}',
+    ].join('\n') }, { role: 'user', content: [
+        `本轮玩家输入（只读）：\n${cropText(userText || '无', 12000, '玩家输入')}`,
+        `已接受正文（只读）：\n${cropText(replyText || '无', 30000, '已接受正文')}`,
+        `最近上下文（只读）：\n${cropText(history || '无', 12000, '最近上下文')}`,
+        `必须逐路径复核的关系变化：\n${cropText(safeJson(changes || []), 24000, '关系变化')}`,
+        `触发原因：${(reasons || []).join(', ') || 'relationship-change'}`,
+    ].join('\n\n') }];
+}
+
+// Read-only legacy prompt body retained temporarily for backward source
+// archaeology; production calls only buildSocialAuditMessages above.
+function legacyBuildSocialAuditMessages({
+    userText,
+    replyText,
+    history,
+    changes,
+    reasons,
+} = {}) {
     const system = [
         '你是人物动机、人格自主性与持久关系变更的结构化二级审核器。',
         '你不负责把故事改成温暖、正能量或善意，也不评价文风。明确威胁、欺骗、洗脑、主奴、黑暗关系与极端情绪，只要有本轮用户授权、设定/机制或连续证据，就必须放行。',
@@ -8693,6 +8796,7 @@ async function runSocialAuditTargetInner(captured, { manual = false } = {}) {
             targetIndex: target.index,
             jsonMode: true,
             attempt: 1,
+            noTimeout: true,
             onUsage: (value) => {
                 attemptUsage = value;
             },
@@ -8731,6 +8835,7 @@ async function runSocialAuditTargetInner(captured, { manual = false } = {}) {
                         targetIndex: target.index,
                         jsonMode: true,
                         attempt: 2,
+                        noTimeout: true,
                         failover: false,
                         maxFailovers: 0,
                         validateOutput: (candidateOutput) => {
@@ -8833,20 +8938,6 @@ async function runSocialAuditTargetInner(captured, { manual = false } = {}) {
             }],
             decisions: [],
         };
-    } else {
-        const byPath = new Map(parsed.decisions.map((decision) => [decision.path, decision]));
-        for (const change of relationship.changes) {
-            if (byPath.has(change.path)) continue;
-            parsed.decisions.push({
-                path: change.path,
-                action: parsed.verdict === 'pass' ? 'allow' : 'revert',
-                reason: parsed.verdict === 'pass'
-                    ? '整体审核通过'
-                    : '二审未逐条说明，保持关系不变并待确认',
-                evidence: '',
-            });
-        }
-        parsed = enforceLocalSocialAuditFloor(parsed, routed.reasons);
     }
     const zeroUsage = {
         inputTokens: 0,
@@ -9751,11 +9842,12 @@ async function runTarget(targetId, {
                 maxTokens: built.maxTokens,
                 task: '变量诊断',
                 targetIndex: resolved,
+                noTimeout: true,
             });
         } catch (error) {
             candidate = {
                 status: 'failed',
-                retryable: error?.name !== 'AbortError' && !isRateLimitError(error),
+                retryable: false,
                 failureKind: isRateLimitError(error) ? 'rate-limit' : 'transport-error',
                 reason: `模型调用失败：${error.message || error}`,
                 output: '',
@@ -11536,6 +11628,7 @@ function stage3LocalRecallPacket({
     mustThreadIds = [],
     mustLaneIds = [],
     worldbookKeys = [],
+    worldbookEntries = [],
 } = {}) {
     const actors = actorLedger?.actors || [];
     const threads = (base?.threads || []).filter((thread) => thread?.stage !== 'resolved');
@@ -11566,6 +11659,19 @@ function stage3LocalRecallPacket({
     ])].filter((id) => knownThreadIds.has(id)).sort();
     if (mustThreadIds.some((id) => !threadIds.includes(String(id || '')))) return null;
 
+    const canonicalWorldbookEntries = (Array.isArray(worldbookEntries) ? worldbookEntries : [])
+        .map((entry) => ({
+            id: String(entry?.id || ''),
+            sourceKind: String(entry?.sourceKind || ''),
+            nativeId: String(entry?.nativeId || ''),
+            world: String(entry?.world || ''),
+            title: String(entry?.title || ''),
+            keys: [...new Set((entry?.keys || []).map(String).filter(Boolean))].sort(),
+            constant: entry?.constant === true,
+            contentDigest: String(entry?.contentDigest || fingerprint(String(entry?.content || ''))),
+        }))
+        .filter((entry) => entry.id && entry.contentDigest)
+        .sort((left, right) => left.id.localeCompare(right.id));
     const packet = {
         version: 2,
         selection: 'local_structured_schedule',
@@ -11573,6 +11679,8 @@ function stage3LocalRecallPacket({
         threadIds,
         laneIds,
         worldbookKeys: [...new Set(worldbookKeys.map((key) => String(key || '').trim()).filter(Boolean))].sort(),
+        worldbookEntryIds: canonicalWorldbookEntries.map((entry) => entry.id),
+        worldbookDigest: fingerprint(JSON.stringify(canonicalWorldbookEntries)),
         reasons: ['local_must_include', 'scheduled_lane_sources', 'scheduled_actor_threads'],
         mustActorIds: [...actorIds],
         mustThreadIds: [...new Set(mustThreadIds.map((id) => String(id || '')).filter(Boolean))].sort(),
@@ -11602,13 +11710,22 @@ function buildContinuityMessages({
         directProfile(settings, 'fast').provider === 'direct'
         && settings.fastApiJsonMode !== false
     );
-    const forumSurface = forumView(readChatNamespace(context).forum, {
+    const promptNamespace = readChatNamespace(context);
+    const forumSurface = forumView(promptNamespace.forum, {
         chatId: captured.chatId,
         maxPosts: settings.forumMaxPosts,
         maxComments: settings.forumMaxComments,
     });
-    const forumSignals = forumSurface.active
-        .filter((post) => post.causalSignal && post.impact)
+    const publicForumThreadIds = publicContinuityRecordsForForum(promptNamespace, settings)
+        .map((thread) => thread.id);
+    const causallyConstrainedForum = constrainForumCausalSignals({
+        newPosts: forumSurface.active,
+    }, publicForumThreadIds);
+    const forumSignals = (causallyConstrainedForum.newPosts || [])
+        .filter((post) => (
+            post.causalSignal
+            && post.impact
+        ))
         .slice(0, 8)
         .map((post) => ({
             id: post.id,
@@ -11617,6 +11734,7 @@ function buildContinuityMessages({
             kind: post.kind,
             body: post.body,
             source: post.source,
+            sourceThreadIds: post.sourceThreadIds,
             impact: post.impact,
             heat: post.heat,
         }));
@@ -11848,6 +11966,7 @@ function buildContinuityMessages({
         lastAction: actor.lastAction || null, lastSemanticTurn: actor.lastSemanticTurn || 0,
         nextActionTurn: actor.nextActionTurn || 0, deadlineTurn: actor.deadlineTurn || 0,
         stateFacts: actor.stateFacts || [], capabilities: actor.capabilities || [], hidden: actor.hidden || {},
+        knowledge: actor.knowledge || [], resources: actor.resources || [], stimuli: actor.stimuli || [],
         evidence: actor.evidence || [],
         // The full profile owns durable tickets, commit proofs, locks and
         // version history.  World reasoning needs the canonical read-only
@@ -11867,7 +11986,23 @@ function buildContinuityMessages({
     // Required material is atomic: never crop through an ActorRef/Profile in
     // the middle. The configured model connection owns the actual context
     // capacity; Doctor must not reject a valid turn with a local char ceiling.
-    const requiredMaterial = safeJson({ recalledActors, recalledThreads, recalledLanes }, 0);
+    const recalledWorldbookEntries = (worldContext?.entries || []).map((entry) => ({
+        id: entry.id,
+        sourceKind: entry.sourceKind,
+        nativeId: entry.nativeId,
+        world: entry.world,
+        title: entry.title,
+        keys: entry.keys,
+        constant: entry.constant === true,
+        content: entry.content,
+        contentDigest: entry.contentDigest,
+    }));
+    const requiredMaterial = safeJson({
+        recalledActors,
+        recalledThreads,
+        recalledLanes,
+        recalledWorldbookEntries,
+    }, 0);
     const actorShardPromptPayload = actorShardCandidates?.actionAttempts?.length
         ? {
             actionAttempts: actorShardCandidates.actionAttempts
@@ -11880,7 +12015,7 @@ function buildContinuityMessages({
         && Array.isArray(actorShardCandidates?.scheduledActorIds)
         && actorShardCandidates.scheduledActorIds.length > 0;
     const actionOutputShape = worldCreatesAttempts
-        ? '"actionProposals":[{"actorId":"输入的已调度人物ID","candidateAction":"NPC自己的尝试","intent":"execute|replan|wait","time":"本轮时间窗","location":"","travelTurns":0,"expectedCost":"预期代价","expectedDuration":"预期耗时","expectedRisk":"预期风险","observableConsequence":"若尝试发生，之后可被观察或验证的预期迹象（不是实际裁决结果）","stateChanges":[{"kind":"plan","summary":"人物自己的计划变化"}],"knowledgeBasis":[],"evidence":[],"sourceThreads":[]}],"actionAdjudications":[{"actorId":"同一人物ID","status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],'
+        ? '"actionProposals":[{"actorId":"输入的已调度人物ID","actorName":"输入的Registry人物行键","candidateAction":"NPC自己的尝试","intent":"execute|replan|wait","time":"本轮时间窗","location":"","travelTurns":0,"interactionTargets":[{"actorId":"输入中已有目标ActorId","actorName":"同一目标的Registry人物行键"}],"contact":{"mode":"none|indirect|direct","target":"玩家或明确对象；none时留空","observableConsequence":"none时留空，否则写可观察迹象"},"resourceCosts":[{"resourceId":"输入人物已有资源ID","amount":1}],"capabilityUsed":"输入人物已有能力原文或留空","currentGoal":"当前目标","waitCondition":"仅wait时填写可判定条件","expectedCost":"预期代价","expectedDuration":"预期耗时","expectedRisk":"预期风险","observableConsequence":"若尝试发生，之后可被观察或验证的预期迹象（不是实际裁决结果）","stimulusDecisions":[{"stimulusId":"输入刺激ID","decision":"adopted|ignored|misread|used|opposed","reason":"人物为何这样处理"}],"stateChanges":[{"kind":"plan","summary":"人物自己的计划变化"}],"knowledgeBasis":[],"evidence":[],"sourceThreads":[],"causalChain":[]}],"actionAdjudications":[{"actorId":"同一人物ID","status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],'
         : '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","actorRef":{"kind":"actor_ref","actorId":"输入原值","displayName":"输入原值","aliases":[]},"target":{"chatId":"输入原值","logicalIndex":0,"index":0,"messageId":"输入原值","swipeId":0,"generation":0,"generationId":"输入原值","generationType":"输入原值","scopeDigest":"输入原值","contentHash":"输入原值","hash":"输入原值"},"status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],';
     const user = [
         `当前导演模式：${director}`,
@@ -12344,13 +12479,20 @@ async function completeActorProfilesForTurn(captured, {
             readbackVerified: false,
         };
     }
+    // Preserve source ownership instead of flattening player/world/MVU data
+    // into one anonymous blob. Current state is first so long lower-priority
+    // material cannot silently push it past the projection boundary.
     const evidenceText = [
-        userText,
-        typeof worldContext === 'object' && worldContext !== null
-            ? worldContext.text
-            : worldContext,
-        stateAnchors,
-    ].filter(Boolean).join('\n\n');
+        `[stateAnchors / MVU实时状态]\n${cropText(stateAnchors || '无', 14000, 'MVU状态锚点')}`,
+        `[worldAuthority / 角色卡与内嵌世界书]\n${cropText(
+            typeof worldContext === 'object' && worldContext !== null
+                ? worldContext.text
+                : worldContext || '无',
+            16000,
+            '世界权威材料',
+        )}`,
+        `[playerInput / 本回合玩家输入]\n${cropText(userText || '无', 12000, '玩家输入')}`,
+    ].join('\n\n');
     const currentSourceRef = sourceRefOf(captured);
     const discoverySourceRef = {
         ...currentSourceRef,
@@ -12397,7 +12539,9 @@ async function completeActorProfilesForTurn(captured, {
                     ? `人物档案模块组：${groupKey}`
                     : `人物档案失败模块组定向补填：${groupKey}`,
                 channel: 'fast',
-                instructionModule: 'profile',
+                instructionModule: groupKey === 'physiology_optional'
+                    ? 'physiology'
+                    : 'profile',
                 targetIndex: captured.index,
                 jsonMode: false,
                 failover: true,
@@ -13034,6 +13178,16 @@ async function runActorProfileTarget(captured, {
         }))
         .filter((entry) => entry.actorId && entry.displayName)
         .sort((left, right) => left.actorId.localeCompare(right.actorId));
+    const registeredProfileCandidates = selectActorProfileCompletionCandidates(promptLedger, {
+        initialActorIds: registeredActorIndex.map((entry) => entry.actorId),
+        includeReadyActorIds: registeredActorIndex.map((entry) => entry.actorId),
+        maintenanceMaxActors: 0,
+        turn,
+        readinessForActor: (actor) => actorProfileReadinessInLedger(
+            s0Ledger,
+            actor?.id,
+        ),
+    });
     const protectedActorNames = [
         ...excludedActorNames,
         ...actorNamesFromMvuData(currentMvuData),
@@ -13041,7 +13195,114 @@ async function runActorProfileTarget(captured, {
         context?.name2,
         context?.characterName,
     ].filter(Boolean);
-    const preflightProfileDiscoveries = async ({ discoveries = [] } = {}) => {
+    const applyIdentityRevealRoutes = (baseLedger, routes = []) => {
+        let ledger = normalizeActorLedger(baseLedger, {
+            chatId: captured.chatId,
+            identityScopeId: captured.identityScopeId,
+            scopeDigest: captured.scopeDigest,
+            allowScopeDigestFill: true,
+            excludedActorNames,
+        });
+        const accepted = [];
+        const failures = [];
+        const seenActorIds = new Set();
+        const seenNames = new Set();
+        for (const raw of Array.isArray(routes) ? routes : []) {
+            const actorId = String(raw?.actorId || '').trim().slice(0, 120);
+            const revealedName = String(raw?.revealedName || '').trim().slice(0, 160);
+            const sourceAnchor = String(raw?.sourceAnchor || '').trim().slice(0, 1200);
+            const evidenceSpan = String(raw?.evidenceSpan || '').trim().slice(0, 240);
+            const registryEntry = Object.values(ledger.actorRegistry?.registered || {})
+                .find((entry) => entry.actorRef?.actorId === actorId);
+            const anchorActorIds = Object.values(ledger.actorRegistry?.registered || {})
+                .filter((entry) => (
+                    [entry?.actorRef?.displayName, ...(entry?.actorRef?.aliases || [])]
+                        .filter(Boolean)
+                        .some((label) => actorProfileIdentityEvidenceSurface(evidenceSpan)
+                            .includes(actorProfileIdentityEvidenceSurface(label)))
+                ))
+                .map((entry) => entry.actorRef?.actorId)
+                .filter(Boolean);
+            const identityReason = classifyActorRegistryTargetName(
+                revealedName,
+                excludedActorNames,
+            );
+            const evidenceValid = evidenceSpan.length >= 4
+                && actorProfileIdentityEvidenceSurface(sourceAnchor)
+                    .includes(actorProfileIdentityEvidenceSurface(evidenceSpan))
+                && actorProfileIdentityEvidenceSurface(evidenceSpan)
+                    .includes(actorProfileIdentityEvidenceSurface(revealedName));
+            if (
+                !registryEntry
+                || !revealedName
+                || !sourceAnchor
+                || !sourceAnchor.includes(revealedName)
+                || !acceptedNarrative.includes(sourceAnchor)
+                || !evidenceValid
+                || seenActorIds.has(actorId)
+                || seenNames.has(revealedName)
+                || identityReason
+                || anchorActorIds.length !== 1
+                || anchorActorIds[0] !== actorId
+            ) {
+                failures.push({
+                    actorId,
+                    name: revealedName,
+                    reason: registryEntry
+                        ? identityReason || (
+                            !evidenceValid
+                                ? 'actor_profile.identity_reveal_evidence_invalid'
+                                : anchorActorIds.length !== 1 || anchorActorIds[0] !== actorId
+                                ? 'actor_profile.identity_reveal_actor_ambiguous'
+                                : 'actor_profile.identity_reveal_name_not_in_coverage_unit'
+                        )
+                        : 'actor_profile.identity_reveal_actor_ref_unknown',
+                });
+                continue;
+            }
+            const previousName = registryEntry.actorRef.displayName;
+            const previousAliases = [...(registryEntry.actorRef.aliases || [])];
+            const merged = mergeActorIdentityReveal(ledger, {
+                actorId,
+                revealedName,
+                aliases: [previousName, ...previousAliases],
+                evidence: [`${sourceRef.messageId}:${sourceRef.swipeId}:${sourceRef.generation}:${sourceRef.hash}`],
+                sourceRef,
+                turn,
+            });
+            const mergedEntry = Object.values(merged.actorRegistry?.registered || {})
+                .find((entry) => entry.actorRef?.actorId === actorId);
+            const mergedActor = (merged.actors || []).find((actor) => actor.id === actorId);
+            if (
+                mergedEntry?.actorRef?.displayName !== revealedName
+                || mergedActor?.name !== revealedName
+                || !mergedActor.identity?.aliases?.includes(previousName)
+            ) {
+                failures.push({
+                    actorId,
+                    name: revealedName,
+                    reason: 'actor_profile.identity_reveal_conflict',
+                });
+                continue;
+            }
+            ledger = merged;
+            seenActorIds.add(actorId);
+            seenNames.add(revealedName);
+            accepted.push({
+                actorId,
+                previousName,
+                revealedName,
+                sourceAnchor,
+                evidenceSpan,
+                coverageUnitId: String(raw?.coverageUnitId || '').trim().slice(0, 80),
+            });
+        }
+        return { ledger, accepted, failures };
+    };
+    const preflightProfileDiscoveries = async ({
+        discoveries = [],
+        identityReveals = [],
+    } = {}) => {
         const deterministicIdentityCodes = new Set([
             'actor_candidate.identity_missing_or_short',
             'actor_candidate.identity_system',
@@ -13067,6 +13328,7 @@ async function runActorProfileTarget(captured, {
             };
         }
         const supplied = Array.isArray(discoveries) ? discoveries : [];
+        const revealPreflight = applyIdentityRevealRoutes(s0Ledger, identityReveals);
         const localFailures = supplied
             .map((entry) => ({
                 candidateRef: deepClone(entry?.candidateRef || null),
@@ -13077,7 +13339,8 @@ async function runActorProfileTarget(captured, {
                 ),
             }))
             .filter((entry) => entry.reason);
-        const actorDiscovery = discoverActorsFromTurnSources(s0Ledger, {
+        localFailures.push(...revealPreflight.failures);
+        const actorDiscovery = discoverActorsFromTurnSources(revealPreflight.ledger, {
             acceptedContent: acceptedNarrative,
             excludedActorNames,
             sourceRef: discoverySourceRef,
@@ -13086,7 +13349,7 @@ async function runActorProfileTarget(captured, {
         });
         localFailures.push(...(actorDiscovery.unresolved || []));
         const registeredNames = new Set(Object.values(
-            s0Ledger.actorRegistry?.registered || {},
+            revealPreflight.ledger.actorRegistry?.registered || {},
         ).flatMap((entry) => [
             entry.actorRef?.displayName,
             ...(entry.actorRef?.aliases || []),
@@ -13116,7 +13379,8 @@ async function runActorProfileTarget(captured, {
         ])).values()];
         const validCandidateCount = Math.max(
             0,
-            (dryRun.inserted || []).length + (dryRun.updated || []).length,
+            (dryRun.inserted || []).length + (dryRun.updated || []).length
+                + revealPreflight.accepted.length,
         );
         return {
             ok: uniqueFailures.length === 0
@@ -13130,7 +13394,10 @@ async function runActorProfileTarget(captured, {
                 && uniqueFailures.every((entry) => deterministicIdentityCodes.has(entry.reason)),
         };
     };
-    const resolveProfileDiscoveries = async ({ discoveries = [] } = {}) => {
+    const resolveProfileDiscoveries = async ({
+        discoveries = [],
+        identityReveals = [],
+    } = {}) => {
         const beforeRegistryGuard = await freshFrozenScopeGuard(captured);
         if (!beforeRegistryGuard.ok) {
             return { ok: false, ledger: s0Ledger, reason: beforeRegistryGuard.reason };
@@ -13156,7 +13423,51 @@ async function runActorProfileTarget(captured, {
         ) {
             return { ok: false, ledger: liveLedger, reason: 'actor_profile.target_stale' };
         }
-        const actorDiscovery = discoverActorsFromTurnSources(s0Ledger, {
+        const revealResolution = applyIdentityRevealRoutes(s0Ledger, identityReveals);
+        if (revealResolution.failures.length) {
+            return {
+                ok: true,
+                ledger: s0Ledger,
+                snapshot: s0Snapshot,
+                candidates: [],
+                entries: [],
+                failures: revealResolution.failures,
+                registry: {
+                    mutated: false,
+                    readback: false,
+                    promotedActorIds: [],
+                    identityRevealedActorIds: [],
+                    quarantined: [],
+                    unresolved: [],
+                    ticketPoolExhausted: [],
+                    ticketProducer: 'stage4_required',
+                },
+            };
+        }
+        const resolutionBaseLedger = revealResolution.ledger;
+        const revealCandidateSource = new Map(registeredProfileCandidates.map((candidate) => [
+            candidate.actorRef?.actorId,
+            candidate,
+        ]));
+        const revealCandidates = revealResolution.accepted.map((reveal) => {
+            const sourceCandidate = revealCandidateSource.get(reveal.actorId);
+            if (!sourceCandidate) return null;
+            return {
+                ...deepClone(sourceCandidate),
+                actorRef: { actorId: reveal.actorId, name: reveal.revealedName },
+                actorId: reveal.actorId,
+                name: reveal.revealedName,
+                identity: {
+                    ...deepClone(sourceCandidate.identity || {}),
+                    aliases: [...new Set([
+                        ...(sourceCandidate.identity?.aliases || []),
+                        reveal.previousName,
+                    ].filter((value) => value && value !== reveal.revealedName))],
+                },
+                refreshProfileModules: [...ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES],
+            };
+        }).filter(Boolean);
+        const actorDiscovery = discoverActorsFromTurnSources(resolutionBaseLedger, {
             acceptedContent: acceptedNarrative,
             excludedActorNames,
             sourceRef: discoverySourceRef,
@@ -13165,7 +13476,7 @@ async function runActorProfileTarget(captured, {
         });
         const localFailures = [...(actorDiscovery.unresolved || [])];
         const registeredNames = new Set(Object.values(
-            s0Ledger.actorRegistry?.registered || {},
+            resolutionBaseLedger.actorRegistry?.registered || {},
         ).flatMap((entry) => [
             entry.actorRef?.displayName,
             ...(entry.actorRef?.aliases || []),
@@ -13185,15 +13496,17 @@ async function runActorProfileTarget(captured, {
         if (!eligibleCandidates.length) {
             return {
                 ok: true,
-                ledger: s0Ledger,
+                ledger: resolutionBaseLedger,
                 snapshot: s0Snapshot,
-                candidates: [],
+                candidates: revealCandidates,
                 entries: [],
                 failures: localFailures,
                 registry: {
-                    mutated: false,
+                    mutated: revealResolution.accepted.length > 0,
                     readback: false,
                     promotedActorIds: [],
+                    identityRevealedActorIds: revealResolution.accepted
+                        .map((entry) => entry.actorId),
                     quarantined: [],
                     unresolved: deepClone(actorDiscovery.unresolved || []),
                     ticketPoolExhausted: [],
@@ -13310,13 +13623,15 @@ async function runActorProfileTarget(captured, {
             ok: true,
             ledger: s1Ledger,
             snapshot: s0Snapshot,
-            candidates: discoveryCandidates,
+            candidates: [...revealCandidates, ...discoveryCandidates],
             entries,
             failures: localFailures,
             registry: {
                 mutated: actorLedgerDigest(s1Ledger) !== s0Snapshot.digest,
                 readback: false,
                 promotedActorIds,
+                identityRevealedActorIds: revealResolution.accepted
+                    .map((entry) => entry.actorId),
                 quarantined: deepClone(actorRegistration.quarantined),
                 unresolved: deepClone(actorDiscovery.unresolved || []),
                 ticketBound: ticketBinding?.matched === true
@@ -13347,6 +13662,7 @@ async function runActorProfileTarget(captured, {
             acceptedNarrative,
             sourceRef: discoverySourceRef,
             registeredActorIndex,
+            registeredProfileCandidates: deepClone(registeredProfileCandidates),
             // Keep this byte-for-byte sourced from currentPlayerActorNames(),
             // the same local list passed to classifyActorRegistryTargetName()
             // during Registry preflight. The model never supplies this index.
@@ -13965,6 +14281,7 @@ async function runContinuityTarget(captured, {
     let actionLedger = profileGate.actorLedger;
     let pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
     let scheduledActorIds = [];
+    const proposalValidationCandidates = new Map();
     if (pendingActions.attempts.length) {
         latestActorShardDiagnostics = {
             status: 'attempts_prepared', selected: pendingActions.attempts.length,
@@ -13987,6 +14304,26 @@ async function runContinuityTarget(captured, {
         // agent layer.  We still persist/verify the locally admitted attempts
         // before any returned outcome is applied below.
         scheduledActorIds = actorSchedule.selected.map((actor) => actor.actorId).filter(Boolean);
+        const registeredInteractionTargets = (actionLedger?.actors || []).map((entry) => ({
+            actorId: String(entry?.id || ''),
+            actorName: String(entry?.name || ''),
+        })).filter((entry) => entry.actorId && entry.actorName);
+        for (const scheduled of actorSchedule.selected) {
+            const candidate = selectActorShardCandidates({
+                continuity: scheduledBase,
+                actorLedger: actionLedger,
+                schedule: { selected: [scheduled] },
+                presentText: messageText,
+                maxWorkers: 1,
+                excludedActorNames: currentPlayerActorNames(context),
+            })[0];
+            if (!candidate || candidate.id !== scheduled.actorId) continue;
+            proposalValidationCandidates.set(candidate.id, {
+                ...candidate,
+                knownInteractionTargets: registeredInteractionTargets
+                    .filter((target) => target.actorId !== candidate.id),
+            });
+        }
         latestActorShardDiagnostics = {
             status: scheduledActorIds.length ? 'scheduled' : 'idle',
             selected: scheduledActorIds.length, completed: 0, succeeded: 0, failed: 0,
@@ -14028,6 +14365,7 @@ async function runContinuityTarget(captured, {
         mustThreadIds,
         mustLaneIds,
         worldbookKeys: captured?.actorSovereigntyScope?.worldbookSelectorKeys || [],
+        worldbookEntries: worldContext?.entries || [],
     });
     if (!recallPacket) return { status: 'failed', reason: 'world_recall_local_material_missing', module: 'world' };
     if (!stage3TaskOwnsCurrent(captured, token)) {
@@ -14166,11 +14504,51 @@ async function runContinuityTarget(captured, {
             };
             return { status: 'failed', reason: 'world_actor_proposals_incomplete', module: 'world' };
         }
-        const candidates = actorActionCandidatesFromShard(actionLedger, proposals, {
+        const validatedProposals = [];
+        const proposalValidationFailures = [];
+        for (const proposal of proposals) {
+            const actorId = String(proposal?.actorId || '');
+            const candidate = proposalValidationCandidates.get(actorId);
+            if (!candidate) {
+                proposalValidationFailures.push('actor_shard.validation_candidate_missing');
+                continue;
+            }
+            const currentLocation = String(candidate?.actorState?.location?.name || '');
+            const requestedLocation = String(proposal?.location || '').trim() || currentLocation;
+            const requestedTravelTurns = Math.max(0, Math.floor(Number(proposal?.travelTurns) || 0));
+            const normalizedProposal = {
+                ...proposal,
+                actorName: candidate.name,
+                location: requestedLocation,
+                travelTurns: requestedLocation === currentLocation
+                    ? 0
+                    : Math.max(1, requestedTravelTurns),
+            };
+            const checked = parseActorShardProposal(JSON.stringify(normalizedProposal), { candidate });
+            if (!checked.proposal) {
+                proposalValidationFailures.push(checked.error || 'actor_shard.proposal_invalid');
+                continue;
+            }
+            validatedProposals.push(checked.proposal);
+        }
+        if (
+            proposalValidationFailures.length
+            || validatedProposals.length !== scheduledActorIds.length
+        ) {
+            latestActorShardDiagnostics = {
+                ...latestActorShardDiagnostics,
+                status: 'failed',
+                failed: scheduledActorIds.length,
+                failureCodes: [...new Set(proposalValidationFailures)].slice(0, 8),
+            };
+            return { status: 'failed', reason: 'world_actor_proposal_invalid', module: 'world' };
+        }
+        const candidates = actorActionCandidatesFromShard(actionLedger, validatedProposals, {
             turn: nextTurn,
         });
         const prepared = prepareActorActionAttempts(actionLedger, candidates, {
             turn: nextTurn,
+            playerNames: currentPlayerActorNames(context),
             sourceRef: actionTarget,
             target: actionTarget,
         });
@@ -14523,6 +14901,8 @@ function stage3PreparedWorldCheckpoint({
             threadIds: [...new Set((recall?.threadIds || []).map(String))].sort(),
             laneIds: [...new Set((recall?.laneIds || []).map(String))].sort(),
             worldbookKeys: [...new Set((recall?.worldbookKeys || []).map(String))].sort(),
+            worldbookEntryIds: [...new Set((recall?.worldbookEntryIds || []).map(String))].sort(),
+            worldbookDigest: String(recall?.worldbookDigest || ''),
         },
         worldContextAvailable: worldContext?.hasSetting === true,
         phase1Expected: deepClone(phase1Expected || {}),
@@ -15007,7 +15387,7 @@ function forumBase(namespace, captured) {
     });
 }
 
-function publicContinuityForForum(namespace, settings) {
+function publicContinuityRecordsForForum(namespace, settings) {
     const state = normalizeContinuityState(namespace?.continuity, {
         chatId: getContext()?.chatId || '',
         maxThreads: settings.continuityMaxThreads,
@@ -15044,7 +15424,11 @@ function publicContinuityForForum(namespace, settings) {
         }
         return [];
     });
-    return safeJson(visible, 2);
+    return visible;
+}
+
+function publicContinuityForForum(namespace, settings) {
+    return safeJson(publicContinuityRecordsForForum(namespace, settings), 2);
 }
 
 function buildForumMessages({
@@ -15091,7 +15475,7 @@ function buildForumMessages({
         'JSON结构：{"summary":"本页一句话概况","newPosts":[{"id":"稳定且唯一","board":"版块","title":"标题","author":"网名","body":"正文","kind":"chat","tags":["标签"],"source":"公开依据或日常设定","sourceThreadIds":[],"causalSignal":false,"impact":"仅在已造成外部影响时填写","heat":12}],"comments":[{"postId":"旧帖ID","author":"网名","body":"评论","tone":"语气","likes":0}],"heat":[{"postId":"旧帖ID","delta":2}],"archive":["旧帖ID"]}',
     ].join('\n');
     const user = [
-        `目标回复：chat=${captured.chatId} index=${captured.index} swipe=${captured.swipeId}`,
+        '目标：当前已接受回复对应的公开论坛增量。内部聊天、楼层和滑动标识不发送给模型。',
         retryReason ? `上一次输出无有效增量，必须纠正：${retryReason}` : '',
         '',
         '=== 当前论坛（只做增量，不重写）===',
@@ -15222,10 +15606,13 @@ async function runForumTarget(captured, {
                 channel: 'fast',
                 targetIndex: captured.index,
                 jsonMode: true,
+                noTimeout: true,
             });
         } catch (error) {
             retryReason = `模型调用失败：${error.message || error}`;
-            rateLimited = isRateLimitError(error);
+            // A failed route is not a format-repair attempt. Do not resend the
+            // identical forum prompt after transport/auth/config failure.
+            rateLimited = true;
             console.warn('[MVU Auto Doctor] 内置论坛模型调用失败：', error);
         }
         guard = targetIsCurrent(captured, token);
@@ -15249,7 +15636,10 @@ async function runForumTarget(captured, {
             continue;
         }
         safelyRepairedJson ||= parsed.repaired === true;
-        const candidate = applyForumUpdate(base, parsed.update, {
+        const publicThreadIds = publicContinuityRecordsForForum(namespace, settings)
+            .map((thread) => thread.id);
+        const trustedUpdate = constrainForumCausalSignals(parsed.update, publicThreadIds);
+        const candidate = applyForumUpdate(base, trustedUpdate, {
             chatId: captured.chatId,
             maxPosts: settings.forumMaxPosts,
             maxComments: settings.forumMaxComments,
@@ -18568,7 +18958,7 @@ function buildSettingsPanel() {
                                 <div class="mvuad-settings-fold-body">
                                     <div class="mvuad-description">
                                         医生会自动提供完整的 Schema、规则、状态、正文和补丁协议。
-                                        下框只用于粘贴你自己的破限/模型适配语句；正常成功只调用一次，
+                                        自定义破限/模型适配语句请使用下方统一入口并选择变量作用域；正常成功只调用一次，
                                         失败重试仍属于同一个目标绑定任务；目标过期、取消或切换分支会立即停止。
                                     </div>
                                     <label class="mvuad-number">
@@ -18580,7 +18970,8 @@ function buildSettingsPanel() {
                                         <input class="text_pole mvuad-variable-retry-count" type="number" min="0" max="5" step="1">
                                     </label>
                                     <div class="mvuad-description">
-                                        默认3次，可设0—5次；0表示首次失败后不重试。自动与手动检查均适用，
+                                        默认1次，可设0—5次；0表示首次失败后不重试。只有解析或本地校验失败才会定向补一次，
+                                        运输、认证和配置失败不会原样重发。自动与手动检查均适用，
                                         但每回合仍只有一个自动主任务，最终失败始终零写入。
                                     </div>
                                     <div class="mvuad-token-chips" aria-label="常用输出上限">
@@ -18591,20 +18982,6 @@ function buildSettingsPanel() {
                                     <div class="mvuad-description">
                                         默认8192；只有模型确实支持更长输出时才调高。
                                         医生会裁剪重复上下文，避免单一异常条目挤爆模型窗口。
-                                    </div>
-                                    <label class="mvuad-prompt-addon-label" for="mvuad-variable-prompt-addon">
-                                        附加破限/模型适配提示词
-                                    </label>
-                                    <textarea
-                                        id="mvuad-variable-prompt-addon"
-                                        class="text_pole mvuad-variable-prompt-addon"
-                                        rows="6"
-                                        placeholder="留空使用内置完整诊断提示；这里只粘贴你负责的那几句破限提示。"
-                                    ></textarea>
-                                    <div class="mvuad-save-hint" aria-live="polite"></div>
-                                    <div class="mvuad-actions">
-                                        <button class="menu_button mvuad-variable-prompt-save" type="button">保存模型适配</button>
-                                        <button class="menu_button mvuad-variable-prompt-reset" type="button">清空附加提示</button>
                                     </div>
                                     <details class="mvuad-prompt-inspector">
                                         <summary>查看本次启动后最后一次实际提示词</summary>
@@ -18627,18 +19004,17 @@ function buildSettingsPanel() {
                         </div>
                     </details>
                     <details class="mvuad-settings-fold mvuad-settings-section mvuad-social-section">
-                        <summary>人物动机、自主性与关系二审</summary>
+                        <summary>关系变量一致性检查</summary>
                         <div class="mvuad-settings-fold-body">
                             <div class="mvuad-description">
-                                人物动机与活人感合同的旧预生成注入在阶段一暂时停用；现有配置仅保留，等待后续批准阶段通过唯一入口重接。
-                                只有出现关系变化、极端标签、玩家隐藏动机归因或强制/自愿冲突时，才用轻量通道做结构化二审；
-                                二审不能重写正文文风，只能放行或撤回本轮持久关系变化。
+                                这里只核对本轮已经写入 MVU 的关系路径是否有正文证据，以及强制状态是否被误写成自愿关系。
+                                不评价人物性格、动机、情绪、文风或剧情质量；不会重写正文，也不会凭全局警告批量撤回关系。
                             </div>
                             <div class="mvuad-social-options"></div>
                             <label class="mvuad-select">
-                                <span>关系二审模式</span>
+                                <span>关系一致性模式</span>
                                 <select class="text_pole mvuad-social-audit-mode">
-                                    <option value="off">关闭二审（预生成注入当前停用）</option>
+                                    <option value="off">关闭关系检查</option>
                                     <option value="balanced">平衡·按风险触发（推荐）</option>
                                     <option value="strict">严格·所有关系变化都审</option>
                                 </select>
@@ -18648,11 +19024,11 @@ function buildSettingsPanel() {
                                 不估算费用，也不会因为费用或旧账本停止调用；费用请在你选择的服务商处管理。
                             </div>
                             <div class="mvuad-actions">
-                                <button class="menu_button mvuad-social-run" type="button">二审最新回复</button>
+                                <button class="menu_button mvuad-social-run" type="button">检查最新关系变化</button>
                             </div>
                             <div class="mvuad-status mvuad-social-status" role="status"></div>
                             <details class="mvuad-audit-details mvuad-social-details">
-                                <summary>查看最近二审追溯</summary>
+                                <summary>查看最近关系检查</summary>
                                 <ul class="mvuad-social-audit-list"></ul>
                             </details>
                         </div>
@@ -18743,7 +19119,6 @@ function buildSettingsPanel() {
                                 <span>人物档案自动补全</span>
                                 <select class="text_pole mvuad-profile-completion-mode">
                                     <option value="off">关闭</option>
-                                    <option value="basic">基础</option>
                                     <option value="full">完整（推荐）</option>
                                     <option value="full_adult">完整＋成人生理</option>
                                 </select>
@@ -19054,32 +19429,6 @@ function buildSettingsPanel() {
             toast('info', `失败重试次数已调整为 ${normalized}。`);
         }
     });
-    const variablePromptAddon = wrapper.querySelector('.mvuad-variable-prompt-addon');
-    const promptSaveHint = wrapper.querySelector('.mvuad-save-hint');
-    variablePromptAddon.value = String(getSettings().variablePromptAddon || '');
-    const saveVariablePromptAddon = ({ notify = false } = {}) => {
-        const value = variablePromptAddon.value.trim();
-        const changed = getSettings().variablePromptAddon !== value;
-        getSettings().variablePromptAddon = value;
-        saveSettings();
-        promptSaveHint.textContent = changed ? '已保存' : '没有未保存改动';
-        if (notify) toast('success', '变量诊断附加提示词已保存。');
-    };
-    variablePromptAddon.addEventListener('input', () => {
-        promptSaveHint.textContent = '有未保存改动；离开输入框时会自动保存';
-    });
-    variablePromptAddon.addEventListener('blur', () => saveVariablePromptAddon());
-    wrapper.querySelector('.mvuad-variable-prompt-save').addEventListener(
-        'click',
-        () => saveVariablePromptAddon({ notify: true }),
-    );
-    wrapper.querySelector('.mvuad-variable-prompt-reset').addEventListener('click', () => {
-        variablePromptAddon.value = '';
-        getSettings().variablePromptAddon = '';
-        saveSettings();
-        promptSaveHint.textContent = '已清空并保存';
-        toast('info', '已清空附加提示，继续使用医生内置完整诊断提示。');
-    });
     const notificationLevel = wrapper.querySelector('.mvuad-notification-level');
     notificationLevel.value = getSettings().notificationLevel || 'all';
     notificationLevel.addEventListener('change', () => {
@@ -19120,7 +19469,7 @@ function buildSettingsPanel() {
     const profileCompletionMode = wrapper.querySelector('.mvuad-profile-completion-mode');
     profileCompletionMode.value = getSettings().actorProfileCompletionMode;
     profileCompletionMode.addEventListener('change', () => {
-        const nextMode = ['off', 'basic', 'full', 'full_adult']
+        const nextMode = ['off', 'full', 'full_adult']
             .includes(profileCompletionMode.value)
             ? profileCompletionMode.value
             : 'full';

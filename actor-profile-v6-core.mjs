@@ -47,6 +47,17 @@ export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS = Object.freeze([
     'relationshipsMotives',
     'knowledgeCapabilitiesResources',
 ]);
+// Versioned locally so a stronger adult-physiology contract can refresh old
+// prose once without guessing at medical keywords in the model's Chinese.
+export const ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION = 2;
+export const ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS = Object.freeze([
+    'generalBaseline',
+    'reproductiveAnatomy',
+    'secondaryTraits',
+    'reproductiveFunction',
+    'sexualResponse',
+    'limitations',
+]);
 export const ACTOR_PROFILE_COMPLETION_GROUPS = Object.freeze([
     { key: 'identity_bootstrap', modules: [] },
     {
@@ -61,6 +72,15 @@ export const ACTOR_PROFILE_COMPLETION_GROUPS = Object.freeze([
         ],
     },
     { key: 'physiology_optional', modules: ['physiology'], adultOnly: true },
+]);
+export const ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES = Object.freeze([
+    'person',
+    'personality',
+    'history',
+    'relationshipsMotives',
+    'currentState',
+    'knowledgeCapabilitiesResources',
+    'physiology',
 ]);
 const ACTOR_PROFILE_NARRATIVE_TITLES = Object.freeze({
     person: '人物信息',
@@ -169,6 +189,18 @@ function narrativeSection(value, key, { modelAuthored = false } = {}) {
             ? 'hypothesis'
             : (NARRATIVE_SECTION_SOURCE_SET.has(source.source) ? source.source : 'hypothesis'),
         evidence: modelAuthored ? [] : cleanList(source.evidence, 8, 240),
+        ...(key === 'physiology'
+            && !modelAuthored
+            && integer(source.contractVersion, 0, Number.MAX_SAFE_INTEGER, 0) > 0
+            ? {
+                contractVersion: integer(
+                    source.contractVersion,
+                    1,
+                    Number.MAX_SAFE_INTEGER,
+                    1,
+                ),
+            }
+            : {}),
     };
 }
 
@@ -268,7 +300,16 @@ export function actorProfileCompletionGroupPlan(candidates, {
         if (moduleKey === 'physiology' && modeOf(candidate?.completionMode) !== 'full_adult') return false;
         const refresh = Array.isArray(candidate?.refreshProfileModules)
             && candidate.refreshProfileModules.includes(moduleKey);
-        return refresh || !currentSectionText(candidate, moduleKey);
+        const previous = candidate?.previousProfile || candidate?.profileV6 || null;
+        const adultPhysiologyContractStale = moduleKey === 'physiology'
+            && previous?.profileFormat === 'narrative-v1'
+            && integer(
+                previous?.narrativeSections?.physiology?.contractVersion,
+                0,
+                Number.MAX_SAFE_INTEGER,
+                0,
+            ) < ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION;
+        return refresh || adultPhysiologyContractStale || !currentSectionText(candidate, moduleKey);
     });
     return ACTOR_PROFILE_COMPLETION_GROUPS.map((definition) => {
         const targets = Object.fromEntries(definition.modules.map((moduleKey) => [
@@ -293,10 +334,10 @@ const PROFILE_MODULE_NOTES = Object.freeze({
     person: '\u7528\u81ea\u7136\u4e2d\u6587\u5b8c\u6574\u8bf4\u660e\u8eab\u4efd\u3001\u7269\u79cd\u3001\u5e74\u9f84\u9636\u6bb5\u3001\u5916\u8c8c\u4e0e\u793e\u4f1a\u5b9a\u4f4d\u3002',
     personality: '\u7528\u9009\u62e9\u3001\u4ef7\u503c\u504f\u597d\u3001\u8bf4\u8bdd\u4e0e\u538b\u529b\u53cd\u5e94\u5199\u51fa\u7a33\u5b9a\u800c\u4e0d\u6a21\u677f\u5316\u7684\u6027\u683c\u3002',
     history: '\u5199\u51fa\u8db3\u4ee5\u652f\u6491\u73b0\u5728\u884c\u4e3a\u7684\u7ecf\u5386\u3001\u8f6c\u6298\u4e0e\u5f62\u6210\u539f\u56e0\u3002',
-    currentState: '\u8bf4\u660e\u5f53\u524d\u5904\u5883\u3001\u8eab\u5fc3\u72b6\u6001\u3001\u8fdb\u884c\u4e2d\u76ee\u6807\u3001\u538b\u529b\u548c\u672a\u5b8c\u4e8b\u9879\u3002',
-    relationshipsMotives: '\u8bf4\u660e\u5173\u952e\u5173\u7cfb\u3001\u5bf9\u4ed6\u4eba\u7684\u8ddd\u79bb\u548c\u5f53\u524d\u52a8\u673a\uff0c\u4e0d\u66ff\u73a9\u5bb6\u51b3\u5b9a\u6001\u5ea6\u3002',
+    currentState: '只写适合长期档案保存的状态基线、持续性限制、长期责任与反复出现的压力来源。即时地点、短暂情绪、当下伤势、进行中的动作和计划进度属于 MVU/连续性实时状态，不得固化进人物基线。',
+    relationshipsMotives: '说明稳定的关键关系背景、与他人的通常距离、长期驱动力和可观察边界；本回合即时态度与关系数值属于实时状态，不得固化，也不得替玩家决定态度。',
     knowledgeCapabilitiesResources: '\u5206\u6e05\u5df2\u77e5\u4e0e\u672a\u77e5\uff0c\u5199\u51fa\u53ef\u7528\u80fd\u529b\u3001\u5de5\u5177\u3001\u8d44\u6e90\u53ca\u9650\u5236\u3002',
-    physiology: '\u4ec5\u5728 full_adult \u542f\u7528\u65f6\uff0c\u4f9d\u7269\u79cd\u4e0e\u6743\u5a01\u8bbe\u5b9a\u5b8c\u6574\u586b\u5199\uff1b\u4e0d\u9002\u7528\u9879\u5199\u660e\u539f\u56e0\u3002',
+    physiology: '仅在 full_adult 启用时填写成人生理档案。使用自然、客观、完整的中文句子，并同时覆盖：稳定的一般体征；与物种和生理性别相符的外生殖器与内生殖系统；第二性征；生殖功能、周期、分泌或特殊体液；性刺激下的生理反应与敏感部位；明确限制。不能只写体型、伤病、服装或机械改造就算完成；即时伤势和临床危急状态属于实时状态，不固化为生理基线。不得把性经历、性行为、偏好、同意或关系当成生理事实；正文没有给出精确尺寸时做合理定性补全，不伪造医学测量值。任何不适用项都用自然句说明物种或生理构造原因。正文末尾必须为上述六项各附一次非持久覆盖声明 <physiology-coverage key="给定key">正文中的逐字短句</physiology-coverage>；key 只能是 generalBaseline、reproductiveAnatomy、secondaryTraits、reproductiveFunction、sexualResponse、limitations，声明内容必须逐字来自本模块自然正文，声明仅供本地完整性核对且不会写入档案。',
 });
 
 export function buildActorProfileModuleGroupMessages(group, {
@@ -322,9 +363,19 @@ export function buildActorProfileModuleGroupMessages(group, {
         confirmed: candidate?.confirmed || candidate?.previousProfile?.confirmed || null,
         locks: candidate?.locks || candidate?.previousProfile?.locks || null,
     });
-    const targetRows = Object.fromEntries(Object.entries(group?.targets || {}).map(([key, rows]) => [
+    const requestedModules = Object.fromEntries(Object.entries(group?.targets || {}).map(([key, rows]) => [
         key,
-        (rows || []).map((candidate) => ({
+        (rows || []).map((candidate) => candidateActorIdForPrompt(candidate)),
+    ]));
+    const actorById = new Map();
+    for (const rows of Object.values(group?.targets || {})) {
+        for (const candidate of rows || []) {
+            actorById.set(candidateActorIdForPrompt(candidate), candidate);
+        }
+    }
+    const targetRows = {
+        requestedModules,
+        actors: [...actorById.values()].map((candidate) => ({
             actorId: candidateActorIdForPrompt(candidate),
             name: cleanText(candidate?.actorRef?.name || candidate?.name, 160),
             identityContext: narrativeText(
@@ -333,15 +384,15 @@ export function buildActorProfileModuleGroupMessages(group, {
                     ?? candidate?.narrativeSections?.person?.text,
                 4000,
             ),
-            current: narrativeText(candidate?.previousProfile?.narrativeSections?.[key]?.text, 4000),
             workingModules: candidate?.previousProfile?.narrativeSections || {},
             authority: authorityProjection(candidate),
         })),
-    ]));
+    };
     const guides = (group?.modules || []).map((key) => `${key}: ${PROFILE_MODULE_NOTES[key]}`).join('\n');
     if (discoveryOnly) return [{ role: 'system', content: [
         '\u4f60\u53ea\u505a\u5df2\u63a5\u53d7\u6b63\u6587\u7684\u4eba\u7269\u8eab\u4efd\u53d1\u73b0\uff0c\u4e0d\u586b\u4eba\u7269\u6863\u6848\uff0c\u4e0d\u7eed\u5199\u5267\u60c5\u3002',
-        '\u5bf9\u6bcf\u4e2a\u771f\u6b63\u51fa\u573a\u3001\u6709\u6b63\u6587\u9010\u5b57\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u4e14\u5c1a\u672a\u767b\u8bb0\u7684\u65b0\u4eba\uff0c\u53ea\u8f93\u51fa <profile-target actor="new" name="\u6b63\u6587\u9010\u5b57\u4eba\u7269\u884c\u952e"></profile-target>\u3002name \u662f\u517c\u5bb9\u5c5e\u6027\uff0c\u5176\u542b\u4e49\u662f Registry displayName/\u884c\u952e\uff1b\u53ef\u4ee5\u662f\u6b63\u6587\u4e2d\u7684\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u63cf\u8ff0\u6027\u79f0\u8c13\uff0c\u4e0d\u8981\u6c42\u6237\u7c4d\u5f0f\u59d3\u540d\u3002\u4e0d\u5f97\u8f93\u51fa module\u3001\u6863\u6848\u6b63\u6587\u3001\u89e3\u91ca\u6216\u81ea\u521b\u884c\u952e\u3002',
+        '\u5bf9\u6bcf\u4e2a\u771f\u6b63\u51fa\u573a\u3001\u6709\u6b63\u6587\u9010\u5b57\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u4e14\u5c1a\u672a\u767b\u8bb0\u7684\u65b0\u4eba\uff0c\u53ea\u8f93\u51fa <profile-target actor="new" name="\u6b63\u6587\u9010\u5b57\u4eba\u7269\u884c\u952e"></profile-target>\u3002name \u662f\u517c\u5bb9\u5c5e\u6027\uff0c\u5176\u542b\u4e49\u662f Registry displayName/\u884c\u952e\uff1b\u53ef\u4ee5\u662f\u6b63\u6587\u4e2d\u7684\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13\uff0c\u4e0d\u8981\u6c42\u6237\u7c4d\u5f0f\u59d3\u540d\u3002\u88f8\u7684\u6027\u522b\u3001\u5e74\u9f84\u6216\u8def\u4eba\u6cdb\u79f0\u4e0d\u662f\u7a33\u5b9a\u884c\u952e\uff1b\u7f16\u53f7\u6216\u660e\u786e\u9650\u5b9a\u5230\u4e00\u4eba\u7684\u79f0\u8c13\u53ef\u7528\u3002\u4e0d\u5f97\u8f93\u51fa module\u3001\u6863\u6848\u6b63\u6587\u3001\u89e3\u91ca\u6216\u81ea\u521b\u884c\u952e\u3002',
+        '\u82e5\u6b63\u6587\u660e\u786e\u63ed\u793a\u4e86\u5df2\u767b\u8bb0\u4eba\u7269\u7684\u65b0\u59d3\u540d\u3001\u4ee3\u53f7\u6216\u7a33\u5b9a\u79f0\u8c13\uff0c\u4e0d\u5f97\u628a\u65b0\u884c\u952e\u5f53\u6210 new\u3002\u5fc5\u987b\u4f7f\u7528\u201c\u5df2\u767b\u8bb0\u7d22\u5f15\u201d\u4e2d\u8be5\u4eba\u7269\u7684\u7cbe\u786e actorId\uff0c\u5e76\u5728\u6807\u7b7e\u5185\u9644\u4e00\u6bb5\u6700\u5c0f\u9010\u5b57\u8bc1\u636e\uff1a<profile-target actor="\u7cbe\u786eActorId" name="\u6b63\u6587\u9010\u5b57\u65b0\u884c\u952e"><identity-evidence>\u540c\u65f6\u5305\u542b\u8be5\u4eba\u5df2\u767b\u8bb0\u884c\u952e/\u522b\u540d\u548c\u65b0\u884c\u952e\u7684\u6700\u77ed\u6b63\u6587\u539f\u53e5\u7247\u6bb5</identity-evidence></profile-target>\u3002\u53ea\u6709\u6b63\u6587\u660e\u786e\u8868\u660e\u662f\u540c\u4e00\u4eba\u65f6\u624d\u8fd9\u6837\u8f93\u51fa\uff1b\u4e0d\u5f97\u51ed\u76f8\u4f3c\u3001\u804c\u4e1a\u6216\u540c\u573a\u51fa\u73b0\u731c\u6d4b\u5408\u5e76\u3002',
         '\u5148\u5728\u201c\u5df2\u63a5\u53d7\u6b63\u6587\u201d\u91cc\u627e\u5230\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u7684\u8fde\u7eed\u539f\u5b57\u4e32\uff0c\u518d\u5c06\u8be5\u5b57\u4e32\u9010\u5b57\u590d\u5236\u5230 name\uff1b\u4e0d\u5f97\u6539\u5199\u3001\u7f29\u5199\u3001\u7ffb\u8bd1\u3001\u8865\u5168\u6216\u81ea\u884c\u53d6\u540d\u3002',
         '\u4e0d\u5f97\u628a\u73a9\u5bb6\u3001\u7eaf\u4ee3\u8bcd\u3001\u660e\u786e\u7ec4\u7ec7\u6216\u7fa4\u4f53\u3001\u53ea\u88ab\u63d0\u53ca\u8005\u3001\u5df2\u767b\u8bb0\u884c\u952e/\u522b\u540d\u6216\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u5f53\u4f5c new\u3002',
         '\u5fc5\u987b\u5bf9\u7528\u6237\u63d0\u4f9b\u7684\u6bcf\u4e2a coverage unit \u6070\u597d\u56de\u5e94\u4e00\u6b21\uff1a\u539f\u6837\u590d\u5236 id \u548c digest \u5230 <coverage-unit id="..." digest="...">...</coverage-unit>\u3002\u8be5\u5355\u5143\u6709\u65b0\u4eba\u65f6\uff0c\u5728\u5176\u4e2d\u8f93\u51fa\u4e00\u4e2a\u6216\u591a\u4e2a profile-target\uff1b\u6ca1\u6709\u65f6\u53ea\u8f93\u51fa <no-new/>\u3002\u4e0d\u5f97\u9057\u6f0f\u3001\u91cd\u590d\u6216\u81ea\u521b coverage unit\uff0c\u4e0d\u5f97\u8f93\u51fa\u88f8\u7684\u201c\u65e0\u4eba\u7269\u6863\u6848\u201d\u3002',
@@ -353,20 +404,15 @@ export function buildActorProfileModuleGroupMessages(group, {
     ].join('\n\n') }];
     return [{ role: 'system', content: [
         '\u4f60\u53ea\u586b\u5199\u6307\u5b9a\u7684\u4eba\u7269\u6863\u6848\u6a21\u5757\uff0c\u4e0d\u7eed\u5199\u5267\u60c5\u3002',
+        group?.key === 'character_core' ? ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT : '',
         '\u8f93\u51fa\u7528\u8f7b\u91cf\u8def\u7531\u8fb9\u754c <profile-target actor="\u7cbe\u786eActorRef" name="Registry displayName/\u884c\u952e"> \u548c <module key="\u7cbe\u786emodule key">\u81ea\u7136\u4e2d\u6587</module>\u3002\u6863\u6848\u7ec4\u53ea\u63a5\u6536\u5df2\u7531\u672c\u5730\u9501\u5b9a\u7684 ActorRef\uff0c\u4e0d\u5f97\u81ea\u884c\u65b0\u589e\u4eba\u7269\u884c\u3002',
         '\u8def\u7531\u6807\u7b7e\u4e0d\u662f\u6863\u6848\u6807\u9898\uff1b\u6a21\u5757\u5185\u53ea\u5199\u53ef\u8bfb\u7684\u81ea\u7136\u4e2d\u6587\uff0c\u4e0d\u8981 JSON/SQL/\u5b57\u6bb5\u8868\u3002',
-        group?.key === 'identity_bootstrap'
-            ? '\u5fc5\u987b\u53d1\u73b0\u5df2\u63a5\u53d7\u6b63\u6587\u4e2d\u6240\u6709\u771f\u6b63\u51fa\u573a\u3001\u6709\u9010\u5b57\u660e\u786e\u59d3\u540d\u4e14\u5c1a\u672a\u767b\u8bb0\u7684\u4eba\u7269\uff1b\u4e0d\u5f97\u628a\u73a9\u5bb6\u3001\u6cdb\u79f0\u3001\u53ea\u88ab\u63d0\u53ca\u8005\u6216\u5df2\u767b\u8bb0\u522b\u540d\u5f53\u65b0\u4eba\u3002'
-            : '',
-        group?.key === 'identity_bootstrap'
-            ? '\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\u4e2d\u7684\u59d3\u540d\u7edd\u5bf9\u4e0d\u5f97\u4ee5 actor="new" \u8f93\u51fa\u3002\u5220\u9664\u8fd9\u7c7b\u5019\u9009\u540e\uff0c\u7ee7\u7eed\u67e5\u627e\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u672a\u767b\u8bb0\u65b0\u4eba\u7269\uff1b\u82e5\u6ca1\u6709\u5176\u4ed6\u5408\u683c\u4eba\u7269\uff0c\u552f\u4e00\u5141\u8bb8\u7684\u8f93\u51fa\u662f\u4e25\u683c\u7684\u201c\u65e0\u4eba\u7269\u6863\u6848\u201d\uff0c\u4e0d\u5e26\u6807\u7b7e\u3001\u89e3\u91ca\u6216\u6807\u70b9\u3002'
-            : '',
         '\u65b0\u53d1\u73b0\u884c\u4e2d\u7684\u540c\u56de\u5408\u7968\u636e\u53ea\u662f\u4ea4\u6613\u5185\u7684 provisional working context\uff1a\u6743\u5a01\u8bbe\u5b9a\u3001\u5df2\u63a5\u53d7\u6b63\u6587\u548c\u5df2\u786e\u8ba4\u6863\u6848\u4f18\u5148\uff0c\u51b2\u7a81\u8f74\u5fc5\u987b\u4e22\u5f03\uff1b\u6700\u7ec8\u53ea\u6709\u672c\u5730 Registry promotion \u540e\u7684 ticket binding \u662f\u771f\u503c\u3002\u6a21\u5757\u6587\u672c\u4e0d\u5f97\u8986\u76d6 confirmed/locks/designRolls\u3002',
         guides,
         validationFeedback.length ? `\u4ec5\u4fee\u590d\u672c\u7ec4\uff1a${validationFeedback.join('; ')}` : '',
     ].filter(Boolean).join('\n\n') }, { role: 'user', content: [
         `\u76ee\u6807\u884c\u4e0e\u5f53\u524d\u503c\uff1a${JSON.stringify(targetRows)}`,
-        `\u5df2\u63a5\u53d7\u6b63\u6587\uff1a\n${String(discoveryContext?.acceptedNarrative || '').slice(0, 42000)}`,
+        `\u5df2\u63a5\u53d7\u6b63\u6587\uff1a\n${String(discoveryContext?.acceptedNarrative || '')}`,
         group?.key === 'identity_bootstrap'
             ? `\u5df2\u767b\u8bb0\u7d22\u5f15\uff1a${JSON.stringify(discoveryContext?.registeredActorIndex || [])}`
             : '',
@@ -376,7 +422,7 @@ export function buildActorProfileModuleGroupMessages(group, {
         group?.key === 'identity_bootstrap'
             ? `\u540c\u672c\u56de\u5408\u4eba\u7269\u521b\u5efa\u7968\u636e\uff1a${JSON.stringify(discoveryContext?.characterCreationTickets || [])}`
             : '',
-        `\u6743\u5a01\u6750\u6599\uff1a\n${cleanText(evidenceText, 42000)}`,
+        `\u6743\u5a01\u6750\u6599\uff08\u5df2\u6309\u6765\u6e90\u6807\u8bb0\uff09\uff1a\n${String(evidenceText || '')}`,
         customPrompt ? `\u5168\u5c40\u9644\u52a0\u63d0\u793a\uff1a\n${customPrompt}` : '',
     ].filter(Boolean).join('\n\n') }];
 }
@@ -391,13 +437,73 @@ function cleanModuleBody(value) {
         .replace(/\s*(?:\u4ee5\u4e0a\u662f\u6240\u9700\u5185\u5bb9[\u3002.]?|\u5b8c\u6210[\u3002.]?)\s*$/u, '').trim().slice(0, 4000);
 }
 
-export function parseActorProfileModuleGroupOutput(output, group, { acceptedNarrative = '' } = {}) {
+export function actorProfileIdentityEvidenceSurface(value) {
+    return String(value || '')
+        .replace(/[\u201c\u201d\u300c\u300d\u300e\u300f\uff02]/gu, '"')
+        .replace(/[\u2018\u2019\uff07]/gu, "'")
+        .trim();
+}
+
+function validatePhysiologyCoverage(value) {
+    const source = String(value || '');
+    const seen = new Map();
+    const coverageRe = /<physiology-coverage\b[^>]*\bkey\s*=\s*(?:["']([^"']+)["']|([^\s>]+))[^>]*>([\s\S]*?)<\/physiology-coverage>/giu;
+    let match;
+    let invalid = false;
+    while ((match = coverageRe.exec(source))) {
+        const key = cleanText(match[1] || match[2], 80);
+        const excerpt = cleanModuleBody(match[3]);
+        if (
+            !ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.includes(key)
+            || seen.has(key)
+            || Array.from(excerpt).length < 8
+            || [...seen.values()].includes(excerpt)
+        ) {
+            invalid = true;
+            continue;
+        }
+        seen.set(key, excerpt);
+    }
+    const prose = cleanModuleBody(source.replace(coverageRe, ''));
+    const ranges = [];
+    for (const excerpt of seen.values()) {
+        const start = prose.indexOf(excerpt);
+        const end = start + excerpt.length;
+        if (start < 0 || ranges.some((range) => start < range.end && end > range.start)) {
+            invalid = true;
+        }
+        ranges.push({ start, end });
+    }
+    const missingFields = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS
+        .filter((key) => !seen.has(key) || !prose.includes(seen.get(key)))
+        .map((key) => `physiology.${key}`);
+    return {
+        ok: !invalid && missingFields.length === 0,
+        prose,
+        missingFields,
+    };
+}
+
+export function parseActorProfileModuleGroupOutput(output, group, {
+    acceptedNarrative = '',
+    registeredActorIndex = [],
+} = {}) {
     const text = String(output || '').replace(/[“”]/gu, '"').replace(/[‘’]/gu, "'")
         .replace(/```(?:xml|html|text|markdown)?/giu, '').replace(/```/gu, '').trim();
     const entries = [];
     const failures = [];
     const expectedCoverage = Array.isArray(group?.discoveryCoverage?.units)
         ? group.discoveryCoverage.units : [];
+    const coverageTargetSources = new Map();
+    const registeredById = new Map((Array.isArray(registeredActorIndex)
+        ? registeredActorIndex : []).map((entry) => [
+        cleanText(entry?.actorId, 120),
+        {
+            actorId: cleanText(entry?.actorId, 120),
+            displayName: cleanText(entry?.displayName || entry?.name, 160),
+            aliases: cleanList(entry?.aliases, 12, 160),
+        },
+    ]).filter(([actorId, entry]) => actorId && entry.displayName));
     let coverageProof = null;
     let coverageCompleteEmpty = false;
     if (group?.key === 'identity_bootstrap' && expectedCoverage.length) {
@@ -445,7 +551,19 @@ export function parseActorProfileModuleGroupOutput(output, group, { acceptedNarr
             allNoNew = false;
             totalTargets += targetMatches.length;
             for (const target of targetMatches) {
+                const actorId = target[1].match(/\bactor\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/iu)?.slice(1).find(Boolean) || '';
                 const name = target[1].match(/\bname\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/iu)?.slice(1).find(Boolean) || '';
+                const evidenceSpan = cleanModuleBody(
+                    target[0].match(/<identity-evidence\b[^>]*>([\s\S]*?)<\/identity-evidence>/iu)?.[1] || '',
+                );
+                const targetKey = `${cleanText(actorId, 120)}\u0000${cleanText(name, 160)}`;
+                if (actorId && name && !coverageTargetSources.has(targetKey)) {
+                    coverageTargetSources.set(targetKey, {
+                        coverageUnitId: unitId,
+                        sourceAnchor: expected.text,
+                        evidenceSpan,
+                    });
+                }
                 if (!name || !expected.text.includes(name)) failures.push({
                     actorId: '', name: cleanText(name, 160),
                     reason: 'actor_profile.discovery_name_not_in_coverage_unit',
@@ -514,7 +632,21 @@ export function parseActorProfileModuleGroupOutput(output, group, { acceptedNarr
                 failures.push({ actorId, name, reason: 'actor_profile.module_duplicate', moduleKey: key, retryable: true });
                 continue;
             }
-            const body = cleanModuleBody(moduleMatch[2]);
+            const physiologyCoverage = key === 'physiology'
+                ? validatePhysiologyCoverage(moduleMatch[2])
+                : null;
+            if (physiologyCoverage && !physiologyCoverage.ok) {
+                failures.push({
+                    actorId,
+                    name,
+                    reason: 'actor_profile.physiology_coverage_incomplete',
+                    moduleKey: key,
+                    missingFields: physiologyCoverage.missingFields,
+                    retryable: true,
+                });
+                continue;
+            }
+            const body = physiologyCoverage?.prose || cleanModuleBody(moduleMatch[2]);
             const minimum = key === 'person' ? 40 : key === 'currentState' ? 50 : 70;
             if (Array.from(body).length >= minimum && !/^(?:未知|待定|暂无|未登记|无|unknown|n\/?a)[。.!！]?$/iu.test(body)) modules[key] = body;
             else failures.push({ actorId, name, reason: 'actor_profile.module_content_incomplete', moduleKey: key, retryable: true });
@@ -523,7 +655,61 @@ export function parseActorProfileModuleGroupOutput(output, group, { acceptedNarr
             failures.push({ actorId: '', name, reason: 'actor_profile.discovery_name_not_in_narrative', retryable: true });
             continue;
         }
-        entries.push({ actorId, name, modules });
+        const routeSource = coverageTargetSources.get(targetKey) || null;
+        if (group?.key === 'identity_bootstrap' && !group?.modules?.length && actorId !== 'new') {
+            const registered = registeredById.get(actorId);
+            if (!registered) {
+                failures.push({ actorId, name, reason: 'actor_profile.identity_reveal_actor_ref_unknown', retryable: true });
+                continue;
+            }
+            if (!name || !routeSource?.sourceAnchor?.includes(name)) {
+                failures.push({ actorId, name, reason: 'actor_profile.identity_reveal_name_not_in_coverage_unit', retryable: true });
+                continue;
+            }
+            if (
+                Array.from(routeSource.evidenceSpan || '').length < 4
+                || Array.from(routeSource.evidenceSpan || '').length > 240
+                || !actorProfileIdentityEvidenceSurface(routeSource.sourceAnchor)
+                    .includes(actorProfileIdentityEvidenceSurface(routeSource.evidenceSpan))
+                || !actorProfileIdentityEvidenceSurface(routeSource.evidenceSpan)
+                    .includes(actorProfileIdentityEvidenceSurface(name))
+            ) {
+                failures.push({ actorId, name, reason: 'actor_profile.identity_reveal_evidence_invalid', retryable: true });
+                continue;
+            }
+            if ([registered.displayName, ...registered.aliases].includes(name)) {
+                failures.push({ actorId, name, reason: 'actor_profile.identity_reveal_unchanged', retryable: true });
+                continue;
+            }
+            const anchorActorIds = [...registeredById.values()].filter((entry) => (
+                [entry.displayName, ...entry.aliases]
+                    .filter(Boolean)
+                    .some((label) => actorProfileIdentityEvidenceSurface(routeSource.evidenceSpan)
+                        .includes(actorProfileIdentityEvidenceSurface(label)))
+            )).map((entry) => entry.actorId);
+            if (anchorActorIds.length !== 1 || anchorActorIds[0] !== actorId) {
+                failures.push({ actorId, name, reason: 'actor_profile.identity_reveal_actor_ambiguous', retryable: true });
+                continue;
+            }
+            entries.push({
+                actorId,
+                name,
+                modules,
+                identityReveal: true,
+                previousName: registered.displayName,
+                coverageUnitId: routeSource.coverageUnitId,
+                sourceAnchor: routeSource.sourceAnchor,
+                evidenceSpan: routeSource.evidenceSpan,
+            });
+            continue;
+        }
+        entries.push({
+            actorId,
+            name,
+            modules,
+            coverageUnitId: routeSource?.coverageUnitId || '',
+            sourceAnchor: routeSource?.sourceAnchor || '',
+        });
     }
     return { entries, failures, formatUnrecoverable: entries.length === 0, explicitEmpty: false, coverageProof, raw: text };
 }
@@ -1759,6 +1945,18 @@ function calculateCoverage(profile) {
 }
 
 function calculateOptionalCoverage(profile) {
+    if (profile?.profileFormat === 'narrative-v1') {
+        if (modeOf(profile.completionMode) !== 'full_adult') return 100;
+        return narrativeText(profile?.narrativeSections?.physiology?.text, 4000)
+            && integer(
+                profile?.narrativeSections?.physiology?.contractVersion,
+                0,
+                Number.MAX_SAFE_INTEGER,
+                0,
+            ) >= ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION
+            ? 100
+            : 0;
+    }
     if (profile.modules.physiology.data.enabled !== true) return 100;
     return moduleReady(profile, 'physiology') ? 100 : 0;
 }
@@ -2101,6 +2299,25 @@ export function actorProfileRecoveryCriticalFingerprint(overrides = {}) {
         String(Object.hasOwn(overrides, name) ? overrides[name] : helper),
     ]);
     return `actor-profile-critical:${fingerprint(JSON.stringify(manifest))}`;
+}
+
+export function actorProfileGenerationCriticalFingerprint(overrides = {}) {
+    const semantics = {
+        diversityContract: ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT,
+        completionGroups: ACTOR_PROFILE_COMPLETION_GROUPS,
+        moduleNotes: PROFILE_MODULE_NOTES,
+        physiologyContractVersion: ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
+        physiologyCoverageKeys: ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
+        identityRevealRefreshModules: ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
+        vagueDiscoveryTerms: [...DISCOVERY_NAME_VAGUE_TERMS].sort(),
+        completionGroupPlan: String(actorProfileCompletionGroupPlan),
+        buildGroupMessages: String(buildActorProfileModuleGroupMessages),
+        parseGroupOutput: String(parseActorProfileModuleGroupOutput),
+        identityEvidenceSurface: String(actorProfileIdentityEvidenceSurface),
+        discoveryAnchor: String(validateActorProfileDiscoveryAnchor),
+        ...(overrides || {}),
+    };
+    return `actor-profile-generation:${fingerprint(JSON.stringify(semantics))}`;
 }
 
 export function actorProfileBaselineDigest(value) {
@@ -2893,6 +3110,8 @@ export function selectActorProfileCompletionCandidates(value, {
     maxActors = null,
     turn: _turn = null,
     priorityActorIds = [],
+    includeReadyActorIds = [],
+    refreshModulesByActorId = {},
     readinessForActor = null,
 } = {}) {
     const actors = Array.isArray(value?.actors) ? value.actors : [];
@@ -2906,6 +3125,11 @@ export function selectActorProfileCompletionCandidates(value, {
     );
     const initial = new Map(initialIds
         .map((actorId, index) => [actorId, index]));
+    const forcedReadyIds = new Set(cleanList(
+        includeReadyActorIds,
+        Math.max(24, actors.length),
+        120,
+    ));
     const maintenanceBudget = integer(
         maintenanceMaxActors ?? maxActors ?? 0,
         0,
@@ -2935,6 +3159,7 @@ export function selectActorProfileCompletionCandidates(value, {
     const incomplete = actors
         .filter((actor) => !actor?.pendingProfile)
         .filter((actor) => {
+            if (forcedReadyIds.has(cleanText(actor?.id, 120))) return true;
             const ready = typeof readinessForActor === 'function'
                 ? readinessForActor(actor)?.ready === true
                 : actorProfileReadyForAction(actor);
@@ -2979,6 +3204,11 @@ export function selectActorProfileCompletionCandidates(value, {
             fieldSources: clone(actor?.profileV6?.fieldSources || {}),
             designRolls: clone(actor?.profileV6?.designRolls || null),
             previousProfile: clone(actor?.profileV6 || null),
+            refreshProfileModules: cleanList(
+                refreshModulesByActorId?.[cleanText(actor?.id, 120)],
+                ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.length,
+                80,
+            ).filter((moduleKey) => ACTOR_PROFILE_NARRATIVE_SECTION_KEYS.includes(moduleKey)),
         }))
         .filter((actor) => actor.actorId && actor.name);
 }
@@ -5398,6 +5628,13 @@ export function materializeActorProfileBaseline(previousProfile, candidate, {
     if (candidate?.profileFormat === 'narrative-v1') {
         profile.profileFormat = 'narrative-v1';
         profile.narrativeSections = normalizeNarrativeSections(candidate.narrativeSections);
+        if (
+            profile.completionMode === 'full_adult'
+            && narrativeText(profile.narrativeSections.physiology?.text, 4000)
+        ) {
+            profile.narrativeSections.physiology.contractVersion =
+                ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION;
+        }
         // Narrative sections are authored content; anchors, tickets, locks and
         // all runtime facts stay on their existing local ownership paths.
         profile.baselineCommit = null;

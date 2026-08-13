@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+    ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
     actorProfileReadyForAction,
     actorProfileDiscoveryCoveragePlan,
     bindCharacterCreationTicketsToRegisteredActors,
@@ -16,6 +17,7 @@ import { completeActorProfileBatchTransaction } from '../actor-profile-batch-cor
 import {
     discoverActorsFromTurnSources,
     emptyActorLedger,
+    mergeActorIdentityReveal,
     normalizeActorLedger,
     promoteActorCandidatesToRegistry,
     runActorRegistryUpsert,
@@ -1407,6 +1409,149 @@ test('module protocol carries working identity, ticket authority and targeted re
     assert.equal(run.saveCount, 2);
     assert.deepEqual(fixture.candidates[0].confirmed, { canonRole: 'locked-role' });
     assert.deepEqual(fixture.candidates[0].locks, { canonRole: true });
+});
+
+test('explicit row-key reveal keeps one ActorId, aliases the old label and atomically refreshes one dossier', async () => {
+    const chatId = 'chat-identity-reveal-escapee';
+    const fixture = prepareRegisteredBatch(1, { chatId });
+    const actorId = fixture.candidates[0].actorRef.actorId;
+    const firstRef = narrativeDiscoverySourceRef(fixture.ref);
+    const renamedLedger = mergeActorIdentityReveal(fixture.ledger, {
+        actorId,
+        revealedName: '\u9003\u4ea1\u8005',
+        sourceRef: firstRef,
+        turn: 1,
+    });
+    const initialCandidates = selectActorProfileCompletionCandidates(renamedLedger, {
+        initialActorIds: [actorId],
+        maintenanceMaxActors: 0,
+    });
+    const proseFor = (key, name) => `${name}${key}\uff1a${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u6863\u6848\u53e5\u5b50\uff0c\u5305\u542b\u73b0\u5b9e\u4f9d\u636e\u3001\u5c40\u9650\u3001\u52a8\u673a\u4e0e\u540e\u7eed\u53d1\u5c55\u7a7a\u95f4\u3002'.repeat(4)}`;
+    const baseline = await runBatch({
+        ...fixture,
+        ledger: renamedLedger,
+        candidates: initialCandidates,
+    }, {
+        moduleProtocol: true,
+        requestBatch: ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+            `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+            ...moduleKeys.map((key) => `<module key="${key}">${proseFor(key, candidate.actorRef.name)}</module>`),
+            '</profile-target>',
+        ].join('\n')).join('\n'),
+    });
+    assert.equal(baseline.result.persistenceStatus, 'atomic_readback');
+    const baselineActor = baseline.result.ledger.actors.find((actor) => actor.id === actorId);
+    assert.equal(baselineActor.name, '\u9003\u4ea1\u8005');
+
+    const secondRef = sourceRef(chatId, 2);
+    const acceptedNarrative = '\u9003\u4ea1\u8005\u63a5\u4e0b\u6e7f\u900f\u7684\u5934\u5dfe\uff0c\u7ec8\u4e8e\u8bf4\u51fa\u771f\u540d\uff1a\u201c\u6211\u53eb\u6770\u514b\u3002\u201d';
+    const registeredProfileCandidates = selectActorProfileCompletionCandidates(
+        baseline.result.ledger,
+        {
+            initialActorIds: [actorId],
+            includeReadyActorIds: [actorId],
+            maintenanceMaxActors: 0,
+        },
+    );
+    const registeredActorIndex = [{
+        actorId,
+        displayName: '\u9003\u4ea1\u8005',
+        aliases: baselineActor.identity.aliases,
+    }];
+    const applyReveal = (ledger, reveal) => mergeActorIdentityReveal(ledger, {
+        actorId: reveal.actorId,
+        revealedName: reveal.revealedName,
+        aliases: [reveal.previousName],
+        evidence: ['identity-reveal-test'],
+        sourceRef: secondRef,
+        turn: 2,
+    });
+    const revealed = await runBatch({
+        ledger: baseline.result.ledger,
+        candidates: registeredProfileCandidates,
+        registration: fixture.registration,
+        binding: fixture.binding,
+        ref: secondRef,
+    }, {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(secondRef),
+            registeredActorIndex,
+            registeredProfileCandidates,
+        },
+        preflightDiscoveries: async ({ discoveries, identityReveals }) => {
+            assert.deepEqual(discoveries, []);
+            assert.equal(identityReveals.length, 1);
+            const merged = applyReveal(baseline.result.ledger, identityReveals[0]);
+            const actorAfter = merged.actors.find((actor) => actor.id === actorId);
+            return {
+                ok: actorAfter?.name === '\u6770\u514b'
+                    && actorAfter.identity.aliases.includes('\u9003\u4ea1\u8005'),
+                failures: [],
+                validCandidateCount: 1,
+                allDiscoveriesDeterministicallyInvalid: false,
+            };
+        },
+        resolveDiscoveries: async ({ discoveries, identityReveals }) => {
+            assert.deepEqual(discoveries, []);
+            const reveal = identityReveals[0];
+            const ledger = applyReveal(baseline.result.ledger, reveal);
+            const sourceCandidate = registeredProfileCandidates[0];
+            return {
+                ok: true,
+                ledger,
+                candidates: [{
+                    ...structuredClone(sourceCandidate),
+                    actorRef: { actorId, name: '\u6770\u514b' },
+                    actorId,
+                    name: '\u6770\u514b',
+                    refreshProfileModules: [...ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES],
+                }],
+                entries: [],
+                rejected: [],
+                failures: [],
+                registry: {
+                    mutated: true,
+                    promotedActorIds: [],
+                    identityRevealedActorIds: [actorId],
+                },
+                snapshot: { fieldRevision: 0 },
+            };
+        },
+        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+            if (groupKey === 'identity_bootstrap') {
+                return '<profile-target actor="' + actorId + '" name="\u6770\u514b"><identity-evidence>'
+                    + acceptedNarrative
+                    + '</identity-evidence></profile-target>';
+            }
+            assert.deepEqual(candidates.map((candidate) => candidate.actorRef.actorId), [actorId]);
+            assert.deepEqual(candidates.map((candidate) => candidate.actorRef.name), ['\u6770\u514b']);
+            return candidates.map((candidate) => [
+                `<profile-target actor="${actorId}" name="\u6770\u514b">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${proseFor(key, '\u6770\u514b')}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(
+        revealed.result.persistenceStatus,
+        'atomic_readback',
+        JSON.stringify(revealed.result.failures || []),
+    );
+    assert.equal(revealed.saveCount, 2);
+    assert.equal(revealed.result.ledger.actors.length, 1);
+    const finalActor = revealed.result.ledger.actors[0];
+    assert.equal(finalActor.id, actorId);
+    assert.equal(finalActor.name, '\u6770\u514b');
+    assert.equal(finalActor.identity.aliases.includes('\u9003\u4ea1\u8005'), true);
+    assert.equal(finalActor.profileV6.name, '\u6770\u514b');
+    assert.match(finalActor.profileV6.narrativeSections.person.text, /\u6770\u514b/u);
+    assert.equal(Object.keys(revealed.result.ledger.actorRegistry.registered).includes('\u6770\u514b'), true);
+    assert.equal(Object.keys(revealed.result.ledger.actorRegistry.registered).includes('\u9003\u4ea1\u8005'), false);
+    assert.equal(actorProfileReadyForAction(finalActor), true);
 });
 
 test('identity preflight retries only bootstrap with the exact safe local reason before later groups', async () => {

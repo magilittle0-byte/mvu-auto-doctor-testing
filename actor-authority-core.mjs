@@ -162,6 +162,8 @@ function targetsPlayer(candidate, playerNames = []) {
     const names = normalizedNames(['玩家', '主角', 'user', 'player', ...playerNames]);
     const action = cleanText(candidate?.action || candidate?.candidateAction, 700).toLocaleLowerCase();
     if ([...names].some((name) => name && action.includes(name))) return true;
+    const contactTarget = cleanText(candidate?.contact?.target, 180).toLocaleLowerCase();
+    if (contactTarget && names.has(contactTarget)) return true;
     return (Array.isArray(candidate?.interactionTargets) ? candidate.interactionTargets : [])
         .some((target) => names.has(cleanText(target?.actorName, 160).toLocaleLowerCase()));
 }

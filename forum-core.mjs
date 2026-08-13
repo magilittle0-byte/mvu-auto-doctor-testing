@@ -77,6 +77,27 @@ function normalizePost(value, index, turn, maxComments) {
     };
 }
 
+export function constrainForumCausalSignals(update, publicThreadIds = []) {
+    if (!plainObject(update)) return update;
+    const allowed = new Set(list(publicThreadIds, 10000, 100));
+    return {
+        ...update,
+        newPosts: (Array.isArray(update.newPosts) ? update.newPosts : []).map((post) => {
+            if (!plainObject(post)) return post;
+            const sourceThreadIds = list(post.sourceThreadIds, 6, 100);
+            const trusted = post.causalSignal === true
+                && sourceThreadIds.length > 0
+                && sourceThreadIds.every((id) => allowed.has(id));
+            return {
+                ...post,
+                sourceThreadIds: trusted ? sourceThreadIds : [],
+                causalSignal: trusted,
+                impact: trusted ? text(post.impact, 500) : '',
+            };
+        }),
+    };
+}
+
 export function emptyForumState(chatId = '') {
     return {
         version: 1,
