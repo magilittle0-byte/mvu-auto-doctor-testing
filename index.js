@@ -2985,6 +2985,7 @@ function doctorRuntimeCriticalFingerprint() {
         actorActionTargetOf.toString(),
         stage3PreparedWorldCheckpoint.toString(),
         stage3PreparedWorldCheckpointMatches.toString(),
+        stage3PreparedPhase1StatesMatch.toString(),
         extractFirstBalancedJsonObject.toString(),
         stage3RecallSelection.toString(),
         runContinuityTarget.toString(),
