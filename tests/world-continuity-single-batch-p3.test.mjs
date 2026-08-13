@@ -2015,14 +2015,17 @@ test('P3 keeps full persistent thread history while P4 remains a separate visibl
     );
 });
 
-test('P3 source retains every scheduled ActorRef atomically and fails capacity before a model call', () => {
+test('P3 source retains every scheduled ActorRef without a Doctor-owned prompt ceiling', () => {
     const advance = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
     const recall = sourceSection('function buildWorldRecallMessages({', 'async function generateWorldRecallPacket(');
     assert.match(advance, /recalledActors = \[\.\.\.\(actorLedger\?\.actors \|\| \[\]\)\]/u);
     assert.match(advance, /world_recall_missing_scheduled_actor_material/u);
-    assert.match(advance, /world_recall_capacity_unavailable/u);
+    assert.doesNotMatch(advance, /world_recall_capacity_unavailable/u);
+    assert.doesNotMatch(advance, /CONTINUITY_MODEL_PROMPT_MAX_CHARS/u);
+    assert.doesNotMatch(advance, /requiredMaterial\.length\s*>/u);
     assert.doesNotMatch(advance, /recalledActors\.slice\(/u);
-    assert.match(recall, /world_recall_capacity_unavailable/u);
+    assert.doesNotMatch(recall, /world_recall_capacity_unavailable/u);
+    assert.doesNotMatch(recall, /recallBudget/u);
     assert.doesNotMatch(recall, /cropText\(user/u);
     const runner = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
     assert.match(runner, /actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);

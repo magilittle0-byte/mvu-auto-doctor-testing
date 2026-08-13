@@ -236,7 +236,6 @@ const MAX_MODEL_TIMEOUT_MS = 180_000;
 // Connection probes are bounded non-production checks. Production profile
 // completion explicitly opts out of the normal hard timeout below.
 const CONNECTION_PROBE_TIMEOUT_MS = 120_000;
-const CONTINUITY_MODEL_PROMPT_MAX_CHARS = 40_000;
 const DEFAULTS = Object.freeze({
     enabled: true,
     normalizeOpeningResources: true,
@@ -11599,10 +11598,6 @@ function buildWorldRecallMessages({
         `结构世界轨=${safeJson(lanes, 0)}`,
         `世界设定取材池=${cropText(String(worldContext?.text || ''), 7000, '召回世界设定')}`,
     ].join('\n\n');
-    const recallBudget = 18_000;
-    if (user.length > recallBudget) {
-        throw new Error('world_recall_capacity_unavailable');
-    }
     return [{ role: 'system', content: '只读召回；不得生成或改变任何权威状态。' }, { role: 'user', content: user }];
 }
 
@@ -11916,9 +11911,9 @@ function buildContinuityMessages({
         throw new Error('world_recall_missing_scheduled_actor_material');
     }
     // Required material is atomic: never crop through an ActorRef/Profile in
-    // the middle.  Capacity failure stops the whole Advance transaction.
+    // the middle. The configured model connection owns the actual context
+    // capacity; Doctor must not reject a valid turn with a local char ceiling.
     const requiredMaterial = safeJson({ recalledActors, recalledThreads, recalledLanes }, 0);
-    if (requiredMaterial.length > 26_000) throw new Error('world_recall_capacity_unavailable');
     const actorShardPromptPayload = actorShardCandidates?.actionAttempts?.length
         ? {
             actionAttempts: actorShardCandidates.actionAttempts
@@ -12012,14 +12007,11 @@ function buildContinuityMessages({
         '只返回本轮有实质变化的旧条目和必要新条目；没有某类变化就返回空数组/空对象，禁止复制整本旧账。',
         jsonOnly ? '' : '</ContinuityState>',
     ].filter(Boolean).join('\n');
-    const promptBudget = Math.max(12_000, CONTINUITY_MODEL_PROMPT_MAX_CHARS - system.length);
     const requiredPrefix = recallPacket
         ? `=== 本轮只读召回包（召回阶段已验证mustInclude；它选择支持材料，不授予写权限）===\n${safeJson(recallPacket, 0)}\n\n=== 召回的持久材料（只读；必须优先用于推进；必需实体从不截断）===\n${requiredMaterial}\n\n`
         : '';
-    if (requiredPrefix.length > promptBudget) throw new Error('world_recall_capacity_unavailable');
     const optionalUser = user.replace(requiredPrefix, '');
-    const boundedUser = requiredPrefix + cropText(optionalUser, promptBudget - requiredPrefix.length, '活世界可选材料');
-    return [{ role: 'system', content: system }, { role: 'user', content: boundedUser }];
+    return [{ role: 'system', content: system }, { role: 'user', content: requiredPrefix + optionalUser }];
 }
 
 async function generateWorldContinuitySingleBatch(messages, {
