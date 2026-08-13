@@ -2988,6 +2988,7 @@ function doctorRuntimeCriticalFingerprint() {
         stage3PreparedPhase1StatesMatch.toString(),
         extractFirstBalancedJsonObject.toString(),
         stage3RecallSelection.toString(),
+        generateWorldRecallPacket.toString(),
         runContinuityTarget.toString(),
         commitPreparedWorldCandidate.toString(),
         precomposeNextTurnConsumer.toString(),
@@ -11477,7 +11478,10 @@ async function generateWorldRecallPacket(messages, {
     const current = () => typeof isCurrent !== 'function' || isCurrent() === true;
     if (!current()) throw new Error('world_recall.target_stale_before_call');
     const output = await callModel(messages, {
-        maxTokens: Math.min(1200, Math.max(300, Number(settings?.continuityMaxTokens) || 1200)),
+        // Recall and Advance share the configured world output budget. The
+        // connection layer still applies its own max-token ceiling, including
+        // for reasoning models whose hidden reasoning consumes this budget.
+        maxTokens: settings?.continuityMaxTokens,
         timeoutMs: settings?.sovereigntyHardTimeoutMs,
         task: '活世界召回', channel: 'fast', instructionModule: 'world_recall',
         targetIndex: captured.index, jsonMode: true, failover: false, maxFailovers: 0,

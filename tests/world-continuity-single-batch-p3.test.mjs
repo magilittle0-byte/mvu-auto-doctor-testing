@@ -44,6 +44,27 @@ function loadStage3RecallSelection() {
     return sandbox.selectRecall;
 }
 
+function loadWorldRecallGenerator(callModel) {
+    const selection = sourceSection(
+        'function stage3RecallSelection(output, {',
+        'function buildWorldRecallMessages({',
+    );
+    const generator = sourceSection(
+        'async function generateWorldRecallPacket(messages, {',
+        'function buildContinuityMessages({',
+    );
+    const sandbox = {
+        callModel,
+        extractFirstBalancedJsonObject,
+        fingerprint: (value) => `test-digest:${String(value).length}`,
+    };
+    vm.runInNewContext(
+        `${selection}${generator}\nthis.generateRecall = generateWorldRecallPacket;`,
+        sandbox,
+    );
+    return sandbox.generateRecall;
+}
+
 function loadStage3PreparedPhase1RevisionGate() {
     const fieldState = sourceSection(
         'function stage3FieldState(namespace, field) {',
@@ -1496,6 +1517,55 @@ test('P3 Recall consumes the production balanced-object extractor result', () =>
     assert.equal(selectRecall(JSON.stringify({
         actorIds: ['actor-known'], threadIds: ['thread-must'], laneIds: ['lane-must'],
     }), options), null, 'must actor omission remains fail-closed');
+});
+
+test('P3 Recall shares the configured world output budget and remains one fail-closed call', async () => {
+    const valid = JSON.stringify({
+        actorIds: ['actor-must'],
+        threadIds: ['thread-must'],
+        laneIds: ['lane-must'],
+        reasons: ['required persistent support'],
+    });
+    const calls = [];
+    const generateRecall = loadWorldRecallGenerator(async (_messages, options) => {
+        calls.push(options);
+        assert.equal(options.validateOutput(valid), true);
+        assert.equal(JSON.stringify(options.validateOutput('{bad json}')), JSON.stringify({
+            valid: false,
+            reason: 'world_recall_invalid_or_must_include_missing',
+        }));
+        assert.equal(JSON.stringify(options.validateOutput(JSON.stringify({
+            actorIds: [], threadIds: ['thread-must'], laneIds: ['lane-must'], reasons: [],
+        }))), JSON.stringify({
+            valid: false,
+            reason: 'world_recall_invalid_or_must_include_missing',
+        }));
+        return valid;
+    });
+    const packet = await generateRecall([{ role: 'user', content: 'bounded recall input' }], {
+        captured: { index: 3 },
+        settings: { continuityMaxTokens: 12_288, sovereigntyHardTimeoutMs: 30_000 },
+        mustActorIds: ['actor-must'],
+        mustThreadIds: ['thread-must'],
+        mustLaneIds: ['lane-must'],
+        availableActorIds: ['actor-must'],
+        availableThreadIds: ['thread-must'],
+        availableLaneIds: ['lane-must'],
+        worldbookKeys: [],
+        isCurrent: () => true,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].maxTokens, 12_288);
+    assert.equal(calls[0].failover, false);
+    assert.equal(calls[0].maxFailovers, 0);
+    assert.deepEqual(Array.from(packet.actorIds), ['actor-must']);
+    const generatorSource = sourceSection(
+        'async function generateWorldRecallPacket(messages, {',
+        'function buildContinuityMessages({',
+    );
+    assert.match(generatorSource, /maxTokens: settings\?\.continuityMaxTokens/u);
+    assert.doesNotMatch(generatorSource, /Math\.min\(1200/u);
+    assert.equal((generatorSource.match(/await callModel\(/gu) || []).length, 1);
 });
 
 test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudications', () => {
