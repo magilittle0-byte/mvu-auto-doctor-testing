@@ -2567,7 +2567,7 @@ function worldCallReservedForUserCancellation(namespace, captured) {
         && !stage3AcceptedTargetsMatch(packet?.producerTarget, producerTarget);
 }
 
-async function clearUserCancelledWorldCallReservation(captured) {
+async function clearWorldCallReservationWithReadback(captured, reservationMatches) {
     const context = getContext();
     if (!captured?.chatId || context?.chatId !== captured.chatId) return false;
     const fresh = captureTarget(context, captured.index, {
@@ -2578,7 +2578,7 @@ async function clearUserCancelledWorldCallReservation(captured) {
         return false;
     }
     const namespace = readChatNamespace(context);
-    if (!worldCallReservedForUserCancellation(namespace, captured)) return false;
+    if (reservationMatches(namespace, captured) !== true) return false;
     const expectedFieldStates = {
         continuityCheckpoint: stage3FieldState(namespace, 'continuityCheckpoint'),
     };
@@ -2598,13 +2598,20 @@ async function clearUserCancelledWorldCallReservation(captured) {
             return stage3AcceptedTargetsMatch(
                 stage3AcceptedTarget(currentTarget),
                 stage3AcceptedTarget(captured),
-            ) && worldCallReservedForUserCancellation(
+            ) && reservationMatches(
                 readChatNamespace(currentContext),
                 captured,
             );
         },
         contentValidator: (persisted) => persisted?.continuityCheckpoint == null,
     });
+}
+
+async function clearUserCancelledWorldCallReservation(captured) {
+    return clearWorldCallReservationWithReadback(
+        captured,
+        worldCallReservedForUserCancellation,
+    );
 }
 
 function markUserCancelledActorProfileControllers(controllers = activeModelControllers) {
@@ -3123,6 +3130,7 @@ function doctorRuntimeCriticalFingerprint() {
         actorNarrativeShardBasis.toString(),
         callModel.toString(),
         worldCallReservedForUserCancellation.toString(),
+        clearWorldCallReservationWithReadback.toString(),
         clearUserCancelledWorldCallReservation.toString(),
         markUserCancelledActorProfileControllers.toString(),
         cancelCurrentOperations.toString(),
@@ -3152,6 +3160,9 @@ function doctorRuntimeCriticalFingerprint() {
         dispatchAcceptedFinal.toString(),
         stage3NoActorPermitMatches.toString(),
         stage3LedgerReadbackGate.toString(),
+        stage3AcceptedTargetIsStrictlyNewer.toString(),
+        stage3PriorReservedCallCanRetire.toString(),
+        retirePriorReservedWorldCallForManualRecovery.toString(),
         actorActionTargetOf.toString(),
         stage3PreparedWorldCheckpoint.toString(),
         stage3PreparedWorldCheckpointMatches.toString(),
@@ -13968,6 +13979,21 @@ function stage3AcceptedTargetsMatch(left, right) {
     );
 }
 
+function stage3AcceptedTargetIsStrictlyNewer(currentValue, priorValue) {
+    const current = stage3AcceptedTarget(currentValue);
+    const prior = stage3AcceptedTarget(priorValue);
+    return !!(
+        current
+        && prior
+        && current.chatId === prior.chatId
+        && current.scopeDigest === prior.scopeDigest
+        && current.index > prior.index
+        && current.generationSerial > prior.generationSerial
+        && current.messageId !== prior.messageId
+        && current.generationId !== prior.generationId
+    );
+}
+
 function stage3AcceptedTargetKey(captured) {
     const target = stage3AcceptedTarget(captured);
     return target ? [
@@ -14021,6 +14047,46 @@ function stage3ContinuityDigestWithoutInjection(state) {
     const copy = deepClone(state || {});
     copy.nextTurnInjection = null;
     return continuityContentDigest(copy);
+}
+
+function stage3PriorReservedCallCanRetire(namespace, captured) {
+    const checkpoint = namespace?.continuityCheckpoint;
+    const current = stage3AcceptedTarget(captured);
+    const producer = stage3AcceptedTarget(checkpoint?.stage3ProducerTarget);
+    if (
+        checkpoint?.stage3Phase !== 'world_call_reserved'
+        || checkpoint?.preparedWorld
+        || !current
+        || !producer
+        || !stage3AcceptedTargetIsStrictlyNewer(current, producer)
+        || !actorActionTargetMatches(checkpoint?.target, actorActionTargetOf(producer))
+        || stage3ContinuityDigestWithoutInjection(checkpoint?.state)
+            !== stage3ContinuityDigestWithoutInjection(namespace?.continuity)
+    ) return false;
+    const lastSource = namespace?.continuity?.lastSource;
+    const lastProducer = stage3AcceptedTarget(lastSource);
+    if (lastSource && (!lastProducer || stage3AcceptedTargetsMatch(lastProducer, producer))) {
+        return false;
+    }
+    const ledger = normalizeActorLedger(namespace?.actorLedger, {
+        chatId: current.chatId,
+        scopeDigest: current.scopeDigest,
+    });
+    if ((ledger?.actionAttempts || []).some((attempt) => (
+        actorActionTargetMatches(attempt?.target, checkpoint.target)
+    ))) return false;
+    if ((ledger?.actionReceipts || []).some((receipt) => (
+        actorActionTargetMatches(receipt?.target, checkpoint.target)
+    ))) return false;
+    const packet = namespace?.continuity?.nextTurnInjection;
+    return packet == null;
+}
+
+async function retirePriorReservedWorldCallForManualRecovery(captured) {
+    return clearWorldCallReservationWithReadback(
+        captured,
+        stage3PriorReservedCallCanRetire,
+    );
 }
 
 function stage3CanonicalSettlementProof(ledger, results = [], captured) {
@@ -14106,10 +14172,7 @@ function stage3CommittedCheckpointIsPriorTerminal(checkpoint, state, ledger, cap
         || !current
         || !producer
         || !actorActionTargetMatches(checkpoint?.target, actorActionTargetOf(producer))
-        || current.chatId !== producer.chatId
-        || current.scopeDigest !== producer.scopeDigest
-        || current.index <= producer.index
-        || current.generationSerial <= producer.generationSerial
+        || !stage3AcceptedTargetIsStrictlyNewer(current, producer)
     ) return false;
     const normalized = normalizeContinuityState(state, {
         chatId: producer.chatId,
@@ -14188,6 +14251,7 @@ function stage3LedgerReadbackGate(captured, noActorPermit = null) {
 async function runContinuityTarget(captured, {
     force = false,
     noActorPermit = null,
+    manualRecovery = false,
 } = {}) {
     const acceptedTarget = stage3AcceptedTarget(captured);
     if (!acceptedTarget) {
@@ -14220,6 +14284,32 @@ async function runContinuityTarget(captured, {
         && storedCheckpoint.restorable !== false
         ? storedCheckpoint
         : null;
+    if (
+        manualRecovery === true
+        && activeCheckpoint?.stage3Phase === 'world_call_reserved'
+        && stage3PriorReservedCallCanRetire(namespace, captured)
+    ) {
+        const retired = await retirePriorReservedWorldCallForManualRecovery(captured);
+        if (!retired) {
+            return {
+                status: 'failed',
+                reason: 'world_call_reserved_manual_reconciliation',
+                module: 'world',
+            };
+        }
+        if (!stage3TaskOwnsCurrent(captured, token)) {
+            return { status: 'stale', reason: 'world_task_owner_changed' };
+        }
+        guard = stage3TargetIsCurrent(captured, token);
+        if (!guard.ok) return { status: 'stale', reason: guard.reason };
+        // Re-enter from a fresh namespace/profile read after the durable CAS
+        // retirement. The ordinary path still owns the sole Recall/Advance.
+        return runContinuityTarget(captured, {
+            force,
+            noActorPermit,
+            manualRecovery: false,
+        });
+    }
     const legacyTarget = [
         activeCheckpoint?.stage3ProducerTarget,
         namespace?.continuity?.nextTurnInjection?.producerTarget,
@@ -14860,6 +14950,7 @@ function continuityTargetIsCurrent(captured, token) {
 
 async function enqueueContinuity(targetId, {
     force = false,
+    manualRecovery = false,
     expectedTarget = null,
     noActorPermit = null,
 } = {}) {
@@ -14893,7 +14984,11 @@ async function enqueueContinuity(targetId, {
             )) {
                 return { status: 'stale', reason: 'current_source_identity_changed' };
             }
-            return runContinuityTarget(fresh, { force, noActorPermit: effectiveNoActorPermit });
+            return runContinuityTarget(fresh, {
+                force,
+                noActorPermit: effectiveNoActorPermit,
+                manualRecovery,
+            });
         })
         .then((result) => {
             const ownsCurrentTask = (
@@ -18366,7 +18461,7 @@ function buildFloatingUi() {
         enqueueActorProfiles(null, { force: true, includeMaintenance: true });
     });
     panel.querySelector('.mvuad-floating-continuity-run').addEventListener('click', () => {
-        enqueueContinuity(null, { force: true });
+        enqueueContinuity(null, { force: true, manualRecovery: true });
     });
     panel.querySelector('.mvuad-floating-sovereignty-retry').addEventListener(
         'click',
@@ -19838,7 +19933,7 @@ function buildSettingsPanel() {
         enqueueActorProfiles(null, { force: true, includeMaintenance: true });
     });
     wrapper.querySelector('.mvuad-world-run').addEventListener('click', () => {
-        enqueueContinuity(null, { force: true });
+        enqueueContinuity(null, { force: true, manualRecovery: true });
     });
     wrapper.querySelector('.mvuad-continuity-open').addEventListener('click', () => {
         showFloatingPanel();
@@ -20426,7 +20521,7 @@ async function initialize() {
         // A manual world retry never re-runs P1.  P3 fresh-reads the durable
         // ledger and either advances, finalizes a prepared candidate, or
         // returns its own fail-closed reason.
-        runContinuity: () => enqueueContinuity(null, { force: true }),
+        runContinuity: () => enqueueContinuity(null, { force: true, manualRecovery: true }),
         runActorProfiles: () => enqueueActorProfiles(null, {
             force: true,
             includeMaintenance: true,

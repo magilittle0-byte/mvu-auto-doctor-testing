@@ -41,8 +41,8 @@ test('world prompts reuse the canonical read-only profile view and expose a sepa
     assert.doesNotMatch(promptView, /profile: actor\.profileV6\s*(?:\|\||[,}])/u);
     assert.match(source, /mvuad-floating-continuity-run[^>]*>继续\/恢复世界连续性</u);
     assert.match(source, /mvuad-world-run[^>]*>继续\/恢复世界连续性</u);
-    assert.match(source, /mvuad-floating-continuity-run'[\s\S]*?enqueueContinuity\(null, \{ force: true \}\)/u);
-    assert.match(source, /mvuad-world-run'[\s\S]*?enqueueContinuity\(null, \{ force: true \}\)/u);
+    assert.match(source, /mvuad-floating-continuity-run'[\s\S]*?enqueueContinuity\(null, \{ force: true, manualRecovery: true \}\)/u);
+    assert.match(source, /mvuad-world-run'[\s\S]*?enqueueContinuity\(null, \{ force: true, manualRecovery: true \}\)/u);
 });
 
 function sourceSection(start, end) {
@@ -80,7 +80,7 @@ function loadCancelledWorldReservationHarness({ checkpointPhase = 'world_call_re
         currentTarget: structuredClone(target),
         namespace: {
             fieldRevisions: { continuityCheckpoint: 7 },
-            actorLedger: { actionAttempts: [] },
+            actorLedger: { actionAttempts: [], actionReceipts: [] },
             continuity: { nextTurnInjection: null },
             continuityCheckpoint: {
                 stage3Phase: checkpointPhase,
@@ -122,6 +122,106 @@ function loadCancelledWorldReservationHarness({ checkpointPhase = 'world_call_re
         sandbox,
     );
     return { state, target, actionTarget, matches: sandbox.matches, clear: sandbox.clear };
+}
+
+function loadPriorReservedManualHarness() {
+    const prior = {
+        chatId: 'chat-prior-reserved', index: 1, messageId: 'message-1', swipeId: 0,
+        generationSerial: 1, generationId: 'generation-1', generationType: 'normal',
+        scopeDigest: 'scope-prior-reserved', contentFingerprint: 'content-1',
+    };
+    const current = {
+        ...prior,
+        index: 3,
+        messageId: 'message-3',
+        generationSerial: 3,
+        generationId: 'generation-3',
+        contentFingerprint: 'content-3',
+    };
+    const actionTargetOf = (value) => ({
+        chatId: value.chatId,
+        logicalIndex: value.index,
+        index: value.index,
+        messageId: value.messageId,
+        swipeId: value.swipeId,
+        generation: value.generationSerial,
+        generationId: value.generationId,
+        generationType: value.generationType,
+        scopeDigest: value.scopeDigest,
+        contentHash: value.contentFingerprint,
+        hash: value.contentFingerprint,
+    });
+    const baseContinuity = {
+        chatId: prior.chatId,
+        turn: 0,
+        lastSource: null,
+        nextTurnInjection: null,
+    };
+    const state = {
+        writes: 0,
+        context: { chatId: current.chatId },
+        currentTarget: structuredClone(current),
+        namespace: {
+            fieldRevisions: { continuityCheckpoint: 9 },
+            actorLedger: { actionAttempts: [], actionReceipts: [] },
+            continuity: structuredClone(baseContinuity),
+            continuityCheckpoint: {
+                stage3Phase: 'world_call_reserved',
+                target: actionTargetOf(prior),
+                stage3ProducerTarget: structuredClone(prior),
+                state: structuredClone(baseContinuity),
+            },
+        },
+    };
+    const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const sandbox = {
+        getContext: () => state.context,
+        captureTarget: () => structuredClone(state.currentTarget),
+        readChatNamespace: () => structuredClone(state.namespace),
+        deepClone: (value) => structuredClone(value),
+        normalizeActorLedger: (value) => structuredClone(value || { actionAttempts: [] }),
+        actorActionTargetOf: actionTargetOf,
+        actorActionTargetMatches: exact,
+        continuityContentDigest: (value) => JSON.stringify(value || {}),
+        stage3FieldState: (namespace, field) => ({
+            revision: namespace.fieldRevisions[field],
+            digest: JSON.stringify(namespace[field]),
+        }),
+        writeChatNamespace: async (candidate, chatId, options) => {
+            if (chatId !== state.context.chatId || options.precondition() !== true) return false;
+            if (JSON.stringify(state.namespace.continuityCheckpoint)
+                !== options.expectedFieldStates.continuityCheckpoint.digest) return false;
+            state.writes += 1;
+            state.namespace = structuredClone(candidate);
+            return options.contentValidator(state.namespace) === true;
+        },
+    };
+    const targetHelpers = sourceSection(
+        'function stage3AcceptedTarget(captured) {',
+        'function stage3AcceptedTargetKey(captured) {',
+    );
+    const continuityHelpers = sourceSection(
+        'function stage3ContinuityDigestWithoutInjection(state) {',
+        'function stage3CanonicalSettlementProof(ledger, results = [], captured) {',
+    );
+    const clearHelpers = sourceSection(
+        'async function clearWorldCallReservationWithReadback(captured, reservationMatches) {',
+        'function markUserCancelledActorProfileControllers(',
+    );
+    vm.runInNewContext(
+        `${targetHelpers}\n${continuityHelpers}\n${clearHelpers}`
+        + '\nthis.matches = stage3PriorReservedCallCanRetire;'
+        + 'this.retire = retirePriorReservedWorldCallForManualRecovery;',
+        sandbox,
+    );
+    return {
+        prior,
+        current,
+        actionTargetOf,
+        state,
+        matches: sandbox.matches,
+        retire: sandbox.retire,
+    };
 }
 
 function loadProductionCallModel(callDirectModel) {
@@ -687,6 +787,216 @@ test('explicit user cancellation clears only an exact owned empty reservation', 
             < cancelSource.indexOf('clearUserCancelledWorldCallReservation('),
         'the controller is aborted and the epoch invalidated before the exact reserved cleanup runs',
     );
+});
+
+test('explicit manual recovery CAS-retires only a self-consistent empty prior reservation', async () => {
+    const exact = loadPriorReservedManualHarness();
+    assert.equal(exact.matches(exact.state.namespace, exact.current), true);
+    assert.equal(await exact.retire(exact.current), true);
+    assert.equal(exact.state.writes, 1);
+    assert.equal(exact.state.namespace.continuityCheckpoint, null);
+
+    const reject = async (mutate, label) => {
+        const fixture = loadPriorReservedManualHarness();
+        mutate(fixture);
+        assert.equal(fixture.matches(fixture.state.namespace, fixture.current), false, label);
+        assert.equal(await fixture.retire(fixture.current), false, label);
+        assert.equal(fixture.state.writes, 0, label);
+        assert.equal(
+            fixture.state.namespace.continuityCheckpoint.stage3Phase,
+            'world_call_reserved',
+            label,
+        );
+    };
+    await reject((fixture) => {
+        fixture.state.currentTarget = structuredClone(fixture.prior);
+        fixture.current = fixture.state.currentTarget;
+    }, 'same target transport reservation is never replayed');
+    await reject((fixture) => {
+        fixture.state.namespace.continuityCheckpoint.preparedWorld = { digest: 'prepared' };
+    }, 'prepared material is never cleared');
+    await reject((fixture) => {
+        fixture.state.namespace.actorLedger.actionAttempts.push({
+            id: 'ATT-OLD',
+            target: fixture.actionTargetOf(fixture.prior),
+        });
+    }, 'any prior ATT blocks retirement');
+    await reject((fixture) => {
+        fixture.state.namespace.actorLedger.actionReceipts.push({
+            receiptId: 'RECEIPT-OLD',
+            target: fixture.actionTargetOf(fixture.prior),
+        });
+    }, 'any prior settlement receipt blocks retirement');
+    await reject((fixture) => {
+        fixture.state.namespace.continuity.nextTurnInjection = {
+            producerTarget: structuredClone(fixture.prior),
+        };
+    }, 'a prior packet blocks retirement');
+    await reject((fixture) => {
+        fixture.state.namespace.continuity.nextTurnInjection = {
+            settlementProof: { producerTarget: structuredClone(fixture.prior) },
+        };
+    }, 'a prior settlement blocks retirement');
+    await reject((fixture) => {
+        fixture.state.namespace.continuity.lastSource = structuredClone(fixture.prior);
+        fixture.state.namespace.continuityCheckpoint.state.lastSource = structuredClone(fixture.prior);
+    }, 'lastSource authority for the prior target blocks retirement');
+    await reject((fixture) => {
+        fixture.state.namespace.continuity.turn = 1;
+    }, 'checkpoint state must match current continuity without injection');
+    for (const [field, value] of [
+        ['scopeDigest', 'scope-drift'],
+        ['generationSerial', 0],
+        ['index', 0],
+        ['generationId', exact.prior.generationId],
+        ['messageId', exact.prior.messageId],
+    ]) {
+        await reject((fixture) => {
+            fixture.state.currentTarget[field] = value;
+            fixture.current = fixture.state.currentTarget;
+        }, `current ${field} drift fails closed`);
+    }
+});
+
+test('manual retirement fresh-reads then runs exactly one local Recall and one Advance', async () => {
+    const fixture = loadPriorReservedManualHarness();
+    const current = fixture.current;
+    const ledger = { actors: [], actionAttempts: [] };
+    const preparedCheckpoint = { stage3Phase: 'world_candidate_prepared' };
+    const chat = Array.from({ length: current.index + 1 }, () => ({ mes: '' }));
+    chat[current.index] = { mes: 'accepted narrative' };
+    let retireCalls = 0;
+    let recallCalls = 0;
+    let advanceCalls = 0;
+    let namespaceReads = 0;
+    const namespace = fixture.state.namespace;
+    const runner = loadStage3LegacyManualReconciliationRunner({
+        captured: current,
+        namespace,
+        spies: {
+            stage3AcceptedTarget: (value) => value?.generationId ? structuredClone(value) : null,
+            stage3AcceptedTargetsMatch: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            stage3AcceptedTargetKey: () => 'current-target',
+            actorActionTargetOf: fixture.actionTargetOf,
+            actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            stage3PriorReservedCallCanRetire: (candidate) => (
+                candidate?.continuityCheckpoint?.stage3Phase === 'world_call_reserved'
+            ),
+            retirePriorReservedWorldCallForManualRecovery: async () => {
+                retireCalls += 1;
+                namespace.continuityCheckpoint = null;
+                return true;
+            },
+            readChatNamespace: () => {
+                namespaceReads += 1;
+                return namespace;
+            },
+            stage3LegacyTargetNeedsManualReconciliation: () => false,
+            stage3CommittedCheckpointIsPriorTerminal: () => false,
+            stage3PersistedPackageForTarget: () => null,
+            getSettings: () => ({
+                continuityMode: 'manual', continuityMaxThreads: 12,
+                worldFactionSlots: 0, worldEnvironmentSlots: 0,
+                actorLedgerMaxActorsPerTurn: 0, actorLedgerExplorationSlots: 0,
+            }),
+            getContext: () => ({ chatId: current.chatId, chat }),
+            stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: ledger, noActorPermit: true }),
+            deepClone: (value) => structuredClone(value),
+            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
+            continuityBase: () => ({ turn: 1, threads: [], world: {} }),
+            mergeMarkerRecords: (value) => value,
+            collectContinuityWorldContext: async () => ({ hasSetting: true, entries: [] }),
+            currentCharacter: () => ({}),
+            continuityFeatureActive: () => true,
+            advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
+            scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
+            detectContinuityDirector: () => 'balanced',
+            pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
+            stage3LocalRecallPacket: () => {
+                recallCalls += 1;
+                return { digest: 'recall', actorIds: [], threadIds: [], laneIds: [] };
+            },
+            writeChatNamespace: async () => true,
+            stage3FieldState: () => ({ revision: 1, digest: 'same' }),
+            normalizeActorLedger: () => ledger,
+            actorLedgerDigest: () => 'ledger',
+            setContinuityStatus: () => {},
+            buildContinuityMessages: () => [],
+            generateWorldContinuitySingleBatch: async () => {
+                advanceCalls += 1;
+                return '{}';
+            },
+            parseContinuityOutput: () => ({
+                state: { turn: 2, threads: [], world: {} },
+                raw: { world: {}, actionAdjudications: [] },
+            }),
+            stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
+            persistActorActionAttemptsForTurn: async () => ({
+                ok: true, checkpoint: preparedCheckpoint, ledger,
+            }),
+            stage3PreparedWorldCheckpointMatches: () => true,
+            stage3PreparedPhase1StatesMatch: () => true,
+            commitPreparedWorldCandidate: async () => ({ status: 'applied', worldModelCalls: 1 }),
+            latestWorldLaneDiagnostics: null,
+            latestActorShardDiagnostics: null,
+        },
+    });
+    const result = await runner(current, { force: true, manualRecovery: true });
+    assert.equal(result.status, 'applied');
+    assert.equal(retireCalls, 1);
+    assert.equal(recallCalls, 1);
+    assert.equal(advanceCalls, 1);
+    assert.ok(namespaceReads >= 2, 'retirement re-enters through a fresh namespace read');
+
+    const sameTarget = loadPriorReservedManualHarness();
+    sameTarget.state.currentTarget = structuredClone(sameTarget.prior);
+    let sameTargetModels = 0;
+    const sameRunner = loadStage3LegacyManualReconciliationRunner({
+        captured: sameTarget.prior,
+        namespace: sameTarget.state.namespace,
+        spies: {
+            stage3AcceptedTarget: (value) => value?.generationId ? structuredClone(value) : null,
+            stage3AcceptedTargetsMatch: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            actorActionTargetOf: sameTarget.actionTargetOf,
+            actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            stage3PriorReservedCallCanRetire: () => false,
+            retirePriorReservedWorldCallForManualRecovery: async () => false,
+            stage3LegacyTargetNeedsManualReconciliation: () => false,
+            stage3CommittedCheckpointIsPriorTerminal: () => false,
+            stage3PersistedPackageForTarget: () => null,
+            generateWorldContinuitySingleBatch: () => { sameTargetModels += 1; },
+        },
+    });
+    const sameResult = await sameRunner(sameTarget.prior, { force: true, manualRecovery: true });
+    assert.equal(sameResult.reason, 'world_call_reserved_manual_reconciliation');
+    assert.equal(sameTargetModels, 0);
+
+    const automatic = loadPriorReservedManualHarness();
+    let automaticRetires = 0;
+    let automaticModels = 0;
+    const automaticRunner = loadStage3LegacyManualReconciliationRunner({
+        captured: automatic.current,
+        namespace: automatic.state.namespace,
+        spies: {
+            stage3AcceptedTarget: (value) => value?.generationId ? structuredClone(value) : null,
+            stage3AcceptedTargetsMatch: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            actorActionTargetOf: automatic.actionTargetOf,
+            actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            stage3PriorReservedCallCanRetire: () => true,
+            retirePriorReservedWorldCallForManualRecovery: async () => {
+                automaticRetires += 1;
+                return true;
+            },
+            stage3LegacyTargetNeedsManualReconciliation: () => false,
+            stage3CommittedCheckpointIsPriorTerminal: () => false,
+            stage3PersistedPackageForTarget: () => null,
+            generateWorldContinuitySingleBatch: () => { automaticModels += 1; },
+        },
+    });
+    const automaticResult = await automaticRunner(automatic.current, { force: true });
+    assert.equal(automaticResult.reason, 'world_call_reserved_manual_reconciliation');
+    assert.equal(automaticRetires, 0, 'automatic P1/P3 wakeup cannot retire old authority');
+    assert.equal(automaticModels, 0);
 });
 
 test('transport failure preserves reserved recovery authority for manual reconciliation', async () => {

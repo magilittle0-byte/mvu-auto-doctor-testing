@@ -615,6 +615,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /hydratedActorProfileDiagnostic\.toString\(\)/u);
     assert.match(fingerprintSource, /callModel\.toString\(\)/u);
     assert.match(fingerprintSource, /worldCallReservedForUserCancellation\.toString\(\)/u);
+    assert.match(fingerprintSource, /clearWorldCallReservationWithReadback\.toString\(\)/u);
     assert.match(fingerprintSource, /clearUserCancelledWorldCallReservation\.toString\(\)/u);
     assert.match(fingerprintSource, /finalizeActorProfileRecoveryOutcome\.toString\(\)/u);
     assert.match(fingerprintSource, /finalizeUserCancelledActorProfileCompletion\.toString\(\)/u);
@@ -624,6 +625,9 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /materializeActorProfileBaseline\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3NoActorPermitMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3LedgerReadbackGate\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3AcceptedTargetIsStrictlyNewer\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3PriorReservedCallCanRetire\.toString\(\)/u);
+    assert.match(fingerprintSource, /retirePriorReservedWorldCallForManualRecovery\.toString\(\)/u);
     assert.match(fingerprintSource, /writeChatNamespace\.toString\(\)/u);
     assert.match(fingerprintSource, /rebaseActorSovereigntyFieldWriteAfterMigration\.toString\(\)/u);
     assert.match(fingerprintSource, /persistNpcDesignTicketBatch\.toString\(\)/u);
@@ -665,6 +669,19 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     );
     assert.notEqual(changedHydration, fingerprintSource);
     assert.notEqual(fingerprint(changedHydration), fingerprint(fingerprintSource));
+    for (const helperName of [
+        'clearWorldCallReservationWithReadback',
+        'stage3AcceptedTargetIsStrictlyNewer',
+        'stage3PriorReservedCallCanRetire',
+        'retirePriorReservedWorldCallForManualRecovery',
+    ]) {
+        const changed = fingerprintSource.replace(
+            `${helperName}.toString()`,
+            `'changed-${helperName}'`,
+        );
+        assert.notEqual(changed, fingerprintSource, helperName);
+        assert.notEqual(fingerprint(changed), fingerprint(fingerprintSource), helperName);
+    }
     assert.doesNotMatch(fingerprintSource, /[0-9a-f]{7,40}/u);
 });
 
