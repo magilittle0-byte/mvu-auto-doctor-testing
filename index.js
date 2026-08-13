@@ -92,7 +92,6 @@ import {
     actorLedgerDigest,
     actorRegistryDigest,
     actorRegistryMatchesLedger,
-    acceptedActorSourceRefMatches,
     applyAcceptedContentObservations,
     classifyActorRegistryTargetName,
     discoverActorsFromTurnSources,
@@ -2974,6 +2973,7 @@ function doctorRuntimeCriticalFingerprint() {
         persistActorProfileRecoveryState.toString(),
         finalizeActorProfileRecoveryOutcome.toString(),
         completeActorProfileBatchTransaction.toString(),
+        runActorProfileTarget.toString(),
         assistantTargetHasPriorRealPlayerInput.toString(),
         captureTarget.toString(),
         markActorSchedulingNotReachedByProfile.toString(),
@@ -12778,6 +12778,16 @@ async function runActorProfileTarget(captured, {
         Number(captured.index) + 1,
     );
     const sourceRef = sourceRefOf(captured);
+    // Registry SourceRefs intentionally persist the compact identity/scope
+    // keys, not the redundant host scope objects. Compare that persisted
+    // projection with the shared profile-recovery matcher so mechanism-only
+    // full-hash refreshes remain recoverable while narrative/scope identity
+    // stays strict.
+    const registryRecoverySourceRef = {
+        ...sourceRef,
+        identityScope: null,
+        scope: null,
+    };
     const discoverySourceRef = {
         ...sourceRef,
         logicalIndex: captured.index,
@@ -12902,7 +12912,7 @@ async function runActorProfileTarget(captured, {
         s0Ledger.actorRegistry?.registered || {},
     )
         .filter((entry) => (entry.sourceRefs || []).some((entrySourceRef) => (
-            acceptedActorSourceRefMatches(entrySourceRef, sourceRef)
+            actorProfileRecoverySourceMatches(entrySourceRef, registryRecoverySourceRef)
         )))
         .map((entry) => entry.actorRef?.actorId)
         .filter((actorId) => {
@@ -13275,7 +13285,7 @@ async function runActorProfileTarget(captured, {
     }
     const currentSourceActorIds = Object.values(actorLedger.actorRegistry?.registered || {})
         .filter((entry) => (entry.sourceRefs || []).some((entrySourceRef) => (
-            acceptedActorSourceRefMatches(entrySourceRef, sourceRef)
+            actorProfileRecoverySourceMatches(entrySourceRef, registryRecoverySourceRef)
         )))
         .map((entry) => entry.actorRef?.actorId)
         .filter(Boolean);
@@ -13593,9 +13603,14 @@ function stage3LedgerReadbackGate(captured, noActorPermit = null) {
         scopeDigest: captured.scopeDigest,
     });
     const source = sourceRefOf(captured);
+    const registryRecoverySource = {
+        ...source,
+        identityScope: null,
+        scope: null,
+    };
     const sourceActorIds = Object.values(ledger.actorRegistry?.registered || {})
         .filter((entry) => (entry.sourceRefs || []).some((entrySource) => (
-            acceptedActorSourceRefMatches(entrySource, source)
+            actorProfileRecoverySourceMatches(entrySource, registryRecoverySource)
         )))
         .map((entry) => entry.actorRef?.actorId)
         .filter(Boolean);

@@ -166,6 +166,8 @@ function loadStage3PersistedPackageValidator({ normalizer = (value) => value } =
 function loadStage3NoActorPermitGate({
     namespace = { actorLedger: {} },
     currentSourceRef = {},
+    ledger = { actorRegistry: { registered: {} } },
+    readiness = {},
 } = {}) {
     const code = sourceSection(
         'function stage3NoActorPermitMatches(permit, captured) {',
@@ -173,9 +175,11 @@ function loadStage3NoActorPermitGate({
     );
     const sandbox = {
         readChatNamespace: () => structuredClone(namespace),
-        normalizeActorLedger: () => ({ actorRegistry: { registered: {} } }),
+        normalizeActorLedger: () => structuredClone(ledger),
         sourceRefOf: () => structuredClone(currentSourceRef),
-        acceptedActorSourceRefMatches: () => false,
+        actorProfileReadinessInLedger: (_value, actorId) => ({
+            ready: readiness[actorId] === true,
+        }),
         actorProfileRecoverySourceMatches,
         actorProfileNoCandidatesTerminalProofMatches,
     };
@@ -1108,6 +1112,62 @@ test('saved no-candidates proof survives refresh and reopens P3 without rerunnin
             currentSourceRef: changed,
         })(changed, null).reason, 'actor_registry_awaiting_p2');
     }
+});
+
+test('P3 Registry lookup tolerates only mechanism full-hash drift for a ready actor', () => {
+    const currentSourceRef = {
+        chatId: 'chat-registry-recovery', messageId: 'message-8',
+        logicalIndex: 8, index: 8, swipeId: 1,
+        generation: 12, generationSerial: 12,
+        generationId: 'generation-12', generationType: 'normal', type: 'normal',
+        identityScope: { cardId: 'card-current' },
+        identityScopeId: 'chat-registry-recovery|card-current',
+        scope: { cardId: 'card-current' }, scopeDigest: 'scope-current',
+        hash: 'host-hash-after-mvu-writeback',
+        contentHash: 'accepted-narrative-fingerprint',
+        contentFingerprint: 'accepted-narrative-fingerprint',
+    };
+    const persistedRegistrySource = {
+        ...currentSourceRef,
+        identityScope: undefined,
+        scope: undefined,
+        hash: 'host-hash-before-mvu-writeback',
+    };
+    const ledger = {
+        actorRegistry: {
+            registered: {
+                'actor-ready': {
+                    actorRef: { actorId: 'actor-ready', displayName: 'Ready NPC' },
+                    sourceRefs: [persistedRegistrySource],
+                },
+            },
+        },
+    };
+    const runGate = (source, ready = true) => loadStage3NoActorPermitGate({
+        namespace: { actorLedger: ledger },
+        currentSourceRef: source,
+        ledger,
+        readiness: { 'actor-ready': ready },
+    })(source, null);
+
+    assert.equal(runGate(currentSourceRef).reason, 'atomic_readback');
+    for (const drift of [
+        {
+            contentHash: 'different-narrative',
+            contentFingerprint: 'different-narrative',
+        },
+        { generation: 13, generationSerial: 13 },
+        { scopeDigest: 'different-scope' },
+    ]) {
+        assert.equal(
+            runGate({ ...currentSourceRef, ...drift }).reason,
+            'actor_registry_awaiting_p2',
+        );
+    }
+    assert.equal(
+        runGate(currentSourceRef, false).reason,
+        'actor_profile.not_ready:actor-ready',
+    );
 });
 
 test('P3 normalize and durable readback retain the complete packet and settlement generation identity', async () => {

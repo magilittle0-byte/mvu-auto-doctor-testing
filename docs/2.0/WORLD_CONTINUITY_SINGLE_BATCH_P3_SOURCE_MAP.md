@@ -26,6 +26,8 @@ ActorLedger、数据库、receipt 数组、第二 store 或旧 `continuityInject
 
 ## P2/P3 时序与人物门
 
+P1/P3 的 current-source Registry lookup 统一复用既有 `actorProfileRecoverySourceMatches`。Registry 的持久 SourceRef 只保存 identity/scope 的规范键，因此比较前仅去掉未持久的冗余 scope 对象；`identityScopeId`、`scopeDigest`、generation、swipe 与正文 `contentFingerprint` 仍严格。宿主在 MVU/机制块写回后产生的 full `hash` 漂移可恢复，但正文、身份或作用域漂移仍 fail-closed；没有新增 matcher、store 或兼容身份猜测。
+
 自动 accepted-final 仅在 P1 完整档案 readback 或严格 `no_candidates` 后才唤醒 P3；P3 自己 fresh-read ledger，不把瞬时 P1 result 当持久权威。手动世界入口直接 `enqueueContinuity(force)`，也只凭同一 fresh durable ledger gate 准入，不重跑 P1；手动人物档案入口才会重试 P1。
 
 P3 每次自行 fresh-read ActorRegistry/ActorLedger/Profile：

@@ -62,6 +62,8 @@ Doctor-specific necessary code: strict ActorRef/candidateRef identity, full Sour
 
 ## 2026-08-13 no-candidates authority receipt source map
 
+P1 的两处 current-source Registry lookup 与 P3 fresh-read gate 统一复用现有 `actorProfileRecoverySourceMatches`。Registry SourceRef 持久投影不保存冗余 scope 对象，因此比较前只对齐该既有投影；identityScopeId、scopeDigest、generation、swipe 与正文 contentFingerprint 仍严格，只有宿主 MVU/机制块写回造成的 full hash 漂移被允许。未新增 matcher 或身份推断。
+
 | 来源 | 分类 | 本轮复用与边界 |
 |---|---|---|
 | 现有 P1 `actorProfileRetryReceipt`、完整 Recovery `SourceRef`、source digest、receipt seal、同聊天 namespace writer、writer-time CAS 与 durable content readback | **T（原样复用）** | `no_candidates` 终态回执直接使用同一套 SourceRef 规范化、source matcher、source digest、回执 payload digest 和宿主 CAS/readback；没有第二套 source normalizer、第二个 store、queue、barrier 或 checkpoint。|
