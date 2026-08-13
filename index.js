@@ -3051,6 +3051,7 @@ function doctorRuntimeCriticalFingerprint() {
         captureTarget.toString(),
         markActorSchedulingNotReachedByProfile.toString(),
         createPrivacySafeDiagnosticProjection.toString(),
+        sovereigntyNarrativeEligible.toString(),
         acceptFinalGeneration.toString(),
         dispatchAcceptedFinal.toString(),
         stage3NoActorPermitMatches.toString(),
@@ -6682,6 +6683,14 @@ function mechanismFreeAcceptedContent(text) {
 }
 
 function sovereigntyNarrativeEligible(text) {
+    const raw = String(text || '').trim();
+    // SillyTavern persists provider failures as assistant messages so the user
+    // can see them. They are not accepted narrative and must never consume a
+    // P4 lease or wake P1/P3. Keep this structural and exact; ordinary prose
+    // that happens to discuss an API error remains eligible.
+    if (/^\[(?:API\s*错误|API\s*Error)\]\s*[\s\S]*?<StatusPlaceHolderImpl\s*\/>\s*$/iu.test(raw)) {
+        return false;
+    }
     const narrative = mechanismFreeAcceptedContent(text)
         .replace(/<[^>]+>/gu, ' ')
         .replace(/[\[\]{}(),.:;"'`~_+=*|\\/\-]+/gu, ' ')

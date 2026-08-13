@@ -43,14 +43,14 @@ function loadActorProfileRecoveryOutcomeFinalizer() {
 function loadAcceptedContentFunctions() {
     const code = sourceSection(
         'function stripMechanism(text)',
-        'function sovereigntyNarrativeEligible(text)',
+        'function recentTranscript(context, targetIndex, limit)',
     );
     const sandbox = {
         STATUS_PLACEHOLDER: '<StatusPlaceHolderImpl/>',
         fingerprint: (value) => String(value),
         stripClosedProposals: (value) => String(value),
     };
-    vm.runInNewContext(`${code}\nthis.acceptedContentText = acceptedContentText;\nthis.acceptedContentFingerprint = acceptedContentFingerprint;`, sandbox);
+    vm.runInNewContext(`${code}\nthis.acceptedContentText = acceptedContentText;\nthis.acceptedContentFingerprint = acceptedContentFingerprint;\nthis.sovereigntyNarrativeEligible = sovereigntyNarrativeEligible;`, sandbox);
     return sandbox;
 }
 
@@ -297,6 +297,7 @@ function loadAcceptedFinalRuntimeHarness({
     currentEpoch = 7,
     currentOperationEpoch = 11,
     chatId = 'chat-a',
+    narrativeEligible = true,
 } = {}) {
     const identity = sourceSection(
         'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
@@ -334,6 +335,7 @@ function loadAcceptedFinalRuntimeHarness({
         stopped: false,
         acceptedFinalEligible: generationEligible,
         p4PlacementScopeDigest: placementScope,
+        frozenScopeDigest: placementScope,
     };
     const sandbox = {
         currentGenerationEpoch: currentEpoch,
@@ -342,7 +344,7 @@ function loadAcceptedFinalRuntimeHarness({
         getContext: () => ({ chatId, chat: [message] }),
         document: { body: { dataset: {} } },
         currentFinalAssistant: () => ({ index: 0, message }),
-        sovereigntyNarrativeEligible: () => true,
+        sovereigntyNarrativeEligible: () => narrativeEligible,
         acceptedContentFingerprint: () => 'after',
         resolveCurrentActorSovereigntyScope: async () => ({ resolved: true, scope: state.scope }),
         currentActorSovereigntyScope: () => state.scope,
@@ -517,6 +519,35 @@ test('actual accepted-final path freezes scope before identity and dispatches on
     assert.equal(await scopeChanged.accept(scopeChanged.generation), false);
     assert.equal(scopeChanged.state.identitySaves, 1);
     assert.equal(scopeChanged.state.dispatches.length, 0);
+});
+
+test('provider error placeholders release P4 and never become accepted narrative', async () => {
+    const { sovereigntyNarrativeEligible } = loadAcceptedContentFunctions();
+    const providerError = [
+        '[API 错误]',
+        'Custom OpenAI endpoint failed with status 502: Resource has been exhausted.',
+        '',
+        '<StatusPlaceHolderImpl/>',
+    ].join('\n');
+    assert.equal(sovereigntyNarrativeEligible(providerError), false);
+    assert.equal(
+        sovereigntyNarrativeEligible('<content>她说明刚才的 API 错误已经恢复，随后继续前行。</content>'),
+        true,
+        'ordinary narrative may discuss an API error without becoming a provider placeholder',
+    );
+
+    const rejected = loadAcceptedFinalRuntimeHarness({
+        narrativeEligible: false,
+        placementScope: 'chat-a|character:card-a|rc14',
+    });
+    assert.equal(await rejected.accept(rejected.generation), false);
+    assert.equal(rejected.state.identitySaves, 0);
+    assert.equal(rejected.state.dispatches.length, 0);
+    assert.deepEqual(
+        rejected.state.releases.map((entry) => entry.reason),
+        ['narrative_ineligible'],
+        'the reserved P4 consumer is released instead of consumed by an error placeholder',
+    );
 });
 
 test('accepted-final dispatch gives variables and P1 the same frozen target, then wakes P3 only after P1 readback', async () => {

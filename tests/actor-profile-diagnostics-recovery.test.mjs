@@ -433,6 +433,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /stage3CommittedCheckpointIsPriorTerminal\.toString\(\)/u);
     assert.match(fingerprintSource, /markActorSchedulingNotReachedByProfile\.toString\(\)/u);
     assert.match(fingerprintSource, /createPrivacySafeDiagnosticProjection\.toString\(\)/u);
+    assert.match(fingerprintSource, /sovereigntyNarrativeEligible\.toString\(\)/u);
     assert.match(fingerprintSource, /acceptFinalGeneration\.toString\(\)/u);
     assert.match(fingerprintSource, /runContinuityTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /commitPreparedWorldCandidate\.toString\(\)/u);
