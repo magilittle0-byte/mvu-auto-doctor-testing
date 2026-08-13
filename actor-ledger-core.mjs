@@ -4019,6 +4019,9 @@ export function actorActionCandidatesFromShard(value, proposals, {
             ...(proposal?.evidence || []),
             ...knowledgeRefs,
         ], 24, 300).filter((item) => allowedEvidence.has(item));
+        const locationFrom = actor.location.name;
+        const locationTo = cleanText(proposal?.location, 180) || locationFrom;
+        const proposedTravelTurns = integer(proposal?.travelTurns, 0, 10_000, 0);
         return {
             actorId: actor.id,
             actorName: actor.name,
@@ -4027,9 +4030,11 @@ export function actorActionCandidatesFromShard(value, proposals, {
             intent: wait ? 'wait' : replan ? 'replan' : 'execute',
             time: { turn: currentTurn, window: cleanText(proposal?.time, 160) || 'now' },
             location: {
-                from: actor.location.name,
-                to: cleanText(proposal?.location, 180) || actor.location.name,
-                travelTurns: integer(proposal?.travelTurns, 0, 10_000, 0),
+                from: locationFrom,
+                to: locationTo,
+                travelTurns: locationTo === locationFrom
+                    ? 0
+                    : Math.max(1, proposedTravelTurns),
             },
             action,
             actionWindow: cleanText(proposal?.actionWindow, 180),

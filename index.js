@@ -2989,6 +2989,7 @@ function doctorRuntimeCriticalFingerprint() {
         extractFirstBalancedJsonObject.toString(),
         stage3RecallSelection.toString(),
         generateWorldRecallPacket.toString(),
+        actorActionCandidatesFromShard.toString(),
         runContinuityTarget.toString(),
         commitPreparedWorldCandidate.toString(),
         precomposeNextTurnConsumer.toString(),
@@ -11788,7 +11789,7 @@ function buildContinuityMessages({
         && Array.isArray(actorShardCandidates?.scheduledActorIds)
         && actorShardCandidates.scheduledActorIds.length > 0;
     const actionOutputShape = worldCreatesAttempts
-        ? '"actionProposals":[{"actorId":"输入的已调度人物ID","candidateAction":"NPC自己的尝试","intent":"execute|replan|wait","time":"本轮时间窗","location":"目标地点或原地","travelTurns":0,"expectedCost":"预期代价","expectedDuration":"预期耗时","expectedRisk":"预期风险","stateChanges":[{"kind":"plan","summary":"人物自己的计划变化"}],"knowledgeBasis":[],"evidence":[],"sourceThreads":[]}],"actionAdjudications":[{"actorId":"同一人物ID","status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],'
+        ? '"actionProposals":[{"actorId":"输入的已调度人物ID","candidateAction":"NPC自己的尝试","intent":"execute|replan|wait","time":"本轮时间窗","location":"","travelTurns":0,"expectedCost":"预期代价","expectedDuration":"预期耗时","expectedRisk":"预期风险","stateChanges":[{"kind":"plan","summary":"人物自己的计划变化"}],"knowledgeBasis":[],"evidence":[],"sourceThreads":[]}],"actionAdjudications":[{"actorId":"同一人物ID","status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],'
         : '"actionAdjudications":[{"attemptId":"输入中的ATT稳定ID","actorRef":{"kind":"actor_ref","actorId":"输入原值","displayName":"输入原值","aliases":[]},"target":{"chatId":"输入原值","logicalIndex":0,"index":0,"messageId":"输入原值","swipeId":0,"generation":0,"generationId":"输入原值","generationType":"输入原值","scopeDigest":"输入原值","contentHash":"输入原值","hash":"输入原值"},"status":"success|partial|failure|delayed|blocked","risk":"实际风险","costs":["实际代价"],"actualResourceCosts":[],"durationTurns":1,"visibility":"public|private|observer_limited","observerActorIds":[],"publicSummary":"仅public必填","privateSummary":"私密结果可填","resultSummary":"世界实际裁决结果","observableConsequence":"实际可观察反馈","revealPath":"离屏结果以后如何被发现","appliedStateChanges":[{"kind":"knowledge|location|plan|resource|relationship|risk|condition|commitment|environment","summary":"裁决后实际新增状态"}]}],';
     const user = [
         `当前导演模式：${director}`,
@@ -11828,7 +11829,7 @@ function buildContinuityMessages({
                 '',
                 '=== 持久人物账本的本轮调度与行动收据 ===',
                 worldCreatesAttempts
-                    ? '本轮已调度人物必须各输出一条actionProposals和一条同actorId的actionAdjudications。提案只写NPC自己的尝试；本地会先用ActorRef、档案、知识、地点、资源、能力、因果和玩家主权进行验证并持久化attempt，才会应用你给出的世界裁决。此分支尚未存在ATT：裁决草案只能给actorId，禁止编造attemptId、actorRef或target。不得替玩家行动。'
+                    ? '本轮已调度人物必须各输出一条actionProposals和一条同actorId的actionAdjudications。提案只写NPC自己的尝试；location为空或等于人物当前地点时travelTurns必须为0，明确前往不同地点时必须为>=1的整数。本地会先用ActorRef、档案、知识、地点、资源、能力、因果和玩家主权进行验证并持久化attempt，才会应用你给出的世界裁决。此分支尚未存在ATT：裁决草案只能给actorId，禁止编造attemptId、actorRef或target。不得替玩家行动。'
                     : 'actionAttempts已经通过ActorRef、完整档案读回、知识、地点、资源、能力、因果和玩家主权预检，并以attempted/pending_world先行持久化，但仍只表示人物尝试。世界裁决器必须逐项原样回传attemptId、actorRef、target并返回actionAdjudications，之后本地才允许结算实际世界后果。',
                 'rejectedActions必须保持拒绝，禁止模型绕过本地原因重新采用。后台行动可以永不进入主线；只有worldEvents中的可观察后果或主动接触才可进入事件/世界表面，且仍受汇流门槛和注入预算限制。',
                 safeJson(actorShardPromptPayload, 0),

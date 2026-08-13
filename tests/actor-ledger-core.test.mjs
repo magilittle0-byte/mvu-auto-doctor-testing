@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     ACTOR_LEDGER_VERSION,
+    actorActionCandidatesFromShard,
     actorLedgerView,
     applyAcceptedContentObservations,
     discoverActorsFromTurnSources,
@@ -1145,6 +1146,68 @@ test('local settlement blocks player sovereignty, teleportation, unknown facts a
             'evidence-out-of-bounds',
         ]),
     );
+});
+
+test('proposal mapping normalizes travel structure without changing destination or world authority', () => {
+    const actor = readyActor('NPC-TRAVEL', { name: '旅人' });
+    const ledger = scopedLedger('chat-travel-normalization', {
+        turn: 4,
+        actors: [actor],
+    });
+    const proposal = {
+        actorId: actor.id,
+        candidateAction: '旅人按既有路线前往南境查验公开路标',
+        intent: 'execute',
+        time: '本轮后台行动窗口',
+        location: '南境',
+        travelTurns: 0,
+        expectedCost: '一次行动机会',
+        expectedDuration: '至少一轮',
+        expectedRisk: '途中可能暴露行踪',
+        observableConsequence: '南境路标附近留下可见足迹',
+        stateChanges: [{ kind: 'plan', summary: '开始沿路线前往南境查验路标' }],
+        knowledgeBasis: [],
+        resourceCosts: [],
+        evidence: actor.evidence,
+        capabilityUsed: '',
+        planUpdate: '到达后查验路标',
+    };
+    const [different] = actorActionCandidatesFromShard(ledger, [proposal], { turn: 4 });
+    assert.equal(different.location.from, actor.location.name);
+    assert.equal(different.location.to, '南境');
+    assert.equal(different.location.travelTurns, 1);
+    const prepared = prepareActorActionAttempts(ledger, [different], {
+        turn: 4,
+        sourceRef: sourceRef(4, ledger.chatId),
+        target: sourceRef(4, ledger.chatId),
+    });
+    assert.equal(prepared.rejected.length, 0, JSON.stringify(prepared.rejected));
+    assert.equal(prepared.attempts.length, 1);
+    assert.equal(
+        Object.hasOwn(prepared.attempts[0], 'worldAdjudicationResult'),
+        false,
+        'local normalization only admits an ATT candidate; world outcome remains independently absent',
+    );
+
+    const [same] = actorActionCandidatesFromShard(ledger, [{
+        ...proposal,
+        location: actor.location.name,
+        travelTurns: 8,
+    }], { turn: 4 });
+    assert.equal(same.location.to, actor.location.name);
+    assert.equal(same.location.travelTurns, 0);
+
+    const [stillInvalid] = actorActionCandidatesFromShard(ledger, [{
+        ...proposal,
+        actorId: 'UNKNOWN-ACTOR',
+    }], { turn: 4 });
+    const rejected = prepareActorActionAttempts(ledger, [stillInvalid], {
+        turn: 4,
+        sourceRef: sourceRef(4, ledger.chatId),
+        target: sourceRef(4, ledger.chatId),
+    });
+    assert.equal(rejected.attempts.length, 0);
+    assert.ok(rejected.rejected.length > 0);
 });
 
 test('due actor must execute, replan, or wait on a concrete unmet condition and receives full receipts', () => {
