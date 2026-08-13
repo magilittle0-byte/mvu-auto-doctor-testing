@@ -1202,6 +1202,31 @@ test('proposal mapping normalizes travel structure without changing destination 
         'local normalization only admits an ATT candidate; world outcome remains independently absent',
     );
 
+    const proposalWithoutExplicitObservable = { ...proposal };
+    delete proposalWithoutExplicitObservable.observableConsequence;
+    const [locallyRepaired] = actorActionCandidatesFromShard(
+        ledger,
+        [proposalWithoutExplicitObservable],
+        { turn: 4 },
+    );
+    const repairedAttempt = prepareActorActionAttempts(ledger, [locallyRepaired], {
+        turn: 4,
+        sourceRef: sourceRef(4, ledger.chatId),
+        target: sourceRef(4, ledger.chatId),
+    });
+    assert.equal(repairedAttempt.rejected.length, 0, JSON.stringify(repairedAttempt.rejected));
+    assert.equal(repairedAttempt.attempts.length, 1);
+    assert.equal(
+        repairedAttempt.attempts[0].expectedObservableConsequence,
+        proposal.stateChanges[0].summary,
+        'the documented proposal shape must remain ATT-usable when the model omits the redundant observable field',
+    );
+    assert.equal(
+        Object.hasOwn(repairedAttempt.attempts[0], 'worldAdjudicationResult'),
+        false,
+        'local expectation repair must never fabricate a world outcome',
+    );
+
     const [same] = actorActionCandidatesFromShard(ledger, [{
         ...proposal,
         location: actor.location.name,

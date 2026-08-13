@@ -4024,6 +4024,12 @@ export function actorActionCandidatesFromShard(value, proposals, {
         const locationFrom = actor.location.name;
         const locationTo = cleanText(proposal?.location, 180) || locationFrom;
         const proposedTravelTurns = integer(proposal?.travelTurns, 0, 10_000, 0);
+        const stateChanges = (Array.isArray(proposal?.stateChanges)
+            ? proposal.stateChanges
+            : []).map((item) => ({
+            kind: cleanText(item?.kind, 80),
+            summary: cleanText(item?.summary, 500),
+        })).filter((item) => item.kind && item.summary);
         return {
             actorId: actor.id,
             actorName: actor.name,
@@ -4043,14 +4049,15 @@ export function actorActionCandidatesFromShard(value, proposals, {
             expectedCost: cleanText(proposal?.expectedCost, 300),
             expectedDuration: cleanText(proposal?.expectedDuration, 180),
             expectedRisk: cleanText(proposal?.expectedRisk, 300),
-            observableConsequence: cleanText(proposal?.observableConsequence, 500),
+            // Advance used to omit this field from its own proposal example
+            // while ATT validation required it.  Preserve an explicit value
+            // when present; otherwise reuse the model's proposed state trace
+            // (or the action itself) as an expectation, never as an outcome.
+            observableConsequence: cleanText(proposal?.observableConsequence, 500)
+                || cleanText(stateChanges[0]?.summary, 500)
+                || action,
             stimulusDecisions: clone(proposal?.stimulusDecisions || []),
-            stateChanges: (Array.isArray(proposal?.stateChanges)
-                ? proposal.stateChanges
-                : []).map((item) => ({
-                kind: cleanText(item?.kind, 80),
-                summary: cleanText(item?.summary, 500),
-            })).filter((item) => item.kind && item.summary),
+            stateChanges,
             knowledgeRefs,
             knowledgeBasis: cleanList(proposal?.knowledgeBasis, 12, 500),
             resourceCosts: (Array.isArray(proposal?.resourceCosts)
