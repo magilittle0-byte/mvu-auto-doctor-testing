@@ -610,6 +610,31 @@ test('player-targeted attempts never settle player action, consent, feeling or r
     assert.equal(settled.results[0].playerFeelingSettled, false);
 });
 
+test('public background adjudication is directly observable while private background adjudication still requires a reveal path', () => {
+    const actor = readyActor('Public Witness');
+    const publicCandidate = candidateFor(actor, { public: true });
+    const { recorded } = prepareAndRecord(ledgerFor(actor), actor, publicCandidate);
+    const attempt = recorded.recorded[0];
+
+    const publicDecision = decisionFor(attempt, 'success', {
+        visibility: 'public',
+        publicSummary: 'the actor visibly leaves the scene',
+        privateSummary: '',
+        revealPath: '',
+    });
+    assert.equal(validateWorldAdjudication(publicDecision, attempt).valid, true);
+
+    const privateDecision = decisionFor(attempt, 'success', {
+        visibility: 'private',
+        publicSummary: '',
+        revealPath: '',
+    });
+    assert.deepEqual(validateWorldAdjudication(privateDecision, attempt), {
+        valid: false,
+        reason: 'world_adjudication_contract_invalid',
+    });
+});
+
 test('strict target and full Registry ActorRef ignore legacy branch while failing closed across chat, swipe, generation and hash', () => {
     const actor = readyActor();
     const { recorded } = prepareAndRecord(ledgerFor(actor), actor);

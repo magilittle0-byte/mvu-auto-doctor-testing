@@ -486,6 +486,7 @@ export function validateWorldAdjudication(value, attempt) {
         || !cleanText(decision.observableConsequence, 500)
         || (
             ['background_private', 'background_public'].includes(attempt?.route)
+            && visibility !== 'public'
             && !cleanText(decision.revealPath, 500)
         )
     ) return { valid: false, reason: 'world_adjudication_contract_invalid' };
