@@ -859,9 +859,27 @@ export function parseActorShardProposal(output, { candidate } = {}) {
     if (!['execute', 'replan', 'wait'].includes(intent)) {
         return { error: 'actor_shard.intent_invalid' };
     }
-    const stateChanges = Array.isArray(value.stateChanges)
+    let stateChanges = Array.isArray(value.stateChanges)
         ? value.stateChanges
         : null;
+    if (candidate?.narrativeProfile === true) {
+        const repairedChanges = (Array.isArray(stateChanges) ? stateChanges : [])
+            .map((item) => ({
+                kind: STATE_CHANGE_KINDS.has(cleanText(item?.kind, 80))
+                    ? cleanText(item.kind, 80)
+                    : 'plan',
+                summary: cleanText(item?.summary, 500),
+            }))
+            .filter((item) => item.summary.length >= 4)
+            .slice(0, 8);
+        stateChanges = intent === 'wait'
+            ? []
+            : (repairedChanges.length ? repairedChanges : [{
+                kind: 'plan',
+                summary: cleanText(value.candidateAction, 500),
+            }]);
+        defaultedFields = true;
+    }
     if (
         !stateChanges
         || stateChanges.length > 8

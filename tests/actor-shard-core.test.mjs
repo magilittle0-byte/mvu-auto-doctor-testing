@@ -695,6 +695,28 @@ test('narrative dossiers conservatively account for omitted stimulus decisions',
     assert.ok(checked.proposal.stimulusDecisions.every((item) => item.decision === 'ignored'));
 });
 
+test('narrative dossier action deltas are repaired as attempts without inventing outcomes', () => {
+    const continuity = { threads: [thread('T-narrative-delta', 'Ada')] };
+    const actorLedger = actionReadyLedgerForContinuity(continuity);
+    const candidate = selectActorShardCandidates({ continuity, actorLedger, maxWorkers: 1 })[0];
+    candidate.narrativeProfile = true;
+    const execute = parseActorShardProposal(JSON.stringify(proposal(candidate, {
+        stateChanges: [],
+    })), { candidate });
+    assert.equal(execute.error, undefined);
+    assert.deepEqual(execute.proposal.stateChanges, [{
+        kind: 'plan',
+        summary: execute.proposal.candidateAction,
+    }]);
+    const wait = parseActorShardProposal(JSON.stringify(proposal(candidate, {
+        intent: 'wait',
+        waitCondition: 'Wait for a concrete external signal.',
+        stateChanges: [{ kind: 'invented-kind', summary: 'This must not become an outcome.' }],
+    })), { candidate });
+    assert.equal(wait.error, undefined);
+    assert.deepEqual(wait.proposal.stateChanges, []);
+});
+
 test('an explicitly empty interaction allow-list rejects invented actors', () => {
     const continuity = { threads: [thread('T-alone', 'Ada')] };
     const actorLedger = actionReadyLedgerForContinuity(continuity);
