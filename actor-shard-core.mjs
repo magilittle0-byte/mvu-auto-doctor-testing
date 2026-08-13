@@ -741,6 +741,15 @@ export function parseActorShardProposal(output, { candidate } = {}) {
         value[key] = clone(fallback);
         locallyDefaulted.push(key);
     }
+    if (candidate?.narrativeProfile === true) {
+        // These are Doctor-owned authority references, not creative output.
+        // Bind them from the already validated candidate instead of requiring
+        // a prose-oriented world model to copy internal IDs byte-for-byte.
+        for (const key of ['knowledgeBasis', 'sourceThreads', 'evidence', 'causalChain']) {
+            value[key] = clone(candidate?.[key] || []);
+            if (!locallyDefaulted.includes(key)) locallyDefaulted.push(key);
+        }
+    }
     if (!Object.hasOwn(value, 'contact')) {
         value.contact = { mode: 'none', target: '', observableConsequence: '' };
     }

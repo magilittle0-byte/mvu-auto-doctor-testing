@@ -660,6 +660,24 @@ test('narrative dossiers discard an untrusted optional capability label when aut
     assert.ok(checked.repairKinds.includes('default-safe-bound-fields'));
 });
 
+test('narrative dossiers bind Doctor-owned evidence IDs locally instead of trusting model copies', () => {
+    const continuity = { threads: [thread('T-narrative-evidence', 'Ada')] };
+    const actorLedger = actionReadyLedgerForContinuity(continuity);
+    const candidate = selectActorShardCandidates({ continuity, actorLedger, maxWorkers: 1 })[0];
+    candidate.narrativeProfile = true;
+    const checked = parseActorShardProposal(JSON.stringify(proposal(candidate, {
+        knowledgeBasis: ['model rewrote the trusted knowledge'],
+        sourceThreads: ['invented-thread'],
+        evidence: ['invented-evidence'],
+        causalChain: ['invented-cause'],
+    })), { candidate });
+    assert.equal(checked.error, undefined);
+    assert.deepEqual(checked.proposal.knowledgeBasis, candidate.knowledgeBasis);
+    assert.deepEqual(checked.proposal.sourceThreads, candidate.sourceThreads);
+    assert.deepEqual(checked.proposal.evidence, candidate.evidence);
+    assert.deepEqual(checked.proposal.causalChain, candidate.causalChain);
+});
+
 test('an explicitly empty interaction allow-list rejects invented actors', () => {
     const continuity = { threads: [thread('T-alone', 'Ada')] };
     const actorLedger = actionReadyLedgerForContinuity(continuity);
