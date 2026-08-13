@@ -1573,4 +1573,8 @@ test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudic
     assert.match(prompt, /newly scheduled actors there is no actionAttempt yet/u);
     assert.match(prompt, /Do not invent attemptId, actorRef, or target/u);
     assert.match(prompt, /For existing persisted actionAttempts/u);
+    assert.match(prompt, /"location":"","travelTurns":0/u);
+    assert.match(prompt, /location为空或等于人物当前地点时travelTurns必须为0/u);
+    assert.match(prompt, /明确前往不同地点时必须为>=1的整数/u);
+    assert.doesNotMatch(prompt, /与当前地点不同的明确目标地点/u);
 });
