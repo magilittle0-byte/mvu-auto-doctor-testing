@@ -2982,6 +2982,8 @@ function doctorRuntimeCriticalFingerprint() {
         dispatchAcceptedFinal.toString(),
         stage3NoActorPermitMatches.toString(),
         stage3LedgerReadbackGate.toString(),
+        extractFirstBalancedJsonObject.toString(),
+        stage3RecallSelection.toString(),
         runContinuityTarget.toString(),
         commitPreparedWorldCandidate.toString(),
         precomposeNextTurnConsumer.toString(),
@@ -11381,8 +11383,8 @@ function continuityTickPlan(context, base, captured, namespace = readChatNamespa
 
 function stage3RecallSelection(output, { mustActorIds = [], mustThreadIds = [], mustLaneIds = [], availableActorIds = [], availableThreadIds = [], availableLaneIds = [], worldbookKeys = [] } = {}) {
     const extracted = extractFirstBalancedJsonObject(String(output || ''));
-    let value = null;
-    try { value = JSON.parse(extracted || String(output || '')); } catch { return null; }
+    if (extracted.error) return null;
+    const value = extracted.value;
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const uniqueKnown = (items, known) => [...new Set((Array.isArray(items) ? items : [])
         .map((item) => String(item || '').trim())

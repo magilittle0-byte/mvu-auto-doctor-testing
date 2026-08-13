@@ -403,6 +403,8 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /assistantTargetHasPriorRealPlayerInput\.toString\(\)/u);
     assert.match(fingerprintSource, /captureTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /actorProfileNoCandidatesTerminalReadbackMatches\.toString\(\)/u);
+    assert.match(fingerprintSource, /extractFirstBalancedJsonObject\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3RecallSelection\.toString\(\)/u);
     assert.match(fingerprintSource, /markActorSchedulingNotReachedByProfile\.toString\(\)/u);
     assert.match(fingerprintSource, /createPrivacySafeDiagnosticProjection\.toString\(\)/u);
     assert.match(fingerprintSource, /acceptFinalGeneration\.toString\(\)/u);

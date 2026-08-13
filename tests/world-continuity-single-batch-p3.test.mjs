@@ -11,7 +11,10 @@ import {
     normalizeSourceRef,
     parseContinuityOutput,
 } from '../continuity-core.mjs';
-import { sovereigntySourceKey } from '../sovereignty-runtime-core.mjs';
+import {
+    extractFirstBalancedJsonObject,
+    sovereigntySourceKey,
+} from '../sovereignty-runtime-core.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
     actorProfileRecoverySourceMatches,
@@ -26,6 +29,19 @@ function sourceSection(start, end) {
     assert.ok(from >= 0, `missing source marker: ${start}`);
     assert.ok(to > from, `missing source marker: ${end}`);
     return source.slice(from, to);
+}
+
+function loadStage3RecallSelection() {
+    const code = sourceSection(
+        'function stage3RecallSelection(output, {',
+        'function buildWorldRecallMessages({',
+    );
+    const sandbox = {
+        extractFirstBalancedJsonObject,
+        fingerprint: (value) => `test-digest:${String(value).length}`,
+    };
+    vm.runInNewContext(`${code}\nthis.selectRecall = stage3RecallSelection;`, sandbox);
+    return sandbox.selectRecall;
 }
 
 function loadStage3AcceptedTargetHelpers(overrides = {}) {
@@ -1172,6 +1188,48 @@ test('P3 source retains every scheduled ActorRef atomically and fails capacity b
     const runner = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
     assert.match(runner, /actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);
     assert.doesNotMatch(runner, /actor_schedule_empty/u);
+});
+
+test('P3 Recall consumes the production balanced-object extractor result', () => {
+    const selectRecall = loadStage3RecallSelection();
+    const options = {
+        mustActorIds: ['actor-must'],
+        mustThreadIds: ['thread-must'],
+        mustLaneIds: ['lane-must'],
+        availableActorIds: ['actor-must', 'actor-known'],
+        availableThreadIds: ['thread-must', 'thread-known'],
+        availableLaneIds: ['lane-must', 'lane-known'],
+        worldbookKeys: ['world-b', 'world-a', 'world-a'],
+    };
+    const valid = JSON.stringify({
+        actorIds: ['actor-known', 'unknown-actor', 'actor-must', 'actor-must'],
+        threadIds: ['unknown-thread', 'thread-must'],
+        laneIds: ['lane-must', 'unknown-lane'],
+        reasons: ['must retain', 'known only'],
+    });
+    const extracted = extractFirstBalancedJsonObject(valid);
+    assert.deepEqual(Object.keys(extracted).sort(), ['end', 'source', 'start', 'value']);
+    assert.deepEqual(extracted.value.actorIds, [
+        'actor-known', 'unknown-actor', 'actor-must', 'actor-must',
+    ]);
+
+    for (const output of [valid, `\`\`\`json\n${valid}\n\`\`\``, `前文\n${valid}\n后文`]) {
+        const packet = selectRecall(output, options);
+        assert.ok(packet);
+        assert.deepEqual(Array.from(packet.actorIds), ['actor-known', 'actor-must']);
+        assert.deepEqual(Array.from(packet.threadIds), ['thread-must']);
+        assert.deepEqual(Array.from(packet.laneIds), ['lane-must']);
+        assert.deepEqual(Array.from(packet.mustActorIds), ['actor-must']);
+        assert.deepEqual(Array.from(packet.worldbookKeys), ['world-a', 'world-b']);
+    }
+
+    assert.deepEqual(extractFirstBalancedJsonObject('{bad json}'), {
+        error: 'json_object_missing',
+    });
+    assert.equal(selectRecall('{bad json}', options), null);
+    assert.equal(selectRecall(JSON.stringify({
+        actorIds: ['actor-known'], threadIds: ['thread-must'], laneIds: ['lane-must'],
+    }), options), null, 'must actor omission remains fail-closed');
 });
 
 test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudications', () => {

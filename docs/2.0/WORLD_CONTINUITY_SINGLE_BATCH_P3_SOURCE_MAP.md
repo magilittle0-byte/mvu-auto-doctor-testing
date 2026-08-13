@@ -10,6 +10,7 @@ ActorLedger、数据库、receipt 数组、第二 store 或旧 `continuityInject
 | 机制 | 成熟实现 | 分类 | P3 接法 |
 |---|---|---|---|
 | 只读召回 | Stitches Reborn V 的 `recall` task（只选 AM/支持材料）与 TavernDB `prepareAIInput_ACU` 的持久快照输入 | 最小适配 | 本地时钟先给出不可删除的 due 人物/线程/世界轨；Recall 只从持久 Profile、Continuity、世界书选择支持材料，零权威写。 |
+| Recall JSON 提取 | 现有 `sovereignty-runtime-core.extractFirstBalancedJsonObject`，其宽容边界来自项目已复用的 shujuku/repair parser 路径 | 原样复用 | `stage3RecallSelection` 直接消费生产 extractor 的 `{value, source, start, end}` 返回契约；围栏/前后文由同一 extractor 处理，`{error}` 继续 fail-closed。没有新增 parser 或复制 balanced-object 扫描。 |
 | 世界推进 | Stitches Reborn V 的 `act,scene` 推进任务、既有 `generateWorldContinuitySingleBatch` | 最小适配 | Advance 读取 canonical recall packet 与最终正文；一次输出 NPC proposals、按 actorId 的裁决和世界/线程变化，`failover:false`、`maxFailovers:0`。 |
 | attempt 准备与读回 | `actorActionCandidatesFromShard`、`prepareActorActionAttempts`、`recordActorActionAttempts`、`persistActorActionAttemptsForTurn` | 原样复用 | Advance 返回 proposal/adjudication 草案后，代码在任何 outcome 应用前先 durable ATT + prepared candidate readback。 |
 | 世界裁决与结果 | `validateWorldAdjudicationBatch`、`settleActorActionCandidates`、`mergeActorWorldEventsIntoContinuity` | 原样复用 | attempt 不等于 outcome；不得替玩家行动、同意、感受或结果。 |
