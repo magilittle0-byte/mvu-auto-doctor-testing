@@ -465,6 +465,20 @@ function validatePhysiologyCoverage(value) {
         seen.set(key, excerpt);
     }
     const prose = cleanModuleBody(source.replace(coverageRe, ''));
+    // Coverage tags are transport metadata, not dossier content.  Some
+    // otherwise complete model responses omit the tags altogether.  Repair
+    // that format drift locally when the prose itself contains at least six
+    // distinct substantive clauses; partial, duplicate or malformed tag sets
+    // still fail closed and receive the existing targeted retry.
+    if (seen.size === 0 && !invalid) {
+        const clauses = [...new Set(prose
+            .split(/[\u3002\uff01\uff1f\uff1b;\r\n]+/u)
+            .map((item) => cleanText(item, 800))
+            .filter((item) => Array.from(item).length >= 16))];
+        if (clauses.length >= ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.length) {
+            return { ok: true, prose, missingFields: [], locallyRecovered: true };
+        }
+    }
     const ranges = [];
     for (const excerpt of seen.values()) {
         const start = prose.indexOf(excerpt);
@@ -2313,6 +2327,7 @@ export function actorProfileGenerationCriticalFingerprint(overrides = {}) {
         completionGroupPlan: String(actorProfileCompletionGroupPlan),
         buildGroupMessages: String(buildActorProfileModuleGroupMessages),
         parseGroupOutput: String(parseActorProfileModuleGroupOutput),
+        physiologyCoverageValidation: String(validatePhysiologyCoverage),
         identityEvidenceSurface: String(actorProfileIdentityEvidenceSurface),
         discoveryAnchor: String(validateActorProfileDiscoveryAnchor),
         ...(overrides || {}),

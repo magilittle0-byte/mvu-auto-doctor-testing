@@ -133,6 +133,28 @@ test('adult physiology requires complete non-persistent coverage declarations an
     assert.ok(rejectedReuse.failures.some((entry) => (
         entry.reason === 'actor_profile.physiology_coverage_incomplete'
     )));
+    const taglessComplete = [
+        '一般体征具有稳定而清楚的物种与年龄基线描述',
+        '生殖解剖依照该人物已经确认的物种和生理性别补全',
+        '第二性征以自然客观的完整句子说明其长期特征',
+        '生殖功能与周期分泌按照当前世界设定保持一致',
+        '性刺激下的生理反应和敏感部位只陈述身体事实',
+        '限制部分明确区分生理事实与经历偏好同意关系',
+    ].join('。');
+    const repairedWithoutTags = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${taglessComplete}</module></profile-target>`,
+        group,
+    );
+    assert.deepEqual(repairedWithoutTags.failures, []);
+    assert.equal(repairedWithoutTags.entries[0].modules.physiology, taglessComplete);
+    const repeatedGeneric = Array.from({ length: 6 }, () => '身体状态正常且没有其他可用的具体生理资料').join('。');
+    const unrecoverableGeneric = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${repeatedGeneric}</module></profile-target>`,
+        group,
+    );
+    assert.ok(unrecoverableGeneric.failures.some((entry) => (
+        entry.reason === 'actor_profile.physiology_coverage_incomplete'
+    )));
 });
 
 test('group parser accepts fences, surrounding prose, unheaded Chinese values, aliases and loose attributes', () => {
