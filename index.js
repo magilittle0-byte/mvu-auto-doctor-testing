@@ -2579,6 +2579,7 @@ async function clearWorldCallReservationWithReadback(captured, reservationMatche
     }
     const namespace = readChatNamespace(context);
     if (reservationMatches(namespace, captured) !== true) return false;
+    const reservedCheckpoint = deepClone(namespace.continuityCheckpoint);
     const expectedFieldStates = {
         continuityCheckpoint: stage3FieldState(namespace, 'continuityCheckpoint'),
     };
@@ -2595,11 +2596,16 @@ async function clearWorldCallReservationWithReadback(captured, reservationMatche
                 frozenScope: captured.actorSovereigntyScope,
                 unscoped: !captured.scopeDigest,
             });
+            const currentNamespace = readChatNamespace(currentContext);
+            const checkpoint = currentNamespace?.continuityCheckpoint;
+            const predicateNamespace = checkpoint == null
+                ? { ...currentNamespace, continuityCheckpoint: deepClone(reservedCheckpoint) }
+                : currentNamespace;
             return stage3AcceptedTargetsMatch(
                 stage3AcceptedTarget(currentTarget),
                 stage3AcceptedTarget(captured),
             ) && reservationMatches(
-                readChatNamespace(currentContext),
+                predicateNamespace,
                 captured,
             );
         },

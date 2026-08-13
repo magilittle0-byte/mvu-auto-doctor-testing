@@ -94,6 +94,7 @@ function loadCancelledWorldReservationHarness({ checkpointPhase = 'world_call_re
         getContext: () => state.context,
         captureTarget: () => structuredClone(state.currentTarget),
         readChatNamespace: () => structuredClone(state.namespace),
+        deepClone: (value) => structuredClone(value),
         normalizeActorLedger: (value) => structuredClone(value || { actionAttempts: [] }),
         actorActionTargetOf: () => structuredClone(actionTarget),
         stage3AcceptedTarget: (value) => value ? structuredClone(value) : null,
@@ -602,6 +603,79 @@ function loadNamespaceWriter(getContext) {
     return {
         write: sandbox.performChatNamespaceWrite,
         metrics: sandbox.chatNamespacePersistenceMetrics,
+        failureCode: () => sandbox.lastChatNamespaceWriteFailureCode,
+    };
+}
+
+function loadProductionPriorReservedRetirementHarness(postApplyMutation = null) {
+    const fixture = loadPriorReservedManualHarness();
+    let persisted = structuredClone(fixture.state.namespace);
+    let appliedCandidate = false;
+    const currentTarget = structuredClone(fixture.current);
+    const context = {
+        chatId: fixture.current.chatId,
+        chatMetadata: { mvu_auto_doctor: structuredClone(fixture.state.namespace) },
+        updateChatMetadata(patch) {
+            this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+            if (!appliedCandidate && this.chatMetadata.mvu_auto_doctor?.continuityCheckpoint == null) {
+                appliedCandidate = true;
+            }
+        },
+        async saveMetadata() {
+            postApplyMutation?.({ context: this, currentTarget, fixture });
+            persisted = structuredClone(this.chatMetadata.mvu_auto_doctor);
+        },
+        async readPersistedChatMetadata() {
+            return structuredClone(persisted);
+        },
+    };
+    const writer = loadNamespaceWriter(() => context);
+    const sandbox = {
+        getContext: () => context,
+        captureTarget: () => currentTarget,
+        readChatNamespace: () => structuredClone(context.chatMetadata.mvu_auto_doctor),
+        deepClone: (value) => structuredClone(value),
+        normalizeActorLedger: (value) => structuredClone(value || {
+            actionAttempts: [], actionReceipts: [],
+        }),
+        actorActionTargetOf: fixture.actionTargetOf,
+        actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+        continuityContentDigest: (value) => JSON.stringify(value || {}),
+        stage3FieldState: (namespace, field) => ({
+            revision: namespace.fieldRevisions[field],
+            digest: JSON.stringify(JSON.stringify(namespace[field])),
+        }),
+        writeChatNamespace: (candidate, chatId, options) => writer.write(
+            candidate,
+            chatId,
+            options,
+        ),
+    };
+    const targetHelpers = sourceSection(
+        'function stage3AcceptedTarget(captured) {',
+        'function stage3AcceptedTargetKey(captured) {',
+    );
+    const continuityHelpers = sourceSection(
+        'function stage3ContinuityDigestWithoutInjection(state) {',
+        'function stage3CanonicalSettlementProof(ledger, results = [], captured) {',
+    );
+    const clearHelpers = sourceSection(
+        'async function clearWorldCallReservationWithReadback(captured, reservationMatches) {',
+        'function markUserCancelledActorProfileControllers(',
+    );
+    vm.runInNewContext(
+        `${targetHelpers}\n${continuityHelpers}\n${clearHelpers}`
+        + '\nthis.retire = retirePriorReservedWorldCallForManualRecovery;',
+        sandbox,
+    );
+    return {
+        fixture,
+        context,
+        currentTarget,
+        writer,
+        retire: sandbox.retire,
+        persisted: () => structuredClone(persisted),
+        failureCode: () => writer.failureCode(),
     };
 }
 
@@ -856,6 +930,62 @@ test('explicit manual recovery CAS-retires only a self-consistent empty prior re
             fixture.current = fixture.state.currentTarget;
         }, `current ${field} drift fails closed`);
     }
+});
+
+test('production writer lifecycle accepts post-apply null only while all reservation side evidence stays exact', async () => {
+    const success = loadProductionPriorReservedRetirementHarness();
+    assert.equal(
+        await success.retire(structuredClone(success.currentTarget)),
+        true,
+        success.failureCode(),
+    );
+    assert.equal(success.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint, null);
+    assert.equal(success.persisted().continuityCheckpoint, null);
+    assert.equal(success.writer.metrics.hostSaveCalls, 1);
+    assert.equal(success.writer.metrics.readbackAttempts, 1);
+    assert.equal(success.writer.metrics.rolledBackWrites, 0);
+
+    const reject = async (mutate, label) => {
+        const fixture = loadProductionPriorReservedRetirementHarness(mutate);
+        const originalCheckpoint = structuredClone(
+            fixture.fixture.state.namespace.continuityCheckpoint,
+        );
+        assert.equal(
+            await fixture.retire(structuredClone(fixture.currentTarget)),
+            false,
+            label,
+        );
+        assert.deepEqual(
+            fixture.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint,
+            originalCheckpoint,
+            `${label}: the applied candidate must roll back`,
+        );
+        assert.equal(fixture.writer.metrics.hostSaveCalls, 1, label);
+        assert.equal(fixture.writer.metrics.readbackAttempts, 0, label);
+        assert.equal(fixture.writer.metrics.rolledBackWrites, 1, label);
+    };
+    await reject(({ context, fixture }) => {
+        context.chatMetadata.mvu_auto_doctor.actorLedger.actionAttempts.push({
+            id: 'ATT-RACE',
+            target: fixture.actionTargetOf(fixture.prior),
+        });
+    }, 'post-apply ATT race');
+    await reject(({ context, fixture }) => {
+        context.chatMetadata.mvu_auto_doctor.continuity.nextTurnInjection = {
+            producerTarget: structuredClone(fixture.prior),
+        };
+    }, 'post-apply packet race');
+    await reject(({ context, fixture }) => {
+        context.chatMetadata.mvu_auto_doctor.continuityCheckpoint = {
+            stage3Phase: 'world_candidate_prepared',
+            target: fixture.actionTargetOf(fixture.prior),
+            stage3ProducerTarget: structuredClone(fixture.prior),
+            preparedWorld: { digest: 'prepared-race' },
+        };
+    }, 'post-apply other checkpoint race');
+    await reject(({ currentTarget }) => {
+        currentTarget.generationId = 'generation-drift';
+    }, 'post-apply current target drift');
 });
 
 test('manual retirement fresh-reads then runs exactly one local Recall and one Advance', async () => {
