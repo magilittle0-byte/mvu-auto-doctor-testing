@@ -3,11 +3,13 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createDoctorRuntimePresentation, createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
 import {
+    actorProfileNoCandidatesTerminalProofMatches,
     actorProfileRecoveryCriticalFingerprint,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
     actorProfileTicketBatchPersistenceMatches,
     createActorProfileRetryReceipt,
+    createActorProfileNoCandidatesTerminalProof,
     issueCharacterCreationTicket,
     sealActorProfileTicketBatchForPersistence,
 } from '../actor-profile-v6-core.mjs';
@@ -28,6 +30,7 @@ test('diagnostic export includes profile failures, missing modules and retry con
     assert.match(indexSource, /failingModules:\s*deepClone\(profileDiagnostic\.failingModules\)/u);
     assert.match(indexSource, /lastFailureCodes:\s*deepClone\(profileDiagnostic\.lastFailureCodes\)/u);
     assert.match(indexSource, /canRetry:\s*profileDiagnostic\.canRetry/u);
+    assert.match(indexSource, /noCandidatesTerminalProof,/u);
     assert.match(indexSource, /validationDiagnostic\?\.missingModules|validation\.missingModules/u);
     assert.doesNotMatch(indexSource, /validationDiagnostic\?\.missingSections/u);
 });
@@ -49,7 +52,7 @@ test('chat-scoped reset clears ephemeral profile failure before new-chat hydrati
 test('profile recovery uses the existing namespace with durable readback and survives refresh hydration', () => {
     assert.match(indexSource, /characterCreationTicketBatches:\s*\[\]/u);
     assert.match(indexSource, /actorProfileRetryReceipt:\s*null/u);
-    assert.match(indexSource, /fields:\s*\['characterCreationTicketBatches', 'actorProfileRetryReceipt'\]/u);
+    assert.match(indexSource, /'characterCreationTicketBatches',[\s\S]*?'actorProfileRetryReceipt',[\s\S]*?'actorProfileNoCandidatesTerminalProof'/u);
     assert.match(indexSource, /requireReadback:\s*true/u);
     assert.match(indexSource, /actorProfileRetryReceiptMatches\(receipt, \{ currentSourceRef, ticketBatch \}\)/u);
     assert.match(indexSource, /persistNpcDesignTicketBatch\(\s*preGenerationTicket,\s*captured,\s*ticketPersistenceFailure/u);
@@ -212,6 +215,44 @@ test('current retry receipt seals diagnostic arrays while bounded V2 compatibili
     }
 });
 
+test('no-candidates terminal receipt reuses recovery source identity and seals its payload', () => {
+    const current = recoverySource();
+    const proof = createActorProfileNoCandidatesTerminalProof({ sourceRef: current });
+    assert.ok(proof);
+    assert.equal(actorProfileNoCandidatesTerminalProofMatches(proof, {
+        currentSourceRef: structuredClone(current), expectedProof: structuredClone(proof),
+    }), true);
+    for (const [field, changed] of [
+        ['generationId', 'generation-other'],
+        ['generationType', 'swipe'],
+        ['scopeDigest', 'scope-other'],
+        ['identityScopeId', 'chat-recovery|card-other'],
+        ['contentFingerprint', 'accepted-other'],
+    ]) {
+        const target = recoverySource({ [field]: changed });
+        if (field === 'generationType') target.type = changed;
+        if (field === 'contentFingerprint') target.contentHash = changed;
+        assert.equal(actorProfileNoCandidatesTerminalProofMatches(proof, {
+            currentSourceRef: target,
+        }), false, field);
+    }
+    assert.equal(actorProfileNoCandidatesTerminalProofMatches(proof, {
+        currentSourceRef: recoverySource({ hash: 'mechanism-refresh' }),
+    }), true, 'the shared recovery matcher permits mechanism-only host hash refresh');
+    for (const mutate of [
+        (value) => { value.kind = 'parallel_state_machine'; },
+        (value) => { value.status = 'not_completed'; },
+        (value) => { value.proofDigest = 'tampered'; },
+        (value) => { value.sourceRef.contentFingerprint = 'tampered'; },
+    ]) {
+        const damaged = structuredClone(proof);
+        mutate(damaged);
+        assert.equal(actorProfileNoCandidatesTerminalProofMatches(damaged, {
+            currentSourceRef: current,
+        }), false);
+    }
+});
+
 test('recovery target comparison is complete and receipt status fails closed', () => {
     const source = recoverySource();
     assert.equal(actorProfileRecoverySourceMatches(source, structuredClone(source)), true);
@@ -244,6 +285,7 @@ test('recovery target comparison is complete and receipt status fails closed', (
 
 test('failed profile is described plainly and cannot be hidden by busy presentation', () => {
     assert.match(indexSource, /人物档案没有生成。影响：人物暂未行动就绪/u);
+    assert.match(indexSource, /零人物结论保存后无法回读验证，已转为可重试状态/u);
     assert.match(diagnosticsSource, /profileCanRetry === true/u);
     assert.match(diagnosticsSource, /actorScheduling:\s*\{/u);
     assert.match(diagnosticsSource, /actorShards:\s*\{ deprecated: true \}/u);
@@ -281,6 +323,7 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
     assert.deepEqual(projected.latestStatuses.profile, {
         kind: 'error', status: 'not_completed', failingModules: ['personality'],
         lastFailureCodes: ['actor_profile.module_missing'], canRetry: true,
+        noCandidatesTerminalProof: false,
     });
     assert.deepEqual(projected.actorScheduling.advanceFailureCodes, [
         'actor_scheduling.advance_parse_failed',
@@ -351,11 +394,15 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
         'function diagnosticPayload',
     );
     assert.match(fingerprintSource, /actorProfileRecoveryCriticalFingerprint\(\)/u);
+    assert.match(fingerprintSource, /finalizeActorProfileRecoveryOutcome\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3NoActorPermitMatches\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3LedgerReadbackGate\.toString\(\)/u);
     assert.match(fingerprintSource, /writeChatNamespace\.toString\(\)/u);
     assert.match(fingerprintSource, /rebaseActorSovereigntyFieldWriteAfterMigration\.toString\(\)/u);
     assert.match(fingerprintSource, /persistNpcDesignTicketBatch\.toString\(\)/u);
     assert.match(fingerprintSource, /assistantTargetHasPriorRealPlayerInput\.toString\(\)/u);
     assert.match(fingerprintSource, /captureTarget\.toString\(\)/u);
+    assert.match(fingerprintSource, /actorProfileNoCandidatesTerminalReadbackMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /markActorSchedulingNotReachedByProfile\.toString\(\)/u);
     assert.match(fingerprintSource, /createPrivacySafeDiagnosticProjection\.toString\(\)/u);
     assert.match(fingerprintSource, /acceptFinalGeneration\.toString\(\)/u);
@@ -382,6 +429,10 @@ test('changing any recovery helper implementation changes the critical manifest 
         'actorProfileRetryReceiptDigest',
         'createActorProfileRetryReceipt',
         'actorProfileRetryReceiptMatches',
+        'actorProfileNoCandidatesTerminalProofPayload',
+        'actorProfileNoCandidatesTerminalProofDigest',
+        'createActorProfileNoCandidatesTerminalProof',
+        'actorProfileNoCandidatesTerminalProofMatches',
     ];
     const baseline = actorProfileRecoveryCriticalFingerprint();
     for (const name of names) {

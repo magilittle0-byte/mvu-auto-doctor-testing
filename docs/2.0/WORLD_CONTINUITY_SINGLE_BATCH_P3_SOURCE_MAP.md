@@ -31,9 +31,11 @@ P3 每次自行 fresh-read ActorRegistry/ActorLedger/Profile：
 - 当前 source 有 registry actor 且有任一未 ready：`blocked`，零 proposal、零世界调用、零世界写。
 - 当前 source 全部 ready：进入人物 proposal→attempt 链。
 - 当前 source 无 actor：默认 `blocked: actor_registry_awaiting_p2`。
-- 只有 P2 对同 accepted target 明确 `no_candidates`、完成 source/readback 且返回 `eligible` 时，P2 以 transient nonblocking signal 通知 P3 再试；P3 fresh-read 仍无 actor 才允许结构世界轨。
+- 只有 P1 对同 accepted target 明确 `no_candidates`，并把最小 terminal authority receipt、retry receipt 清理和匹配 ticket 清理一起完成宿主读回时，P3 fresh-read gate 才允许结构世界轨；刷新/重启后不重跑 P1。
 
-该 transient signal 不持久、不作 P3 成功收据，也不形成 barrier。它随写入时的 chat/operation epoch 绑定；若它在初次 P3 尚 pending 时到达，按同 target 记录一次 deferred retry；旧 chat/epoch 不消费或写入新 chat 信号。
+首次同一运行仍可使用 generation-bound transient permit 立即唤醒 P3；跨刷新恢复只认同 namespace 内的最小 P1 terminal receipt。两者都只是既有 P3 fresh-read gate 的上游 authority，不是 P3 成功收据或 barrier。持久回执直接复用 P1 Recovery `SourceRef` normalizer/matcher/digest、receipt seal、namespace CAS/readback；准入还要求 retry receipt 为空且同 source ticket batch 已清理。旧 target、正文 fingerprint、identity/scope/generation 漂移或回执篡改一律拒绝。
+
+该适配没有新增 world store、queue、barrier、checkpoint 或第二套 source normalizer。P3 放行后仍沿既有 Stitches Recall -> Advance 和 `world_call_reserved -> world_candidate_prepared -> committed` 恢复链运行；已有 prepared/committed package 继续由 Continuity fresh snapshot、settlement proof 与 P4 exact-once lease/consumer 管理，P1 terminal receipt 不能重演或冒充任何世界域权威。
 
 ## actor-first Recall→Advance→两阶段提交
 

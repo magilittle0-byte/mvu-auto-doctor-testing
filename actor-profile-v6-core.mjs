@@ -1846,6 +1846,52 @@ export function actorProfileRetryReceiptMatches(value, {
     });
 }
 
+function actorProfileNoCandidatesTerminalProofPayload(value) {
+    return {
+        version: Math.max(0, Number(value?.version) || 0),
+        kind: cleanText(value?.kind, 80),
+        status: cleanText(value?.status, 80),
+        generationId: cleanText(value?.generationId, 180),
+        sourceRef: normalizeActorProfileRecoverySourceRef(value?.sourceRef),
+        sourceDigest: cleanText(value?.sourceDigest, 240),
+    };
+}
+
+function actorProfileNoCandidatesTerminalProofDigest(value) {
+    return `profile-no-candidates-proof:${fingerprint(JSON.stringify(canonicalProfileValue(
+        actorProfileNoCandidatesTerminalProofPayload(value),
+    )))}`;
+}
+
+export function createActorProfileNoCandidatesTerminalProof({ sourceRef } = {}) {
+    if (!actorProfileRecoverySourceMatches(sourceRef, sourceRef)) return null;
+    const normalizedSource = normalizeActorProfileRecoverySourceRef(sourceRef);
+    const proof = {
+        version: 1,
+        kind: 'actor_profile_terminal_receipt',
+        status: 'no_candidates',
+        generationId: normalizedSource.generationId,
+        sourceRef: normalizedSource,
+        sourceDigest: actorProfileRecoverySourceDigest(normalizedSource),
+    };
+    proof.proofDigest = actorProfileNoCandidatesTerminalProofDigest(proof);
+    return proof;
+}
+
+export function actorProfileNoCandidatesTerminalProofMatches(value, {
+    currentSourceRef = null,
+    expectedProof = null,
+} = {}) {
+    return value?.version === 1
+        && value?.kind === 'actor_profile_terminal_receipt'
+        && value?.status === 'no_candidates'
+        && actorProfileRecoverySourceMatches(value.sourceRef, currentSourceRef)
+        && value.sourceDigest === actorProfileRecoverySourceDigest(value.sourceRef)
+        && cleanText(value?.proofDigest, 240) !== ''
+        && value.proofDigest === actorProfileNoCandidatesTerminalProofDigest(value)
+        && (!expectedProof || value.proofDigest === expectedProof?.proofDigest);
+}
+
 export function actorProfileRecoveryCriticalFingerprint(overrides = {}) {
     const helpers = {
         normalizeActorProfileRecoverySourceRef,
@@ -1862,6 +1908,10 @@ export function actorProfileRecoveryCriticalFingerprint(overrides = {}) {
         actorProfileRetryReceiptDigest,
         createActorProfileRetryReceipt,
         actorProfileRetryReceiptMatches,
+        actorProfileNoCandidatesTerminalProofPayload,
+        actorProfileNoCandidatesTerminalProofDigest,
+        createActorProfileNoCandidatesTerminalProof,
+        actorProfileNoCandidatesTerminalProofMatches,
     };
     const manifest = Object.entries(helpers).map(([name, helper]) => [
         name,

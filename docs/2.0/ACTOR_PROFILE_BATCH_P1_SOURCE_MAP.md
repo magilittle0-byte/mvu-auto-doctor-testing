@@ -60,6 +60,18 @@ Doctor-specific necessary code: strict ActorRef/candidateRef identity, full Sour
   resources, capabilities, locations, relations, player choices, or world
   results.  Those structured ledger facts retain their existing owners.
 
+## 2026-08-13 no-candidates authority receipt source map
+
+| 来源 | 分类 | 本轮复用与边界 |
+|---|---|---|
+| 现有 P1 `actorProfileRetryReceipt`、完整 Recovery `SourceRef`、source digest、receipt seal、同聊天 namespace writer、writer-time CAS 与 durable content readback | **T（原样复用）** | `no_candidates` 终态回执直接使用同一套 SourceRef 规范化、source matcher、source digest、回执 payload digest 和宿主 CAS/readback；没有第二套 source normalizer、第二个 store、queue、barrier 或 checkpoint。|
+| TavernDB / `shujuku` 的 staged working transaction -> terminal cleanup/readback | **A（最小适配）** | 将“事务结束后清理暂存材料并读回确认”适配为：同一次 namespace 写入同时清掉匹配 ticket batch 与 retry receipt，并保存最小 terminal receipt；content validator 必须读回三者的一致状态。没有复制 TavernDB CRUD、表状态机或数据库所有权。|
+| `caikis` 人物表与 `npc_tracker` | **T/A（保持既有边界）** | 仅沿用 identity promotion、明确空结果与 registry gate 语义；不从这些作品新增持久层、人物扫描器或世界推进协议。|
+| Stitches Recall -> Advance、现有 World/Continuity `world_call_reserved -> world_candidate_prepared -> committed`、fresh snapshot/checkpoint，以及 P4 lease/settlement proof | **A（只复用恢复形状）** | P1 终态回执只作为现有 P3 fresh-read actor gate 的上游 authority receipt。P3 放行后仍进入原有 Recall/Advance、prepared checkpoint、settlement 与 P4 exact-once consumer；已存在的 prepared/committed world package 仍走原恢复路径，绝不重演 Advance，也不复制世界状态、checkpoint 或 P4 lease/proof。|
+| Doctor 的 P1 严格零行结论跨 refresh/restart 唤醒 P3 | **X（必要最小新写）** | 参考作品没有“P1 已证明本 generation 无人物，刷新后手动 P3 不重跑 P1”的跨阶段语义，因此仅新增一个最小、generation-bound terminal receipt payload/digest，以及在既有 P3 fresh-read gate 中消费它。旧 target、正文 fingerprint、identity/scope 或 generation 漂移、回执篡改、terminal cleanup 未读回均 fail-closed。|
+
+该回执不是第二套编排器或世界 checkpoint：它不保存人物、世界候选、模型输出或完成队列，只证明同一 accepted target 的 P1 严格 `no_candidates` 已与 terminal cleanup 一起完成宿主读回。P1 读回失败仍降为 `not_completed`，不得加入 completed key，也不得唤醒 P3。
+
 ```text
 accepted-final
   └─ enqueueActorProfiles(includeMaintenance=false)

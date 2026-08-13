@@ -12,6 +12,11 @@ import {
     parseContinuityOutput,
 } from '../continuity-core.mjs';
 import { sovereigntySourceKey } from '../sovereignty-runtime-core.mjs';
+import {
+    actorProfileNoCandidatesTerminalProofMatches,
+    actorProfileRecoverySourceMatches,
+    createActorProfileNoCandidatesTerminalProof,
+} from '../actor-profile-v6-core.mjs';
 
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 
@@ -119,23 +124,70 @@ function loadStage3PersistedPackageValidator({ normalizer = (value) => value } =
     return sandbox;
 }
 
-function loadStage3NoActorPermitGate() {
+function loadStage3NoActorPermitGate({
+    namespace = { actorLedger: {} },
+    currentSourceRef = {},
+} = {}) {
     const code = sourceSection(
         'function stage3NoActorPermitMatches(permit, captured) {',
         'async function runContinuityTarget(captured, {',
     );
     const sandbox = {
-        readChatNamespace: () => ({ actorLedger: {} }),
+        readChatNamespace: () => structuredClone(namespace),
         normalizeActorLedger: () => ({ actorRegistry: { registered: {} } }),
-        sourceRefOf: () => ({}),
+        sourceRefOf: () => structuredClone(currentSourceRef),
         acceptedActorSourceRefMatches: () => false,
+        actorProfileRecoverySourceMatches,
+        actorProfileNoCandidatesTerminalProofMatches,
     };
     vm.runInNewContext(
         `${sourceSection('function stage3AcceptedTarget(captured) {', 'function stage3ContinuityDigestWithoutInjection(state) {')}`
+        + `${sourceSection('function actorProfileNoCandidatesTerminalReadbackMatches(namespace, currentSourceRef, {', 'async function persistActorProfileRecoveryState')}`
         + `${code}\nthis.stage3LedgerReadbackGate = stage3LedgerReadbackGate;`,
         sandbox,
     );
     return sandbox.stage3LedgerReadbackGate;
+}
+
+function loadNoCandidatesPersistenceHarness(initialNamespace = {}) {
+    const code = sourceSection(
+        'async function persistActorProfileRecoveryState',
+        'async function finalizeActorProfileRecoveryOutcome',
+    );
+    const state = { namespace: structuredClone(initialNamespace), persisted: null, writes: 0 };
+    const sandbox = {
+        readChatNamespace: () => structuredClone(state.namespace),
+        sourceRefOf: (value) => structuredClone(value),
+        captureTarget: () => structuredClone(state.captured),
+        getContext: () => ({ chatId: state.captured?.chatId || '' }),
+        actorProfileRecoverySourceMatches,
+        npcDesignTicketBatches: new Map(),
+        actorProfileTicketBatchPersistenceMatches: () => false,
+        sealActorProfileTicketBatchForPersistence: () => null,
+        createActorProfileNoCandidatesTerminalProof,
+        actorProfileNoCandidatesTerminalProofMatches,
+        deepClone: (value) => structuredClone(value),
+        writeChatNamespace: async (candidate, _chatId, options) => {
+            state.writes += 1;
+            const persisted = structuredClone(candidate);
+            if (options.contentValidator(persisted) !== true) return false;
+            state.namespace = persisted;
+            state.persisted = structuredClone(persisted);
+            return true;
+        },
+    };
+    vm.runInNewContext(
+        `${sourceSection('function actorProfileNoCandidatesTerminalReadbackMatches(namespace, currentSourceRef, {', 'async function persistActorProfileRecoveryState')}`
+        + `${code}\nthis.persist = persistActorProfileRecoveryState;`,
+        sandbox,
+    );
+    return {
+        state,
+        persist(captured, result) {
+            state.captured = structuredClone(captured);
+            return sandbox.persist(captured, result);
+        },
+    };
 }
 
 function loadWorldGenerator(callModel) {
@@ -839,6 +891,75 @@ test('P3 current guard, permit gate, old package reconciliation, and settlement 
         null,
         'a proof ActorRef mismatch cannot pass readback',
     );
+});
+
+test('saved no-candidates proof survives refresh and reopens P3 without rerunning P1', async () => {
+    const captured = {
+        chatId: 'chat-proof', index: 4, logicalIndex: 4,
+        messageId: 'message-proof', swipeId: 0,
+        generation: 9, generationSerial: 9,
+        generationId: 'generation-proof', generationType: 'normal', type: 'normal',
+        identityScope: { cardId: 'card-proof' },
+        identityScopeId: 'chat-proof|card-proof', scope: { cardId: 'card-proof' },
+        scopeDigest: 'scope-proof', hash: 'host-proof',
+        contentHash: 'content-proof', contentFingerprint: 'content-proof',
+    };
+    const persistence = loadNoCandidatesPersistenceHarness({
+        actorLedger: {},
+        actorProfileRetryReceipt: null,
+        characterCreationTicketBatches: [],
+        actorProfileNoCandidatesTerminalProof: null,
+    });
+    assert.equal(await persistence.persist(captured, {
+        status: 'no_candidates', profileBatch: { readbackVerified: false },
+    }), true);
+    assert.equal(persistence.state.writes, 1);
+    const savedNamespace = JSON.parse(JSON.stringify(persistence.state.persisted));
+    assert.ok(savedNamespace.actorProfileNoCandidatesTerminalProof);
+    assert.equal(savedNamespace.actorProfileRetryReceipt, null);
+    assert.deepEqual(savedNamespace.characterCreationTicketBatches, []);
+    let p1CallsAfterRefresh = 0;
+    const refreshedP3Gate = loadStage3NoActorPermitGate({
+        namespace: savedNamespace,
+        currentSourceRef: captured,
+    });
+    const reopened = refreshedP3Gate(captured, null);
+    assert.equal(p1CallsAfterRefresh, 0);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.reason, 'no_candidates');
+    assert.equal(reopened.noActorPermit, false);
+    assert.equal(reopened.persistedNoCandidatesProof, true);
+
+    const damagedNamespace = structuredClone(savedNamespace);
+    damagedNamespace.actorProfileNoCandidatesTerminalProof.proofDigest = 'tampered';
+    assert.equal(loadStage3NoActorPermitGate({
+        namespace: damagedNamespace,
+        currentSourceRef: captured,
+    })(captured, null).reason, 'actor_registry_awaiting_p2');
+
+    for (const staleCleanup of [
+        { actorProfileRetryReceipt: { status: 'not_completed' } },
+        { characterCreationTicketBatches: [{ acceptedTarget: structuredClone(captured) }] },
+    ]) {
+        const incompleteCleanup = { ...structuredClone(savedNamespace), ...staleCleanup };
+        assert.equal(loadStage3NoActorPermitGate({
+            namespace: incompleteCleanup,
+            currentSourceRef: captured,
+        })(captured, null).reason, 'actor_registry_awaiting_p2');
+    }
+
+    for (const drift of [
+        { contentHash: 'changed', contentFingerprint: 'changed' },
+        { scopeDigest: 'scope-changed' },
+        { identityScopeId: 'chat-proof|card-changed' },
+        { generationId: 'generation-changed' },
+    ]) {
+        const changed = { ...captured, ...drift };
+        assert.equal(loadStage3NoActorPermitGate({
+            namespace: savedNamespace,
+            currentSourceRef: changed,
+        })(changed, null).reason, 'actor_registry_awaiting_p2');
+    }
 });
 
 test('P3 normalize and durable readback retain the complete packet and settlement generation identity', async () => {

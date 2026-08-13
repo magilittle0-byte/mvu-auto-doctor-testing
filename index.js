@@ -138,6 +138,7 @@ import {
     nextModelRouteHealth,
 } from './model-queue.mjs';
 import {
+    actorProfileNoCandidatesTerminalProofMatches,
     actorProfileRecoveryCriticalFingerprint,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
@@ -150,6 +151,7 @@ import {
     prepareActorLedgerProfilesV6,
     regenerateActorProfileV6Module,
     createActorProfileRetryReceipt,
+    createActorProfileNoCandidatesTerminalProof,
     sealActorProfileTicketBatchForPersistence,
     selectActorProfileCompletionCandidates,
     setActorProfileV6Lock,
@@ -1826,6 +1828,7 @@ const RUNTIME_FAILURE_LABELS = Object.freeze({
     'profile.preparation_incomplete': '人物档案仍待补全',
     'profile.content_incomplete': '人物档案缺列，未作为成功档案提交',
     'profile.persistence_failed': '人物档案保存失败',
+    'actor_profile.no_candidates_readback_failed': '零人物结论保存后无法回读验证，已转为可重试状态',
     'physiology.content_incomplete': '生理档案缺列，未作为成功档案提交',
     'physiology.persistence_failed': '生理档案保存失败',
     'actor.output_missing': '人物行动没有可用输出',
@@ -2967,7 +2970,9 @@ function doctorRuntimeCriticalFingerprint() {
         writeChatNamespace.toString(),
         rebaseActorSovereigntyFieldWriteAfterMigration.toString(),
         persistNpcDesignTicketBatch.toString(),
+        actorProfileNoCandidatesTerminalReadbackMatches.toString(),
         persistActorProfileRecoveryState.toString(),
+        finalizeActorProfileRecoveryOutcome.toString(),
         completeActorProfileBatchTransaction.toString(),
         assistantTargetHasPriorRealPlayerInput.toString(),
         captureTarget.toString(),
@@ -2975,6 +2980,8 @@ function doctorRuntimeCriticalFingerprint() {
         createPrivacySafeDiagnosticProjection.toString(),
         acceptFinalGeneration.toString(),
         dispatchAcceptedFinal.toString(),
+        stage3NoActorPermitMatches.toString(),
+        stage3LedgerReadbackGate.toString(),
         runContinuityTarget.toString(),
         commitPreparedWorldCandidate.toString(),
         precomposeNextTurnConsumer.toString(),
@@ -3007,6 +3014,13 @@ function diagnosticPayload() {
     };
     const sovereignty = sovereigntyHealthWithScheduler(namespace);
     const profileDiagnostic = hydratedActorProfileDiagnostic(namespace);
+    const diagnosticLatest = latestAiMessage(context);
+    const diagnosticProfileSource = diagnosticLatest.index >= 0
+        ? sourceRefOf(captureTarget(context, diagnosticLatest.index)) : null;
+    const noCandidatesTerminalProof = actorProfileNoCandidatesTerminalReadbackMatches(
+        namespace,
+        diagnosticProfileSource,
+    );
     return {
         exportedAt: new Date().toISOString(),
         ...createPrivacySafeDiagnosticProjection({
@@ -3092,6 +3106,7 @@ function diagnosticPayload() {
                     failingModules: deepClone(profileDiagnostic.failingModules),
                     lastFailureCodes: deepClone(profileDiagnostic.lastFailureCodes),
                     canRetry: profileDiagnostic.canRetry === true,
+                    noCandidatesTerminalProof,
                 },
                 continuity: { kind: latestContinuityKind },
                 forum: { kind: latestForumKind },
@@ -3382,6 +3397,7 @@ function emptyChatNamespace(context = getContext()) {
         actorLedgerCheckpointBlobs: {},
         characterCreationTicketBatches: [],
         actorProfileRetryReceipt: null,
+        actorProfileNoCandidatesTerminalProof: null,
         sovereigntyRuntime: emptySovereigntyRuntime(chatId, {
             mode: getSettings().sovereigntyMode,
             scopeDigest,
@@ -12460,6 +12476,19 @@ function clearActorProfileReadShadow(captured = null) {
     actorProfileReadShadow = null;
 }
 
+function actorProfileNoCandidatesTerminalReadbackMatches(namespace, currentSourceRef, {
+    expectedProof = null,
+} = {}) {
+    return namespace?.actorProfileRetryReceipt == null
+        && !(namespace?.characterCreationTicketBatches || []).some((entry) => (
+            actorProfileRecoverySourceMatches(entry?.acceptedTarget, currentSourceRef)
+        ))
+        && actorProfileNoCandidatesTerminalProofMatches(
+            namespace?.actorProfileNoCandidatesTerminalProof,
+            { currentSourceRef, expectedProof },
+        );
+}
+
 async function persistActorProfileRecoveryState(captured, result) {
     const namespace = readChatNamespace();
     const generationId = String(captured?.generationId || '');
@@ -12491,7 +12520,11 @@ async function persistActorProfileRecoveryState(captured, result) {
                 acceptedTarget,
             ));
         namespace.actorProfileRetryReceipt = null;
+        namespace.actorProfileNoCandidatesTerminalProof = status === 'no_candidates'
+            ? createActorProfileNoCandidatesTerminalProof({ sourceRef: acceptedTarget })
+            : null;
     } else if (retryable) {
+        namespace.actorProfileNoCandidatesTerminalProof = null;
         if (sealedBatch && !existingBatch) {
             namespace.characterCreationTicketBatches = [
                 ...(namespace.characterCreationTicketBatches || []), deepClone(sealedBatch),
@@ -12518,30 +12551,92 @@ async function persistActorProfileRecoveryState(captured, result) {
     }
     if (retryable && !namespace.actorProfileRetryReceipt) return false;
     return writeChatNamespace(namespace, captured.chatId, {
-        fields: ['characterCreationTicketBatches', 'actorProfileRetryReceipt'],
+        fields: [
+            'characterCreationTicketBatches',
+            'actorProfileRetryReceipt',
+            'actorProfileNoCandidatesTerminalProof',
+        ],
         durable: true,
         requireReadback: true,
         readbackAttempts: 3,
         precondition: sourceStillCurrent,
         contentValidator: (persisted) => {
             if (terminal) {
-                return persisted?.actorProfileRetryReceipt == null
+                const cleanupMatches = persisted?.actorProfileRetryReceipt == null
                     && !(persisted?.characterCreationTicketBatches || []).some((entry) => (
                         actorProfileRecoverySourceMatches(entry?.acceptedTarget, acceptedTarget)
                     ));
+                if (!cleanupMatches) return false;
+                if (status !== 'no_candidates') {
+                    return persisted?.actorProfileNoCandidatesTerminalProof == null;
+                }
+                return actorProfileNoCandidatesTerminalReadbackMatches(
+                    persisted,
+                    acceptedTarget,
+                    { expectedProof: namespace.actorProfileNoCandidatesTerminalProof },
+                );
             }
             const persistedBatch = (persisted?.characterCreationTicketBatches || [])
                 .find((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
                     acceptedTarget,
                     expectedDigest: namespace.actorProfileRetryReceipt?.ticketBatchDigest || '',
                 })) || null;
-            return actorProfileRetryReceiptMatches(persisted?.actorProfileRetryReceipt, {
+            return persisted?.actorProfileNoCandidatesTerminalProof == null
+                && actorProfileRetryReceiptMatches(persisted?.actorProfileRetryReceipt, {
                 currentSourceRef: acceptedTarget,
                 ticketBatch: persistedBatch,
                 expectedReceipt: namespace.actorProfileRetryReceipt,
-            });
+                });
         },
     });
+}
+
+async function finalizeActorProfileRecoveryOutcome(captured, result, {
+    persistRecoveryState = persistActorProfileRecoveryState,
+} = {}) {
+    const initialSaved = await persistRecoveryState(captured, result);
+    if (result?.status !== 'no_candidates') {
+        return { result, recoverySaved: initialSaved === true };
+    }
+    if (initialSaved === true) {
+        return {
+            result: {
+                ...result,
+                profileBatch: {
+                    ...(result?.profileBatch || {}),
+                    readbackVerified: true,
+                },
+            },
+            recoverySaved: true,
+        };
+    }
+    const reason = 'actor_profile.no_candidates_readback_failed';
+    const failedResult = {
+        ...result,
+        status: 'not_completed',
+        reason,
+        profileBatch: {
+            ...(result?.profileBatch || {}),
+            readbackVerified: false,
+            failed: [
+                ...(Array.isArray(result?.profileBatch?.failed)
+                    ? result.profileBatch.failed : []),
+                { reason, missingSections: [] },
+            ],
+            validationDiagnostic: {
+                ...(result?.profileBatch?.validationDiagnostic || {}),
+                failingGroups: [...new Set([
+                    ...(result?.profileBatch?.validationDiagnostic?.failingGroups || []),
+                    'identity_bootstrap',
+                ])].slice(0, 8),
+            },
+        },
+    };
+    // Failed terminal cleanup/readback is not a successful zero-actor
+    // decision. Persist a retry receipt and retain any sealed ticket material
+    // before exposing this recoverable failure to UI or P3 dispatch.
+    const recoverySaved = await persistRecoveryState(captured, failedResult);
+    return { result: failedResult, recoverySaved: recoverySaved === true };
 }
 
 function compactActorProfileFailureCode(value) {
@@ -13485,7 +13580,8 @@ function stage3NoActorPermitMatches(permit, captured) {
 }
 
 function stage3LedgerReadbackGate(captured, noActorPermit = null) {
-    const ledger = normalizeActorLedger(readChatNamespace().actorLedger, {
+    const namespace = readChatNamespace();
+    const ledger = normalizeActorLedger(namespace.actorLedger, {
         chatId: captured.chatId,
         identityScopeId: captured.identityScopeId,
         scopeDigest: captured.scopeDigest,
@@ -13497,8 +13593,21 @@ function stage3LedgerReadbackGate(captured, noActorPermit = null) {
         )))
         .map((entry) => entry.actorRef?.actorId)
         .filter(Boolean);
-    if (!sourceActorIds.length) return stage3NoActorPermitMatches(noActorPermit, captured)
-        ? { ok: true, reason: 'no_candidates', actorLedger: ledger, noActorPermit: true }
+    const persistedNoCandidatesProof = actorProfileNoCandidatesTerminalReadbackMatches(
+        namespace,
+        source,
+    );
+    if (!sourceActorIds.length) return (
+        stage3NoActorPermitMatches(noActorPermit, captured)
+        || persistedNoCandidatesProof
+    )
+        ? {
+            ok: true,
+            reason: 'no_candidates',
+            actorLedger: ledger,
+            noActorPermit: stage3NoActorPermitMatches(noActorPermit, captured),
+            persistedNoCandidatesProof,
+        }
         : { ok: false, reason: 'actor_registry_awaiting_p2' };
     const incomplete = sourceActorIds.find((actorId) => (
         !actorProfileReadinessInLedger(ledger, actorId).ready
@@ -14480,7 +14589,9 @@ async function enqueueActorProfiles(targetId, {
         })
         .then(async (result) => {
             if (!actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) return result;
-            const recoverySaved = await persistActorProfileRecoveryState(expected, result);
+            const recovery = await finalizeActorProfileRecoveryOutcome(expected, result);
+            result = recovery.result;
+            const recoverySaved = recovery.recoverySaved;
             if (['atomic_readback', 'no_candidates'].includes(result?.status)) {
                 actorProfileCompletedKeys.add(dedupeKey);
             }

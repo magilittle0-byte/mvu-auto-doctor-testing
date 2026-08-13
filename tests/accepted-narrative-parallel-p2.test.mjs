@@ -28,6 +28,16 @@ function deferred() {
     return { promise, resolve, reject };
 }
 
+function loadActorProfileRecoveryOutcomeFinalizer() {
+    const code = sourceSection(
+        'async function finalizeActorProfileRecoveryOutcome',
+        'function compactActorProfileFailureCode',
+    );
+    const sandbox = {};
+    vm.runInNewContext(`${code}\nthis.finalize = finalizeActorProfileRecoveryOutcome;`, sandbox);
+    return sandbox.finalize;
+}
+
 function loadAcceptedContentFunctions() {
     const code = sourceSection(
         'function stripMechanism(text)',
@@ -566,6 +576,62 @@ test('a P1 not-completed result never grants a P3 permit or world launch', async
     )).length, 1);
     assert.equal(noCandidates.state.worldModelCalls, 1);
     assert.equal(noCandidates.state.worldWrites, 1);
+});
+
+test('strict no-candidates wakes P3 only after terminal recovery save and content readback proof', async () => {
+    const finalize = loadActorProfileRecoveryOutcomeFinalizer();
+    const captured = { chatId: 'chat-a', generationId: 'generation-a' };
+    const raw = {
+        status: 'no_candidates',
+        eligible: true,
+        target: { chatId: 'chat-a' },
+        profileBatch: { readbackVerified: false, failed: [] },
+    };
+    const successCalls = [];
+    const success = await finalize(captured, structuredClone(raw), {
+        persistRecoveryState: async (_target, result) => {
+            successCalls.push(result.status);
+            return true;
+        },
+    });
+    assert.deepEqual(successCalls, ['no_candidates']);
+    assert.equal(success.result.status, 'no_candidates');
+    assert.equal(success.result.profileBatch.readbackVerified, true);
+    const successfulDispatch = loadAcceptedFinalFullDispatchHarness({
+        profileResult: success.result,
+    });
+    assert.equal(await successfulDispatch.accept(successfulDispatch.generation), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(successfulDispatch.state.continuityCalls.length, 1);
+    assert.equal(successfulDispatch.state.continuityCalls[0].noActorPermit.profileBatch.readbackVerified, true);
+    assert.equal(successfulDispatch.state.worldModelCalls, 1);
+
+    const failureCalls = [];
+    const failure = await finalize(captured, structuredClone(raw), {
+        persistRecoveryState: async (_target, result) => {
+            failureCalls.push(result.status);
+            return result.status === 'not_completed';
+        },
+    });
+    assert.deepEqual(failureCalls, ['no_candidates', 'not_completed']);
+    assert.equal(failure.result.status, 'not_completed');
+    assert.equal(failure.result.profileBatch.readbackVerified, false);
+    assert.equal(failure.result.reason, 'actor_profile.no_candidates_readback_failed');
+    assert.ok(failure.result.profileBatch.failed.some((entry) => (
+        entry.reason === 'actor_profile.no_candidates_readback_failed'
+    )));
+    assert.ok(failure.result.profileBatch.validationDiagnostic.failingGroups.includes('identity_bootstrap'));
+    assert.equal(failure.recoverySaved, true, 'recovery material is saved as retry evidence, not completion');
+    const failedDispatch = loadAcceptedFinalFullDispatchHarness({
+        profileResult: failure.result,
+    });
+    assert.equal(await failedDispatch.accept(failedDispatch.generation), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(failedDispatch.state.continuityCalls.length, 0);
+    assert.equal(failedDispatch.state.worldModelCalls, 0);
+    assert.equal(failedDispatch.state.worldWrites, 0);
 });
 
 test('accepted-final rejection is ephemeral and an old epoch cannot touch the new chat', async () => {
