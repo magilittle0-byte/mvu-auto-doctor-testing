@@ -935,6 +935,20 @@ export function parseActorShardProposal(output, { candidate } = {}) {
     const expectedStimulusIds = new Set(
         cleanStimuli(candidate?.stimuli, 8).map((item) => item.id),
     );
+    if (candidate?.narrativeProfile === true) {
+        const suppliedIds = new Set(proposal.stimulusDecisions
+            .map((item) => item.stimulusId)
+            .filter(Boolean));
+        for (const stimulusId of expectedStimulusIds) {
+            if (suppliedIds.has(stimulusId)) continue;
+            proposal.stimulusDecisions.push({
+                stimulusId,
+                decision: 'ignored',
+                reason: 'Not selected as evidence for this bounded attempt.',
+            });
+            defaultedFields = true;
+        }
+    }
     const decidedStimulusIds = new Set();
     const stimulusDecisionsValid = proposal.stimulusDecisions.every((item) => {
         if (

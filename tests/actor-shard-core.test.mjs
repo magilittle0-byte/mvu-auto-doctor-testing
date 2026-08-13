@@ -678,6 +678,23 @@ test('narrative dossiers bind Doctor-owned evidence IDs locally instead of trust
     assert.deepEqual(checked.proposal.causalChain, candidate.causalChain);
 });
 
+test('narrative dossiers conservatively account for omitted stimulus decisions', () => {
+    const continuity = { threads: [thread('T-narrative-stimulus', 'Ada')] };
+    const actorLedger = actionReadyLedgerForContinuity(continuity);
+    const candidate = selectActorShardCandidates({ continuity, actorLedger, maxWorkers: 1 })[0];
+    candidate.narrativeProfile = true;
+    assert.ok(candidate.stimuli.length > 0);
+    const checked = parseActorShardProposal(JSON.stringify(proposal(candidate, {
+        stimulusDecisions: [],
+    })), { candidate });
+    assert.equal(checked.error, undefined);
+    assert.deepEqual(
+        checked.proposal.stimulusDecisions.map((item) => item.stimulusId).sort(),
+        candidate.stimuli.map((item) => item.id).sort(),
+    );
+    assert.ok(checked.proposal.stimulusDecisions.every((item) => item.decision === 'ignored'));
+});
+
 test('an explicitly empty interaction allow-list rejects invented actors', () => {
     const continuity = { threads: [thread('T-alone', 'Ada')] };
     const actorLedger = actionReadyLedgerForContinuity(continuity);
