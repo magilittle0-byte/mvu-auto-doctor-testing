@@ -2990,6 +2990,9 @@ function doctorRuntimeCriticalFingerprint() {
         stage3RecallSelection.toString(),
         generateWorldRecallPacket.toString(),
         actorActionCandidatesFromShard.toString(),
+        stage3SettlementProofMatchesTarget.toString(),
+        stage3PersistedPackageForTarget.toString(),
+        stage3CommittedCheckpointIsPriorTerminal.toString(),
         runContinuityTarget.toString(),
         commitPreparedWorldCandidate.toString(),
         precomposeNextTurnConsumer.toString(),
@@ -13533,12 +13536,11 @@ function stage3CanonicalSettlementProof(ledger, results = [], captured) {
     };
 }
 
-function stage3SettlementProofMatchesLedger(proof, ledger, captured) {
+function stage3SettlementProofMatchesTarget(proof, ledger, captured) {
     const producerTarget = stage3AcceptedTarget(captured);
     const target = actorActionTargetOf(captured);
     if (!proof || !producerTarget || !target
-        || !stage3AcceptedTargetsMatch(proof.producerTarget, producerTarget)
-        || actorLedgerDigest(ledger) !== proof.actorLedgerDigest) return false;
+        || !stage3AcceptedTargetsMatch(proof.producerTarget, producerTarget)) return false;
     const canonicalize = (attempt, result) => ({
         attemptId: String(attempt?.id || result?.attemptId || ''),
         status: String(result?.status || ''),
@@ -13564,6 +13566,11 @@ function stage3SettlementProofMatchesLedger(proof, ledger, captured) {
         && pendingActorActionAttempts(ledger, { target }).attempts.length === 0;
 }
 
+function stage3SettlementProofMatchesLedger(proof, ledger, captured) {
+    return actorLedgerDigest(ledger) === proof?.actorLedgerDigest
+        && stage3SettlementProofMatchesTarget(proof, ledger, captured);
+}
+
 function stage3PersistedPackageForTarget(state, ledger, captured) {
     const normalized = normalizeContinuityState(state, {
         chatId: captured?.chatId || '',
@@ -13580,6 +13587,41 @@ function stage3PersistedPackageForTarget(state, ledger, captured) {
         )
         ? packet
         : null;
+}
+
+function stage3CommittedCheckpointIsPriorTerminal(checkpoint, state, ledger, captured) {
+    const current = stage3AcceptedTarget(captured);
+    const producer = stage3AcceptedTarget(checkpoint?.stage3ProducerTarget);
+    if (
+        checkpoint?.stage3Phase !== 'world_committed'
+        || !current
+        || !producer
+        || !actorActionTargetMatches(checkpoint?.target, actorActionTargetOf(producer))
+        || current.chatId !== producer.chatId
+        || current.scopeDigest !== producer.scopeDigest
+        || current.index <= producer.index
+        || current.generationSerial <= producer.generationSerial
+    ) return false;
+    const normalized = normalizeContinuityState(state, {
+        chatId: producer.chatId,
+        maxThreads: getSettings().continuityMaxThreads,
+    });
+    return stage3AcceptedTargetsMatch(
+        stage3AcceptedTarget(normalized.lastSource),
+        producer,
+    )
+        && !!normalized.nextTurnInjection
+        && stage3AcceptedTargetsMatch(
+            normalized.nextTurnInjection.producerTarget,
+            producer,
+        )
+        && normalized.nextTurnInjection.sourceContinuityDigest
+            === stage3ContinuityDigestWithoutInjection(normalized)
+        && stage3SettlementProofMatchesTarget(
+            normalized.nextTurnInjection.settlementProof,
+            ledger,
+            producer,
+        );
 }
 
 function stage3NoActorPermitMatches(permit, captured) {
@@ -13690,19 +13732,28 @@ async function runContinuityTarget(captured, {
             compatibilityOnly: true,
         };
     }
-    if (activeCheckpoint) {
-        const checkpointPhase = String(activeCheckpoint.stage3Phase || '');
+    const priorCommittedTerminal = activeCheckpoint
+        ? stage3CommittedCheckpointIsPriorTerminal(
+            activeCheckpoint,
+            namespace?.continuity,
+            profileGate.actorLedger,
+            captured,
+        )
+        : false;
+    const currentCheckpoint = priorCommittedTerminal ? null : activeCheckpoint;
+    if (currentCheckpoint) {
+        const checkpointPhase = String(currentCheckpoint.stage3Phase || '');
         const knownPhase = [
             'world_call_reserved',
             'world_candidate_prepared',
             'world_committed',
         ].includes(checkpointPhase);
         const checkpointTargetMatches = actorActionTargetMatches(
-            activeCheckpoint.target,
+            currentCheckpoint.target,
             actorActionTargetOf(captured),
         );
         const checkpointProducerMatches = stage3AcceptedTargetsMatch(
-            activeCheckpoint.stage3ProducerTarget,
+            currentCheckpoint.stage3ProducerTarget,
             stage3AcceptedTarget(captured),
         );
         if (!knownPhase || !checkpointTargetMatches || !checkpointProducerMatches) {
@@ -13715,10 +13766,10 @@ async function runContinuityTarget(captured, {
         }
     }
     if (
-        activeCheckpoint?.stage3Phase === 'world_candidate_prepared'
+        currentCheckpoint?.stage3Phase === 'world_candidate_prepared'
     ) {
         if (!stage3PreparedPhase1StatesMatch(
-            activeCheckpoint,
+            currentCheckpoint,
             namespace,
             profileGate.actorLedger,
             captured,
@@ -13729,16 +13780,16 @@ async function runContinuityTarget(captured, {
             token,
             settings,
             namespace,
-            checkpoint: activeCheckpoint,
+            checkpoint: currentCheckpoint,
             ledger: profileGate.actorLedger,
         });
     }
     if (
-        activeCheckpoint?.stage3Phase === 'world_call_reserved'
+        currentCheckpoint?.stage3Phase === 'world_call_reserved'
     ) {
         return { status: 'failed', reason: 'world_call_reserved_manual_reconciliation', module: 'world' };
     }
-    const committedCheckpoint = activeCheckpoint;
+    const committedCheckpoint = currentCheckpoint;
     const existingPacket = stage3PersistedPackageForTarget(
         namespace?.continuity,
         profileGate.actorLedger,

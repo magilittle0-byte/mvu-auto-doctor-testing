@@ -412,6 +412,9 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /stage3RecallSelection\.toString\(\)/u);
     assert.match(fingerprintSource, /generateWorldRecallPacket\.toString\(\)/u);
     assert.match(fingerprintSource, /actorActionCandidatesFromShard\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3SettlementProofMatchesTarget\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3PersistedPackageForTarget\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3CommittedCheckpointIsPriorTerminal\.toString\(\)/u);
     assert.match(fingerprintSource, /markActorSchedulingNotReachedByProfile\.toString\(\)/u);
     assert.match(fingerprintSource, /createPrivacySafeDiagnosticProjection\.toString\(\)/u);
     assert.match(fingerprintSource, /acceptFinalGeneration\.toString\(\)/u);

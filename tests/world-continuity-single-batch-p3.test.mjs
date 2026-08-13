@@ -12,6 +12,10 @@ import {
     parseContinuityOutput,
 } from '../continuity-core.mjs';
 import {
+    actorLedgerDigest,
+    emptyActorLedger,
+} from '../actor-ledger-core.mjs';
+import {
     extractFirstBalancedJsonObject,
     sovereigntySourceKey,
 } from '../sovereignty-runtime-core.mjs';
@@ -123,13 +127,17 @@ function loadStage3LegacyManualReconciliationRunner(state) {
         stage3LegacyTargetNeedsManualReconciliation: (stored, captured) => (
             stored === state.legacyTarget && captured === state.captured
         ),
+        stage3CommittedCheckpointIsPriorTerminal: () => false,
         ...state.spies,
     };
     vm.runInNewContext(`${code}\nthis.run = runContinuityTarget;`, sandbox);
     return sandbox.run;
 }
 
-function loadStage3PersistedPackageValidator({ normalizer = (value) => value } = {}) {
+function loadStage3PersistedPackageValidator({
+    normalizer = (value) => value,
+    ledgerDigest = null,
+} = {}) {
     const code = sourceSection(
         'function stage3ContinuityDigestWithoutInjection(state) {',
         'function stage3NoActorPermitMatches(permit, captured) {',
@@ -139,7 +147,7 @@ function loadStage3PersistedPackageValidator({ normalizer = (value) => value } =
         continuityContentDigest: (value) => JSON.stringify(value),
         normalizeContinuityState: normalizer,
         getSettings: () => ({ continuityMaxThreads: 4 }),
-        actorLedgerDigest: (ledger) => {
+        actorLedgerDigest: ledgerDigest || ((ledger) => {
             const result = ledger?.actionAttempts?.[0]?.worldAdjudicationResult || {};
             return [
                 'actor-ledger',
@@ -148,7 +156,7 @@ function loadStage3PersistedPackageValidator({ normalizer = (value) => value } =
                 String(result.actorRef?.actorId || ''),
                 String(result.outcome || ''),
             ].join(':');
-        },
+        }),
         fingerprint: (value) => {
             const text = String(value);
             let hash = 0;
@@ -176,8 +184,10 @@ function loadStage3PersistedPackageValidator({ normalizer = (value) => value } =
     vm.runInNewContext(
         `${sourceSection('function stage3AcceptedTarget(captured) {', 'function stage3ContinuityDigestWithoutInjection(state) {')}`
         + `${code}\nthis.stage3CanonicalSettlementProof = stage3CanonicalSettlementProof;`
+        + 'this.stage3SettlementProofMatchesTarget = stage3SettlementProofMatchesTarget;'
         + 'this.stage3SettlementProofMatchesLedger = stage3SettlementProofMatchesLedger;'
         + 'this.stage3PersistedPackageForTarget = stage3PersistedPackageForTarget;'
+        + 'this.stage3CommittedCheckpointIsPriorTerminal = stage3CommittedCheckpointIsPriorTerminal;'
         + 'this.stage3ContinuityDigestWithoutInjection = stage3ContinuityDigestWithoutInjection;',
         sandbox,
     );
@@ -896,6 +906,267 @@ test('committed checkpoint authority cannot be bypassed by an exact persisted wo
         assert.equal(rejected.recallCalls, 0);
         assert.equal(rejected.modelCalls, 0);
         assert.equal(rejected.writes, 0);
+    }
+});
+
+test('a fully committed prior generation becomes history only for a strictly newer accepted turn', async () => {
+    const persisted = loadStage3PersistedPackageValidator({ ledgerDigest: actorLedgerDigest });
+    const previous = {
+        chatId: 'chat-history', index: 1, messageId: 'message-1', swipeId: 0,
+        generationSerial: 1, generationId: 'generation-1', generationType: 'normal',
+        scopeDigest: 'scope-history', contentFingerprint: 'content-1',
+    };
+    const current = {
+        ...previous,
+        index: 2,
+        messageId: 'message-2',
+        generationSerial: 2,
+        generationId: 'generation-2',
+        contentFingerprint: 'content-2',
+    };
+    const committedLedger = emptyActorLedger(previous.chatId);
+    const ledger = structuredClone(committedLedger);
+    ledger.actors.push({
+        id: 'NPC-NEW-TURN',
+        name: '新回合人物',
+        status: 'active',
+        profileStatus: 'ready',
+        profileVersion: 1,
+    });
+    assert.notEqual(
+        actorLedgerDigest(ledger),
+        actorLedgerDigest(committedLedger),
+        'the fixture must prove that a legitimate new-turn P1 ledger change occurred',
+    );
+    const proof = persisted.stage3CanonicalSettlementProof(committedLedger, [], previous);
+    const withoutPacket = {
+        chatId: previous.chatId,
+        turn: 1,
+        lastSource: structuredClone(previous),
+        nextTurnInjection: null,
+    };
+    const packet = {
+        status: 'pending',
+        producerTarget: structuredClone(previous),
+        sourceContinuityDigest: persisted.stage3ContinuityDigestWithoutInjection(withoutPacket),
+        settlementProof: proof,
+    };
+    const continuity = { ...withoutPacket, nextTurnInjection: packet };
+    const checkpoint = {
+        stage3Phase: 'world_committed',
+        target: structuredClone(previous),
+        stage3ProducerTarget: structuredClone(previous),
+    };
+    assert.equal(
+        persisted.stage3CommittedCheckpointIsPriorTerminal(
+            checkpoint, continuity, ledger, current,
+        ),
+        true,
+    );
+
+    for (const [label, candidateCheckpoint, candidateContinuity, candidateCurrent] of [
+        ['same-generation content drift', checkpoint, continuity, {
+            ...previous, contentFingerprint: 'same-generation-drift',
+        }],
+        ['checkpoint target drift', {
+            ...checkpoint, target: { ...previous, contentFingerprint: 'target-drift' },
+        }, continuity, current],
+        ['producer drift', {
+            ...checkpoint, stage3ProducerTarget: { ...previous, contentFingerprint: 'producer-drift' },
+        }, continuity, current],
+        ['missing packet', checkpoint, withoutPacket, current],
+        ['continuity authority drift', checkpoint, {
+            ...continuity, lastSource: { ...previous, contentFingerprint: 'last-source-drift' },
+        }, current],
+        ['older target', checkpoint, continuity, {
+            ...current, index: 0, generationSerial: 0,
+        }],
+    ]) {
+        assert.equal(
+            persisted.stage3CommittedCheckpointIsPriorTerminal(
+                candidateCheckpoint, candidateContinuity, ledger, candidateCurrent,
+            ),
+            false,
+            label,
+        );
+    }
+
+    let recallCalls = 0;
+    let advanceCalls = 0;
+    const namespace = {
+        continuityCheckpoint: structuredClone(checkpoint),
+        continuity: structuredClone(continuity),
+        actorLedger: structuredClone(ledger),
+    };
+    const preparedCheckpoint = { stage3Phase: 'world_candidate_prepared' };
+    const chat = Array.from({ length: current.index + 1 }, () => ({ mes: '' }));
+    chat[current.index] = { mes: 'accepted narrative' };
+    const runner = loadStage3LegacyManualReconciliationRunner({
+        captured: current,
+        namespace,
+        spies: {
+            stage3AcceptedTarget: persisted.stage3AcceptedTarget,
+            stage3AcceptedTargetsMatch: persisted.stage3AcceptedTargetsMatch,
+            stage3AcceptedTargetKey: () => 'current-target',
+            actorActionTargetOf: (value) => ({ ...value }),
+            actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            stage3CommittedCheckpointIsPriorTerminal:
+                persisted.stage3CommittedCheckpointIsPriorTerminal,
+            stage3PersistedPackageForTarget: persisted.stage3PersistedPackageForTarget,
+            getSettings: () => ({
+                continuityMode: 'manual', continuityMaxThreads: 12,
+                worldFactionSlots: 0, worldEnvironmentSlots: 0,
+                actorLedgerMaxActorsPerTurn: 0, actorLedgerExplorationSlots: 0,
+            }),
+            getContext: () => ({ chatId: current.chatId, chat }),
+            stage3LedgerReadbackGate: () => ({
+                ok: true, actorLedger: ledger, noActorPermit: true,
+            }),
+            deepClone: (value) => structuredClone(value),
+            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
+            continuityBase: () => ({ turn: 1, threads: [], world: {} }),
+            mergeMarkerRecords: (value) => value,
+            collectContinuityWorldContext: async () => ({ hasSetting: true }),
+            currentCharacter: () => ({}),
+            continuityFeatureActive: () => true,
+            advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
+            scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
+            detectContinuityDirector: () => 'balanced',
+            pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
+            buildWorldRecallMessages: () => [],
+            generateWorldRecallPacket: async () => {
+                recallCalls += 1;
+                return { digest: 'recall', actorIds: [], threadIds: [], laneIds: [] };
+            },
+            writeChatNamespace: async () => true,
+            stage3FieldState: () => ({ revision: 1, digest: 'same' }),
+            normalizeActorLedger: () => ledger,
+            actorLedgerDigest: () => 'ledger',
+            setContinuityStatus: () => {},
+            buildContinuityMessages: () => [],
+            generateWorldContinuitySingleBatch: async () => {
+                advanceCalls += 1;
+                return '{}';
+            },
+            parseContinuityOutput: () => ({
+                state: { turn: 2, threads: [], world: {} },
+                raw: { world: {}, actionAdjudications: [] },
+            }),
+            stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
+            persistActorActionAttemptsForTurn: async () => {
+                namespace.continuityCheckpoint = preparedCheckpoint;
+                return { ok: true, checkpoint: preparedCheckpoint, ledger };
+            },
+            stage3PreparedWorldCheckpointMatches: () => true,
+            stage3PreparedPhase1StatesMatch: () => true,
+            commitPreparedWorldCandidate: async () => ({
+                status: 'applied', worldModelCalls: 1,
+            }),
+            latestWorldLaneDiagnostics: null,
+            latestActorShardDiagnostics: null,
+        },
+    });
+    const result = await runner(current);
+    assert.equal(result.status, 'applied');
+    assert.equal(recallCalls, 1);
+    assert.equal(advanceCalls, 1);
+
+    const runManualCase = async (candidateContinuity, candidateCurrent, candidateLedger = ledger) => {
+        let modelCalls = 0;
+        const candidateChat = Array.from(
+            { length: Math.max(1, candidateCurrent.index + 1) },
+            () => ({ mes: 'accepted narrative' }),
+        );
+        const manualRunner = loadStage3LegacyManualReconciliationRunner({
+            captured: candidateCurrent,
+            namespace: {
+                continuityCheckpoint: structuredClone(checkpoint),
+                continuity: structuredClone(candidateContinuity),
+            },
+            spies: {
+                stage3AcceptedTarget: persisted.stage3AcceptedTarget,
+                stage3AcceptedTargetsMatch: persisted.stage3AcceptedTargetsMatch,
+                actorActionTargetOf: (value) => ({ ...value }),
+                actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+                stage3CommittedCheckpointIsPriorTerminal:
+                    persisted.stage3CommittedCheckpointIsPriorTerminal,
+                stage3PersistedPackageForTarget: persisted.stage3PersistedPackageForTarget,
+                getSettings: () => ({ continuityMaxThreads: 12 }),
+                getContext: () => ({ chatId: candidateCurrent.chatId, chat: candidateChat }),
+                stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: candidateLedger }),
+                generateWorldRecallPacket: () => { modelCalls += 1; },
+                generateWorldContinuitySingleBatch: () => { modelCalls += 1; },
+            },
+        });
+        return { result: await manualRunner(candidateCurrent), modelCalls };
+    };
+    for (const [label, candidateContinuity, candidateCurrent] of [
+        ['same-generation drift', continuity, {
+            ...previous, contentFingerprint: 'same-generation-drift',
+        }],
+        ['missing packet', withoutPacket, current],
+        ['older target', continuity, {
+            ...current, index: 0, generationSerial: 0,
+        }],
+    ]) {
+        const rejected = await runManualCase(candidateContinuity, candidateCurrent);
+        assert.equal(rejected.result.status, 'failed', label);
+        assert.equal(rejected.result.reason, 'world_committed_manual_reconciliation', label);
+        assert.equal(rejected.modelCalls, 0, label);
+    }
+
+    const settledResult = {
+        attemptId: 'ATT-OLD',
+        id: 'WORLD-OLD',
+        actorRef: { kind: 'actor_ref', actorId: 'NPC-OLD', displayName: '旧人物', aliases: [] },
+        target: structuredClone(previous),
+        status: 'success',
+        outcome: '旧回合已裁决',
+    };
+    const settledLedger = {
+        ...emptyActorLedger(previous.chatId),
+        actionAttempts: [{
+            id: settledResult.attemptId,
+            target: structuredClone(previous),
+            worldAdjudicationResult: structuredClone(settledResult),
+        }],
+    };
+    const settledProof = persisted.stage3CanonicalSettlementProof(
+        settledLedger,
+        [settledResult],
+        previous,
+    );
+    const settledWithoutPacket = {
+        ...withoutPacket,
+        nextTurnInjection: null,
+    };
+    const settledContinuity = {
+        ...settledWithoutPacket,
+        nextTurnInjection: {
+            ...packet,
+            sourceContinuityDigest:
+                persisted.stage3ContinuityDigestWithoutInjection(settledWithoutPacket),
+            settlementProof: settledProof,
+        },
+    };
+    assert.equal(
+        persisted.stage3CommittedCheckpointIsPriorTerminal(
+            checkpoint, settledContinuity, settledLedger, current,
+        ),
+        true,
+        'an intact old-target settlement remains a historical terminal',
+    );
+    const deletedSettlement = { ...settledLedger, actionAttempts: [] };
+    const tamperedSettlement = structuredClone(settledLedger);
+    tamperedSettlement.actionAttempts[0].worldAdjudicationResult.outcome = '被篡改';
+    for (const [label, candidateLedger] of [
+        ['old-target settlement deleted', deletedSettlement],
+        ['old-target settlement tampered', tamperedSettlement],
+    ]) {
+        const rejected = await runManualCase(settledContinuity, current, candidateLedger);
+        assert.equal(rejected.result.status, 'failed', label);
+        assert.equal(rejected.result.reason, 'world_committed_manual_reconciliation', label);
+        assert.equal(rejected.modelCalls, 0, label);
     }
 });
 
