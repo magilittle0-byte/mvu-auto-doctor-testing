@@ -44,6 +44,29 @@ function loadStage3RecallSelection() {
     return sandbox.selectRecall;
 }
 
+function loadStage3PreparedPhase1RevisionGate() {
+    const fieldState = sourceSection(
+        'function stage3FieldState(namespace, field) {',
+        'function stage3PreparedWorldCheckpoint({',
+    );
+    const revisionGate = sourceSection(
+        'function stage3PreparedPhase1StatesMatch(checkpoint, namespace, ledger, captured) {',
+        'async function commitPreparedWorldCandidate(captured, {',
+    );
+    const sandbox = {
+        actorLedgerDigest: (ledger) => String(ledger?.digest || ''),
+        fingerprint: (value) => `field:${String(value)}`,
+        safeJson: (value) => JSON.stringify(value),
+        stage3PreparedWorldCheckpointMatches: () => true,
+    };
+    vm.runInNewContext(
+        `${fieldState}${revisionGate}\nthis.fieldState = stage3FieldState;`
+        + 'this.matches = stage3PreparedPhase1StatesMatch;',
+        sandbox,
+    );
+    return sandbox;
+}
+
 function loadStage3AcceptedTargetHelpers(overrides = {}) {
     const code = sourceSection(
         'function stage3AcceptedTarget(captured) {',
@@ -1201,6 +1224,65 @@ test('P3 normalize and durable readback retain the complete packet and settlemen
         },
     }, { chatId: current.chatId });
     assert.equal(legacy.nextTurnInjection, null, 'legacy packet without generation type is non-restorable');
+});
+
+test('P3 Phase1 readback requires one shared advanced transaction revision', () => {
+    const gate = loadStage3PreparedPhase1RevisionGate();
+    const ledger = { digest: 'actor-ledger-after-phase1', actionAttempts: [] };
+    const continuity = { turn: 4, threads: [] };
+    const continuityDigest = gate.fieldState({ continuity }, 'continuity').digest;
+    const checkpoint = {
+        preparedWorld: {
+            phase1ActorLedgerDigest: ledger.digest,
+            phase1Expected: {
+                actorLedger: { revision: 1, digest: 'actor-before' },
+                continuityCheckpoint: { revision: 5, digest: 'checkpoint-before' },
+                continuity: { revision: 4, digest: continuityDigest },
+            },
+        },
+    };
+    const namespaceAt = ({ actorRevision = 6, checkpointRevision = 6,
+        continuityRevision = 4, actorDigest = ledger.digest,
+        actorLedgerValue = { ...ledger, digest: actorDigest },
+        continuityValue = continuity } = {}) => ({
+        actorLedger: actorLedgerValue,
+        continuity: continuityValue,
+        continuityCheckpoint: checkpoint,
+        fieldRevisions: {
+            actorLedger: actorRevision,
+            continuityCheckpoint: checkpointRevision,
+            continuity: continuityRevision,
+        },
+    });
+
+    assert.equal(
+        gate.matches(checkpoint, namespaceAt(), ledger, {}),
+        true,
+        'global revision 6 is one atomic commit after actor S0=1 and checkpoint S0=5',
+    );
+    assert.equal(gate.matches(checkpoint, namespaceAt({ actorRevision: 6, checkpointRevision: 7 }), ledger, {}), false);
+    assert.equal(gate.matches(checkpoint, namespaceAt({ actorRevision: 1, checkpointRevision: 6 }), ledger, {}), false);
+    assert.equal(gate.matches(checkpoint, namespaceAt({ actorRevision: 6, checkpointRevision: 5 }), ledger, {}), false);
+    assert.equal(gate.matches(checkpoint, namespaceAt({ actorDigest: 'actor-digest-drift' }), ledger, {}), false);
+    assert.equal(gate.matches(checkpoint, namespaceAt({ continuityRevision: 5 }), ledger, {}), false);
+    assert.equal(gate.matches(checkpoint, namespaceAt({ continuityValue: { turn: 5 } }), ledger, {}), false);
+
+    const attemptLedger = {
+        digest: ledger.digest,
+        actionAttempts: [{ id: 'attempt-1', status: 'pending_world' }],
+    };
+    const ordinaryCheckpoint = structuredClone(checkpoint);
+    ordinaryCheckpoint.preparedWorld.phase1Expected.actorLedger.revision = 5;
+    assert.equal(
+        gate.matches(
+            ordinaryCheckpoint,
+            namespaceAt({ actorLedgerValue: attemptLedger }),
+            attemptLedger,
+            {},
+        ),
+        true,
+        'ordinary attempt Phase1 also advances both selected fields from 5 to shared revision 6',
+    );
 });
 
 test('P3 wiring uses Recall then one Advance call, with ATT plus prepared checkpoint before Phase2', () => {

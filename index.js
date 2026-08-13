@@ -14421,16 +14421,20 @@ function stage3PreparedPhase1StatesMatch(checkpoint, namespace, ledger, captured
     const prepared = checkpoint?.preparedWorld;
     const s0 = prepared?.phase1Expected || {};
     if (!stage3PreparedWorldCheckpointMatches(checkpoint, ledger, captured)) return false;
-    const expectedActorRevision = Math.max(0, Number(s0?.actorLedger?.revision) || 0) + 1;
-    const expectedCheckpointRevision = Math.max(0, Number(s0?.continuityCheckpoint?.revision) || 0) + 1;
+    const previousActorRevision = Math.max(0, Number(s0?.actorLedger?.revision) || 0);
+    const previousCheckpointRevision = Math.max(
+        0,
+        Number(s0?.continuityCheckpoint?.revision) || 0,
+    );
     const currentActor = stage3FieldState(namespace, 'actorLedger');
     const currentContinuity = stage3FieldState(namespace, 'continuity');
     const currentCheckpoint = stage3FieldState(namespace, 'continuityCheckpoint');
-    return currentActor.revision === expectedActorRevision
+    return currentActor.revision === currentCheckpoint.revision
+        && currentActor.revision > previousActorRevision
+        && currentCheckpoint.revision > previousCheckpointRevision
         && currentActor.digest === String(prepared.phase1ActorLedgerDigest || '')
         && currentContinuity.revision === Math.max(0, Number(s0?.continuity?.revision) || 0)
-        && currentContinuity.digest === String(s0?.continuity?.digest || '')
-        && currentCheckpoint.revision === expectedCheckpointRevision;
+        && currentContinuity.digest === String(s0?.continuity?.digest || '');
 }
 
 async function commitPreparedWorldCandidate(captured, {
