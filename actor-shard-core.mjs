@@ -350,6 +350,7 @@ export function selectActorShardCandidates({
         byActor.set(id, {
             id,
             name,
+            narrativeProfile: actor?.profileV6?.profileFormat === 'narrative-v1',
             actorRef: clone(registeredActorRef),
             score: Number(scheduling?.score) || 0,
             slot: cleanText(scheduling?.slot, 40) || 'priority',
@@ -748,7 +749,7 @@ export function parseActorShardProposal(output, { candidate } = {}) {
     ));
     if (missingRequired) return { error: 'actor_shard.shape_not_whitelisted' };
     const droppedFields = Object.keys(value).some((key) => !PROPOSAL_KEYS.includes(key));
-    const defaultedFields = locallyDefaulted.length > 0;
+    let defaultedFields = locallyDefaulted.length > 0;
     if (
         cleanText(value.actorId, 180) !== candidate?.id
         || cleanText(value.actorName, 120) !== candidate?.name
@@ -824,7 +825,20 @@ export function parseActorShardProposal(output, { candidate } = {}) {
     ))) {
         return { error: 'actor_shard.resource_invalid' };
     }
-    const capabilityUsed = cleanText(value.capabilityUsed, 160);
+    let capabilityUsed = cleanText(value.capabilityUsed, 160);
+    if (
+        capabilityUsed
+        && candidate?.narrativeProfile === true
+        && !(candidate?.actorState?.capabilities || []).length
+    ) {
+        // The unified world call sometimes fills this optional label from
+        // dossier prose even though the authoritative allow-list is empty.
+        // Discard the untrusted label without granting a capability; world
+        // adjudication still decides the described attempt and its outcome.
+        capabilityUsed = '';
+        locallyDefaulted.push('capabilityUsed');
+        defaultedFields = true;
+    }
     if (
         capabilityUsed
         && !(candidate?.actorState?.capabilities || []).includes(capabilityUsed)

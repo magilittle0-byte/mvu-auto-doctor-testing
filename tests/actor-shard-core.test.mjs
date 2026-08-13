@@ -646,6 +646,20 @@ test('persistent actor proposals whitelist resource costs and capabilities befor
     );
 });
 
+test('narrative dossiers discard an untrusted optional capability label when authority is empty', () => {
+    const continuity = { threads: [thread('T-narrative-capability', 'Ada')] };
+    const actorLedger = actionReadyLedgerForContinuity(continuity);
+    const candidate = selectActorShardCandidates({ continuity, actorLedger, maxWorkers: 1 })[0];
+    candidate.narrativeProfile = true;
+    candidate.actorState.capabilities = [];
+    const checked = parseActorShardProposal(JSON.stringify(proposal(candidate, {
+        capabilityUsed: 'an unregistered prose-only ability label',
+    })), { candidate });
+    assert.equal(checked.error, undefined);
+    assert.equal(checked.proposal.capabilityUsed, '');
+    assert.ok(checked.repairKinds.includes('default-safe-bound-fields'));
+});
+
 test('an explicitly empty interaction allow-list rejects invented actors', () => {
     const continuity = { threads: [thread('T-alone', 'Ada')] };
     const actorLedger = actionReadyLedgerForContinuity(continuity);

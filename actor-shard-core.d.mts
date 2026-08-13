@@ -1,6 +1,7 @@
 export interface ActorShardCandidate {
     id: string;
     name: string;
+    narrativeProfile?: boolean;
     actorRef: {
         kind: 'actor_ref';
         actorId: string;
