@@ -78,6 +78,7 @@ import {
     userPromptSlotMetadata,
 } from './actor-shard-core.mjs';
 import {
+    actorAuthorityAdjudicationSemanticFingerprint,
     actorActionTargetMatches,
     actorActionAttemptWorldView,
     normalizeActorActionTarget,
@@ -3658,6 +3659,7 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileRecoveryCriticalFingerprint(),
         actorProfileGenerationCriticalFingerprint(),
         actorProfileBatchSemanticFingerprint(),
+        actorAuthorityAdjudicationSemanticFingerprint(),
         continuityCoreSemanticFingerprint(),
         hydratedActorProfileDiagnostic.toString(),
         classifyActorRegistryTargetName.toString(),
@@ -3731,6 +3733,7 @@ function doctorRuntimeCriticalFingerprint() {
         stage3PreparedPhase1StatesMatch.toString(),
         stage3ValidateWorldCandidateInMemory.toString(),
         stage3ValidateWorldDraftInMemory.toString(),
+        stage3WorldAdjudicationRepairFields.toString(),
         stage3WorldAdjudicationValidationFailure.toString(),
         stage3WorldValidationExpectedShape.toString(),
         stage3WorldTargetedRepairPatchKeys.toString(),
@@ -13842,23 +13845,54 @@ async function generateWorldContinuitySingleBatch(messages, {
         : { ok: true, validationCode: 'world.candidate.valid' };
     if (!initialValidation?.ok) {
         const validationCode = fixedValidationCode(initialValidation?.validationCode);
-        const repairContext = initialValidation?.repairContext?.family === 'proposal'
-            ? {
+        const sourceRepairContext = initialValidation?.repairContext;
+        let repairContext = null;
+        if (sourceRepairContext?.family === 'proposal') {
+            repairContext = {
                 family: 'proposal',
-                allowedActorIds: [...new Set((initialValidation.repairContext.allowedActorIds || [])
+                allowedActorIds: [...new Set((sourceRepairContext.allowedActorIds || [])
                     .map((actorId) => String(actorId || ''))
                     .filter(Boolean))],
-                targetActorIds: [...new Set((initialValidation.repairContext.targetActorIds || [])
+                targetActorIds: [...new Set((sourceRepairContext.targetActorIds || [])
                     .map((actorId) => String(actorId || ''))
                     .filter(Boolean))],
-                targets: (initialValidation.repairContext.targets || []).map((entry) => ({
+                targets: (sourceRepairContext.targets || []).map((entry) => ({
                     actorId: String(entry?.actorId || ''),
                     validationCode: /^actor_shard\.[a-z0-9_]+$/u.test(
                         String(entry?.validationCode || ''),
                     ) ? String(entry.validationCode) : 'actor_shard.proposal_invalid',
                 })).filter((entry) => entry.actorId),
-            }
-            : null;
+            };
+        } else if (sourceRepairContext?.family === 'adjudication') {
+            repairContext = {
+                family: 'adjudication',
+                allowedActorIds: [...new Set((sourceRepairContext.allowedActorIds || [])
+                    .map((actorId) => String(actorId || ''))
+                    .filter(Boolean))],
+                allowedAttemptIds: [...new Set((sourceRepairContext.allowedAttemptIds || [])
+                    .map((attemptId) => String(attemptId || ''))
+                    .filter(Boolean))],
+                allowedPairs: (sourceRepairContext.allowedPairs || []).map((entry) => ({
+                    actorId: String(entry?.actorId || ''),
+                    attemptId: String(entry?.attemptId || ''),
+                })).filter((entry) => entry.actorId && entry.attemptId),
+                targets: (sourceRepairContext.targets || []).map((entry) => {
+                    const validationCodes = [...new Set((entry?.validationCodes || [])
+                        .map((code) => String(code || ''))
+                        .filter((code) => /^world\.actor\.adjudication[a-z0-9_.:-]*$/u.test(code)))];
+                    return {
+                        actorId: String(entry?.actorId || ''),
+                        attemptId: String(entry?.attemptId || ''),
+                        validationCodes,
+                        repairFields: stage3WorldAdjudicationRepairFields(validationCodes),
+                    };
+                }).filter((entry) => (
+                    (entry.actorId || entry.attemptId)
+                    && entry.validationCodes.length
+                    && entry.repairFields.length
+                )),
+            };
+        }
         const expectedShape = stage3WorldValidationExpectedShape(
             validationCode,
             repairContext,
@@ -13898,9 +13932,13 @@ async function generateWorldContinuitySingleBatch(messages, {
                     : 'Return exactly one JSON repair object as {"repairPatch":{...}} with no validationCode, reason, explanation, turn, or unrelated sibling fields.',
                 '你只修复一个世界连续性JSON候选，不重做整轮推演。',
                 `固定校验码=${validationCode}。只补该缺项或纠正对应字段；不得新增无证据事实。`,
-                ...(repairContext?.targets?.length ? [
+                ...(repairContext?.family === 'proposal' && repairContext.targets.length ? [
                     `仅修复这些ActorId行=${JSON.stringify(repairContext.targets)}。actionProposals是按actorId局部替换，不得返回其他人物。`,
                     '每行只需actorId、intent、candidateAction、stateChanges；其余身份、位置、证据、资源、能力、刺激与目标引用由本地权威材料绑定。wait必须使用空stateChanges；execute/replan必须给非空且具体的新stateChanges。',
+                ] : []),
+                ...(repairContext?.family === 'adjudication' && repairContext.targets.length ? [
+                    `Only repair these failed adjudication rows=${JSON.stringify(repairContext.targets)}. Match by the supplied actorId or attemptId.`,
+                    'Return only each identifier plus its listed repairFields. Existing attemptId/ActorRef/target authority and every valid adjudication field are preserved locally. Do not repeat the full candidate.',
                 ] : []),
                 `最小期望形状=${expectedShape}`,
                 'success/partial必须有非空appliedStateChanges；没有真实增量就改为delayed/blocked，lastTick必须held并与具体未满足条件一致。',
@@ -18180,7 +18218,11 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
             recorded.recorded,
         );
         if (!adjudications.valid) {
-            return stage3WorldAdjudicationValidationFailure(adjudications.errors);
+            return stage3WorldAdjudicationValidationFailure(
+                adjudications.errors,
+                recorded.recorded,
+                workingParsed.raw.actionAdjudications,
+            );
         }
     } else if (pendingActorAttempts.length) {
         const adjudications = validateWorldAdjudicationBatch(
@@ -18188,7 +18230,11 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
             pendingActorAttempts,
         );
         if (!adjudications.valid) {
-            return stage3WorldAdjudicationValidationFailure(adjudications.errors);
+            return stage3WorldAdjudicationValidationFailure(
+                adjudications.errors,
+                pendingActorAttempts,
+                workingParsed.raw?.actionAdjudications,
+            );
         }
     }
     const candidate = stage3ValidateWorldCandidateInMemory(
@@ -18222,7 +18268,63 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
     };
 }
 
-function stage3WorldAdjudicationValidationFailure(errors = []) {
+function stage3WorldAdjudicationRepairFields(validationCodes = []) {
+    const byCode = {
+        risk_missing: ['risk'],
+        costs_invalid: ['costs'],
+        actual_resource_costs_invalid: ['actualResourceCosts'],
+        actual_resource_costs_exceed_attempt: ['actualResourceCosts'],
+        state_changes_invalid: ['appliedStateChanges'],
+        visibility_invalid: ['visibility', 'observerActorIds', 'publicSummary'],
+        observers_missing: ['observerActorIds'],
+        public_summary_missing: ['publicSummary'],
+        duration_invalid: ['durationTurns'],
+        result_summary_missing: ['resultSummary'],
+        applied_state_changes_missing: ['status', 'appliedStateChanges'],
+        action_duration_invalid: ['durationTurns'],
+        observable_consequence_missing: ['observableConsequence'],
+        reveal_path_missing: ['revealPath'],
+    };
+    const fields = [];
+    for (const code of Array.isArray(validationCodes) ? validationCodes : []) {
+        const suffix = String(code || '').replace(/^world\.actor\.adjudication_contract\./u, '');
+        for (const field of byCode[suffix] || []) {
+            if (!fields.includes(field)) fields.push(field);
+        }
+    }
+    return fields;
+}
+
+function stage3WorldAdjudicationValidationFailure(
+    errors = [],
+    attempts = [],
+    decisions = [],
+) {
+    const attemptList = Array.isArray(attempts) ? attempts : [];
+    const attemptById = new Map(attemptList.map((attempt) => [
+        String(attempt?.id || ''),
+        attempt,
+    ]).filter(([attemptId]) => attemptId));
+    const decisionById = new Map((Array.isArray(decisions) ? decisions : []).map((decision) => [
+        String(decision?.attemptId || ''),
+        decision,
+    ]).filter(([attemptId]) => attemptId));
+    const allowedContractCodes = new Set([
+        'risk_missing',
+        'costs_invalid',
+        'actual_resource_costs_invalid',
+        'actual_resource_costs_exceed_attempt',
+        'state_changes_invalid',
+        'visibility_invalid',
+        'observers_missing',
+        'public_summary_missing',
+        'duration_invalid',
+        'result_summary_missing',
+        'applied_state_changes_missing',
+        'action_duration_invalid',
+        'observable_consequence_missing',
+        'reveal_path_missing',
+    ]);
     const firstReason = (Array.isArray(errors) ? errors : [])
         .map((entry) => String(entry?.reason || ''))
         .find((reason) => ({
@@ -18236,10 +18338,55 @@ function stage3WorldAdjudicationValidationFailure(errors = []) {
             world_adjudication_status_invalid: true,
             world_adjudication_contract_invalid: true,
         })[reason]) || 'world_adjudication_invalid';
+    const targets = [];
+    let allErrorsLocallyRepairable = Array.isArray(errors) && errors.length > 0;
+    for (const error of Array.isArray(errors) ? errors : []) {
+        const attemptId = String(error?.attemptId || '');
+        const attempt = attemptById.get(attemptId);
+        const contractCodes = [...new Set((error?.contractCodes || [])
+            .map((code) => String(code || ''))
+            .filter((code) => allowedContractCodes.has(code)))];
+        if (
+            String(error?.reason || '') !== 'world_adjudication_contract_invalid'
+            || !attempt
+            || !decisionById.has(attemptId)
+            || !contractCodes.length
+        ) {
+            allErrorsLocallyRepairable = false;
+            continue;
+        }
+        const validationCodes = contractCodes.map(
+            (code) => `world.actor.adjudication_contract.${code}`,
+        );
+        targets.push({
+            actorId: String(attempt?.actorId || attempt?.actorRef?.actorId || ''),
+            attemptId,
+            validationCodes,
+            repairFields: stage3WorldAdjudicationRepairFields(validationCodes),
+        });
+    }
+    const validationCode = allErrorsLocallyRepairable && targets.length
+        ? targets[0].validationCodes[0]
+        : `world.actor.${firstReason.replace(/^world_adjudication_/u, 'adjudication_')}`;
     return {
         ok: false,
-        validationCode: `world.actor.${firstReason.replace(/^world_adjudication_/u, 'adjudication_')}`,
+        validationCode,
         expectedShape: 'actionAdjudications[]: one object per scheduled actor; actorId,status,risk,costs[],actualResourceCosts[],durationTurns,resultSummary,visibility,observerActorIds[],observableConsequence,revealPath,appliedStateChanges[{kind,summary}]. success/partial requires nonempty appliedStateChanges.',
+        ...(allErrorsLocallyRepairable && targets.length ? {
+            repairContext: {
+                family: 'adjudication',
+                allowedActorIds: attemptList
+                    .map((attempt) => String(attempt?.actorId || attempt?.actorRef?.actorId || ''))
+                    .filter(Boolean),
+                allowedAttemptIds: attemptList.map((attempt) => String(attempt?.id || ''))
+                    .filter(Boolean),
+                allowedPairs: attemptList.map((attempt) => ({
+                    actorId: String(attempt?.actorId || attempt?.actorRef?.actorId || ''),
+                    attemptId: String(attempt?.id || ''),
+                })).filter((entry) => entry.actorId && entry.attemptId),
+                targets,
+            },
+        } : {}),
     };
 }
 
@@ -18262,6 +18409,30 @@ function stage3WorldValidationExpectedShape(validationCode, repairContext = null
         return JSON.stringify({ repairPatch: { actionProposals: rows } });
     }
     if (code.includes('adjudication') || code.includes('settlement')) {
+        if (repairContext?.family === 'adjudication' && repairContext.targets?.length) {
+            const examples = {
+                status: 'success|partial|failure|delayed|blocked',
+                risk: 'actual bounded risk',
+                costs: [],
+                actualResourceCosts: [],
+                appliedStateChanges: [{ kind: 'plan', summary: 'one actual state delta' }],
+                visibility: 'public|private|observer_limited',
+                observerActorIds: [],
+                publicSummary: 'required when visibility is public',
+                durationTurns: 1,
+                resultSummary: 'actual adjudicated result',
+                observableConsequence: 'actual observable evidence',
+                revealPath: 'required for nonpublic background result',
+            };
+            const rows = repairContext.targets.map((target) => {
+                const row = target.attemptId
+                    ? { attemptId: target.attemptId }
+                    : { actorId: target.actorId };
+                for (const field of target.repairFields || []) row[field] = examples[field];
+                return row;
+            });
+            return JSON.stringify({ repairPatch: { actionAdjudications: rows } });
+        }
         return '{"repairPatch":{"actionAdjudications":[one object per scheduled actorId with status,risk,costs,actualResourceCosts,durationTurns,resultSummary,visibility,observerActorIds,observableConsequence,revealPath,appliedStateChanges]}}';
     }
     if (code === 'world.semantic_progress_missing') {
@@ -18396,6 +18567,90 @@ function stage3ApplyWorldTargetedRepairPatch(
                     ? deepClone(repairedByActor.get(String(row.actorId)))
                     : deepClone(row)
             ));
+            continue;
+        }
+        if (
+            key === 'actionAdjudications'
+            && repairContext?.family === 'adjudication'
+            && Array.isArray(repairRaw[key])
+            && Array.isArray(originalRaw.actionAdjudications)
+            && Array.isArray(repairContext.targets)
+            && repairContext.targets.length
+        ) {
+            const targets = repairContext.targets.map((target) => ({
+                actorId: String(target?.actorId || ''),
+                attemptId: String(target?.attemptId || ''),
+                repairFields: stage3WorldAdjudicationRepairFields(target?.validationCodes),
+            })).filter((target) => (
+                (target.actorId || target.attemptId) && target.repairFields.length
+            ));
+            if (targets.length !== repairContext.targets.length) return null;
+            const authoritativePairs = (repairContext.allowedPairs || []).map((entry) => ({
+                actorId: String(entry?.actorId || ''),
+                attemptId: String(entry?.attemptId || ''),
+            })).filter((entry) => entry.actorId && entry.attemptId);
+            if (!authoritativePairs.length) return null;
+            const pairByActorId = new Map();
+            const pairByAttemptId = new Map();
+            for (const pair of authoritativePairs) {
+                if (
+                    pairByActorId.has(pair.actorId)
+                    || pairByAttemptId.has(pair.attemptId)
+                ) return null;
+                pairByActorId.set(pair.actorId, pair);
+                pairByAttemptId.set(pair.attemptId, pair);
+            }
+            const resolveAuthoritativePair = (value) => {
+                const actorId = String(value?.actorId || '');
+                const attemptId = String(value?.attemptId || '');
+                if (!actorId && !attemptId) return null;
+                const actorPair = actorId ? pairByActorId.get(actorId) : null;
+                const attemptPair = attemptId ? pairByAttemptId.get(attemptId) : null;
+                if ((actorId && !actorPair) || (attemptId && !attemptPair)) return null;
+                if (actorPair && attemptPair && actorPair !== attemptPair) return null;
+                return actorPair || attemptPair;
+            };
+            const targetByAttemptId = new Map();
+            for (const target of targets) {
+                const pair = resolveAuthoritativePair(target);
+                if (!pair || targetByAttemptId.has(pair.attemptId)) return null;
+                targetByAttemptId.set(pair.attemptId, target);
+            }
+            const repairedByTarget = new Map();
+            for (const row of repairRaw[key]) {
+                if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+                const pair = resolveAuthoritativePair(row);
+                if (!pair) return null;
+                const target = targetByAttemptId.get(pair.attemptId);
+                if (!target) continue;
+                const targetKey = pair.attemptId;
+                if (repairedByTarget.has(targetKey)) return null;
+                if (target.repairFields.some((field) => !Object.hasOwn(row, field))) return null;
+                const projected = {};
+                for (const field of target.repairFields) projected[field] = deepClone(row[field]);
+                repairedByTarget.set(targetKey, projected);
+            }
+            if (repairedByTarget.size !== targets.length) return null;
+            const originalTargetKeys = new Set();
+            const mergedAdjudications = [];
+            for (const row of originalRaw.actionAdjudications) {
+                const pair = resolveAuthoritativePair(row);
+                if (!pair) return null;
+                const target = targetByAttemptId.get(pair.attemptId);
+                if (!target) {
+                    mergedAdjudications.push(deepClone(row));
+                    continue;
+                }
+                originalTargetKeys.add(pair.attemptId);
+                mergedAdjudications.push({
+                    ...deepClone(row),
+                    ...deepClone(repairedByTarget.get(pair.attemptId)),
+                });
+            }
+            if ([...targetByAttemptId.keys()].some((attemptId) => (
+                !originalTargetKeys.has(attemptId)
+            ))) return null;
+            next.actionAdjudications = mergedAdjudications;
             continue;
         }
         next[key] = deepClone(repairRaw[key]);

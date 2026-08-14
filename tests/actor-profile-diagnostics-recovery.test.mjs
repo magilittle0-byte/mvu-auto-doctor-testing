@@ -644,6 +644,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
         'function diagnosticPayload',
     );
     assert.match(fingerprintSource, /actorProfileRecoveryCriticalFingerprint\(\)/u);
+    assert.match(fingerprintSource, /actorAuthorityAdjudicationSemanticFingerprint\(\)/u);
     assert.match(fingerprintSource, /hydratedActorProfileDiagnostic\.toString\(\)/u);
     assert.match(
         fingerprintSource,
@@ -803,12 +804,16 @@ test('prompt context and ticket normalizer implementations change generation and
     );
     const helperNames = [...new Set([...runtimeSource.matchAll(/\b([A-Za-z_$][\w$]*)\.toString\(\)/gu)]
         .map((match) => match[1]))];
-    const runtimeFor = (generationFingerprint) => Function(
+    const runtimeFor = (
+        generationFingerprint,
+        authorityFingerprint = 'authority-fingerprint',
+    ) => Function(
         'VERSION',
         'fingerprint',
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
         'actorProfileBatchSemanticFingerprint',
+        'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
@@ -818,6 +823,7 @@ test('prompt context and ticket normalizer implementations change generation and
         () => 'recovery-fingerprint',
         () => generationFingerprint,
         () => 'batch-fingerprint',
+        () => authorityFingerprint,
         () => 'continuity-fingerprint',
         ...helperNames.map((name) => Function(`return function ${name}(){}`)()),
     )();
@@ -831,6 +837,7 @@ test('prompt context and ticket normalizer implementations change generation and
     assert.notEqual(changedPromptContext, baselineGeneration);
     assert.notEqual(changedTicketNormalizer, baselineGeneration);
     const baselineRuntime = runtimeFor(baselineGeneration);
+    assert.notEqual(runtimeFor(baselineGeneration, 'changed-authority'), baselineRuntime);
     assert.notEqual(runtimeFor(changedPromptContext), baselineRuntime);
     assert.notEqual(runtimeFor(changedTicketNormalizer), baselineRuntime);
 });
@@ -872,6 +879,7 @@ test('runtime fingerprint changes with the production profile route planner and 
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
         'actorProfileBatchSemanticFingerprint',
+        'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
@@ -881,6 +889,7 @@ test('runtime fingerprint changes with the production profile route planner and 
         () => 'recovery-fingerprint',
         () => 'generation-fingerprint',
         () => 'batch-fingerprint',
+        () => 'authority-fingerprint',
         () => 'continuity-fingerprint',
         ...helperNames.map((name) => overrides[name]
             || Function(`return function ${name}(){}`)()),
@@ -914,6 +923,7 @@ test('continuity recovery normalizer mutations change semantic and runtime finge
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
         'actorProfileBatchSemanticFingerprint',
+        'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
@@ -923,6 +933,7 @@ test('continuity recovery normalizer mutations change semantic and runtime finge
         () => 'recovery-fingerprint',
         () => 'generation-fingerprint',
         () => 'batch-fingerprint',
+        () => 'authority-fingerprint',
         () => continuityFingerprint,
         ...helperNames.map((name) => helperOverrides[name]
             || Function(`return function ${name}(){}`)()),
@@ -1023,6 +1034,7 @@ test('resolver closure and group failure attribution helpers change batch and ru
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
         'actorProfileBatchSemanticFingerprint',
+        'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
@@ -1032,6 +1044,7 @@ test('resolver closure and group failure attribution helpers change batch and ru
         () => 'recovery-fingerprint',
         () => 'generation-fingerprint',
         () => batchFingerprint,
+        () => 'authority-fingerprint',
         () => 'continuity-fingerprint',
         ...helperNames.map((name) => Function(`return function ${name}(){}`)()),
     )();

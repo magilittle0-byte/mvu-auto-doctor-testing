@@ -29,13 +29,15 @@ export function validateActorActionAttempt(value: unknown): {
 export function validateWorldAdjudication(value: unknown, attempt: unknown): {
     valid: boolean;
     reason: string;
+    contractCodes?: string[];
     decision?: object;
 };
 export function validateWorldAdjudicationBatch(values: unknown, attempts: unknown): {
     valid: boolean;
     decisions: object[];
-    errors: Array<{ attemptId: string; reason: string }>;
+    errors: Array<{ attemptId: string; reason: string; contractCodes?: string[] }>;
 };
+export function actorAuthorityAdjudicationSemanticFingerprint(): string;
 export function adjudicateActorActionAttempt(attempt: unknown, options?: object): object;
 export function actorActionNarrativeInjection(attempt: unknown, result: unknown): object;
 export function discloseActorActionResult(result: unknown, options?: object): object;

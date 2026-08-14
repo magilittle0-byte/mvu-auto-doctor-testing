@@ -633,6 +633,7 @@ test('public background adjudication is directly observable while private backgr
     assert.deepEqual(validateWorldAdjudication(privateDecision, attempt), {
         valid: false,
         reason: 'world_adjudication_contract_invalid',
+        contractCodes: ['reveal_path_missing'],
     });
 });
 

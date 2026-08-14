@@ -463,35 +463,58 @@ export function validateWorldAdjudication(value, attempt) {
             && WORLD_STATE_CHANGE_KINDS.has(cleanText(entry.kind, 80))
             && cleanText(entry.summary, 500).length >= 4
         ));
+    const contractCodes = [];
+    if (!cleanText(decision.risk, 300)) contractCodes.push('risk_missing');
     if (
-        !cleanText(decision.risk, 300)
-        || !Array.isArray(decision.costs)
-        || !Array.isArray(decision.actualResourceCosts)
+        !Array.isArray(decision.costs)
         || decision.costs.some((entry) => (
             typeof entry !== 'string' || !cleanText(entry, 300)
         ))
-        || rawStateChanges.length !== appliedStateChanges.length
+    ) contractCodes.push('costs_invalid');
+    if (
+        !Array.isArray(decision.actualResourceCosts)
         || rawActualResourceCosts.length !== actualResourceCosts.length
-        || !resourceCostsWithinAttempt
-        || !['public', 'private', 'observer_limited'].includes(visibility)
-        || (visibility === 'observer_limited' && !observerActorIds.length)
-        || (strictTarget && visibility === 'public' && !cleanText(decision.publicSummary, 700))
-        || !Number.isFinite(durationTurns)
-        || durationTurns < 0
-        || !cleanText(decision.resultSummary, 700)
-        || (['settled', 'partial'].includes(status) && !appliedStateChanges.length)
-        || (
-            ['settled', 'partial'].includes(status)
-            && attempt?.intent !== 'wait'
-            && durationTurns < 1
-        )
-        || !cleanText(decision.observableConsequence, 500)
-        || (
-            ['background_private', 'background_public'].includes(attempt?.route)
-            && visibility !== 'public'
-            && !cleanText(decision.revealPath, 500)
-        )
-    ) return { valid: false, reason: 'world_adjudication_contract_invalid' };
+    ) contractCodes.push('actual_resource_costs_invalid');
+    if (!resourceCostsWithinAttempt) contractCodes.push('actual_resource_costs_exceed_attempt');
+    if (rawStateChanges.length !== appliedStateChanges.length) {
+        contractCodes.push('state_changes_invalid');
+    }
+    if (!['public', 'private', 'observer_limited'].includes(visibility)) {
+        contractCodes.push('visibility_invalid');
+    }
+    if (visibility === 'observer_limited' && !observerActorIds.length) {
+        contractCodes.push('observers_missing');
+    }
+    if (strictTarget && visibility === 'public' && !cleanText(decision.publicSummary, 700)) {
+        contractCodes.push('public_summary_missing');
+    }
+    if (!Number.isFinite(durationTurns) || durationTurns < 0) {
+        contractCodes.push('duration_invalid');
+    }
+    if (!cleanText(decision.resultSummary, 700)) contractCodes.push('result_summary_missing');
+    if (['settled', 'partial'].includes(status) && !appliedStateChanges.length) {
+        contractCodes.push('applied_state_changes_missing');
+    }
+    if (
+        ['settled', 'partial'].includes(status)
+        && attempt?.intent !== 'wait'
+        && durationTurns < 1
+    ) contractCodes.push('action_duration_invalid');
+    if (!cleanText(decision.observableConsequence, 500)) {
+        contractCodes.push('observable_consequence_missing');
+    }
+    if (
+        ['background_private', 'background_public'].includes(attempt?.route)
+        && visibility !== 'public'
+        && !cleanText(decision.revealPath, 500)
+    ) contractCodes.push('reveal_path_missing');
+    if (contractCodes.length) {
+        return {
+            valid: false,
+            reason: 'world_adjudication_contract_invalid',
+            contractCodes,
+        };
+    }
     return {
         valid: true,
         decision: {
@@ -545,7 +568,13 @@ export function validateWorldAdjudicationBatch(values, attempts) {
     for (const attempt of attemptList) {
         const checked = validateWorldAdjudication(decisionById.get(attempt.id), attempt);
         if (!checked.valid) {
-            errors.push({ attemptId: attempt.id, reason: checked.reason });
+            errors.push({
+                attemptId: attempt.id,
+                reason: checked.reason,
+                ...(Array.isArray(checked.contractCodes)
+                    ? { contractCodes: [...checked.contractCodes] }
+                    : {}),
+            });
             continue;
         }
         normalized.push(checked.decision);
@@ -555,6 +584,13 @@ export function validateWorldAdjudicationBatch(values, attempts) {
         decisions: normalized,
         errors,
     };
+}
+
+export function actorAuthorityAdjudicationSemanticFingerprint() {
+    return fingerprint([
+        validateWorldAdjudication.toString(),
+        validateWorldAdjudicationBatch.toString(),
+    ]);
 }
 
 export function adjudicateActorActionAttempt(attempt, {

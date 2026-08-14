@@ -674,7 +674,7 @@ function loadWorldGenerator(callModel) {
         'async function persistActorRegistryForTurn(captured, {',
     );
     const repairHelpers = sourceSection(
-        'function stage3WorldValidationExpectedShape(validationCode, repairContext = null)',
+        'function stage3WorldAdjudicationRepairFields(validationCodes = [])',
         'async function commitPreparedWorldCandidate(captured, {',
     );
     const sandbox = {
@@ -694,6 +694,19 @@ function loadWorldGenerator(callModel) {
         sandbox,
     );
     return sandbox.generateWorldContinuitySingleBatch;
+}
+
+function loadStage3AdjudicationFailureMapper() {
+    const code = sourceSection(
+        'function stage3WorldAdjudicationRepairFields(validationCodes = [])',
+        'function stage3WorldValidationExpectedShape(validationCode, repairContext = null)',
+    );
+    const sandbox = {};
+    vm.runInNewContext(
+        `${code}\nthis.mapFailure = stage3WorldAdjudicationValidationFailure;`,
+        sandbox,
+    );
+    return sandbox.mapFailure;
 }
 
 function loadAttemptlessPhase1RebaseHarness({
@@ -1453,7 +1466,7 @@ test('proposal repair replaces only invalid ActorId rows with the production par
 test('production draft validator exposes only fixed invalid proposal ActorId subcodes to repair', () => {
     const code = sourceSection(
         'function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, parsed, {',
-        'function stage3WorldAdjudicationValidationFailure(errors = []) {',
+        'function stage3WorldAdjudicationRepairFields(validationCodes = [])',
     );
     const sandbox = {
         deepClone: (value) => structuredClone(value),
@@ -1540,6 +1553,180 @@ test('proposal repair rejects missing duplicate or unknown target rows without a
         ));
         assert.equal(calls, 2);
     }
+
+});
+
+test('adjudication contract failures expose fixed fields and repair only the failed ActorRef row', async () => {
+    const attempts = [{
+        id: 'ATT-A', actorId: 'actor-a', actorRef: { kind: 'actor_ref', actorId: 'actor-a' },
+        route: 'foreground_attempt', intent: 'execute', resourceCosts: [],
+    }, {
+        id: 'ATT-B', actorId: 'actor-b', actorRef: { kind: 'actor_ref', actorId: 'actor-b' },
+        route: 'foreground_attempt', intent: 'execute', resourceCosts: [],
+    }];
+    const decision = (attemptId, actorId, appliedStateChanges) => ({
+        attemptId, actorId, status: 'success', risk: 'bounded', costs: [],
+        actualResourceCosts: [], durationTurns: 1, visibility: 'private',
+        observerActorIds: [], resultSummary: 'bounded result',
+        observableConsequence: 'bounded trace', revealPath: '', appliedStateChanges,
+    });
+    const original = JSON.parse(validWorldOutput(7));
+    original.actionAdjudications = [
+        { ...decision('', 'actor-a', []), attemptId: undefined },
+        {
+            ...decision('', 'actor-b', [{ kind: 'plan', summary: 'valid plan change' }]),
+            attemptId: undefined,
+            marker: 'keep-valid',
+        },
+    ];
+    const mapFailure = loadStage3AdjudicationFailureMapper();
+    const bindAuthority = (rows) => rows.map((row) => ({
+        ...row,
+        attemptId: row.actorId === 'actor-a' ? 'ATT-A' : 'ATT-B',
+    }));
+    const firstBoundRows = bindAuthority(original.actionAdjudications);
+    const firstBatch = validateWorldAdjudicationBatch(firstBoundRows, attempts);
+    const firstFailure = mapFailure(firstBatch.errors, attempts, firstBoundRows);
+    assert.equal(firstFailure.validationCode, 'world.actor.adjudication_contract.applied_state_changes_missing');
+    assert.equal(firstFailure.repairContext.family, 'adjudication');
+    assert.deepEqual(Array.from(firstFailure.repairContext.allowedPairs, (entry) => ({ ...entry })), [
+        { actorId: 'actor-a', attemptId: 'ATT-A' },
+        { actorId: 'actor-b', attemptId: 'ATT-B' },
+    ]);
+    assert.deepEqual(Array.from(firstFailure.repairContext.targets[0].repairFields), [
+        'status', 'appliedStateChanges',
+    ]);
+    assert.equal(JSON.stringify(firstFailure.repairContext).includes('displayName'), false);
+
+    let calls = 0;
+    const callMessages = [];
+    const generate = loadWorldGenerator(async (messages) => {
+        calls += 1;
+        callMessages.push(messages);
+        return calls === 1
+            ? JSON.stringify(original)
+            : JSON.stringify({
+                repairPatch: {
+                    actionAdjudications: [{
+                        ...original.actionAdjudications[1],
+                        marker: 'must-not-overwrite-valid-adjudication',
+                    }, {
+                        attemptId: 'ATT-A',
+                        status: 'delayed',
+                        appliedStateChanges: [],
+                        risk: 'must-not-overwrite-existing-risk',
+                    }],
+                },
+            });
+    });
+    const output = await generate([], {
+        captured,
+        settings: generatorSettings,
+        scheduledActorIds: ['actor-a', 'actor-b'],
+        validateCandidateInMemory: (candidateOutput) => {
+            const rows = parseContinuityOutput(candidateOutput).raw?.actionAdjudications || [];
+            const boundRows = bindAuthority(rows);
+            const checked = validateWorldAdjudicationBatch(boundRows, attempts);
+            return checked.valid
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : mapFailure(checked.errors, attempts, boundRows);
+        },
+    });
+    const finalRows = parseContinuityOutput(output).raw.actionAdjudications;
+    assert.equal(calls, 2);
+    assert.equal(finalRows[0].status, 'delayed');
+    assert.equal(finalRows[0].attemptId, undefined, 'scheduled ATT authority stays local');
+    assert.equal(finalRows[0].risk, 'bounded', 'unlisted valid fields cannot be overwritten');
+    const expectedValidRow = structuredClone(original.actionAdjudications[1]);
+    delete expectedValidRow.attemptId;
+    assert.deepEqual(finalRows[1], expectedValidRow);
+    assert.match(callMessages[1][0].content, /applied_state_changes_missing/u);
+    assert.match(callMessages[1][0].content, /ATT-A/u);
+    assert.doesNotMatch(callMessages[1][0].content, /ATT-B/u);
+});
+
+test('adjudication local repair rejects missing duplicate and unknown failed rows at two calls', async () => {
+    const repairContext = {
+        family: 'adjudication',
+        allowedActorIds: ['actor-a', 'actor-b'],
+        allowedAttemptIds: ['ATT-A', 'ATT-B'],
+        allowedPairs: [
+            { actorId: 'actor-a', attemptId: 'ATT-A' },
+            { actorId: 'actor-b', attemptId: 'ATT-B' },
+        ],
+        targets: [{
+            actorId: 'actor-a',
+            attemptId: 'ATT-A',
+            validationCodes: ['world.actor.adjudication_contract.risk_missing'],
+            repairFields: ['risk'],
+        }],
+    };
+    for (const rows of [
+        [],
+        [{ attemptId: 'ATT-A', risk: 'one' }, { actorId: 'actor-a', risk: 'duplicate' }],
+        [{ attemptId: 'ATT-UNKNOWN', risk: 'unknown' }],
+        [{ actorId: 'actor-unknown', attemptId: 'ATT-A', risk: 'wrong actor' }],
+        [{ actorId: 'actor-a', attemptId: 'ATT-UNKNOWN', risk: 'wrong attempt' }],
+        [
+            { actorId: 'actor-a', attemptId: 'ATT-A', risk: 'fixed target' },
+            { actorId: 'actor-b', attemptId: 'ATT-A', risk: 'mismatched redundant row' },
+        ],
+    ]) {
+        let calls = 0;
+        const original = JSON.parse(validWorldOutput(7));
+        original.actionAdjudications = [
+            { attemptId: 'ATT-A', actorId: 'actor-a', risk: '' },
+            { attemptId: 'ATT-B', actorId: 'actor-b', risk: 'valid' },
+        ];
+        const generate = loadWorldGenerator(async () => {
+            calls += 1;
+            return calls === 1
+                ? JSON.stringify(original)
+                : JSON.stringify({ repairPatch: { actionAdjudications: rows } });
+        });
+        await assert.rejects(generate([], {
+            captured,
+            settings: generatorSettings,
+            validateCandidateInMemory: () => ({
+                ok: false,
+                validationCode: 'world.actor.adjudication_contract.risk_missing',
+                repairContext,
+            }),
+        }), (error) => (
+            error?.validationReason === 'world.targeted_repair.patch_invalid'
+            && error?.initialValidationCode === 'world.actor.adjudication_contract.risk_missing'
+            && error?.repairFamily === 'adjudication'
+        ));
+        assert.equal(calls, 2);
+    }
+
+    let originalMismatchCalls = 0;
+    const mismatchedOriginal = JSON.parse(validWorldOutput(7));
+    mismatchedOriginal.actionAdjudications = [
+        { actorId: 'actor-a', attemptId: 'ATT-B', risk: '' },
+    ];
+    const originalMismatch = loadWorldGenerator(async () => {
+        originalMismatchCalls += 1;
+        return originalMismatchCalls === 1
+            ? JSON.stringify(mismatchedOriginal)
+            : JSON.stringify({
+                repairPatch: {
+                    actionAdjudications: [{
+                        actorId: 'actor-a', attemptId: 'ATT-A', risk: 'fixed',
+                    }],
+                },
+            });
+    });
+    await assert.rejects(originalMismatch([], {
+        captured,
+        settings: generatorSettings,
+        validateCandidateInMemory: () => ({
+            ok: false,
+            validationCode: 'world.actor.adjudication_contract.risk_missing',
+            repairContext,
+        }),
+    }), (error) => error?.validationReason === 'world.targeted_repair.patch_invalid');
+    assert.equal(originalMismatchCalls, 2);
 });
 
 test('targeted repair mechanically extracts explicit wrappers aliases and array roots', async () => {
@@ -1787,13 +1974,17 @@ test('the production authority validator rejects success with empty applied stat
     }], [attempt]);
     assert.equal(result.valid, false);
     assert.equal(result.errors[0].reason, 'world_adjudication_contract_invalid');
+    assert.deepEqual(result.errors[0].contractCodes, ['applied_state_changes_missing']);
     const helper = sourceSection(
         'function stage3ValidateWorldDraftInMemory(',
         'async function commitPreparedWorldCandidate(',
     );
     assert.match(helper, /validateWorldAdjudicationBatch/u);
     assert.match(helper, /stage3ValidateWorldCandidateInMemory/u);
-    assert.match(helper, /stage3WorldAdjudicationValidationFailure\(adjudications\.errors\)/u);
+    assert.match(
+        helper,
+        /stage3WorldAdjudicationValidationFailure\([\s\S]*?adjudications\.errors,[\s\S]*?recorded\.recorded/u,
+    );
     assert.match(helper, /world_adjudication_contract_invalid/u);
     assert.match(helper, /world\.actor\.\$\{firstReason/u);
     const generator = sourceSection(
