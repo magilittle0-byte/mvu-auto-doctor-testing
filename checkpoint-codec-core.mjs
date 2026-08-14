@@ -179,10 +179,31 @@ export async function decodeContentAddressedJson(ref, blob) {
     if (blob.encoding === 'json') {
         json = String(blob.data || '');
     } else if (blob.encoding === 'gzip-base64' && typeof DecompressionStream === 'function') {
-        const decompressed = await new Response(
-            new Blob([base64ToBytes(blob.data)]).stream()
-                .pipeThrough(new DecompressionStream('gzip')),
-        ).arrayBuffer();
+        // K1 修复：截断/损坏的 base64 或 gzip 负载会让 DecompressionStream 抛出
+        // 底层原始错误（如 "unexpected end of file"），调用方无法区分"数据损坏"
+        // 与"格式问题"。统一归一为领域化错误码，便于诊断与日志聚合。
+        let raw;
+        try {
+            raw = base64ToBytes(blob.data);
+        } catch {
+            throw new Error('checkpoint_blob_corrupt:base64');
+        }
+        // storedBytes 若被外部篡改且与实际不符，视为可疑损坏并如实报错。
+        if (
+            Number.isFinite(blob.storedBytes)
+            && blob.storedBytes !== raw.length
+        ) {
+            throw new Error('checkpoint_blob_corrupt:length_mismatch');
+        }
+        let decompressed;
+        try {
+            decompressed = await new Response(
+                new Blob([raw]).stream()
+                    .pipeThrough(new DecompressionStream('gzip')),
+            ).arrayBuffer();
+        } catch {
+            throw new Error('checkpoint_blob_corrupt:gzip');
+        }
         json = new TextDecoder().decode(decompressed);
     } else {
         throw new Error('checkpoint_encoding_unsupported');
@@ -192,3 +213,4 @@ export async function decodeContentAddressedJson(ref, blob) {
     if (expected !== ref) throw new Error('checkpoint_digest_mismatch');
     return JSON.parse(json);
 }
+

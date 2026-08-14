@@ -44,6 +44,24 @@ export function validateTransactionHostBridge(host) {
 export class InMemoryIdempotencyStore {
     #records = new Map();
 
+    // T2 修复：claimed 占位若无 TTL，一旦 claim 后进程崩溃/异常而未 settle/release，
+    // 该 scope 会永久停留在 claimed，导致后续同一事务被永久判 duplicate-inflight。
+    // 引入可配置 TTL：超过 claimTtlMs 的孤儿 claimed 记录视为过期，可被回收重声明。
+    constructor({ claimTtlMs = 60000, now = () => Date.now() } = {}) {
+        this.claimTtlMs = Number.isFinite(claimTtlMs) && claimTtlMs > 0
+            ? claimTtlMs
+            : 60000;
+        this.now = now;
+    }
+
+    #isExpiredClaim(record) {
+        return (
+            record?.status === 'claimed'
+            && Number.isFinite(record.claimedAt)
+            && (this.now() - record.claimedAt) > this.claimTtlMs
+        );
+    }
+
     async get(scope) {
         const record = this.#records.get(scope);
         return record ? deepClone(record) : null;
@@ -51,21 +69,27 @@ export class InMemoryIdempotencyStore {
 
     async claim(scope, transactionId) {
         const current = this.#records.get(scope);
-        if (!current) {
+        // 过期孤儿 claim 回收：视为不存在，允许新事务重新占位。
+        if (current && this.#isExpiredClaim(current)) {
+            this.#records.delete(scope);
+        }
+        const effective = this.#records.get(scope);
+        if (!effective) {
             const claimed = {
                 status: 'claimed',
                 transactionId,
+                claimedAt: this.now(),
             };
             this.#records.set(scope, claimed);
             return deepClone(claimed);
         }
         if (
-            current.status === 'claimed'
-            && current.transactionId === transactionId
+            effective.status === 'claimed'
+            && effective.transactionId === transactionId
         ) {
-            return { ...deepClone(current), owner: true };
+            return { ...deepClone(effective), owner: true };
         }
-        return deepClone(current);
+        return deepClone(effective);
     }
 
     async release(scope, transactionId) {
@@ -243,6 +267,23 @@ export class TransactionKernel {
             domainResults,
         });
         if (prepared.status === 'prepared') {
+            // T1 修复：prepare 在写入队列之外执行，若同一事务 id 已存在
+            // 活跃（未终态）handle，无条件 set 会静默顶掉前一个事务的恢复记录，
+            // 使其 commit/rollback 时拿到的是别人的 writePlan/beforeTouched。
+            // 因此：同 id 且仍活跃 => 拒绝本次 prepare，而非覆盖。
+            const existing = this.#handles.get(prepared.transaction.id);
+            const existingActive = existing
+                && ['prepared', 'committing'].includes(existing.transaction?.status);
+            if (existingActive) {
+                return terminalResult(prepared.transaction, [{
+                    code: 'transaction.prepare_handle_conflict',
+                    path: '$.id',
+                    severity: 'error',
+                    message: '同一事务 id 已存在活跃的 prepared 句柄；禁止静默覆盖，请先 commit/abort/rollback 或使用新 idempotencyKey。',
+                }], {
+                    status: 'aborted',
+                });
+            }
             const handle = {
                 transaction: prepared.transaction,
                 writePlan: prepared.prepared.writePlan,
@@ -251,6 +292,7 @@ export class TransactionKernel {
             };
             this.#handles.set(handle.transaction.id, handle);
         } else {
+
             await this.#persistTerminal(prepared.transaction);
         }
         return prepared;
@@ -636,7 +678,10 @@ export class TransactionKernel {
                 branchId: handle.transaction.branchId,
                 target: deepClone(handle.transaction.target),
                 status: 'rollback-requested',
-                writeAttempted: true,
+                // T3 修复：只有 committed 事务才真正写入过；prepared 事务
+                // 尚未执行 writeExact，必须如实标记 writeAttempted:false，
+                // 否则崩溃恢复会把未写入的事务误判为"写入中崩溃"而误回滚。
+                writeAttempted: handle.transaction.status === 'committed',
                 beforeTouched: deepClone(handle.beforeTouched),
                 afterTouched: deepClone(handle.afterTouched),
                 createdAt: this.now(),
