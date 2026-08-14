@@ -94,7 +94,8 @@ const SAFE_PROFILE_RETRY_CODES = new Set([
     'actor_profile.actor_ref_mismatch',
 ]);
 
-// Transport rows are bounded, not actors. Every row remains in the same
+// Transport packets are bounded by ActorRef, not by the total actor set. Every
+// ActorRef x module row remains in the same
 // transaction-local working clone and the batch is persisted only after all
 // chunks validate. This mirrors TavernDB's targetSheetKeys batching shape.
 export const ACTOR_PROFILE_GROUP_TRANSPORT_ROWS = 6;
@@ -239,6 +240,9 @@ export function actorProfileBatchSemanticFingerprint(overrides = {}) {
         transportRows: ACTOR_PROFILE_GROUP_TRANSPORT_ROWS,
         groupChunks: String(actorProfileModuleGroupChunks),
         ...(overrides || {}),
+        transaction: String(
+            overrides?.transaction || completeActorProfileBatchTransaction,
+        ),
         groupFailureDiagnostic: String(
             overrides?.groupFailureDiagnostic || actorProfileGroupFailureDiagnostic,
         ),
@@ -419,6 +423,9 @@ export async function completeActorProfileBatchTransaction({
     turn = 0,
     target = {},
     semanticRetry = true,
+    transportActorLimit = ACTOR_PROFILE_GROUP_TRANSPORT_ROWS,
+    transportConcurrency = 1,
+    transportRouteSlots = [],
     allowDiscovery = false,
     discoveryContext = null,
     recoveryProgress = null,
@@ -658,16 +665,20 @@ export async function completeActorProfileBatchTransaction({
                 evidenceText, customPrompt, validationFeedback: groupFeedback,
                 discoveryContext: attemptDiscoveryContext,
             });
-            const chunks = actorProfileModuleGroupChunks(group);
+            const chunks = actorProfileModuleGroupChunks(group, transportActorLimit);
             const aggregate = {
                 entries: [], failures: [], explicitEmpty: false,
                 formatUnrecoverable: false, coverageProof: null,
             };
-            for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-                const chunk = chunks[chunkIndex];
+            const executeChunk = async (
+                chunk,
+                chunkIndex,
+                routeSlotIndex = null,
+                occupiedRouteSlotIndices = [],
+            ) => {
                 const messages = buildMessages(chunk);
                 let output;
-                const modelStartedAt = Date.now();
+                const requestStartedAt = Date.now();
                 try {
                     const groupCandidates = [...new Map(Object.values(chunk.targets || {})
                         .flat()
@@ -677,17 +688,35 @@ export async function completeActorProfileBatchTransaction({
                         groupKey: chunk.key, moduleKeys: clone(chunk.modules),
                         fieldCount: Math.max(0, Number(chunk.targetCount) || 0),
                         transportChunk: clone(chunk.transportChunk || null),
+                        routeSlotIndex,
+                        occupiedRouteSlotIndices: clone(occupiedRouteSlotIndices),
                     });
-                    modelMs += Date.now() - modelStartedAt;
                     modelCalls += 1;
                 } catch (error) {
-                    modelMs += Date.now() - modelStartedAt;
                     const failure = profileBatchRequestFailure(error);
                     if (failure.routeDiagnostic?.requestStarted === true) modelCalls += 1;
-                    groupDiagnostics.push({ groupKey: chunk.key, attempt: groupAttempt, transportChunk: clone(chunk.transportChunk || null), status: 'transport_failed', routeDiagnostic: failure.routeDiagnostic });
-                    return { requestFailure: failure, recoveryProgress: captureRecoveryProgress() };
+                    return {
+                        chunk,
+                        chunkIndex,
+                        modelDurationMs: Math.max(0, Date.now() - requestStartedAt),
+                        requestFailure: failure,
+                        diagnostic: {
+                            groupKey: chunk.key,
+                            attempt: groupAttempt,
+                            transportChunk: clone(chunk.transportChunk || null),
+                            status: 'transport_failed',
+                            routeDiagnostic: failure.routeDiagnostic,
+                        },
+                    };
                 }
-                if (!await current()) return { stale: true };
+                const modelFinishedAt = Date.now();
+                const modelDurationMs = Math.max(0, modelFinishedAt - requestStartedAt);
+                if (!await current()) return {
+                    chunk,
+                    chunkIndex,
+                    stale: true,
+                    modelDurationMs,
+                };
                 const parseStartedAt = Date.now();
                 const parsed = parseActorProfileModuleGroupOutput(output, chunk, {
                     acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
@@ -704,21 +733,85 @@ export async function completeActorProfileBatchTransaction({
                 const routeRepairCodes = [...new Set((parsed.routeRepairs || [])
                     .map((code) => cleanText(code, 120))
                     .filter((code) => /^actor_profile\.route_[a-z0-9_.-]+$/u.test(code)))].slice(0, 4);
-                groupDiagnostics.push({
-                    groupKey: chunk.key,
-                    moduleKeys: clone(chunk.modules),
-                    targetCount: chunk.targetCount,
-                    attempt: groupAttempt,
-                    transportChunk: clone(chunk.transportChunk || null),
-                    status: parsed.formatUnrecoverable
-                        ? 'format_failed'
-                        : parsedFailureCodes.length ? 'semantic_failed' : 'parsed',
-                    parsedRowCount: Math.max(0, Number(parsed.entries?.length) || 0),
-                    failureCodes: parsedFailureCodes,
-                    missingModules: parsedMissingModules,
-                    routeRepairCount: Math.max(0, Number(parsed.routeRepairs?.length) || 0),
-                    routeRepairCodes,
-                });
+                return {
+                    chunk,
+                    chunkIndex,
+                    modelDurationMs,
+                    parsed,
+                    diagnostic: {
+                        groupKey: chunk.key,
+                        moduleKeys: clone(chunk.modules),
+                        targetCount: chunk.targetCount,
+                        attempt: groupAttempt,
+                        transportChunk: clone(chunk.transportChunk || null),
+                        status: parsed.formatUnrecoverable
+                            ? 'format_failed'
+                            : parsedFailureCodes.length ? 'semantic_failed' : 'parsed',
+                        parsedRowCount: Math.max(0, Number(parsed.entries?.length) || 0),
+                        failureCodes: parsedFailureCodes,
+                        missingModules: parsedMissingModules,
+                        routeRepairCount: Math.max(0, Number(parsed.routeRepairs?.length) || 0),
+                        routeRepairCodes,
+                    },
+                };
+            };
+            // Each post-identity ActorRef is one transport row. Independent
+            // direct routes may run these rows concurrently; host generateRaw
+            // remains serialized by its shared background scheduler key. The
+            // existing transaction-local clone and pending -> final CAS still
+            // make persistence all-or-nothing across every row.
+            const boundedConcurrency = Math.min(
+                chunks.length,
+                Math.max(1, Math.floor(Number(transportConcurrency) || 1)),
+            );
+            const frozenRouteSlots = (Array.isArray(transportRouteSlots)
+                ? transportRouteSlots : [])
+                .map((value) => Math.max(0, Math.floor(Number(value) || 0)))
+                .slice(0, boundedConcurrency);
+            const chunkResults = [];
+            let stopLaunching = false;
+            for (let start = 0; start < chunks.length && !stopLaunching; start += boundedConcurrency) {
+                const wave = chunks.slice(start, start + boundedConcurrency);
+                const occupiedRouteSlotIndices = frozenRouteSlots.slice(0, wave.length);
+                const settled = await Promise.allSettled(wave.map((chunk, offset) => (
+                    executeChunk(
+                        chunk,
+                        start + offset,
+                        frozenRouteSlots[offset] ?? null,
+                        occupiedRouteSlotIndices,
+                    )
+                )));
+                for (let offset = 0; offset < settled.length; offset += 1) {
+                    const chunkIndex = start + offset;
+                    const result = settled[offset];
+                    const normalized = result.status === 'fulfilled'
+                        ? result.value
+                        : {
+                            chunk: chunks[chunkIndex],
+                            chunkIndex,
+                            modelDurationMs: 0,
+                            requestFailure: profileBatchRequestFailure(result.reason),
+                            diagnostic: {
+                                groupKey: chunks[chunkIndex]?.key || group.key,
+                                attempt: groupAttempt,
+                                transportChunk: clone(chunks[chunkIndex]?.transportChunk || null),
+                                status: 'transport_failed',
+                                routeDiagnostic: profileBatchRouteDiagnostic(result.reason?.routeDiagnostic),
+                            },
+                        };
+                    chunkResults[chunkIndex] = normalized;
+                    if (normalized?.stale || normalized?.requestFailure) stopLaunching = true;
+                }
+                modelMs += Math.max(0, ...chunkResults
+                    .slice(start, start + settled.length)
+                    .filter(Boolean)
+                    .map((entry) => Math.max(0, Number(entry.modelDurationMs) || 0)));
+            }
+            for (const chunkResult of chunkResults.filter(Boolean)) {
+                const { chunk, parsed } = chunkResult;
+                if (chunkResult.diagnostic) groupDiagnostics.push(chunkResult.diagnostic);
+                if (chunkResult.stale) return { stale: true };
+                if (chunkResult.requestFailure) continue;
                 // TavernDB keeps validated cells in its transaction-local
                 // workingTableData even when a later transport chunk fails.
                 // Mirror that exact boundary here: only exact ActorRef x
@@ -777,6 +870,10 @@ export async function completeActorProfileBatchTransaction({
                         }
                     }
                 }
+            }
+            const requestFailure = chunkResults.find((entry) => entry.requestFailure)?.requestFailure;
+            if (requestFailure) {
+                return { requestFailure, recoveryProgress: captureRecoveryProgress() };
             }
             return aggregate;
         };

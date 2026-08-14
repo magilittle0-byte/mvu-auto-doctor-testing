@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -100,6 +101,8 @@ test('production P1 uses the background lane and host-only foreground preemption
         source.indexOf('async function probeModelChannelConnections'),
     );
     assert.match(callModelSource, /const runUntilCancelled = options\.runUntilCancelled === true/u);
+    assert.match(callModelSource, /`\$\{modelConnectionKey\(profile\)\}:channel:\$\{channel\}`/u);
+    assert.doesNotMatch(callModelSource, /channel:\$\{channel\}:slot:\$\{slotIndex\}/u);
     assert.match(callModelSource, /mvuadUsesHostGenerateRaw/u);
     assert.match(source, /FOREGROUND_PREEMPTED/u);
     const profileSource = source.slice(
@@ -168,6 +171,106 @@ test('foreground preemption resumes only fields missing after validated transpor
         [fixture.candidates[6].actorRef.actorId],
         'the six validated rows must not be regenerated after foreground preemption',
     );
+});
+
+test('production actor-row transport runs bounded direct waves and stops before the next wave on failure', async () => {
+    const fixture = prepareRegisteredBatch(5, { chatId: 'chat-profile-bounded-waves' });
+    const moduleText = (key, actorId) => `${actorId} ${key}. ${'Complete stable dossier prose records facts limits choices and usable future context. '.repeat(6)}`;
+    const outputFor = ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+        `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+        ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.actorId)}</module>`),
+        '</profile-target>',
+    ].join('\n')).join('\n');
+    let active = 0;
+    let maxActive = 0;
+    const calls = [];
+    const succeeded = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        transportActorLimit: 1,
+        transportConcurrency: 2,
+        transportRouteSlots: [0, 2],
+        requestBatch: async (request) => {
+            calls.push({
+                actorIds: request.candidates.map((candidate) => candidate.actorRef.actorId),
+                routeSlotIndex: request.routeSlotIndex,
+                occupied: request.occupiedRouteSlotIndices,
+            });
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            active -= 1;
+            return outputFor(request);
+        },
+    });
+    assert.equal(calls.length, 5);
+    assert.ok(calls.every(({ actorIds }) => actorIds.length === 1));
+    assert.deepEqual(calls.slice(0, 2).map((entry) => entry.routeSlotIndex), [0, 2]);
+    assert.ok(calls.slice(0, 2).every((entry) => (
+        JSON.stringify(entry.occupied) === JSON.stringify([0, 2])
+    )));
+    assert.equal(maxActive, 2, 'the route-level concurrency bound must be enforced');
+    assert.equal(succeeded.result.persistenceStatus, 'atomic_readback');
+    assert.equal(succeeded.saveCount, 2, 'all rows still share one pending/final transaction');
+
+    const failedCalls = [];
+    const failed = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        semanticRetry: false,
+        transportActorLimit: 1,
+        transportConcurrency: 2,
+        transportRouteSlots: [0, 2],
+        requestBatch: async (request) => {
+            const index = failedCalls.length;
+            failedCalls.push(request.candidates[0].actorRef.actorId);
+            if (index === 1) throw new Error('synthetic bounded-wave failure');
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            return outputFor(request);
+        },
+    });
+    assert.deepEqual(failedCalls, fixture.candidates.slice(0, 2)
+        .map((candidate) => candidate.actorRef.actorId));
+    assert.equal(failed.saveCount, 0);
+    assert.equal(failed.result.persistenceStatus, 'not_completed');
+    assert.equal(failed.result.recoveryProgress.verifiedFieldCount, 6);
+});
+
+test('production profile route plan freezes one healthy slot per distinct direct connection key', () => {
+    const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+    const helperSource = source.slice(
+        source.indexOf('function actorProfileTransportRoutePlan'),
+        source.indexOf('function modelTaskPriority'),
+    );
+    const profiles = [
+        { slotIndex: 0, profile: { provider: 'direct', key: 'A' } },
+        { slotIndex: 1, profile: { provider: 'direct', key: 'A' } },
+        { slotIndex: 2, profile: { provider: 'direct', key: 'B' } },
+        { slotIndex: 3, profile: { provider: 'direct', key: 'C' } },
+    ];
+    const plan = Function(
+        'channelConnectionProfiles',
+        'modelRouteHealthRecord',
+        'modelConnectionKey',
+        `${helperSource}; return actorProfileTransportRoutePlan;`,
+    )(
+        () => profiles,
+        (_channel, slotIndex) => ({ openedUntil: slotIndex === 3 ? 999 : 0 }),
+        (profile) => profile.key,
+    )({}, 100);
+    assert.deepEqual([...plan.slotIndices], [0, 2]);
+    assert.equal(plan.concurrency, 2);
+
+    const mixed = Function(
+        'channelConnectionProfiles',
+        'modelRouteHealthRecord',
+        'modelConnectionKey',
+        `${helperSource}; return actorProfileTransportRoutePlan;`,
+    )(
+        () => [{ slotIndex: 0, profile: { provider: 'tavern' } }],
+        () => ({ openedUntil: 0 }),
+        () => 'host',
+    )({}, 100);
+    assert.deepEqual([...mixed.slotIndices], []);
+    assert.equal(mixed.concurrency, 1);
 });
 
 test('identity bootstrap failure calls the full accepted narrative model once and writes no partial profile', async () => {
@@ -571,6 +674,9 @@ async function runBatch(fixture, {
     resolveDiscoveries = null,
     moduleProtocol = false,
     recoveryProgress = null,
+    transportActorLimit = undefined,
+    transportConcurrency = undefined,
+    transportRouteSlots = undefined,
 } = {}) {
     let saveCount = 0;
     let readbackCount = 0;
@@ -709,6 +815,9 @@ async function runBatch(fixture, {
         turn: fixture.ref.generation,
         target: { ...fixture.ref, sourceRef: fixture.ref },
         semanticRetry,
+        transportActorLimit,
+        transportConcurrency,
+        transportRouteSlots,
         allowDiscovery,
         discoveryContext,
         recoveryProgress,
@@ -4300,6 +4409,10 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /requestKind: 'actor_profile_batch'/u);
     assert.match(profileFunction, /maxFailovers: 1/u);
     assert.match(profileFunction, /noTimeout: true/u);
+    assert.match(profileFunction, /transportActorLimit: 1/u);
+    assert.match(profileFunction, /transportConcurrency: actorProfileTransportPlan\.concurrency/u);
+    assert.match(profileFunction, /transportRouteSlots: actorProfileTransportPlan\.slotIndices/u);
+    assert.match(profileFunction, /routeSlotIndex,[\s\S]*?attemptedRouteKeys: occupiedRouteSlotIndices\.map/u);
     assert.match(profileFunction, /localBatchFailure\('scope_stale'\)/u);
     assert.match(profileFunction, /localBatchFailure\('target_stale'\)/u);
     assert.match(profileFunction, /readbackAttempts: 3/u);

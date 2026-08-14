@@ -3667,6 +3667,8 @@ function doctorRuntimeCriticalFingerprint() {
         preemptHostBackgroundModelControllersForForegroundGeneration.toString(),
         modelFailureKind.toString(),
         modelTransportFailureCanFailover.toString(),
+        modelConnectionKey.toString(),
+        actorProfileTransportRoutePlan.toString(),
         assertUsableModelOutput.toString(),
         callModel.toString(),
         worldCallReservedForUserCancellation.toString(),
@@ -3699,6 +3701,7 @@ function doctorRuntimeCriticalFingerprint() {
         parseActorProfileModuleGroupOutput.toString(),
         materializeActorProfileBaseline.toString(),
         completeActorProfileBatchTransaction.toString(),
+        completeActorProfilesForTurn.toString(),
         runActorProfileTarget.toString(),
         enqueueActorProfiles.toString(),
         assistantTargetHasPriorRealPlayerInput.toString(),
@@ -9336,6 +9339,29 @@ function modelConnectionKey(profile) {
     return 'tavern-current-connection';
 }
 
+function actorProfileTransportRoutePlan(settings, now = Date.now()) {
+    const routes = channelConnectionProfiles(settings, 'fast');
+    if (!routes.length || routes.some(({ profile }) => profile.provider !== 'direct')) {
+        return Object.freeze({ slotIndices: Object.freeze([]), concurrency: 1 });
+    }
+    const healthy = routes.filter(({ slotIndex, profile }) => (
+        modelRouteHealthRecord('fast', slotIndex, profile).openedUntil <= now
+    ));
+    const source = healthy.length ? healthy : routes.slice(0, 1);
+    const seenConnectionKeys = new Set();
+    const slotIndices = [];
+    for (const { slotIndex, profile } of source) {
+        const connectionKey = modelConnectionKey(profile);
+        if (seenConnectionKeys.has(connectionKey)) continue;
+        seenConnectionKeys.add(connectionKey);
+        slotIndices.push(slotIndex);
+    }
+    return Object.freeze({
+        slotIndices: Object.freeze(slotIndices),
+        concurrency: Math.max(1, slotIndices.length),
+    });
+}
+
 function modelTaskPriority(task, explicitPriority) {
     if (Number.isFinite(Number(explicitPriority))) return Number(explicitPriority);
     const text = String(task || '');
@@ -9555,7 +9581,7 @@ async function callModel(messages, options = {}) {
             ),
         );
     const connectionKeyBase = profile.provider === 'direct'
-        ? `${modelConnectionKey(profile)}:channel:${channel}:slot:${slotIndex}`
+        ? `${modelConnectionKey(profile)}:channel:${channel}`
         : modelConnectionKey(profile);
     const connectionKey = backgroundLane
         ? ['direct', 'story-oracle'].includes(profile.provider)
@@ -14572,6 +14598,7 @@ async function completeActorProfilesForTurn(captured, {
         return error;
     };
     const settings = getSettings();
+    const actorProfileTransportPlan = actorProfileTransportRoutePlan(settings);
     const candidates = selectActorProfileCompletionCandidates(actorLedger, {
         initialActorIds,
         maintenanceMaxActors: includeMaintenance
@@ -14633,6 +14660,9 @@ async function completeActorProfilesForTurn(captured, {
             sourceRef: currentSourceRef,
         },
         semanticRetry: settings.actorProfileSemanticRetries > 0,
+        transportActorLimit: 1,
+        transportConcurrency: actorProfileTransportPlan.concurrency,
+        transportRouteSlots: actorProfileTransportPlan.slotIndices,
         allowDiscovery: true,
         discoveryContext: {
             ...(discoveryContext || {}),
@@ -14646,7 +14676,7 @@ async function completeActorProfilesForTurn(captured, {
         ),
         requestBatch: async ({
             candidates: groupCandidates = [], messages, attempt, groupKey = '', moduleKeys = [],
-            fieldCount = 0,
+            fieldCount = 0, routeSlotIndex = null, occupiedRouteSlotIndices = [],
         }) => {
             const freshScope = await freshFrozenScopeGuard(captured).catch(() => ({ ok: false }));
             if (!freshScope.ok) {
@@ -14668,6 +14698,11 @@ async function completeActorProfilesForTurn(captured, {
                 jsonMode: false,
                 failover: true,
                 maxFailovers: 1,
+                routeSlotIndex,
+                attemptedRouteKeys: occupiedRouteSlotIndices.map((slotIndex) => {
+                    const route = channelConnectionProfiles(settings, 'fast')[slotIndex];
+                    return route ? modelConnectionKey(route.profile) : '';
+                }).filter(Boolean),
                 runUntilCancelled: true,
                 noTimeout: true,
                 actorProfileTarget: captured,
@@ -18392,6 +18427,7 @@ async function commitPreparedWorldCandidate(captured, {
                 persisted?.continuity,
                 persisted?.actorLedger || settlementLedger,
                 captured,
+                { allowUnrelatedLedgerEvolution: true },
             )
             && (!settlement || actorActionSettlementsMatchLedger(persisted?.actorLedger, {
                 chatId: captured.chatId, target: actionTarget, results: settlement.results,

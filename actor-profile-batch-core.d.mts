@@ -94,5 +94,8 @@ export function completeActorProfileBatchTransaction(options?: {
     preflightDiscoveries?: (context: object) => Promise<object>;
     resolveDiscoveries?: (context: object) => Promise<object>;
     recoveryProgress?: ActorProfileRecoveryProgress | null;
+    transportActorLimit?: number;
+    transportConcurrency?: number;
+    transportRouteSlots?: number[];
     [key: string]: unknown;
 }): Promise<ActorProfileBatchTransactionResult>;

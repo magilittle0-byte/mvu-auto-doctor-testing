@@ -851,6 +851,55 @@ test('runtime fingerprint includes every P1 writer used for bounded world-only r
     }
 });
 
+test('runtime fingerprint changes with the production profile route planner and adapter', () => {
+    const runtimeSource = sourceBetween(
+        indexSource,
+        'function doctorRuntimeCriticalFingerprint',
+        'function diagnosticPayload',
+    );
+    for (const helper of [
+        'modelConnectionKey',
+        'actorProfileTransportRoutePlan',
+        'completeActorProfilesForTurn',
+    ]) {
+        assert.match(runtimeSource, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
+    }
+    const helperNames = [...new Set([...runtimeSource.matchAll(/\b([A-Za-z_$][\w$]*)\.toString\(\)/gu)]
+        .map((match) => match[1]))];
+    const runtimeFor = (overrides = {}) => Function(
+        'VERSION',
+        'fingerprint',
+        'actorProfileRecoveryCriticalFingerprint',
+        'actorProfileGenerationCriticalFingerprint',
+        'actorProfileBatchSemanticFingerprint',
+        'continuityCoreSemanticFingerprint',
+        ...helperNames,
+        `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
+    )(
+        'test-version',
+        fingerprint,
+        () => 'recovery-fingerprint',
+        () => 'generation-fingerprint',
+        () => 'batch-fingerprint',
+        () => 'continuity-fingerprint',
+        ...helperNames.map((name) => overrides[name]
+            || Function(`return function ${name}(){}`)()),
+    )();
+    const baseline = runtimeFor();
+    assert.notEqual(runtimeFor({
+        modelConnectionKey:
+            function modelConnectionKeyChanged() { return 'changed-connection-key'; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        actorProfileTransportRoutePlan:
+            function actorProfileTransportRoutePlanChanged() { return { concurrency: 1 }; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        completeActorProfilesForTurn:
+            async function completeActorProfilesForTurnChanged() { return null; },
+    }), baseline);
+});
+
 test('continuity recovery normalizer mutations change semantic and runtime fingerprints', () => {
     const runtimeSource = sourceBetween(
         indexSource,
@@ -999,6 +1048,9 @@ test('resolver closure and group failure attribution helpers change batch and ru
         }),
         actorProfileBatchSemanticFingerprint({
             workingSection: function actorProfileWorkingSectionChanged() {},
+        }),
+        actorProfileBatchSemanticFingerprint({
+            transaction: function completeActorProfileBatchTransactionChanged() {},
         }),
     ];
     const baselineRuntime = runtimeFor(baselineBatch);

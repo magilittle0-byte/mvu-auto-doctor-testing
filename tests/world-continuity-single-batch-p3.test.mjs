@@ -5018,6 +5018,142 @@ test('Phase2 selected transaction polls, locally resaves once, and rejects mixed
     }
 });
 
+test('production Phase2 writer accepts concurrent P1-only ledger evolution but rejects same-target authority drift', async () => {
+    const target = {
+        chatId: 'chat-phase2-p1-evolution', index: 1, messageId: 'message-1', swipeId: 0,
+        generationSerial: 1, generationId: 'generation-1', generationType: 'normal',
+        scopeDigest: 'scope-phase2-p1-evolution', contentFingerprint: 'content-1',
+    };
+    const persistedPackage = loadStage3PersistedPackageValidator({
+        ledgerDigest: (ledger) => JSON.stringify(ledger),
+    });
+    const modelTimeLedger = {
+        actors: [], actionAttempts: [], actionReceipts: [],
+    };
+    const proof = persistedPackage.stage3CanonicalSettlementProof(
+        modelTimeLedger,
+        [],
+        target,
+    );
+    const withoutPacket = {
+        chatId: target.chatId, turn: 1, lastSource: structuredClone(target),
+        nextTurnInjection: null,
+    };
+    const committedContinuity = {
+        ...structuredClone(withoutPacket),
+        nextTurnInjection: {
+            version: 1, status: 'pending', producerTarget: structuredClone(target),
+            sourceContinuityDigest:
+                persistedPackage.stage3ContinuityDigestWithoutInjection(withoutPacket),
+            payload: { text: 'bounded world projection', visibleThreadIds: [] },
+            settlementProof: proof,
+        },
+    };
+    const preparedCheckpoint = {
+        stage3Phase: 'world_candidate_prepared', target: structuredClone(target),
+        stage3ProducerTarget: structuredClone(target),
+        preparedWorld: { phase1WriteMode: 'checkpoint_only' },
+    };
+    const committedCheckpoint = {
+        stage3Phase: 'world_committed', target: structuredClone(target),
+        stage3ProducerTarget: structuredClone(target),
+    };
+    const baseline = {
+        version: 13, chatId: target.chatId, rev: 7,
+        actorSovereigntyScope: { scopeDigest: target.scopeDigest },
+        actorLedger: structuredClone(modelTimeLedger),
+        continuity: { chatId: target.chatId, turn: 0, nextTurnInjection: null },
+        continuityCheckpoint: preparedCheckpoint,
+        continuityDirector: 'standalone', continuityDetected: true,
+        fieldRevisions: {
+            actorSovereigntyScope: 1, actorLedger: 6, continuity: 7,
+            continuityCheckpoint: 7, continuityDirector: 7, continuityDetected: 7,
+        },
+    };
+    const p1Evolved = structuredClone(baseline);
+    p1Evolved.rev = 8;
+    p1Evolved.fieldRevisions.actorLedger = 8;
+    p1Evolved.actorLedger.actors.push({
+        id: 'p1-profile', profileV6: { status: 'complete', moduleCount: 9 },
+    });
+    const selected = [
+        'continuity', 'continuityCheckpoint', 'continuityDirector', 'continuityDetected',
+    ];
+    const desired = {
+        ...structuredClone(baseline),
+        continuity: committedContinuity,
+        continuityCheckpoint: committedCheckpoint,
+    };
+    const contentValidator = (namespace) => (
+        namespace?.continuityCheckpoint?.stage3Phase === 'world_committed'
+        && !!persistedPackage.stage3PersistedPackageForTarget(
+            namespace?.continuity,
+            namespace?.actorLedger,
+            target,
+            { allowUnrelatedLedgerEvolution: true },
+        )
+    );
+    const run = async (current) => {
+        let durable = structuredClone(current);
+        const context = {
+            chatId: target.chatId,
+            chatMetadata: { mvu_auto_doctor: structuredClone(current) },
+            updateChatMetadata(patch) {
+                this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+            },
+            async saveMetadata() {
+                durable = structuredClone(this.chatMetadata.mvu_auto_doctor);
+            },
+            async readPersistedChatMetadata() { return structuredClone(durable); },
+        };
+        const writer = loadNamespaceWriter(() => context);
+        const failureSink = {};
+        const ok = await writer.write(desired, target.chatId, {
+            fields: selected, durable: true, force: true,
+            requireReadback: true, readbackAttempts: 1,
+            allowUnselectedFieldEvolution: true,
+            recoverSelectedTransaction: true,
+            failureSink,
+            contentValidator,
+        });
+        return { ok, context, durable, failureSink };
+    };
+
+    assert.equal(
+        persistedPackage.stage3PersistedPackageForTarget(
+            committedContinuity,
+            p1Evolved.actorLedger,
+            target,
+        ),
+        null,
+        'the old strict whole-ledger check reproduces the false conflict',
+    );
+    const accepted = await run(p1Evolved);
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.failureSink.code, '');
+    assert.equal(accepted.durable.continuityCheckpoint.stage3Phase, 'world_committed');
+    assert.equal(accepted.durable.actorLedger.actors[0].profileV6.moduleCount, 9);
+
+    const sameTargetDrift = structuredClone(p1Evolved);
+    sameTargetDrift.actorLedger.actionAttempts.push({
+        id: 'same-target-drift', target: structuredClone(target), status: 'held',
+    });
+    sameTargetDrift.rev = 9;
+    sameTargetDrift.fieldRevisions.actorLedger = 9;
+    const rejected = await run(sameTargetDrift);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.failureSink.code, 'host_save_content_validation_conflict');
+    assert.equal(
+        rejected.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint.stage3Phase,
+        'world_candidate_prepared',
+    );
+    assert.equal(
+        rejected.context.chatMetadata.mvu_auto_doctor.actorLedger.actionAttempts[0].id,
+        'same-target-drift',
+        'fail-closed recovery preserves the newer actor authority',
+    );
+});
+
 test('Phase2 host-save failures use fixed phase-specific diagnostic codes', () => {
     const code = sourceSection(
         'function stage3Phase2ReadbackValidationCode(failureSink) {',
@@ -5492,6 +5628,7 @@ test('production Phase2 consumes validated scheduledBase and reaches committed r
     let attachedFrom = null;
     let written = null;
     let phase2Writes = 0;
+    let packageValidationOptions = null;
     const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
     const sandbox = {
         Date,
@@ -5523,7 +5660,10 @@ test('production Phase2 consumes validated scheduledBase and reaches committed r
         readChatNamespace: () => structuredClone(freshNamespace),
         getContext: () => ({ chatId: producerTarget.chatId }),
         normalizeActorLedger: (value) => structuredClone(value),
-        stage3PersistedPackageForTarget: () => ({ settlementProof: { orderedResults: [] } }),
+        stage3PersistedPackageForTarget: (_continuity, _ledger, _captured, options) => {
+            packageValidationOptions = structuredClone(options || {});
+            return { settlementProof: { orderedResults: [] } };
+        },
         actorActionSettlementsMatchLedger: () => ({ ok: true }),
         writeChatNamespace: async (candidate, _chatId, options) => {
             phase2Writes += 1;
@@ -5560,6 +5700,7 @@ test('production Phase2 consumes validated scheduledBase and reaches committed r
     assert.deepEqual(attachedFrom, scheduledBase);
     assert.equal(written.continuityCheckpoint.stage3Phase, 'world_committed');
     assert.equal(written.actorLedger.actors[0].profileV6.status, 'complete');
+    assert.equal(packageValidationOptions.allowUnrelatedLedgerEvolution, true);
     assert.equal(phase2Writes, 2, 'Phase2 locally rebases one P1-only CAS drift');
     assert.equal(result.status, 'applied');
     assert.equal(result.worldFinalPhase, 'world_committed');
