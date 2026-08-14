@@ -511,15 +511,13 @@ export function buildActorProfileModuleGroupMessages(group, {
     ));
     const guides = requestedModuleKeys.map((key) => `${key}: ${PROFILE_MODULE_NOTES[key]}`).join('\n');
     if (discoveryOnly) return [{ role: 'system', content: [
-        '\u4f60\u53ea\u505a\u5df2\u63a5\u53d7\u6b63\u6587\u7684\u4eba\u7269\u8eab\u4efd\u53d1\u73b0\uff0c\u4e0d\u586b\u4eba\u7269\u6863\u6848\uff0c\u4e0d\u7eed\u5199\u5267\u60c5\u3002',
-        '\u5bf9\u6bcf\u4e2a\u771f\u6b63\u51fa\u573a\u3001\u6709\u6b63\u6587\u9010\u5b57\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u4e14\u5c1a\u672a\u767b\u8bb0\u7684\u65b0\u4eba\uff0c\u53ea\u8f93\u51fa <profile-target actor="new" name="\u6b63\u6587\u9010\u5b57\u4eba\u7269\u884c\u952e"></profile-target>\u3002name \u662f\u517c\u5bb9\u5c5e\u6027\uff0c\u5176\u542b\u4e49\u662f Registry displayName/\u884c\u952e\uff1b\u53ef\u4ee5\u662f\u6b63\u6587\u4e2d\u7684\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13\uff0c\u4e0d\u8981\u6c42\u6237\u7c4d\u5f0f\u59d3\u540d\u3002\u88f8\u7684\u6027\u522b\u3001\u5e74\u9f84\u6216\u8def\u4eba\u6cdb\u79f0\u4e0d\u662f\u7a33\u5b9a\u884c\u952e\uff1b\u7f16\u53f7\u6216\u660e\u786e\u9650\u5b9a\u5230\u4e00\u4eba\u7684\u79f0\u8c13\u53ef\u7528\u3002\u4e0d\u5f97\u8f93\u51fa module\u3001\u6863\u6848\u6b63\u6587\u3001\u89e3\u91ca\u6216\u81ea\u521b\u884c\u952e\u3002',
-        '\u82e5\u6b63\u6587\u660e\u786e\u63ed\u793a\u4e86\u5df2\u767b\u8bb0\u4eba\u7269\u7684\u65b0\u59d3\u540d\u3001\u4ee3\u53f7\u6216\u7a33\u5b9a\u79f0\u8c13\uff0c\u4e0d\u5f97\u628a\u65b0\u884c\u952e\u5f53\u6210 new\u3002\u5fc5\u987b\u4f7f\u7528\u201c\u5df2\u767b\u8bb0\u7d22\u5f15\u201d\u4e2d\u8be5\u4eba\u7269\u7684\u7cbe\u786e actorId\uff0c\u5e76\u5728\u6807\u7b7e\u5185\u9644\u4e00\u6bb5\u6700\u5c0f\u9010\u5b57\u8bc1\u636e\uff1a<profile-target actor="\u7cbe\u786eActorId" name="\u6b63\u6587\u9010\u5b57\u65b0\u884c\u952e"><identity-evidence>\u540c\u65f6\u5305\u542b\u8be5\u4eba\u5df2\u767b\u8bb0\u884c\u952e/\u522b\u540d\u548c\u65b0\u884c\u952e\u7684\u6700\u77ed\u6b63\u6587\u539f\u53e5\u7247\u6bb5</identity-evidence></profile-target>\u3002\u53ea\u6709\u6b63\u6587\u660e\u786e\u8868\u660e\u662f\u540c\u4e00\u4eba\u65f6\u624d\u8fd9\u6837\u8f93\u51fa\uff1b\u4e0d\u5f97\u51ed\u76f8\u4f3c\u3001\u804c\u4e1a\u6216\u540c\u573a\u51fa\u73b0\u731c\u6d4b\u5408\u5e76\u3002',
-        '\u5148\u5728\u201c\u5df2\u63a5\u53d7\u6b63\u6587\u201d\u91cc\u627e\u5230\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u7684\u8fde\u7eed\u539f\u5b57\u4e32\uff0c\u518d\u5c06\u8be5\u5b57\u4e32\u9010\u5b57\u590d\u5236\u5230 name\uff1b\u4e0d\u5f97\u6539\u5199\u3001\u7f29\u5199\u3001\u7ffb\u8bd1\u3001\u8865\u5168\u6216\u81ea\u884c\u53d6\u540d\u3002',
-        '\u4e0d\u5f97\u628a\u73a9\u5bb6\u3001\u7eaf\u4ee3\u8bcd\u3001\u660e\u786e\u7ec4\u7ec7\u6216\u7fa4\u4f53\u3001\u53ea\u88ab\u63d0\u53ca\u8005\u3001\u5df2\u767b\u8bb0\u884c\u952e/\u522b\u540d\u6216\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u5f53\u4f5c new\u3002',
-        '\u5fc5\u987b\u5bf9\u7528\u6237\u63d0\u4f9b\u7684\u6bcf\u4e2a coverage unit \u6070\u597d\u56de\u5e94\u4e00\u6b21\uff1a\u539f\u6837\u590d\u5236 id \u548c digest \u5230 <coverage-unit id="..." digest="...">...</coverage-unit>\u3002\u8be5\u5355\u5143\u6709\u65b0\u4eba\u65f6\uff0c\u5728\u5176\u4e2d\u8f93\u51fa\u4e00\u4e2a\u6216\u591a\u4e2a profile-target\uff1b\u6ca1\u6709\u65f6\u53ea\u8f93\u51fa <no-new/>\u3002\u4e0d\u5f97\u9057\u6f0f\u3001\u91cd\u590d\u6216\u81ea\u521b coverage unit\uff0c\u4e0d\u5f97\u8f93\u51fa\u88f8\u7684\u201c\u65e0\u4eba\u7269\u6863\u6848\u201d\u3002',
+        '只做已接受正文的人物身份路由，不填档案、不续写剧情。',
+        '输出零到多行裸路由：<profile-target actor="new" name="正文逐字稳定行键" unit="可选CU-id"/>。行键可为姓名、代号、编号、职业或带限定的描述性称谓；不得改写、补名或使用玩家、纯代词、群体、只被提及者、已登记/受保护身份。unit 可省略；省略时脚本按最早且不被更长行键覆盖的独立逐字出现机械绑定，短名若只嵌在本批更长 name 中则拒绝。不要回显 digest、空单元、正文、档案或解释。',
+        '若正文明确揭示已登记人物的新行键，actor 必须用已登记索引中的精确 actorId，并在标签内给出 <identity-evidence>同时含旧行键/别名与新行键的最短正文原句片段</identity-evidence>；不得猜测合并。',
+        '只有确实没有任何合格新人物或身份揭示时，整个响应精确输出 <no-new/>；不得与 profile-target 混用。',
         validationFeedback.length ? `\u4ec5\u4fee\u590d\u8eab\u4efd\u53d1\u73b0\u8def\u7531\uff1a${validationFeedback.join('; ')}` : '',
     ].filter(Boolean).join('\n\n') }, { role: 'user', content: [
-        `\u5df2\u63a5\u53d7\u6b63\u6587 coverage units\uff1a${JSON.stringify(group?.discoveryCoverage?.units || [])}`,
+        `\u5df2\u63a5\u53d7\u6b63\u6587 coverage units\uff1a${JSON.stringify((group?.discoveryCoverage?.units || []).map((unit) => ({ id: unit.id, text: unit.text })))}`,
         `\u5df2\u767b\u8bb0\u7d22\u5f15\uff1a${JSON.stringify(discoveryContext?.registeredActorIndex || [])}`,
         `\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a${JSON.stringify(excludedActorNames)}`,
     ].join('\n\n') }];
@@ -658,6 +656,19 @@ export function parseActorProfileModuleGroupOutput(output, group, {
 } = {}) {
     const text = String(output || '').replace(/[“”]/gu, '"').replace(/[‘’]/gu, "'")
         .replace(/```(?:xml|html|text|markdown)?/giu, '').replace(/```/gu, '').trim();
+    const normalized = text
+        .replace(/\[\s*coverage[-_ ]unit\s+([^\]]+)\]/giu, '<coverage-unit $1>')
+        .replace(/\[\s*\/\s*coverage[-_ ]unit\s*\]/giu, '</coverage-unit>')
+        .replace(/<\s*coverage[_ ]unit\b/giu, '<coverage-unit')
+        .replace(/<\s*\/\s*coverage[_ ]unit\s*>/giu, '</coverage-unit>')
+        .replace(/\[\s*profile[-_ ]target\s+([^\]]+)\]/giu, '<profile-target $1>')
+        .replace(/\[\s*\/\s*profile[-_ ]target\s*\]/giu, '</profile-target>')
+        .replace(/<\s*profile[_ ]target\b/giu, '<profile-target')
+        .replace(/<\s*\/\s*profile[_ ]target\s*>/giu, '</profile-target>')
+        .replace(/<\s*no[_ ]new\s*\/\s*>/giu, '<no-new/>')
+        .replace(/<profile-target\b([^>]*)\/\s*>/giu, '<profile-target$1></profile-target>')
+        .replace(/\[\s*module\s*[:=]\s*([^\]]+)\]/giu, '<module key="$1">')
+        .replace(/\[\s*\/\s*module\s*\]/giu, '</module>');
     const entries = [];
     const failures = [];
     const routeRepairs = [];
@@ -728,79 +739,193 @@ export function parseActorProfileModuleGroupOutput(output, group, {
     let coverageCompleteEmpty = false;
     if (group?.key === 'identity_bootstrap' && expectedCoverage.length) {
         const expectedById = new Map(expectedCoverage.map((unit) => [unit.id, unit]));
-        const seenCoverageIds = new Set();
-        const coverageRe = /<coverage-unit\b([^>]*)>([\s\S]*?)<\/coverage-unit>/giu;
-        let coverageMatch;
+        const coverageMatches = [...normalized.matchAll(
+            /<coverage-unit\b([^>]*)>([\s\S]*?)<\/coverage-unit>/giu,
+        )];
+        const attrValue = (attrs, key) => attrs.match(
+            new RegExp(`\\b${key}\\s*=\\s*(?:["']([^"']+)["']|([^\\s>]+))`, 'iu'),
+        )?.slice(1).find(Boolean) || '';
+        const targetMatchesIn = (value) => [...String(value || '').matchAll(
+            /<profile-target\b([^>]*)>[\s\S]*?(?:<\/profile-target>|(?=<profile-target\b)|$)/giu,
+        )];
+        const hasIdentityControlResidue = (value) => (
+            /[<\[]\s*\/?\s*(?:profile[-_ ]*target|no[-_ ]*new|coverage[-_ ]*unit)\b/iu
+                .test(String(value || ''))
+        );
+        const bindTarget = (target, expected, unitId, { inferred = false } = {}) => {
+            const actorId = attrValue(target[1], 'actor');
+            const name = attrValue(target[1], 'name');
+            const evidenceSpan = cleanModuleBody(
+                target[0].match(/<identity-evidence\b[^>]*>([\s\S]*?)<\/identity-evidence>/iu)?.[1] || '',
+            );
+            const targetKey = `${cleanText(actorId, 120)}\u0000${cleanText(name, 160)}`;
+            if (actorId && name && !coverageTargetSources.has(targetKey)) {
+                coverageTargetSources.set(targetKey, {
+                    coverageUnitId: unitId,
+                    sourceUnitOffset: coverageUnitOffsets.get(unitId) ?? -1,
+                    sourceAnchor: expected.text,
+                    evidenceSpan,
+                });
+                if (inferred) routeRepairs.push('actor_profile.route_discovery_unit_inferred');
+            }
+            if (!name || !expected.text.includes(name)) failures.push({
+                actorId: '', name: cleanText(name, 160),
+                reason: 'actor_profile.discovery_name_not_in_coverage_unit',
+                groupKey: group.key, retryable: true,
+            });
+        };
         let totalTargets = 0;
-        let allNoNew = true;
-        while ((coverageMatch = coverageRe.exec(text))) {
-            const attrs = coverageMatch[1];
-            const attrValue = (key) => attrs.match(new RegExp(`\\b${key}\\s*=\\s*(?:["']([^"']+)["']|([^\\s>]+))`, 'iu'))?.slice(1).find(Boolean) || '';
-            const unitId = cleanText(attrValue('id'), 80);
-            const digest = cleanText(attrValue('digest'), 240);
-            const expected = expectedById.get(unitId);
-            if (!expected) {
-                failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_unit_unknown', groupKey: group.key, retryable: true });
-                continue;
-            }
-            if (seenCoverageIds.has(unitId)) {
-                failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_unit_duplicate', groupKey: group.key, retryable: true });
-                continue;
-            }
-            seenCoverageIds.add(unitId);
-            if (digest !== expected.digest) {
-                failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_digest_mismatch', groupKey: group.key, retryable: true });
-                continue;
-            }
-            const body = coverageMatch[2];
-            const targetMatches = [...body.matchAll(/<profile-target\b([^>]*)>[\s\S]*?(?:<\/profile-target>|(?=<profile-target\b)|$)/giu)];
-            const noNew = /<no-new\s*\/\s*>/iu.test(body);
-            const unexplained = body
-                .replace(/<profile-target\b[^>]*>[\s\S]*?(?:<\/profile-target>|(?=<profile-target\b)|$)/giu, '')
-                .replace(/<no-new\s*\/\s*>/giu, '')
-                .trim();
-            if (unexplained) {
-                failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_extra_content', groupKey: group.key, retryable: true });
-                continue;
-            }
-            if ((noNew && targetMatches.length) || (!noNew && !targetMatches.length)) {
-                failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_disposition_invalid', groupKey: group.key, retryable: true });
-                continue;
-            }
-            if (noNew) continue;
-            allNoNew = false;
-            totalTargets += targetMatches.length;
-            for (const target of targetMatches) {
-                const actorId = target[1].match(/\bactor\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/iu)?.slice(1).find(Boolean) || '';
-                const name = target[1].match(/\bname\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/iu)?.slice(1).find(Boolean) || '';
-                const evidenceSpan = cleanModuleBody(
-                    target[0].match(/<identity-evidence\b[^>]*>([\s\S]*?)<\/identity-evidence>/iu)?.[1] || '',
-                );
-                const targetKey = `${cleanText(actorId, 120)}\u0000${cleanText(name, 160)}`;
-                if (actorId && name && !coverageTargetSources.has(targetKey)) {
-                    coverageTargetSources.set(targetKey, {
-                        coverageUnitId: unitId,
-                        sourceUnitOffset: coverageUnitOffsets.get(unitId) ?? -1,
-                        sourceAnchor: expected.text,
-                        evidenceSpan,
-                    });
+        let allNoNew = false;
+        if (coverageMatches.length) {
+            // Read-only compatibility for the former per-unit echo protocol.
+            // A partial wrapper set remains invalid; it is never mixed with
+            // the compact flat route protocol.
+            const seenCoverageIds = new Set();
+            allNoNew = true;
+            for (const coverageMatch of coverageMatches) {
+                const unitId = cleanText(attrValue(coverageMatch[1], 'id'), 80);
+                const digest = cleanText(attrValue(coverageMatch[1], 'digest'), 240);
+                const expected = expectedById.get(unitId);
+                if (!expected) {
+                    failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_unit_unknown', groupKey: group.key, retryable: true });
+                    continue;
                 }
-                if (!name || !expected.text.includes(name)) failures.push({
-                    actorId: '', name: cleanText(name, 160),
-                    reason: 'actor_profile.discovery_name_not_in_coverage_unit',
-                    groupKey: group.key, retryable: true,
+                if (seenCoverageIds.has(unitId)) {
+                    failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_unit_duplicate', groupKey: group.key, retryable: true });
+                    continue;
+                }
+                seenCoverageIds.add(unitId);
+                if (digest !== expected.digest) {
+                    failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_digest_mismatch', groupKey: group.key, retryable: true });
+                    continue;
+                }
+                const body = coverageMatch[2];
+                const targetMatches = targetMatchesIn(body);
+                const noNew = /<no-new\s*\/\s*>/iu.test(body);
+                const unexplained = body
+                    .replace(/<profile-target\b[^>]*>[\s\S]*?(?:<\/profile-target>|(?=<profile-target\b)|$)/giu, '')
+                    .replace(/<no-new\s*\/\s*>/giu, '')
+                    .trim();
+                if (hasIdentityControlResidue(unexplained)) {
+                    failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_extra_content', groupKey: group.key, retryable: true });
+                    continue;
+                }
+                if ((noNew && targetMatches.length) || (!noNew && !targetMatches.length)) {
+                    failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_disposition_invalid', groupKey: group.key, retryable: true });
+                    continue;
+                }
+                if (noNew) continue;
+                allNoNew = false;
+                totalTargets += targetMatches.length;
+                for (const target of targetMatches) bindTarget(target, expected, unitId);
+            }
+            for (const unit of expectedCoverage) {
+                if (!seenCoverageIds.has(unit.id)) failures.push({
+                    actorId: '', reason: 'actor_profile.discovery_coverage_unit_missing', groupKey: group.key, retryable: true,
                 });
             }
-        }
-        for (const unit of expectedCoverage) {
-            if (!seenCoverageIds.has(unit.id)) failures.push({
-                actorId: '', reason: 'actor_profile.discovery_coverage_unit_missing', groupKey: group.key, retryable: true,
+            const outside = normalized.replace(
+                /<coverage-unit\b[^>]*>[\s\S]*?<\/coverage-unit>/giu,
+                '',
+            ).trim();
+            if (hasIdentityControlResidue(outside)) failures.push({
+                actorId: '', reason: 'actor_profile.discovery_coverage_extra_content', groupKey: group.key, retryable: true,
+            });
+            else if (outside) routeRepairs.push('actor_profile.route_extra_prose_ignored');
+            if (!failures.length && seenCoverageIds.size === expectedCoverage.length) {
+                coverageCompleteEmpty = allNoNew && totalTargets === 0;
+            }
+        } else {
+            const flatTargets = targetMatchesIn(normalized);
+            const noNewMatches = [...normalized.matchAll(/<no-new\s*\/\s*>/giu)];
+            if (noNewMatches.length) {
+                if (
+                    noNewMatches.length !== 1
+                    || flatTargets.length
+                    || normalized.replace(/<no-new\s*\/\s*>/giu, '').trim()
+                ) failures.push({
+                    actorId: '', reason: 'actor_profile.discovery_coverage_disposition_invalid', groupKey: group.key, retryable: true,
+                });
+                else coverageCompleteEmpty = true;
+            } else if (flatTargets.length) {
+                totalTargets = flatTargets.length;
+                const flatRouteNames = flatTargets.map((target) => (
+                    cleanText(attrValue(target[1], 'name'), 160)
+                )).filter(Boolean);
+                const earliestIndependentUnit = (name) => {
+                    const source = String(acceptedNarrative || '');
+                    const longerNames = [...new Set(flatRouteNames.filter((other) => (
+                        other.length > name.length && other.includes(name)
+                    )))];
+                    let offset = source.indexOf(name);
+                    while (offset >= 0) {
+                        const coveredByLonger = longerNames.some((longerName) => {
+                            let longerOffset = source.indexOf(longerName);
+                            while (longerOffset >= 0) {
+                                if (
+                                    longerOffset <= offset
+                                    && longerOffset + longerName.length >= offset + name.length
+                                ) return true;
+                                longerOffset = source.indexOf(longerName, longerOffset + 1);
+                            }
+                            return false;
+                        });
+                        if (!coveredByLonger) {
+                            const unit = expectedCoverage.find((candidate) => {
+                                const unitOffset = coverageUnitOffsets.get(candidate.id) ?? -1;
+                                return unitOffset >= 0
+                                    && offset >= unitOffset
+                                    && offset + name.length <= unitOffset + candidate.text.length;
+                            });
+                            if (unit) return unit;
+                        }
+                        offset = source.indexOf(name, offset + 1);
+                    }
+                    return null;
+                };
+                for (const target of flatTargets) {
+                    const actorId = cleanText(attrValue(target[1], 'actor'), 120);
+                    const name = cleanText(attrValue(target[1], 'name'), 160);
+                    const evidenceSpan = cleanModuleBody(
+                        target[0].match(/<identity-evidence\b[^>]*>([\s\S]*?)<\/identity-evidence>/iu)?.[1] || '',
+                    );
+                    const explicitUnitId = cleanText(
+                        attrValue(target[1], 'unit')
+                            || attrValue(target[1], 'coverageUnitId')
+                            || attrValue(target[1], 'unitId'),
+                        80,
+                    );
+                    let expected = explicitUnitId ? expectedById.get(explicitUnitId) : null;
+                    let unitId = explicitUnitId;
+                    if (explicitUnitId && !expected) {
+                        failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_unit_unknown', groupKey: group.key, retryable: true });
+                        continue;
+                    }
+                    if (!explicitUnitId) {
+                        expected = actorId && actorId !== 'new' && evidenceSpan
+                            ? expectedCoverage.find((unit) => unit.text.includes(evidenceSpan)) || null
+                            : name ? earliestIndependentUnit(name) : null;
+                        if (!expected) {
+                            failures.push({ actorId: '', name, reason: 'actor_profile.discovery_coverage_unit_missing', groupKey: group.key, retryable: true });
+                            continue;
+                        }
+                        unitId = expected.id;
+                    }
+                    bindTarget(target, expected, unitId, { inferred: !explicitUnitId });
+                }
+                const outside = normalized.replace(
+                    /<profile-target\b[^>]*>[\s\S]*?(?:<\/profile-target>|(?=<profile-target\b)|$)/giu,
+                    '',
+                ).trim();
+                if (hasIdentityControlResidue(outside)) failures.push({
+                    actorId: '', reason: 'actor_profile.discovery_coverage_extra_content', groupKey: group.key, retryable: true,
+                });
+                else if (outside) routeRepairs.push('actor_profile.route_extra_prose_ignored');
+            } else failures.push({
+                actorId: '', reason: 'actor_profile.discovery_coverage_extra_content', groupKey: group.key, retryable: true,
             });
         }
-        if (text.replace(/<coverage-unit\b[^>]*>[\s\S]*?<\/coverage-unit>/giu, '').trim()) {
-            failures.push({ actorId: '', reason: 'actor_profile.discovery_coverage_extra_content', groupKey: group.key, retryable: true });
-        }
-        if (!failures.length && seenCoverageIds.size === expectedCoverage.length) {
+        if (!failures.length && (coverageCompleteEmpty || totalTargets > 0)) {
             const proofCandidate = {
                 version: 1,
                 unitCount: group.discoveryCoverage.unitCount,
@@ -809,18 +934,12 @@ export function parseActorProfileModuleGroupOutput(output, group, {
                 coverageDigest: group.discoveryCoverage.coverageDigest,
             };
             if (actorProfileDiscoveryCoverageProofMatches(proofCandidate)) coverageProof = proofCandidate;
-            coverageCompleteEmpty = allNoNew && totalTargets === 0;
         }
     }
     const explicitEmpty = expectedCoverage.length
         ? coverageCompleteEmpty && failures.length === 0
         : /^\s*无人(?:物)?档案[。.!！]?\s*$/u.test(text);
     if (explicitEmpty) return { entries, failures, routeRepairs, formatUnrecoverable: false, explicitEmpty: true, coverageProof, raw: text };
-    const normalized = text
-        .replace(/\[\s*profile-target\s+([^\]]+)\]/giu, '<profile-target $1>')
-        .replace(/\[\s*\/\s*profile-target\s*\]/giu, '</profile-target>')
-        .replace(/\[\s*module\s*[:=]\s*([^\]]+)\]/giu, '<module key="$1">')
-        .replace(/\[\s*\/\s*module\s*\]/giu, '</module>');
     const targetRe = /<profile-target\b([^>]*)>([\s\S]*?)(?:<\/profile-target>|(?=<profile-target\b)|$)/giu;
     const seenTargets = new Set();
     let targetMatch;

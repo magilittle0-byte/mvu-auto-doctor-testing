@@ -1204,6 +1204,52 @@ test('rowless current-source identity response fails after one model call with z
     assert.equal(run.saveCount, 0);
 });
 
+test('flat identity routes bind locally and complete Registry through atomic pending-final readback', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-flat-identity-atomic' });
+    const names = ['合成人物甲', '合成人物乙', '合成人物丙'];
+    const acceptedNarrative = `${names[0]}先到场。${'景'.repeat(430)}。${names[1]}与${names[2]}随后分别到场。`;
+    const calls = [];
+    const moduleText = (key, name) => (
+        `${name}${key}：${'这是完整、自然且可长期使用的合成人物档案内容，包含稳定事实、现实限制、选择依据与后续发展空间。'.repeat(4)}`
+    );
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({ groupKey, attempt, count: candidates.length });
+            if (groupKey === 'identity_bootstrap') return [
+                '识别结果如下：',
+                ...names.map((name) => `<profile-target actor="new" name="${name}"/>`),
+            ].join('\n');
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(calls.filter((entry) => entry.groupKey === 'identity_bootstrap').length, 1);
+    assert.equal(run.result.modelCalls, 2);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.readbackVerified, true);
+    assert.equal(run.result.accepted.length, names.length);
+    assert.equal(run.result.failures.length, 0);
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.persistencePayloads[0].ledger.actors.filter((actor) => (
+        actor.profileV6?.preparedForAction === false
+    )).length, names.length);
+    assert.equal(run.persistencePayloads[1].ledger.actors.filter((actor) => (
+        actor.profileV6?.preparedForAction === true
+    )).length, names.length);
+});
+
 test('holdout invented discovery name fails once without resending accepted narrative', async () => {
     const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-literal-retry' });
     const literalName = '\u9646\u7d20\u82e9';

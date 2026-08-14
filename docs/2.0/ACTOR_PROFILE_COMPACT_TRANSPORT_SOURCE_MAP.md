@@ -35,5 +35,17 @@ Identity coverage remains one model call. The local partition was reduced from
 approximately 900 characters to at most 420 characters at mechanical
 punctuation boundaries; concatenating all unit texts exactly reconstructs the
 accepted narrative. This changes no identity classifier and performs no
-keyword NER. A no-candidates result still requires the complete id/digest unit
-proof and the existing terminal CAS/readback receipt.
+keyword NER. The normal response is now only flat literal `profile-target`
+routes (an optional short unit id, no digest or empty-unit echo), or the whole
+response exactly `<no-new/>`. The script binds an omitted unit to the earliest
+independent literal occurrence, skipping occurrences covered by a longer route
+name; registered identity reveals instead bind their complete literal evidence
+span. It then derives the coverage proof from the complete local plan already
+sent in that same call. Complete legacy id/digest wrappers remain read-only
+compatible; partial wrappers, unknown explicit units, route-plus-empty and
+free-text empty claims fail closed. Supported `profile_target` / `no_new`
+spelling drift is normalized mechanically; any remaining target/empty
+control-like residue fails closed instead of being ignored as prose, so a
+malformed peer cannot disappear from flat or legacy output. No format failure can trigger a second
+full-narrative identity call. The existing terminal CAS/readback receipt stays
+unchanged.

@@ -332,21 +332,179 @@ test('identity coverage uses small mechanical units while preserving the complet
 });
 
 test('identity bootstrap is a route-only row-key probe isolated from dossier authority', () => {
-    const group = actorProfileCompletionGroupPlan([], { allowDiscovery: true })[0];
+    const acceptedNarrative = '新人物明璃真正出场。';
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
     const messages = buildActorProfileModuleGroupMessages(group, { discoveryContext: {
-        acceptedNarrative: '新人物明璃真正出场。',
+        acceptedNarrative,
         registeredActorIndex: [{ actorId: 'NPC-old', name: '旧人物' }],
         characterCreationTickets: [{ id: 'ticket-1', name: '明璃' }],
     } });
     const all = messages.map((message) => message.content).join('\n');
     assert.equal(all.match(/NPC-old/gu)?.length, 1);
     assert.equal(all.includes('ticket-1'), false);
-    assert.match(all, /Registry displayName\/\u884c\u952e/u);
+    assert.match(all, /actor="new"/u);
     assert.match(all, /\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13/u);
+    assert.match(all, /\u6574\u4e2a\u54cd\u5e94\u7cbe\u786e\u8f93\u51fa <no-new\/>/u);
+    assert.match(all, /\u4e0d\u8981\u56de\u663e digest\u3001\u7a7a\u5355\u5143/u);
+    assert.doesNotMatch(all, /coverage-unit:/u);
     assert.doesNotMatch(all, /\u58eb\u5175A|\u53d7\u4f24\u7684\u8b66\u536b/u);
     assert.doesNotMatch(all, /\u6743\u5a01\u6750\u6599|\u5168\u5c40\u9644\u52a0\u63d0\u793a/u);
     assert.deepEqual(group.modules, []);
     assert.match(all, /真正出场/u);
+});
+
+test('identity parser binds flat literal routes to the earliest independent local unit', () => {
+    const longName = '北门记录员七号';
+    const shortName = '七号';
+    const acceptedNarrative = `${longName}完成登记。${'甲'.repeat(430)}。${shortName}随后独立出现。`;
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    assert.ok(group.discoveryCoverage.unitCount > 1);
+    const parsed = parseActorProfileModuleGroupOutput([
+        '以下为路由：',
+        `<profile-target actor="new" name="${longName}"/>`,
+        `<profile-target actor="new" name="${shortName}"/>`,
+    ].join('\n'), group, { acceptedNarrative });
+    assert.deepEqual(parsed.failures, []);
+    assert.equal(parsed.entries.length, 2);
+    assert.equal(parsed.entries[0].coverageUnitId, group.discoveryCoverage.units[0].id);
+    assert.equal(parsed.entries[1].coverageUnitId, group.discoveryCoverage.units.at(-1).id);
+    assert.ok(parsed.coverageProof);
+    assert.ok(parsed.routeRepairs.includes('actor_profile.route_discovery_unit_inferred'));
+    assert.ok(parsed.routeRepairs.includes('actor_profile.route_extra_prose_ignored'));
+});
+
+test('identity parser binds a repeated stable literal to its earliest coverage unit', () => {
+    const name = '重复出现的记录员';
+    const acceptedNarrative = `${name}先到场。${'甲'.repeat(430)}。${name}再次被看见。`;
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const parsed = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="new" name="${name}"/>`,
+        group,
+        { acceptedNarrative },
+    );
+    assert.deepEqual(parsed.failures, []);
+    assert.equal(parsed.entries[0].coverageUnitId, group.discoveryCoverage.units[0].id);
+    assert.equal(parsed.entries[0].sourceUnitOffset, 0);
+});
+
+test('identity compact coverage accepts only exact empty or locally provable flat routes', () => {
+    const acceptedNarrative = `第一单元没有人物。${'甲'.repeat(430)}。第二单元有记录员。`;
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const exactEmpty = parseActorProfileModuleGroupOutput('<no-new/>', group, {
+        acceptedNarrative,
+    });
+    assert.equal(exactEmpty.explicitEmpty, true);
+    assert.ok(exactEmpty.coverageProof);
+
+    const mixed = parseActorProfileModuleGroupOutput(
+        '<no-new/><profile-target actor="new" name="记录员"/>',
+        group,
+        { acceptedNarrative },
+    );
+    assert.ok(mixed.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_coverage_disposition_invalid'
+    )));
+    const unknownUnit = parseActorProfileModuleGroupOutput(
+        '<profile-target actor="new" name="记录员" unit="CU-999"/>',
+        group,
+        { acceptedNarrative },
+    );
+    assert.ok(unknownUnit.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_coverage_unit_unknown'
+    )));
+    const wrongKnownUnit = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="new" name="记录员" unit="${group.discoveryCoverage.units[0].id}"/>`,
+        group,
+        { acceptedNarrative },
+    );
+    assert.ok(wrongKnownUnit.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_name_not_in_coverage_unit'
+    )));
+    const proseOnly = parseActorProfileModuleGroupOutput('没有发现需要登记的人物。', group, {
+        acceptedNarrative,
+    });
+    assert.equal(proseOnly.explicitEmpty, false);
+    assert.ok(proseOnly.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_coverage_extra_content'
+    )));
+});
+
+test('identity parser keeps complete legacy wrappers but rejects a partial wrapper set', () => {
+    const acceptedNarrative = `第一单元。${'甲'.repeat(430)}。第二单元有记录员。`;
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const wrappers = group.discoveryCoverage.units.map((unit) => (
+        `<coverage-unit id="${unit.id}" digest="${unit.digest}">`
+        + (unit.text.includes('记录员')
+            ? '<profile-target actor="new" name="记录员"></profile-target>'
+            : '<no-new/>')
+        + '</coverage-unit>'
+    ));
+    const complete = parseActorProfileModuleGroupOutput(wrappers.join(''), group, {
+        acceptedNarrative,
+    });
+    assert.deepEqual(complete.failures, []);
+    assert.equal(complete.entries.length, 1);
+    assert.ok(complete.coverageProof);
+    const partial = parseActorProfileModuleGroupOutput(wrappers.at(-1), group, {
+        acceptedNarrative,
+    });
+    assert.ok(partial.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_coverage_unit_missing'
+    )));
+});
+
+test('legacy empty wrapper rejects a malformed profile-target peer instead of sealing no candidates', () => {
+    const acceptedNarrative = '记录员进入房间。';
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const unit = group.discoveryCoverage.units[0];
+    const parsed = parseActorProfileModuleGroupOutput(
+        `<coverage-unit id="${unit.id}" digest="${unit.digest}">`
+        + '<no-new/><profile_target actor="new" name="记录员"'
+        + '</coverage-unit>',
+        group,
+        { acceptedNarrative },
+    );
+    assert.equal(parsed.explicitEmpty, false);
+    assert.equal(parsed.coverageProof, null);
+    assert.ok(parsed.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_coverage_extra_content'
+    )));
+});
+
+test('flat identity route rejects a malformed second control tag instead of dropping its person', () => {
+    const acceptedNarrative = '记录员和守门人一起进入房间。';
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const parsed = parseActorProfileModuleGroupOutput(
+        '<profile-target actor="new" name="记录员"/>'
+        + '<profile_target actor="new" name="守门人"',
+        group,
+        { acceptedNarrative },
+    );
+    assert.equal(parsed.coverageProof, null);
+    assert.ok(parsed.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_coverage_extra_content'
+    )));
 });
 
 test('identity route parser discards dossier module noise instead of promoting it', () => {
@@ -386,6 +544,32 @@ test('identity route reuses a registered ActorRef when accepted narrative reveal
     assert.equal(parsed.entries[0].actorId, 'NPC-escapee');
     assert.equal(parsed.entries[0].name, '\u6770\u514b');
     assert.equal(parsed.entries[0].sourceAnchor, unit.text);
+});
+
+test('flat identity reveal binds the unit containing its complete literal evidence', () => {
+    const acceptedNarrative = `杰克这个名字先被写在名单上。${'甲'.repeat(430)}。逃亡者终于承认自己就是杰克。`;
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const evidence = '逃亡者终于承认自己就是杰克';
+    const parsed = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="NPC-escapee" name="杰克"><identity-evidence>${evidence}</identity-evidence></profile-target>`,
+        group,
+        {
+            acceptedNarrative,
+            registeredActorIndex: [{
+                actorId: 'NPC-escapee',
+                displayName: '逃亡者',
+                aliases: [],
+            }],
+        },
+    );
+    assert.deepEqual(parsed.failures, []);
+    assert.equal(parsed.entries.length, 1);
+    assert.equal(parsed.entries[0].identityReveal, true);
+    assert.equal(parsed.entries[0].coverageUnitId, group.discoveryCoverage.units.at(-1).id);
+    assert.ok(parsed.entries[0].sourceAnchor.includes(evidence));
 });
 
 test('identity reveal refuses an invented ActorRef and never downgrades it to a new actor', () => {
