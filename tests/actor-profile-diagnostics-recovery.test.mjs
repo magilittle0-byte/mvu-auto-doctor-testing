@@ -973,6 +973,14 @@ test('continuity recovery normalizer mutations change semantic and runtime finge
             normalizeContinuityState:
                 function normalizeContinuityStateChanged() { return null; },
         }),
+        continuityCoreSemanticFingerprint({
+            continuityGlobalHoldIsVerifiable:
+                function continuityGlobalHoldIsVerifiableChanged() { return false; },
+        }),
+        continuityCoreSemanticFingerprint({
+            enforceContinuityPolicy:
+                function enforceContinuityPolicyChanged() { return null; },
+        }),
     ];
     const baselineRuntime = runtimeFor(baseline);
     for (const changed of mutations) {

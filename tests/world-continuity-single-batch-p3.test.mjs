@@ -6,6 +6,11 @@ import vm from 'node:vm';
 import {
     advanceContinuityClocks,
     applyWorldUpdate,
+    continuityGlobalHoldIsVerifiable,
+    continuityLifecycleStats,
+    continuityScenarioDigest,
+    continuityWorldDigest,
+    enforceContinuityPolicy,
     mergeMarkerRecords,
     normalizeContinuityState,
     normalizeSourceRef,
@@ -72,6 +77,56 @@ function sourceSection(start, end) {
     assert.ok(from >= 0, `missing source marker: ${start}`);
     assert.ok(to > from, `missing source marker: ${end}`);
     return source.slice(from, to);
+}
+
+function loadStage3WorldCandidateValidator({
+    pendingAttempts = [],
+    settlement = null,
+} = {}) {
+    const code = sourceSection(
+        'function stage3ValidateWorldCandidateInMemory(',
+        'function stage3ValidateWorldDraftInMemory(',
+    );
+    const sandbox = {
+        actorActionTargetOf: () => ({ chatId: 'chat-world-hold' }),
+        pendingActorActionAttempts: () => ({
+            attempts: structuredClone(pendingAttempts),
+            candidates: [],
+        }),
+        validateWorldAdjudicationBatch: () => ({ valid: true, decisions: [] }),
+        settleActorActionCandidates: () => structuredClone(settlement),
+        actorActionSettlementsMatchLedger: () => ({ ok: true }),
+        deepClone: (value) => structuredClone(value),
+        normalizeContinuityState,
+        preserveMissingThreads: (_previous, next) => structuredClone(next),
+        applyWorldUpdate,
+        mergeActorWorldEventsIntoContinuity: (next) => structuredClone(next),
+        enforceContinuityPolicy,
+        continuityLifecycleStats,
+        continuityGlobalHoldIsVerifiable,
+        continuityScenarioDigest,
+        continuityWorldDigest,
+    };
+    vm.runInNewContext(
+        `${code}\nthis.validateWorldCandidate = stage3ValidateWorldCandidateInMemory;`,
+        sandbox,
+    );
+    return sandbox.validateWorldCandidate;
+}
+
+function loadActorSchedulingSettlementDiagnostics() {
+    const code = sourceSection(
+        'function markActorSchedulingSettled(',
+        'let latestWorldLaneDiagnostics',
+    );
+    const sandbox = { structuredClone };
+    vm.runInNewContext(
+        `let latestActorShardDiagnostics = {};\n${code}`
+        + '\nthis.markSettled = markActorSchedulingSettled;'
+        + '\nthis.readDiagnostics = () => structuredClone(latestActorShardDiagnostics);',
+        sandbox,
+    );
+    return sandbox;
 }
 
 function loadStage3LocalRecallPacket() {
@@ -1229,6 +1284,281 @@ const captured = {
     fingerprint: 'accepted-p3-6',
 };
 
+test('zero-thread WORLD-held is a verifiable no-change terminal, not fabricated progress', () => {
+    const before = normalizeContinuityState({
+        chatId: 'chat-world-hold',
+        turn: 1,
+        threads: [],
+        world: {},
+        scenarioPlan: {},
+        lastTick: {},
+    }, { chatId: 'chat-world-hold' });
+    const requested = normalizeContinuityState({
+        ...structuredClone(before),
+        lastTick: {
+            turn: 1,
+            action: 'held',
+            threadId: 'WORLD',
+            reason: '没有足够权威依据形成可持久化的世界变化',
+        },
+    }, { chatId: 'chat-world-hold' });
+    const enforced = enforceContinuityPolicy(before, requested, {
+        autonomy: 'living',
+        allowAutonomous: true,
+        maxThreads: 24,
+    });
+    assert.equal(enforced.lastTick.action, 'held');
+    assert.equal(enforced.lastTick.threadId, 'WORLD');
+    assert.equal(continuityGlobalHoldIsVerifiable(before, enforced), true);
+    assert.equal(continuityWorldDigest(before), continuityWorldDigest(enforced));
+    assert.equal(continuityLifecycleStats(before, enforced).changedExisting, 0);
+});
+
+test('WORLD-held cannot bypass an active thread or repair an unknown target', () => {
+    const activeBefore = normalizeContinuityState({
+        chatId: 'chat-world-hold',
+        turn: 1,
+        threads: [{
+            id: 'THREAD-ACTIVE', title: 'active', summary: 'active state',
+            stage: 'seeded', seedBasis: 'stable basis',
+        }],
+        world: {},
+        scenarioPlan: {},
+    }, { chatId: 'chat-world-hold' });
+    const worldHeld = normalizeContinuityState({
+        ...structuredClone(activeBefore),
+        lastTick: {
+            turn: 1, action: 'held', threadId: 'WORLD',
+            reason: '现有活动线程尚未满足继续推进所需条件',
+        },
+    }, { chatId: 'chat-world-hold' });
+    assert.equal(continuityGlobalHoldIsVerifiable(activeBefore, worldHeld), false);
+    assert.notEqual(
+        enforceContinuityPolicy(activeBefore, worldHeld).lastTick.threadId,
+        'WORLD',
+    );
+    const activeHeld = normalizeContinuityState({
+        ...structuredClone(activeBefore),
+        lastTick: {
+            turn: 1, action: 'held', threadId: 'THREAD-ACTIVE',
+            reason: '现有活动线程尚未满足继续推进所需条件',
+        },
+    }, { chatId: 'chat-world-hold' });
+    const activeEnforced = enforceContinuityPolicy(activeBefore, activeHeld);
+    assert.equal(activeEnforced.lastTick.turn, 1);
+    assert.equal(activeEnforced.lastTick.threadId, 'THREAD-ACTIVE');
+
+    for (const threadId of ['', 'UNKNOWN']) {
+        const emptyBefore = normalizeContinuityState({
+            chatId: 'chat-world-hold', turn: 1, threads: [], world: {}, scenarioPlan: {},
+        }, { chatId: 'chat-world-hold' });
+        const unknown = normalizeContinuityState({
+            ...structuredClone(emptyBefore),
+            lastTick: {
+                turn: 1, action: 'held', threadId,
+                reason: '没有足够权威依据形成可持久化的世界变化',
+            },
+        }, { chatId: 'chat-world-hold' });
+        const enforced = enforceContinuityPolicy(emptyBefore, unknown);
+        assert.equal(enforced.lastTick.action, '');
+        assert.equal(continuityGlobalHoldIsVerifiable(emptyBefore, enforced), false);
+    }
+});
+
+test('production P3 validator accepts WORLD-held only after all ATT are adjudicated', () => {
+    const before = normalizeContinuityState({
+        chatId: 'chat-world-hold', turn: 1, threads: [], world: {}, scenarioPlan: {},
+    }, { chatId: 'chat-world-hold' });
+    const held = normalizeContinuityState({
+        ...structuredClone(before),
+        lastTick: {
+            turn: 1,
+            action: 'held',
+            threadId: 'WORLD',
+            reason: '没有足够权威依据形成可持久化的世界变化',
+        },
+    }, { chatId: 'chat-world-hold' });
+    const args = {
+        scheduledState: before,
+        continuityState: held,
+        world: {},
+        actionAdjudications: [],
+        nextTurn: 1,
+        worldContextAvailable: true,
+    };
+    const noAttempts = loadStage3WorldCandidateValidator()(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        args,
+    );
+    assert.equal(noAttempts.ok, true);
+    assert.equal(noAttempts.next.lastTick.threadId, 'WORLD');
+    for (const driftedTurn of [0, 99]) {
+        const drifted = normalizeContinuityState({
+            ...structuredClone(held),
+            turn: driftedTurn,
+            lastTick: structuredClone(held.lastTick),
+        }, { chatId: 'chat-world-hold' });
+        const normalizedClock = loadStage3WorldCandidateValidator()(
+            { chatId: 'chat-world-hold' },
+            { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+            {},
+            { ...args, continuityState: drifted },
+        );
+        assert.equal(normalizedClock.ok, true);
+        assert.equal(normalizedClock.next.turn, 1);
+        assert.equal(normalizedClock.next.lastTick.threadId, 'WORLD');
+    }
+
+    const pendingAttempt = { id: 'ATT-WORLD-HOLD', actorId: 'actor-test' };
+    const unadjudicated = loadStage3WorldCandidateValidator({
+        pendingAttempts: [pendingAttempt],
+        settlement: {
+            ledger: {}, pendingWorld: [pendingAttempt], results: [], worldEvents: [],
+        },
+    })(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        args,
+    );
+    assert.equal(unadjudicated.ok, false);
+    assert.equal(unadjudicated.reason, 'world_candidate_settlement_failed');
+
+    const activeBefore = normalizeContinuityState({
+        chatId: 'chat-world-hold',
+        turn: 1,
+        threads: [{
+            id: 'THREAD-ACTIVE', title: 'active', summary: 'active state',
+            stage: 'seeded', seedBasis: 'stable basis',
+        }],
+        world: {},
+        scenarioPlan: {},
+    }, { chatId: 'chat-world-hold' });
+    const missing = loadStage3WorldCandidateValidator()(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        {
+            ...args,
+            scheduledState: activeBefore,
+            continuityState: activeBefore,
+        },
+    );
+    assert.equal(missing.ok, false);
+    assert.deepEqual(structuredClone(missing.repairContext), {
+        family: 'semantic_progress',
+        targetTurn: 1,
+        allowedThreadIds: ['THREAD-ACTIVE'],
+    });
+    const activeHeld = normalizeContinuityState({
+        ...structuredClone(activeBefore),
+        lastTick: {
+            turn: 1, action: 'held', threadId: 'THREAD-ACTIVE',
+            reason: '现有活动线程尚未满足继续推进所需条件',
+        },
+    }, { chatId: 'chat-world-hold' });
+    const acceptedActiveHold = loadStage3WorldCandidateValidator()(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        { ...args, scheduledState: activeBefore, continuityState: activeHeld },
+    );
+    assert.equal(acceptedActiveHold.ok, true);
+    assert.equal(acceptedActiveHold.next.lastTick.threadId, 'THREAD-ACTIVE');
+    const driftedActive = normalizeContinuityState({
+        ...structuredClone(activeHeld),
+        turn: 99,
+        lastTick: structuredClone(activeHeld.lastTick),
+    }, { chatId: 'chat-world-hold' });
+    const normalizedActiveClock = loadStage3WorldCandidateValidator()(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        { ...args, scheduledState: activeBefore, continuityState: driftedActive },
+    );
+    assert.equal(normalizedActiveClock.ok, true);
+    assert.equal(normalizedActiveClock.next.turn, 1);
+    assert.equal(normalizedActiveClock.next.lastTick.threadId, 'THREAD-ACTIVE');
+    const unknownActive = normalizeContinuityState({
+        ...structuredClone(activeHeld),
+        turn: 99,
+        lastTick: {
+            turn: 1, action: 'held', threadId: 'UNKNOWN',
+            reason: '未知目标不应被本地时钟规范化放行',
+        },
+    }, { chatId: 'chat-world-hold' });
+    const rejectedUnknown = loadStage3WorldCandidateValidator()(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        { ...args, scheduledState: activeBefore, continuityState: unknownActive },
+    );
+    assert.equal(rejectedUnknown.ok, false);
+
+    const adjacentBefore = normalizeContinuityState({
+        ...structuredClone(activeBefore),
+        lastTick: {
+            turn: 1, action: 'advanced', threadId: 'THREAD-ACTIVE',
+            reason: '上一轮已经记录了同一目标回合的调度收据',
+        },
+    }, { chatId: 'chat-world-hold' });
+    const adjacentHeld = normalizeContinuityState({
+        ...structuredClone(adjacentBefore),
+        lastTick: {
+            turn: 1, action: 'held', threadId: 'THREAD-ACTIVE',
+            reason: '本轮仍未满足该活动线程继续推进所需条件',
+        },
+    }, { chatId: 'chat-world-hold' });
+    const acceptedAdjacentHold = loadStage3WorldCandidateValidator()(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        { ...args, scheduledState: adjacentBefore, continuityState: adjacentHeld },
+    );
+    assert.equal(acceptedAdjacentHold.ok, true);
+    assert.equal(
+        continuityLifecycleStats(adjacentBefore, acceptedAdjacentHold.next).schedulerAdvanced,
+        false,
+    );
+    assert.equal(acceptedAdjacentHold.next.lastTick.threadId, 'THREAD-ACTIVE');
+});
+
+test('P3 settlement diagnostics distinguish semantic, held, and pending attempts', () => {
+    const diagnostics = loadActorSchedulingSettlementDiagnostics();
+    diagnostics.markSettled([
+        { status: 'settled', appliedStateChanges: [{ kind: 'plan', summary: 'delta' }] },
+        { worldAdjudicationResult: {
+            status: 'partial',
+            appliedStateChanges: [{ kind: 'knowledge', summary: 'bounded delta' }],
+        } },
+        { status: 'partial', appliedStateChanges: [] },
+        { status: 'held', appliedStateChanges: [] },
+        { status: 'blocked', appliedStateChanges: [] },
+        { status: 'rejected', appliedStateChanges: [] },
+        { status: 'pending_player', appliedStateChanges: [] },
+    ]);
+    assert.deepEqual(diagnostics.readDiagnostics(), {
+        status: 'settled',
+        selected: 7,
+        completed: 7,
+        succeeded: 2,
+        failed: 1,
+        semanticActions: 2,
+        heldActions: 4,
+        scheduledWithoutSemanticAction: 5,
+        failureCodes: ['actor_scheduling.world_rejected'],
+    });
+    const attemptsPrepared = [...source.matchAll(/status: 'attempts_prepared'[\s\S]{0,360}?failureCodes: \[\]/gu)]
+        .map((match) => match[0]);
+    assert.equal(attemptsPrepared.length, 2);
+    for (const block of attemptsPrepared) {
+        assert.match(block, /completed: 0, succeeded: 0, failed: 0, semanticActions: 0/u);
+        assert.match(block, /scheduledWithoutSemanticAction: pending(?:Actions)?\.attempts\.length/u);
+    }
+});
+
 test('0/1/3/6 world events each use exactly one production world-model call', async () => {
     const calls = [];
     const generate = loadWorldGenerator(async (messages, options) => {
@@ -1284,9 +1614,52 @@ test('an invalid world draft gets one compact targeted repair before any caller 
     assert.equal(calls[1].options.transportFailoverOnly, true);
     assert.match(calls[1].messages[0].content, /world\.semantic_progress_missing/u);
     assert.match(calls[1].messages[0].content, /"repairPatch"/u);
+    assert.match(calls[1].messages[0].content, /"threadId":"WORLD"/u);
+    assert.doesNotMatch(calls[1].messages[0].content, /"threadId":"\.\.\."/u);
     assert.doesNotMatch(calls[1].messages[0].content, /large original prompt/u);
     assert.equal(parseContinuityOutput(output).raw.world.digest, 'repaired semantic delta');
     assert.equal(parseContinuityOutput(output).raw.lastTick.action, 'held');
+});
+
+test('semantic repair targets an active stable thread instead of teaching WORLD', async () => {
+    const calls = [];
+    const generate = loadWorldGenerator(async (messages) => {
+        calls.push(messages);
+        return calls.length === 1
+            ? validWorldOutput(1)
+            : JSON.stringify({
+                repairPatch: {
+                    lastTick: {
+                        turn: 1,
+                        action: 'held',
+                        threadId: 'THREAD-ACTIVE',
+                        reason: '现有活动线程尚未满足继续推进所需条件',
+                    },
+                },
+            });
+    });
+    const output = await generate([], {
+        captured,
+        settings: generatorSettings,
+        validateCandidateInMemory: (candidateOutput) => (
+            parseContinuityOutput(candidateOutput).raw?.lastTick?.threadId === 'THREAD-ACTIVE'
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : {
+                    ok: false,
+                    validationCode: 'world.semantic_progress_missing',
+                    repairContext: {
+                        family: 'semantic_progress',
+                        targetTurn: 1,
+                        allowedThreadIds: ['THREAD-ACTIVE'],
+                    },
+                }
+        ),
+    });
+    assert.equal(calls.length, 2);
+    assert.match(calls[1][0].content, /"threadId":"THREAD-ACTIVE"/u);
+    assert.match(calls[1][0].content, /threadId must be one of \["THREAD-ACTIVE"\]/u);
+    assert.doesNotMatch(calls[1][0].content, /threadId must be WORLD/u);
+    assert.equal(parseContinuityOutput(output).raw.lastTick.threadId, 'THREAD-ACTIVE');
 });
 
 test('a still-invalid targeted repair stops at two calls and preserves its privacy-safe code', async () => {

@@ -50,8 +50,10 @@ import {
     buildContinuityInjection,
     continuityContentDigest,
     continuityCoreSemanticFingerprint,
+    continuityGlobalHoldIsVerifiable,
     continuityLifecycleStats,
     continuityLedgerView,
+    continuityScenarioDigest,
     continuityWorldDigest,
     CONTINUITY_TICK_LABELS,
     emptyContinuityState,
@@ -1062,19 +1064,27 @@ function markActorSchedulingSettled(results = [], { recovered = false } = {}) {
         .map((entry) => entry?.worldAdjudicationResult || entry)
         .filter(Boolean);
     if (!values.length) return;
-    const succeeded = values.filter((entry) => entry?.status === 'settled').length;
-    const partial = values.filter((entry) => entry?.status === 'partial').length;
+    const semantic = values.filter((entry) => (
+        ['settled', 'partial'].includes(entry?.status)
+        && Array.isArray(entry?.appliedStateChanges)
+        && entry.appliedStateChanges.length > 0
+    )).length;
+    const held = values.filter((entry) => (
+        ['held', 'blocked', 'rejected', 'pending_player'].includes(entry?.status)
+    )).length;
+    const rejected = values.filter((entry) => entry?.status === 'rejected').length;
+    const nonsemantic = values.length - semantic;
     latestActorShardDiagnostics = {
         ...latestActorShardDiagnostics,
         status: recovered ? 'applied_recovered' : 'settled',
         selected: values.length,
         completed: values.length,
-        succeeded,
-        failed: partial,
-        semanticActions: values.length,
-        heldActions: partial,
-        scheduledWithoutSemanticAction: 0,
-        failureCodes: partial ? ['actor_scheduling.world_partial'] : [],
+        succeeded: semantic,
+        failed: rejected,
+        semanticActions: semantic,
+        heldActions: held,
+        scheduledWithoutSemanticAction: nonsemantic,
+        failureCodes: rejected ? ['actor_scheduling.world_rejected'] : [],
     };
 }
 let latestWorldLaneDiagnostics = {
@@ -3918,6 +3928,7 @@ function doctorRuntimeCriticalFingerprint() {
         acceptFinalGeneration.toString(),
         dispatchAcceptedFinal.toString(),
         stage3NoActorPermitMatches.toString(),
+        markActorSchedulingSettled.toString(),
         stage3LedgerReadbackGate.toString(),
         stage3AcceptedTargetIsStrictlyNewer.toString(),
         stage3PriorReservedCallCanRetire.toString(),
@@ -13684,6 +13695,16 @@ async function generateWorldContinuitySingleBatch(messages, {
                     && entry.repairFields.length
                 )),
             };
+        } else if (sourceRepairContext?.family === 'semantic_progress') {
+            repairContext = {
+                family: 'semantic_progress',
+                targetTurn: Math.max(0, Math.floor(
+                    Number(sourceRepairContext.targetTurn) || 0,
+                )),
+                allowedThreadIds: [...new Set((sourceRepairContext.allowedThreadIds || [])
+                    .map((threadId) => String(threadId || ''))
+                    .filter(Boolean))].slice(0, 40),
+            };
         }
         const expectedShape = stage3WorldValidationExpectedShape(
             validationCode,
@@ -16786,9 +16807,10 @@ async function runContinuityTarget(captured, {
     if (pendingActions.attempts.length) {
         latestActorShardDiagnostics = {
             status: 'attempts_prepared', selected: pendingActions.attempts.length,
-            completed: pendingActions.attempts.length, succeeded: pendingActions.attempts.length,
-            failed: 0, semanticActions: pendingActions.attempts.length, heldActions: 0,
-            scheduledWithoutSemanticAction: 0, failureCodes: [],
+            completed: 0, succeeded: 0, failed: 0, semanticActions: 0, heldActions: 0,
+            scheduledWithoutSemanticAction: pendingActions.attempts.length,
+            pendingRecovery: pendingActions.attempts.length,
+            failureCodes: [],
         };
     }
     if (!pendingActions.attempts.length) {
@@ -17872,7 +17894,12 @@ function stage3ValidateWorldCandidateInMemory(captured, settings, ledger, {
         chatId: captured.chatId,
         maxThreads: settings.continuityMaxThreads,
     });
-    let next = preserveMissingThreads(scheduledBase, continuityState);
+    const targetTurnContinuity = deepClone(continuityState || {});
+    // The accepted target owns this mechanical clock field. A missing or
+    // drifted model `turn` must not force the one semantic repair to invent a
+    // second world delta; thread/world/scenario/ATT content remains untouched.
+    targetTurnContinuity.turn = nextTurn;
+    let next = preserveMissingThreads(scheduledBase, targetTurnContinuity);
     next.world = applyWorldUpdate(scheduledBase.world, world, { turn: nextTurn });
     if (settlement?.worldEvents?.length) {
         next = mergeActorWorldEventsIntoContinuity(next, settlement.worldEvents);
@@ -17883,12 +17910,45 @@ function stage3ValidateWorldCandidateInMemory(captured, settings, ledger, {
         maxThreads: settings.continuityMaxThreads,
     });
     const lifecycle = continuityLifecycleStats(scheduledBase, next);
+    const actionAttemptsFullyAdjudicated = pending.attempts.length === 0 || (
+        !!settlement
+        && settlement.pendingWorld.length === 0
+        && settlement.results.length === pending.attempts.length
+    );
+    const globalHoldTerminal = actionAttemptsFullyAdjudicated
+        && continuityGlobalHoldIsVerifiable(scheduledBase, next);
+    const activeThreadIds = new Set(scheduledBase.threads
+        .filter((thread) => thread.stage !== 'resolved')
+        .map((thread) => thread.id));
+    const specificHoldTerminal = actionAttemptsFullyAdjudicated
+        && next.turn === scheduledBase.turn
+        && next.lastTick.turn === nextTurn
+        && next.lastTick.action === 'held'
+        && activeThreadIds.has(next.lastTick.threadId)
+        && next.lastTick.reason.length >= 8
+        && lifecycle.changedExisting === 0
+        && lifecycle.added === 0
+        && lifecycle.removed === 0
+        && continuityWorldDigest(scheduledBase) === continuityWorldDigest(next)
+        && continuityScenarioDigest(scheduledBase) === continuityScenarioDigest(next);
     const progressed = lifecycle.changedExisting > 0 || lifecycle.added > 0
-        || (lifecycle.schedulerAdvanced && lifecycle.tickAction === 'held')
+        || specificHoldTerminal
+        || globalHoldTerminal
         || continuityWorldDigest(scheduledBase) !== continuityWorldDigest(next);
     return progressed
         ? { ok: true, pending, settlement, scheduledBase, next }
-        : { ok: false, reason: 'world_semantic_progress_missing', pending };
+        : {
+            ok: false,
+            reason: 'world_semantic_progress_missing',
+            pending,
+            repairContext: {
+                family: 'semantic_progress',
+                targetTurn: nextTurn,
+                allowedThreadIds: scheduledBase.threads
+                    .filter((thread) => thread.stage !== 'resolved')
+                    .map((thread) => thread.id),
+            },
+        };
 }
 
 function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, parsed, {
@@ -18041,7 +18101,13 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
             world_candidate_settlement_failed: 'world.actor.settlement_failed',
             world_semantic_progress_missing: 'world.semantic_progress_missing',
         })[candidate.reason] || 'world.candidate.invalid';
-        return { ok: false, validationCode };
+        return {
+            ok: false,
+            validationCode,
+            ...(candidate.repairContext ? {
+                repairContext: deepClone(candidate.repairContext),
+            } : {}),
+        };
     }
     return {
         ok: true,
@@ -18221,7 +18287,24 @@ function stage3WorldValidationExpectedShape(validationCode, repairContext = null
         return '{"repairPatch":{"actionAdjudications":[one object per scheduled actorId with status,risk,costs,actualResourceCosts,durationTurns,resultSummary,visibility,observerActorIds,observableConsequence,revealPath,appliedStateChanges]}}';
     }
     if (code === 'world.semantic_progress_missing') {
-        return '{"repairPatch":{"threads":[changed threads],"world":{"changed world fields":{}},"scenarioPlan":{},"lastTick":{"action":"held","threadId":"...","reason":"specific unmet condition"}}}; include only fields actually repaired.';
+        const targetTurn = Math.max(0, Math.floor(Number(repairContext?.targetTurn) || 0));
+        const activeThreadIds = [...new Set((repairContext?.allowedThreadIds || [])
+            .map((threadId) => String(threadId || ''))
+            .filter(Boolean))];
+        const threadId = activeThreadIds[0] || 'WORLD';
+        const threadRule = activeThreadIds.length
+            ? `threadId must be one of ${JSON.stringify(activeThreadIds)}`
+            : 'there is no unresolved thread, so threadId must be WORLD';
+        return `${JSON.stringify({
+            repairPatch: {
+                lastTick: {
+                    turn: targetTurn,
+                    action: 'held',
+                    threadId,
+                    reason: 'specific unmet condition, at least 8 characters',
+                },
+            },
+        })}; ${threadRule}; return exactly this held receipt instead of inventing threads/world/scenario progress.`;
     }
     return '';
 }
@@ -18500,9 +18583,10 @@ async function commitPreparedWorldCandidate(captured, {
     if (pending.attempts.length) {
         latestActorShardDiagnostics = {
             status: 'attempts_prepared', selected: pending.attempts.length,
-            completed: pending.attempts.length, succeeded: pending.attempts.length,
-            failed: 0, semanticActions: pending.attempts.length, heldActions: 0,
-            scheduledWithoutSemanticAction: 0, failureCodes: [],
+            completed: 0, succeeded: 0, failed: 0, semanticActions: 0, heldActions: 0,
+            scheduledWithoutSemanticAction: pending.attempts.length,
+            pendingRecovery: pending.attempts.length,
+            failureCodes: [],
         };
     }
     if (!stage3PreparedPhase1StatesMatch(checkpoint, namespace, ledger, captured)) {

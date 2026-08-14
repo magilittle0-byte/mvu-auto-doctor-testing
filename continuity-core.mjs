@@ -959,6 +959,13 @@ export function continuityCoreSemanticFingerprint(overrides = {}) {
         continuityState: String(
             overrides?.normalizeContinuityState || normalizeContinuityState,
         ),
+        globalHoldTerminal: String(
+            overrides?.continuityGlobalHoldIsVerifiable
+                || continuityGlobalHoldIsVerifiable,
+        ),
+        continuityPolicy: String(
+            overrides?.enforceContinuityPolicy || enforceContinuityPolicy,
+        ),
     }))}`;
 }
 
@@ -1709,6 +1716,23 @@ export function continuityLifecycleStats(previous, next) {
     };
 }
 
+export function continuityGlobalHoldIsVerifiable(previous, next) {
+    const before = normalizeContinuityState(previous, { maxThreads: 24, maxResolved: 24 });
+    const after = normalizeContinuityState(next, { maxThreads: 24, maxResolved: 24 });
+    const lifecycle = continuityLifecycleStats(before, after);
+    return after.turn === before.turn
+        && after.lastTick.turn === before.turn
+        && after.lastTick.action === 'held'
+        && after.lastTick.threadId === 'WORLD'
+        && after.lastTick.reason.length >= 8
+        && before.threads.every((thread) => thread.stage === 'resolved')
+        && lifecycle.changedExisting === 0
+        && lifecycle.added === 0
+        && lifecycle.removed === 0
+        && continuityWorldDigest(before) === continuityWorldDigest(after)
+        && continuityScenarioDigest(before) === continuityScenarioDigest(after);
+}
+
 function nextWorldId(items, prefix) {
     let number = 1;
     const used = new Set(items.map((item) => item.id));
@@ -2308,6 +2332,18 @@ export function enforceContinuityPolicy(previous, candidate, {
     );
     const scenarioChanged = JSON.stringify(before.scenarioPlan)
         !== JSON.stringify(scenarioPlan);
+    const requestedGlobalHold = normalizeContinuityState({
+        ...after,
+        lastTick: {
+            turn: before.turn,
+            action: 'held',
+            threadId: 'WORLD',
+            reason: after.lastTick?.reason,
+        },
+        threads,
+        world: policyWorld,
+        scenarioPlan,
+    }, { chatId: before.chatId || after.chatId, maxThreads });
     let lastTick = clone(before.lastTick);
     if (selectedChangedId) {
         const changed = threads.find((thread) => thread.id === selectedChangedId);
@@ -2348,12 +2384,21 @@ export function enforceContinuityPolicy(previous, candidate, {
     } else if (
         after.lastTick?.action === 'held'
         && after.lastTick.reason.length >= 8
-        && after.lastTick.turn > (before.lastTick?.turn || 0)
-        && oldById.has(after.lastTick.threadId)
-        && oldById.get(after.lastTick.threadId)?.stage !== 'resolved'
+        && (
+            (
+                after.lastTick.turn === before.turn
+                && oldById.has(after.lastTick.threadId)
+                && oldById.get(after.lastTick.threadId)?.stage !== 'resolved'
+            )
+            || (
+                after.lastTick.turn === before.turn
+                && after.lastTick.threadId === 'WORLD'
+                && continuityGlobalHoldIsVerifiable(before, requestedGlobalHold)
+            )
+        )
     ) {
         lastTick = {
-            turn: before.turn + 1,
+            turn: before.turn,
             action: 'held',
             threadId: after.lastTick.threadId,
             reason: after.lastTick.reason,
