@@ -69,9 +69,9 @@ export const ACTOR_PROFILE_COMPLETION_GROUPS = Object.freeze([
             'relationshipsMotives',
             'currentState',
             'knowledgeCapabilitiesResources',
+            'physiology',
         ],
     },
-    { key: 'physiology_optional', modules: ['physiology'], adultOnly: true },
 ]);
 export const ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES = Object.freeze([
     'person',
@@ -323,6 +323,9 @@ export function actorProfileCompletionGroupPlan(candidates, {
         const discoveryBootstrap = definition.key === 'identity_bootstrap' && allowDiscovery;
         return {
             ...definition,
+            modules: definition.modules.filter((moduleKey) => (
+                (targets[moduleKey] || []).length > 0
+            )),
             targets,
             targetCount,
             discoveryBootstrap,
@@ -340,8 +343,81 @@ const PROFILE_MODULE_NOTES = Object.freeze({
     currentState: '只写适合长期档案保存的状态基线、持续性限制、长期责任与反复出现的压力来源。即时地点、短暂情绪、当下伤势、进行中的动作和计划进度属于 MVU/连续性实时状态，不得固化进人物基线。',
     relationshipsMotives: '说明稳定的关键关系背景、与他人的通常距离、长期驱动力和可观察边界；本回合即时态度与关系数值属于实时状态，不得固化，也不得替玩家决定态度。',
     knowledgeCapabilitiesResources: '\u5206\u6e05\u5df2\u77e5\u4e0e\u672a\u77e5\uff0c\u5199\u51fa\u53ef\u7528\u80fd\u529b\u3001\u5de5\u5177\u3001\u8d44\u6e90\u53ca\u9650\u5236\u3002',
-    physiology: '仅在 full_adult 启用时填写成人生理档案。使用自然、客观、完整的中文句子，并同时覆盖：稳定的一般体征；与物种和生理性别相符的外生殖器与内生殖系统；第二性征；生殖功能、周期、分泌或特殊体液；性刺激下的生理反应与敏感部位；明确限制。不能只写体型、伤病、服装或机械改造就算完成；即时伤势和临床危急状态属于实时状态，不固化为生理基线。不得把性经历、性行为、偏好、同意或关系当成生理事实；正文没有给出精确尺寸时做合理定性补全，不伪造医学测量值。任何不适用项都用自然句说明物种或生理构造原因。正文末尾必须为上述六项各附一次非持久覆盖声明 <physiology-coverage key="给定key">正文中的逐字短句</physiology-coverage>；key 只能是 generalBaseline、reproductiveAnatomy、secondaryTraits、reproductiveFunction、sexualResponse、limitations，声明内容必须逐字来自本模块自然正文，声明仅供本地完整性核对且不会写入档案。',
+    physiology: '仅 full_adult 填写。六个片段都用自然、客观的完整中文句子：generalBaseline=稳定一般体征；reproductiveAnatomy=与物种和生理性别相符的外生殖器与内生殖系统；secondaryTraits=第二性征；reproductiveFunction=生殖功能、周期、分泌或特殊体液；sexualResponse=性刺激下的生理反应与敏感部位；limitations=明确生理限制。不能只写体型、伤病、服装或机械改造；即时伤势属于 MVU/连续性，不固化为生理基线。不得把性经历、性行为、偏好、同意或关系当成生理事实；无精确尺寸时做合理定性补全，不伪造医学测量。不适用项必须写明物种或构造原因。最小输出形状：<module key="physiology"><field key="generalBaseline">片段</field><field key="reproductiveAnatomy">片段</field><field key="secondaryTraits">片段</field><field key="reproductiveFunction">片段</field><field key="sexualResponse">片段</field><field key="limitations">片段</field></module>。字段标签只用于本地归位，最终只保存自然中文。',
 });
+
+const PHYSIOLOGY_FIELD_TITLES = Object.freeze({
+    generalBaseline: '一般体征',
+    reproductiveAnatomy: '生殖解剖',
+    secondaryTraits: '第二性征',
+    reproductiveFunction: '生殖功能',
+    sexualResponse: '性刺激下的生理反应',
+    limitations: '生理限制',
+});
+
+const PHYSIOLOGY_FIELD_ALIASES = Object.freeze({
+    generalBaseline: ['generalBaseline', '一般体征', '稳定一般体征'],
+    reproductiveAnatomy: ['reproductiveAnatomy', '生殖解剖', '生殖系统', '外生殖器与内生殖系统'],
+    secondaryTraits: ['secondaryTraits', '第二性征'],
+    reproductiveFunction: ['reproductiveFunction', '生殖功能', '周期分泌与特殊体液'],
+    sexualResponse: ['sexualResponse', '性刺激反应', '性刺激下的生理反应', '敏感部位'],
+    limitations: ['limitations', '限制', '生理限制'],
+});
+
+function compactRelevantFragments(value, needles, {
+    radius = 240,
+    maxFragments = 3,
+    fallbackLimit = 900,
+    totalLimit = 2400,
+} = {}) {
+    const source = String(value || '').trim();
+    if (!source) return '';
+    const labels = [...new Set((needles || []).map((item) => cleanText(item, 160)).filter(Boolean))];
+    const spans = [];
+    for (const label of labels) {
+        let offset = source.indexOf(label);
+        while (offset >= 0 && spans.length < maxFragments) {
+            spans.push({
+                start: Math.max(0, offset - radius),
+                end: Math.min(source.length, offset + label.length + radius),
+            });
+            offset = source.indexOf(label, offset + label.length);
+        }
+        if (spans.length >= maxFragments) break;
+    }
+    if (!spans.length) return source.slice(0, fallbackLimit);
+    spans.sort((left, right) => left.start - right.start);
+    const merged = [];
+    for (const span of spans) {
+        const previous = merged.at(-1);
+        if (previous && span.start <= previous.end) previous.end = Math.max(previous.end, span.end);
+        else merged.push({ ...span });
+    }
+    return merged.map((span) => source.slice(span.start, span.end).trim())
+        .filter(Boolean).join('\n…\n').slice(0, totalLimit);
+}
+
+function compactAuthorityOverview(value) {
+    const source = String(value || '').trim();
+    if (!source) return '';
+    const headings = [...source.matchAll(/^\[[^\]\r\n]{1,120}\][^\r\n]*$/gmu)];
+    if (!headings.length) return source.slice(0, 1200);
+    return headings.map((heading, index) => {
+        const start = heading.index;
+        const end = index + 1 < headings.length ? headings[index + 1].index : source.length;
+        return source.slice(start, Math.min(end, start + 600)).trim();
+    }).filter(Boolean).join('\n\n').slice(0, 1800);
+}
+
+function candidatePromptLabels(candidate) {
+    return cleanList([
+        candidate?.actorRef?.name,
+        candidate?.name,
+        ...(candidate?.actorRef?.aliases || []),
+        ...(candidate?.identity?.aliases || []),
+        candidate?.previousProfile?.actorName,
+    ], 16, 160);
+}
 
 export function buildActorProfileModuleGroupMessages(group, {
     evidenceText = '', customPrompt = '', discoveryContext = null, validationFeedback = [],
@@ -401,6 +477,7 @@ export function buildActorProfileModuleGroupMessages(group, {
         requestedModules,
         actors: [...actorById.values()].map((candidate) => {
             const actorId = candidateActorIdForPrompt(candidate);
+            const labels = candidatePromptLabels(candidate);
             const moduleKeys = Object.entries(requestedModules)
                 .filter(([, actorIds]) => actorIds.includes(actorId))
                 .map(([moduleKey]) => moduleKey);
@@ -412,13 +489,27 @@ export function buildActorProfileModuleGroupMessages(group, {
                 name: cleanText(candidate?.actorRef?.name || candidate?.name, 160),
                 current: Object.fromEntries(moduleKeys.map((moduleKey) => [
                     moduleKey,
-                    narrativeText(sections?.[moduleKey]?.text ?? sections?.[moduleKey], 4000),
+                    narrativeText(sections?.[moduleKey]?.text ?? sections?.[moduleKey], 1200),
                 ])),
+                narrativeEvidence: compactRelevantFragments(
+                    candidate?.__discoveryKey?.split('\u0000')?.[1]
+                        || discoveryContext?.acceptedNarrative,
+                    labels,
+                    { fallbackLimit: 0, totalLimit: 1800 },
+                ),
+                authorityMaterial: compactRelevantFragments(
+                    evidenceText,
+                    labels,
+                    { fallbackLimit: 0, totalLimit: 2400 },
+                ),
                 authority: authorityProjection(candidate, moduleKeys),
             };
         }),
     };
-    const guides = (group?.modules || []).map((key) => `${key}: ${PROFILE_MODULE_NOTES[key]}`).join('\n');
+    const requestedModuleKeys = (group?.modules || []).filter((key) => (
+        (requestedModules[key] || []).length > 0
+    ));
+    const guides = requestedModuleKeys.map((key) => `${key}: ${PROFILE_MODULE_NOTES[key]}`).join('\n');
     if (discoveryOnly) return [{ role: 'system', content: [
         '\u4f60\u53ea\u505a\u5df2\u63a5\u53d7\u6b63\u6587\u7684\u4eba\u7269\u8eab\u4efd\u53d1\u73b0\uff0c\u4e0d\u586b\u4eba\u7269\u6863\u6848\uff0c\u4e0d\u7eed\u5199\u5267\u60c5\u3002',
         '\u5bf9\u6bcf\u4e2a\u771f\u6b63\u51fa\u573a\u3001\u6709\u6b63\u6587\u9010\u5b57\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u4e14\u5c1a\u672a\u767b\u8bb0\u7684\u65b0\u4eba\uff0c\u53ea\u8f93\u51fa <profile-target actor="new" name="\u6b63\u6587\u9010\u5b57\u4eba\u7269\u884c\u952e"></profile-target>\u3002name \u662f\u517c\u5bb9\u5c5e\u6027\uff0c\u5176\u542b\u4e49\u662f Registry displayName/\u884c\u952e\uff1b\u53ef\u4ee5\u662f\u6b63\u6587\u4e2d\u7684\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13\uff0c\u4e0d\u8981\u6c42\u6237\u7c4d\u5f0f\u59d3\u540d\u3002\u88f8\u7684\u6027\u522b\u3001\u5e74\u9f84\u6216\u8def\u4eba\u6cdb\u79f0\u4e0d\u662f\u7a33\u5b9a\u884c\u952e\uff1b\u7f16\u53f7\u6216\u660e\u786e\u9650\u5b9a\u5230\u4e00\u4eba\u7684\u79f0\u8c13\u53ef\u7528\u3002\u4e0d\u5f97\u8f93\u51fa module\u3001\u6863\u6848\u6b63\u6587\u3001\u89e3\u91ca\u6216\u81ea\u521b\u884c\u952e\u3002',
@@ -434,25 +525,15 @@ export function buildActorProfileModuleGroupMessages(group, {
     ].join('\n\n') }];
     return [{ role: 'system', content: [
         '\u4f60\u53ea\u586b\u5199\u6307\u5b9a\u7684\u4eba\u7269\u6863\u6848\u6a21\u5757\uff0c\u4e0d\u7eed\u5199\u5267\u60c5\u3002',
-        group?.key === 'character_core' ? ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT : '',
+        requestedModuleKeys.some((key) => key !== 'physiology')
+            ? ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT : '',
         '\u8f93\u51fa\u7528\u8f7b\u91cf\u8def\u7531\u8fb9\u754c <profile-target actor="\u7cbe\u786eActorRef" name="Registry displayName/\u884c\u952e"> \u548c <module key="\u7cbe\u786emodule key">\u81ea\u7136\u4e2d\u6587</module>\u3002\u6863\u6848\u7ec4\u53ea\u63a5\u6536\u5df2\u7531\u672c\u5730\u9501\u5b9a\u7684 ActorRef\uff0c\u4e0d\u5f97\u81ea\u884c\u65b0\u589e\u4eba\u7269\u884c\u3002',
-        '\u8def\u7531\u6807\u7b7e\u4e0d\u662f\u6863\u6848\u6807\u9898\uff1b\u6a21\u5757\u5185\u53ea\u5199\u53ef\u8bfb\u7684\u81ea\u7136\u4e2d\u6587\uff0c\u4e0d\u8981 JSON/SQL/\u5b57\u6bb5\u8868\u3002',
+        '\u8def\u7531\u6807\u7b7e\u4e0d\u662f\u6863\u6848\u6807\u9898\uff1b\u666e\u901a\u6a21\u5757\u5185\u53ea\u5199\u53ef\u8bfb\u7684\u81ea\u7136\u4e2d\u6587\uff0cphysiology \u4f7f\u7528\u516d\u4e2a field \u7247\u6bb5\u5f52\u4f4d\u3002\u4e0d\u8981 JSON/SQL/\u989d\u5916\u8bc1\u660e\u3002',
         '\u65b0\u53d1\u73b0\u884c\u4e2d\u7684\u540c\u56de\u5408\u7968\u636e\u53ea\u662f\u4ea4\u6613\u5185\u7684 provisional working context\uff1a\u6743\u5a01\u8bbe\u5b9a\u3001\u5df2\u63a5\u53d7\u6b63\u6587\u548c\u5df2\u786e\u8ba4\u6863\u6848\u4f18\u5148\uff0c\u51b2\u7a81\u8f74\u5fc5\u987b\u4e22\u5f03\uff1b\u6700\u7ec8\u53ea\u6709\u672c\u5730 Registry promotion \u540e\u7684 ticket binding \u662f\u771f\u503c\u3002\u6a21\u5757\u6587\u672c\u4e0d\u5f97\u8986\u76d6 confirmed/locks/designRolls\u3002',
         guides,
         validationFeedback.length ? `\u4ec5\u4fee\u590d\u672c\u7ec4\uff1a${validationFeedback.join('; ')}` : '',
     ].filter(Boolean).join('\n\n') }, { role: 'user', content: [
-        `\u76ee\u6807\u884c\u4e0e\u5f53\u524d\u503c\uff1a${JSON.stringify(targetRows)}`,
-        `\u5df2\u63a5\u53d7\u6b63\u6587\uff1a\n${String(discoveryContext?.acceptedNarrative || '')}`,
-        group?.key === 'identity_bootstrap'
-            ? `\u5df2\u767b\u8bb0\u7d22\u5f15\uff1a${JSON.stringify(discoveryContext?.registeredActorIndex || [])}`
-            : '',
-        group?.key === 'identity_bootstrap'
-            ? `\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a${JSON.stringify(excludedActorNames)}`
-            : '',
-        group?.key === 'identity_bootstrap'
-            ? `\u540c\u672c\u56de\u5408\u4eba\u7269\u521b\u5efa\u7968\u636e\uff1a${JSON.stringify(discoveryContext?.characterCreationTickets || [])}`
-            : '',
-        `\u6743\u5a01\u6750\u6599\uff08\u5df2\u6309\u6765\u6e90\u6807\u8bb0\uff09\uff1a\n${String(evidenceText || '')}`,
+        `\u76ee\u6807 ActorRef\u00d7\u5b57\u6bb5\u3001\u5f53\u524d\u503c\u4e0e\u5c40\u90e8\u6750\u6599\uff1a${JSON.stringify(targetRows)}`,
         customPrompt ? `\u5168\u5c40\u9644\u52a0\u63d0\u793a\uff1a\n${customPrompt}` : '',
     ].filter(Boolean).join('\n\n') }];
 }
@@ -474,57 +555,100 @@ export function actorProfileIdentityEvidenceSurface(value) {
         .trim();
 }
 
+function physiologyFieldKey(value) {
+    const wanted = moduleAliasKey(value);
+    return Object.entries(PHYSIOLOGY_FIELD_ALIASES).find(([, aliases]) => (
+        aliases.some((alias) => moduleAliasKey(alias) === wanted)
+    ))?.[0] || '';
+}
+
+function physiologyFragment(value) {
+    const text = cleanModuleBody(value).replace(/^\s*[-*•]\s*/u, '');
+    return Array.from(text).length >= 8 && !PROFILE_PLACEHOLDER_RE.test(text) ? text : '';
+}
+
+function physiologyProse(fields) {
+    return ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => {
+        const fragment = String(fields.get(key) || '').replace(/[\u3002.!\uff01\uff1f\uff1b;]+$/u, '');
+        return `${PHYSIOLOGY_FIELD_TITLES[key]}：${fragment}。`;
+    }).join('');
+}
+
 function validatePhysiologyCoverage(value) {
     const source = String(value || '');
-    const seen = new Map();
-    const coverageRe = /<physiology-coverage\b[^>]*\bkey\s*=\s*(?:["']([^"']+)["']|([^\s>]+))[^>]*>([\s\S]*?)<\/physiology-coverage>/giu;
+    const legacySeen = new Map();
+    const legacyCoverageRe = /<physiology-coverage\b[^>]*\bkey\s*=\s*(?:["']([^"']+)["']|([^\s>]+))[^>]*>([\s\S]*?)<\/physiology-coverage>/giu;
     let match;
     let invalid = false;
-    while ((match = coverageRe.exec(source))) {
-        const key = cleanText(match[1] || match[2], 80);
-        const excerpt = cleanModuleBody(match[3]);
-        if (
-            !ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.includes(key)
-            || seen.has(key)
-            || Array.from(excerpt).length < 8
-            || [...seen.values()].includes(excerpt)
-        ) {
+    while ((match = legacyCoverageRe.exec(source))) {
+        const key = physiologyFieldKey(match[1] || match[2]);
+        const excerpt = physiologyFragment(match[3]);
+        if (!key || !excerpt || legacySeen.has(key) || [...legacySeen.values()].includes(excerpt)) {
             invalid = true;
             continue;
         }
-        seen.set(key, excerpt);
+        legacySeen.set(key, excerpt);
     }
-    const prose = cleanModuleBody(source.replace(coverageRe, ''));
-    // Coverage tags are transport metadata, not dossier content.  Some
-    // otherwise complete model responses omit the tags altogether.  Repair
-    // that format drift locally when the prose itself contains at least six
-    // distinct substantive clauses; partial, duplicate or malformed tag sets
-    // still fail closed and receive the existing targeted retry.
-    if (seen.size === 0 && !invalid) {
-        const clauses = [...new Set(prose
-            .split(/[\u3002\uff01\uff1f\uff1b;\r\n]+/u)
-            .map((item) => cleanText(item, 800))
-            .filter((item) => Array.from(item).length >= 16))];
-        if (clauses.length >= ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.length) {
-            return { ok: true, prose, missingFields: [], locallyRecovered: true };
+    const withoutLegacyCoverage = source.replace(legacyCoverageRe, '');
+    if (legacySeen.size > 0 || /<physiology-coverage\b/iu.test(source)) {
+        const prose = cleanModuleBody(withoutLegacyCoverage);
+        const ranges = [];
+        for (const excerpt of legacySeen.values()) {
+            const start = prose.indexOf(excerpt);
+            const end = start + excerpt.length;
+            if (start < 0 || ranges.some((range) => start < range.end && end > range.start)) {
+                invalid = true;
+            }
+            ranges.push({ start, end });
         }
+        const missingFields = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS
+            .filter((key) => !legacySeen.has(key) || !prose.includes(legacySeen.get(key)))
+            .map((key) => `physiology.${key}`);
+        return { ok: !invalid && missingFields.length === 0, prose, missingFields };
     }
-    const ranges = [];
-    for (const excerpt of seen.values()) {
-        const start = prose.indexOf(excerpt);
-        const end = start + excerpt.length;
-        if (start < 0 || ranges.some((range) => start < range.end && end > range.start)) {
+
+    const normalized = withoutLegacyCoverage
+        .replace(/\[\s*(?:physiology[-_ ]?)?field\s*[:=]\s*([^\]]+)\]/giu, '<field key="$1">')
+        .replace(/\[\s*\/\s*(?:physiology[-_ ]?)?field\s*\]/giu, '</field>');
+    const fields = new Map();
+    const fieldRe = /<(?:physiology[-_ ]?)?field\b([^>]*)>([\s\S]*?)(?:<\/(?:physiology[-_ ]?)?field>|(?=<(?:physiology[-_ ]?)?field\b)|$)/giu;
+    while ((match = fieldRe.exec(normalized))) {
+        const rawKey = match[1].match(/\b(?:key|name)\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/iu)?.slice(1).find(Boolean) || '';
+        const key = physiologyFieldKey(rawKey);
+        const fragment = physiologyFragment(match[2]);
+        if (!key || !fragment || fields.has(key) || [...fields.values()].includes(fragment)) {
             invalid = true;
+            continue;
         }
-        ranges.push({ start, end });
+        fields.set(key, fragment);
+    }
+
+    // Mechanical format repair only: accept one explicitly labelled field per
+    // line (English key or listed Chinese alias).  Do not infer fields from
+    // free prose or medical keywords.
+    if (fields.size === 0 && !invalid) {
+        for (const line of normalized.split(/\r?\n/u)) {
+            const labelled = line.match(/^\s*(?:[-*•]\s*)?(?:\[|【)?([^\]】:：=]{1,80})(?:\]|】)?\s*[:：=]\s*(.+?)\s*$/u)
+                || line.match(/^\s*(?:\[|【)([^\]】]{1,80})(?:\]|】)\s*(.+?)\s*$/u);
+            if (!labelled) continue;
+            const key = physiologyFieldKey(labelled[1]);
+            if (!key) continue;
+            const fragment = physiologyFragment(labelled[2]);
+            if (!fragment || fields.has(key) || [...fields.values()].includes(fragment)) {
+                invalid = true;
+                continue;
+            }
+            fields.set(key, fragment);
+        }
     }
     const missingFields = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS
-        .filter((key) => !seen.has(key) || !prose.includes(seen.get(key)))
+        .filter((key) => !fields.has(key))
         .map((key) => `physiology.${key}`);
     return {
         ok: !invalid && missingFields.length === 0,
-        prose,
+        prose: missingFields.length === 0 ? physiologyProse(fields) : '',
         missingFields,
+        locallyRecovered: fields.size > 0 && !/<(?:physiology[-_ ]?)?field\b/iu.test(normalized),
     };
 }
 
@@ -536,6 +660,52 @@ export function parseActorProfileModuleGroupOutput(output, group, {
         .replace(/```(?:xml|html|text|markdown)?/giu, '').replace(/```/gu, '').trim();
     const entries = [];
     const failures = [];
+    const routeRepairs = [];
+    const scheduledCandidates = [...new Map(Object.values(group?.targets || {})
+        .flat()
+        .map((candidate) => [candidateActorIdForPrompt(candidate), candidate])
+        .filter(([actorId]) => actorId)).values()];
+    const scheduledRoutes = scheduledCandidates.map((candidate) => ({
+        actorId: candidateActorIdForPrompt(candidate),
+        name: cleanText(candidate?.actorRef?.name || candidate?.name, 160),
+        labels: new Set(candidatePromptLabels(candidate)),
+    }));
+    const resolveScheduledRoute = (rawActorId, rawName) => {
+        const actorId = cleanText(rawActorId, 120);
+        const name = cleanText(rawName, 160);
+        const exact = scheduledRoutes.find((route) => route.actorId === actorId);
+        if (exact) {
+            if (!name || name === exact.name) return { actorId: exact.actorId, name: exact.name };
+            if (exact.labels.has(name)) {
+                return {
+                    actorId: exact.actorId,
+                    name: exact.name,
+                    repair: 'actor_profile.route_name_alias_normalized',
+                };
+            }
+            return { actorId, name };
+        }
+        if (group?.key === 'identity_bootstrap' || !scheduledRoutes.length) {
+            return { actorId, name };
+        }
+        // A display label/known alias is routing evidence only when it names
+        // exactly one scheduled ActorRef. This repairs common model drift
+        // without fuzzy matching, inventing an identity, or merging actors.
+        const labelled = scheduledRoutes.filter((route) => (
+            (actorId && route.labels.has(actorId))
+            || (name && route.labels.has(name))
+        ));
+        if (labelled.length === 1) {
+            return {
+                actorId: labelled[0].actorId,
+                name: labelled[0].name,
+                repair: scheduledRoutes.length === 1
+                    ? 'actor_profile.route_single_target_label_normalized'
+                    : 'actor_profile.route_unique_label_normalized',
+            };
+        }
+        return { actorId, name };
+    };
     const expectedCoverage = Array.isArray(group?.discoveryCoverage?.units)
         ? group.discoveryCoverage.units : [];
     const coverageTargetSources = new Map();
@@ -638,7 +808,7 @@ export function parseActorProfileModuleGroupOutput(output, group, {
     const explicitEmpty = expectedCoverage.length
         ? coverageCompleteEmpty && failures.length === 0
         : /^\s*无人(?:物)?档案[。.!！]?\s*$/u.test(text);
-    if (explicitEmpty) return { entries, failures, formatUnrecoverable: false, explicitEmpty: true, coverageProof, raw: text };
+    if (explicitEmpty) return { entries, failures, routeRepairs, formatUnrecoverable: false, explicitEmpty: true, coverageProof, raw: text };
     const normalized = text
         .replace(/\[\s*profile-target\s+([^\]]+)\]/giu, '<profile-target $1>')
         .replace(/\[\s*\/\s*profile-target\s*\]/giu, '</profile-target>')
@@ -650,13 +820,17 @@ export function parseActorProfileModuleGroupOutput(output, group, {
     while ((targetMatch = targetRe.exec(normalized))) {
         const attrs = targetMatch[1];
         const attrValue = (key) => attrs.match(new RegExp(`\\b${key}\\s*=\\s*(?:["']([^"']+)["']|([^\\s>]+))`, 'iu'))?.slice(1).find(Boolean) || '';
-        const actorId = cleanText(attrValue('actor'), 120);
-        const name = cleanText(attrValue('name'), 160);
+        const rawActorId = cleanText(attrValue('actor'), 120);
+        const rawName = cleanText(attrValue('name'), 160);
+        const resolvedRoute = resolveScheduledRoute(rawActorId, rawName);
+        const actorId = resolvedRoute.actorId;
+        const name = resolvedRoute.name;
         const targetKey = `${actorId}\u0000${name}`;
         if (!actorId || seenTargets.has(targetKey)) {
             failures.push({ actorId, name, reason: actorId ? 'actor_profile.module_target_duplicate' : 'actor_profile.module_target_missing', retryable: true });
             continue;
         }
+        if (resolvedRoute.repair) routeRepairs.push(resolvedRoute.repair);
         seenTargets.add(targetKey);
         const modules = {};
         const moduleRe = /<module\b([^>]*)>([\s\S]*?)(?:<\/module>|(?=<module\b)|$)/giu;
@@ -755,7 +929,15 @@ export function parseActorProfileModuleGroupOutput(output, group, {
             sourceAnchor: routeSource?.sourceAnchor || '',
         });
     }
-    return { entries, failures, formatUnrecoverable: entries.length === 0, explicitEmpty: false, coverageProof, raw: text };
+    return {
+        entries,
+        failures,
+        routeRepairs,
+        formatUnrecoverable: entries.length === 0,
+        explicitEmpty: false,
+        coverageProof,
+        raw: text,
+    };
 }
 
 function narrativeSectionsReady(profile) {
@@ -2350,15 +2532,23 @@ export function actorProfileGenerationCriticalFingerprint(overrides = {}) {
         diversityContract: ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT,
         completionGroups: ACTOR_PROFILE_COMPLETION_GROUPS,
         moduleNotes: PROFILE_MODULE_NOTES,
+        physiologyFieldTitles: PHYSIOLOGY_FIELD_TITLES,
+        physiologyFieldAliases: PHYSIOLOGY_FIELD_ALIASES,
         physiologyContractVersion: ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
         physiologyCoverageKeys: ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
         identityRevealRefreshModules: ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
         vagueDiscoveryTerms: [...DISCOVERY_NAME_VAGUE_TERMS].sort(),
         completionGroupPlan: String(actorProfileCompletionGroupPlan),
         buildGroupMessages: String(buildActorProfileModuleGroupMessages),
+        compactRelevantFragments: String(compactRelevantFragments),
+        compactAuthorityOverview: String(compactAuthorityOverview),
+        candidatePromptLabels: String(candidatePromptLabels),
         promptContext: String(actorProfilePromptContext),
         designRollNormalizer: String(normalizeActorProfileDesignRolls),
         parseGroupOutput: String(parseActorProfileModuleGroupOutput),
+        physiologyFieldKey: String(physiologyFieldKey),
+        physiologyFragment: String(physiologyFragment),
+        physiologyProse: String(physiologyProse),
         physiologyCoverageValidation: String(validatePhysiologyCoverage),
         identityEvidenceSurface: String(actorProfileIdentityEvidenceSurface),
         discoveryAnchor: String(validateActorProfileDiscoveryAnchor),

@@ -1,5 +1,6 @@
 import { fingerprint } from './core.mjs';
 import {
+    ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
     ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
     actorProfileBaselineDigest,
     actorProfileCompletionGroupPlan,
@@ -33,6 +34,16 @@ function candidateActorId(candidate) {
 
 function candidateName(candidate) {
     return cleanText(candidate?.actorRef?.name || candidate?.name, 160);
+}
+
+function actorProfileWorkingSection(candidate, moduleKey, text) {
+    return {
+        text,
+        ...(moduleKey === 'physiology'
+            && candidate?.completionMode === 'full_adult'
+            ? { contractVersion: ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION }
+            : {}),
+    };
 }
 
 function failureFor(candidate, reason, extras = {}) {
@@ -237,12 +248,18 @@ export function actorProfileBatchSemanticFingerprint(overrides = {}) {
         finalCandidateClosure: String(
             overrides?.finalCandidateClosure || actorProfileFinalCandidateClosure,
         ),
+        workingSection: String(
+            overrides?.workingSection || actorProfileWorkingSection,
+        ),
+        recoveryProgress: String(normalizeActorProfileRecoveryProgress),
+        recoveryDigest: String(actorProfileRecoveryProgressDigest),
     }))}`;
 }
 
 const PROFILE_BATCH_FAILURE_CATEGORIES = new Set([
     'scope_stale',
     'target_stale',
+    'foreground_preempted',
     'cancelled',
     'http',
     'timeout',
@@ -250,6 +267,73 @@ const PROFILE_BATCH_FAILURE_CATEGORIES = new Set([
     'protocol',
     'transport',
 ]);
+
+const PROFILE_RECOVERY_MODULE_KEYS = Object.freeze([
+    'person',
+    'personality',
+    'history',
+    'relationshipsMotives',
+    'currentState',
+    'knowledgeCapabilitiesResources',
+    'physiology',
+]);
+
+export function normalizeActorProfileRecoveryProgress(value) {
+    if (!value || typeof value !== 'object') return null;
+    const rows = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(value.rows) ? value.rows : []) {
+        const actorId = cleanText(raw?.actorId, 120);
+        const name = cleanText(raw?.name, 160);
+        const sourceAnchor = String(raw?.sourceAnchor || '').trim().slice(0, 1200);
+        const discovery = raw?.discovery === true;
+        if (!actorId || !name || (discovery && !sourceAnchor)) continue;
+        const key = `${actorId}\u0000${name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const modules = {};
+        for (const moduleKey of PROFILE_RECOVERY_MODULE_KEYS) {
+            const text = String(raw?.modules?.[moduleKey] || '').trim().slice(0, 16000);
+            if (text) modules[moduleKey] = text;
+        }
+        rows.push({
+            actorId,
+            name,
+            discovery,
+            sourceAnchor: discovery ? sourceAnchor : '',
+            modules,
+            ...(raw?.identityReveal && typeof raw.identityReveal === 'object'
+                ? { identityReveal: clone(raw.identityReveal) } : {}),
+        });
+    }
+    const identityLocked = value.identityLocked === true;
+    const identityAttempted = identityLocked || value.identityAttempted === true;
+    if (
+        !identityAttempted
+        && !rows.some((row) => Object.keys(row.modules).length > 0)
+    ) {
+        return null;
+    }
+    return {
+        version: 1,
+        identityAttempted,
+        identityLocked,
+        rows: rows.sort((left, right) => left.actorId.localeCompare(right.actorId)),
+        verifiedFieldCount: rows.reduce(
+            (sum, row) => sum + Object.keys(row.modules).length,
+            0,
+        ),
+    };
+}
+
+export function actorProfileRecoveryProgressDigest(value, sourceDigest = '') {
+    const normalized = normalizeActorProfileRecoveryProgress(value);
+    if (!normalized) return '';
+    return `profile-recovery-progress:${fingerprint(JSON.stringify({
+        sourceDigest: cleanText(sourceDigest, 240),
+        progress: normalized,
+    }))}`;
+}
 
 const PROFILE_BATCH_LENGTH_BUCKETS = new Set([
     'empty',
@@ -337,6 +421,7 @@ export async function completeActorProfileBatchTransaction({
     semanticRetry = true,
     allowDiscovery = false,
     discoveryContext = null,
+    recoveryProgress = null,
     requestBatch,
     preflightDiscoveries,
     resolveDiscoveries,
@@ -344,6 +429,8 @@ export async function completeActorProfileBatchTransaction({
     persistFinalizedBatch,
     isTargetCurrent = () => true,
 } = {}) {
+    const startedAt = Date.now();
+    let latestRecoveryProgress = normalizeActorProfileRecoveryProgress(recoveryProgress);
     const supplied = (Array.isArray(candidates) ? candidates : [])
         .filter((candidate) => candidateActorId(candidate) && candidateName(candidate));
     const candidateCounts = new Map();
@@ -379,6 +466,8 @@ export async function completeActorProfileBatchTransaction({
         readbackVerified: false,
         batchMeta: null,
         batchFormatReplacementAttempted: false,
+        recoveryProgress: clone(latestRecoveryProgress),
+        timings: { totalMs: 0, modelMs: 0, parseMs: 0, persistMs: 0 },
     };
     if (!selected.length && !allowDiscovery) return base;
     if (
@@ -417,6 +506,9 @@ export async function completeActorProfileBatchTransaction({
     const failureById = new Map();
     const rejected = [];
     let modelCalls = 0;
+    let modelMs = 0;
+    let parseMs = 0;
+    let persistMs = 0;
     const collect = async (
         subset,
         validationFeedback,
@@ -442,6 +534,120 @@ export async function completeActorProfileBatchTransaction({
         const discoveries = new Map();
         const identityReveals = new Map();
         const groupDiagnostics = [];
+        let identityLocked = latestRecoveryProgress?.identityLocked === true;
+        let identityAttempted = identityLocked
+            || latestRecoveryProgress?.identityAttempted === true;
+        const recoveredRows = new Map((latestRecoveryProgress?.rows || []).map((row) => [
+            candidateActorId(row), row,
+        ]));
+        for (const [actorId, row] of recoveredRows) {
+            if (row.discovery !== true) {
+                const currentRow = profileById.get(actorId);
+                if (!currentRow) continue;
+                if (row.identityReveal) {
+                    const previousName = candidateName(currentRow.candidate);
+                    currentRow.candidate = {
+                        ...currentRow.candidate,
+                        actorRef: { actorId, name: row.name },
+                        actorId,
+                        name: row.name,
+                        identity: {
+                            ...clone(currentRow.candidate?.identity || {}),
+                            aliases: [...new Set([
+                                ...(currentRow.candidate?.identity?.aliases || []),
+                                previousName,
+                            ].filter((value) => value && value !== row.name))],
+                        },
+                        refreshProfileModules: [...ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES],
+                        __identityReveal: clone(row.identityReveal),
+                    };
+                    identityReveals.set(actorId, clone(row.identityReveal));
+                } else if (candidateName(currentRow.candidate) !== row.name) {
+                    continue;
+                }
+                for (const [moduleKey, text] of Object.entries(row.modules || {})) {
+                    currentRow.sections[moduleKey] = actorProfileWorkingSection(
+                        currentRow.candidate,
+                        moduleKey,
+                        text,
+                    );
+                    if (!completedModulesByActor.has(actorId)) {
+                        completedModulesByActor.set(actorId, new Set());
+                    }
+                    completedModulesByActor.get(actorId).add(moduleKey);
+                }
+                continue;
+            }
+            const anchor = validateActorProfileDiscoveryAnchor({
+                name: row.name,
+                sourceAnchor: row.sourceAnchor,
+            }, String(attemptDiscoveryContext?.acceptedNarrative || ''));
+            if (!anchor.ok) continue;
+            const completionMode = attemptDiscoveryContext?.completionMode
+                || subset[0]?.completionMode || 'full';
+            const candidate = {
+                actorRef: { actorId, name: row.name },
+                name: row.name,
+                completionMode,
+                previousProfile: {
+                    narrativeSections: Object.fromEntries(Object.entries(row.modules || {})
+                        .map(([moduleKey, text]) => [
+                            moduleKey,
+                            actorProfileWorkingSection(
+                                { completionMode },
+                                moduleKey,
+                                text,
+                            ),
+                        ])),
+                },
+                characterCreationTicket: null,
+                __discoveryKey: `${row.name}\u0000${row.sourceAnchor}`,
+                __sourceOffset: anchor.offset,
+            };
+            profileById.set(actorId, {
+                candidate,
+                sections: clone(candidate.previousProfile.narrativeSections),
+            });
+            discoveries.set(candidate.__discoveryKey, {
+                name: row.name,
+                sourceAnchor: row.sourceAnchor,
+                sections: clone(row.modules || {}),
+            });
+            completedModulesByActor.set(actorId, new Set(Object.keys(row.modules || {})));
+        }
+        const captureRecoveryProgress = () => {
+            const rows = [];
+            for (const { candidate, sections } of profileById.values()) {
+                const actorId = candidateActorId(candidate);
+                const completed = completedModulesByActor.get(actorId) || new Set();
+                const modules = {};
+                for (const moduleKey of completed) {
+                    const text = String(sections?.[moduleKey]?.text ?? sections?.[moduleKey] ?? '').trim();
+                    if (text) modules[moduleKey] = text;
+                }
+                const discoveryKey = String(candidate?.__discoveryKey || '');
+                const sourceAnchor = discoveryKey.includes('\u0000')
+                    ? discoveryKey.slice(discoveryKey.indexOf('\u0000') + 1)
+                    : '';
+                if (!identityLocked && !Object.keys(modules).length) continue;
+                rows.push({
+                    actorId,
+                    name: candidateName(candidate),
+                    discovery: Boolean(sourceAnchor),
+                    sourceAnchor,
+                    modules,
+                    ...(candidate?.__identityReveal
+                        ? { identityReveal: clone(candidate.__identityReveal) } : {}),
+                });
+            }
+            latestRecoveryProgress = normalizeActorProfileRecoveryProgress({
+                version: 1,
+                identityAttempted,
+                identityLocked,
+                rows,
+            });
+            return clone(latestRecoveryProgress);
+        };
         const callGroup = async (group, groupAttempt = 0, groupFeedback = validationFeedback) => {
             // A retry may reuse successful sibling groups only inside this
             // transaction. Revalidate the accepted source before every call;
@@ -461,6 +667,7 @@ export async function completeActorProfileBatchTransaction({
                 const chunk = chunks[chunkIndex];
                 const messages = buildMessages(chunk);
                 let output;
+                const modelStartedAt = Date.now();
                 try {
                     const groupCandidates = [...new Map(Object.values(chunk.targets || {})
                         .flat()
@@ -468,20 +675,25 @@ export async function completeActorProfileBatchTransaction({
                     output = await requestBatch({
                         candidates: clone(groupCandidates), messages, attempt: groupAttempt,
                         groupKey: chunk.key, moduleKeys: clone(chunk.modules),
+                        fieldCount: Math.max(0, Number(chunk.targetCount) || 0),
                         transportChunk: clone(chunk.transportChunk || null),
                     });
+                    modelMs += Date.now() - modelStartedAt;
                     modelCalls += 1;
                 } catch (error) {
+                    modelMs += Date.now() - modelStartedAt;
                     const failure = profileBatchRequestFailure(error);
                     if (failure.routeDiagnostic?.requestStarted === true) modelCalls += 1;
                     groupDiagnostics.push({ groupKey: chunk.key, attempt: groupAttempt, transportChunk: clone(chunk.transportChunk || null), status: 'transport_failed', routeDiagnostic: failure.routeDiagnostic });
-                    return { requestFailure: failure };
+                    return { requestFailure: failure, recoveryProgress: captureRecoveryProgress() };
                 }
                 if (!await current()) return { stale: true };
+                const parseStartedAt = Date.now();
                 const parsed = parseActorProfileModuleGroupOutput(output, chunk, {
                     acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
                     registeredActorIndex: attemptDiscoveryContext?.registeredActorIndex || [],
                 });
+                parseMs += Date.now() - parseStartedAt;
                 const parsedFailureCodes = [...new Set((parsed.failures || [])
                     .map((entry) => cleanText(entry?.reason, 120))
                     .filter((code) => /^actor_profile\.[a-z0-9_.-]+$/u.test(code)))].slice(0, 8);
@@ -489,6 +701,9 @@ export async function completeActorProfileBatchTransaction({
                     cleanText(entry?.moduleKey, 80),
                     ...(entry?.missingFields || []).map((path) => cleanText(path, 160).split('.').at(-1)),
                 ]).filter((moduleKey) => /^[a-z][a-zA-Z0-9]*$/u.test(moduleKey)))].slice(0, 7);
+                const routeRepairCodes = [...new Set((parsed.routeRepairs || [])
+                    .map((code) => cleanText(code, 120))
+                    .filter((code) => /^actor_profile\.route_[a-z0-9_.-]+$/u.test(code)))].slice(0, 4);
                 groupDiagnostics.push({
                     groupKey: chunk.key,
                     moduleKeys: clone(chunk.modules),
@@ -501,7 +716,53 @@ export async function completeActorProfileBatchTransaction({
                     parsedRowCount: Math.max(0, Number(parsed.entries?.length) || 0),
                     failureCodes: parsedFailureCodes,
                     missingModules: parsedMissingModules,
+                    routeRepairCount: Math.max(0, Number(parsed.routeRepairs?.length) || 0),
+                    routeRepairCodes,
                 });
+                // TavernDB keeps validated cells in its transaction-local
+                // workingTableData even when a later transport chunk fails.
+                // Mirror that exact boundary here: only exact ActorRef x
+                // scheduled-module cells without a local parse/semantic
+                // failure enter the recovery working clone. Nothing is
+                // durable until the existing pending -> final readbacks.
+                if (chunk.key !== 'identity_bootstrap' && !parsed.formatUnrecoverable) {
+                    const globalFailure = (parsed.failures || []).some((failureEntry) => (
+                        !cleanText(failureEntry?.actorId, 120)
+                    ));
+                    if (!globalFailure) {
+                        for (const entry of parsed.entries || []) {
+                            const actorId = cleanText(entry?.actorId, 120);
+                            const row = profileById.get(actorId);
+                            if (!row || (entry.name
+                                && cleanText(entry.name, 160) !== candidateName(row.candidate))) {
+                                continue;
+                            }
+                            for (const moduleKey of chunk.modules || []) {
+                                const scheduled = (chunk.targets?.[moduleKey] || [])
+                                    .some((candidate) => candidateActorId(candidate) === actorId);
+                                const failed = (parsed.failures || []).some((failureEntry) => (
+                                    cleanText(failureEntry?.actorId, 120) === actorId
+                                    && (
+                                        !cleanText(failureEntry?.moduleKey, 80)
+                                        || cleanText(failureEntry?.moduleKey, 80) === moduleKey
+                                    )
+                                ));
+                                const text = String(entry?.modules?.[moduleKey] || '').trim();
+                                if (!scheduled || failed || !text) continue;
+                                row.sections[moduleKey] = actorProfileWorkingSection(
+                                    row.candidate,
+                                    moduleKey,
+                                    text,
+                                );
+                                if (!completedModulesByActor.has(actorId)) {
+                                    completedModulesByActor.set(actorId, new Set());
+                                }
+                                completedModulesByActor.get(actorId).add(moduleKey);
+                            }
+                        }
+                        captureRecoveryProgress();
+                    }
+                }
                 if (chunks.length === 1) return parsed;
                 aggregate.entries.push(...(parsed.entries || []));
                 aggregate.failures.push(...(parsed.failures || []));
@@ -631,7 +892,11 @@ export async function completeActorProfileBatchTransaction({
         const commitGroupApply = (preparedApply) => {
             for (const update of preparedApply.sectionUpdates) {
                 for (const [moduleKey, text] of Object.entries(update.modules || {})) {
-                    update.row.sections[moduleKey] = { text };
+                    update.row.sections[moduleKey] = actorProfileWorkingSection(
+                        update.row.candidate,
+                        moduleKey,
+                        text,
+                    );
                 }
                 const actorId = candidateActorId(update.row.candidate);
                 if (!completedModulesByActor.has(actorId)) completedModulesByActor.set(actorId, new Set());
@@ -704,6 +969,13 @@ export async function completeActorProfileBatchTransaction({
             });
         };
         const preflightIdentityDiscoveries = async (preparedApply, group, groupAttempt) => {
+            const safePreflightReason = (value) => {
+                const code = cleanText(value, 160);
+                return /^(?:actor_candidate\.identity_[a-z0-9_.-]+|actor_profile\.(?:discovery|identity)_[a-z0-9_.-]+)$/u
+                    .test(code)
+                    ? code
+                    : 'actor_profile.discovery_preflight_failed';
+            };
             if ((preparedApply?.failures || []).length) return {
                 stale: false,
                 failures: [],
@@ -738,8 +1010,7 @@ export async function completeActorProfileBatchTransaction({
                 result = {
                     ok: false,
                     failures: [{
-                        reason: cleanText(error?.message || error, 240)
-                            || 'actor_profile.discovery_preflight_failed',
+                        reason: safePreflightReason(error?.message || error),
                     }],
                 };
             }
@@ -748,16 +1019,14 @@ export async function completeActorProfileBatchTransaction({
                 .map((entry) => ({
                     ...entry,
                     name: cleanText(entry?.name || entry?.candidateRef?.name, 160),
-                    reason: cleanText(entry?.reason, 160)
-                        || 'actor_profile.discovery_preflight_failed',
+                    reason: safePreflightReason(entry?.reason),
                     groupKey: group.key,
                     moduleKey: 'person',
                     missingFields: Array.isArray(entry?.missingFields)
                         ? clone(entry.missingFields) : [],
                 }));
             if (result?.ok !== true && !failures.length) failures.push({
-                reason: cleanText(result?.reason, 160)
-                    || 'actor_profile.discovery_preflight_failed',
+                reason: safePreflightReason(result?.reason),
                 groupKey: group.key,
                 moduleKey: 'person',
                 missingFields: [],
@@ -782,11 +1051,42 @@ export async function completeActorProfileBatchTransaction({
             acceptedNarrative: attemptDiscoveryContext?.acceptedNarrative || '',
         });
         const identity = plan.find((group) => group.key === 'identity_bootstrap');
-        if (identity) {
-            let parsed = await callGroup(identity, 0);
-            if (parsed.stale || parsed.requestFailure) return parsed;
-            let preparedApply = prepareGroupApply(identity, parsed);
-            let preflight = parsed.formatUnrecoverable
+        if (identity && !identityLocked) {
+            if (identityAttempted) {
+                return {
+                    entries: [], discoveries: [], identityReveals: [],
+                    unresolved: [{
+                        actorId: '',
+                        reason: 'actor_profile.identity_bootstrap_already_attempted',
+                        groupKey: identity.key,
+                        retryable: false,
+                    }],
+                    failures: [{
+                        actorId: '',
+                        reason: 'actor_profile.identity_bootstrap_already_attempted',
+                        groupKey: identity.key,
+                        retryable: false,
+                    }],
+                    unexpected: [], explicitEmpty: false,
+                    batchMeta: { moduleGroups: groupDiagnostics },
+                    recoveryProgress: captureRecoveryProgress(),
+                };
+            }
+            const parsed = await callGroup(identity, 0);
+            if (parsed.stale) return parsed;
+            if (parsed.requestFailure) {
+                if (
+                    parsed.requestFailure.routeDiagnostic?.requestStarted === true
+                    && parsed.requestFailure.failureKind !== 'foreground_preempted'
+                ) {
+                    identityAttempted = true;
+                    parsed.recoveryProgress = captureRecoveryProgress();
+                }
+                return parsed;
+            }
+            identityAttempted = true;
+            const preparedApply = prepareGroupApply(identity, parsed);
+            const preflight = parsed.formatUnrecoverable
                 ? { stale: false, failures: [] }
                 : await preflightIdentityDiscoveries(preparedApply, identity, 0);
             if (preflight.stale) return { stale: true };
@@ -799,29 +1099,16 @@ export async function completeActorProfileBatchTransaction({
                     batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
                 };
             }
-            const firstIdentityFailures = clone(preparedApply.failures);
-            if ((parsed.formatUnrecoverable || preparedApply.failures.length) && semanticRetry) {
-                parsed = await callGroup(identity, 1, retryFeedbackFor(preparedApply, parsed, identity));
-                if (parsed.stale || parsed.requestFailure) return parsed;
-                preparedApply = prepareGroupApply(identity, parsed);
-                preflight = parsed.formatUnrecoverable
-                    ? { stale: false, failures: [] }
-                    : await preflightIdentityDiscoveries(preparedApply, identity, 1);
-                if (preflight.stale) return { stale: true };
-                preparedApply.failures.push(...preflight.failures);
-                if (parsed.explicitEmpty) {
-                    preparedApply.failures.push(...(firstIdentityFailures.length
-                        ? firstIdentityFailures
-                        : [{ actorId: '', reason: 'actor_profile.identity_retry_erased_failure', groupKey: identity.key }]));
-                }
-            }
             if (parsed.formatUnrecoverable || preparedApply.failures.length) {
+                captureRecoveryProgress();
                 const terminalFailures = parsed.formatUnrecoverable && !preparedApply.failures.length
                     ? [{ actorId: '', reason: 'actor_profile.format_unrecoverable', groupKey: identity.key }]
                     : preparedApply.failures;
                 return { entries: [], discoveries: [], identityReveals: [], unresolved: terminalFailures.map((entry) => ({ ...entry, retryable: false })), failures: terminalFailures.map((entry) => ({ ...entry, retryable: false })), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics } };
             }
             commitGroupApply(preparedApply);
+            identityLocked = true;
+            captureRecoveryProgress();
         }
         const acceptedNarrative = String(attemptDiscoveryContext?.acceptedNarrative || '');
         const orderedDiscoveries = [...discoveries.values()].map((entry) => ({
@@ -860,15 +1147,44 @@ export async function completeActorProfileBatchTransaction({
             };
         }
         orderedDiscoveries.sort((left, right) => left.anchor.offset - right.anchor.offset);
-        const discoveryCandidates = orderedDiscoveries.map(({ entry, anchor }, index) => ({
-            actorRef: { actorId: `DISC-${fingerprint(entry.name).slice(0, 16)}`, name: entry.name },
-            name: entry.name,
-            completionMode: attemptDiscoveryContext?.completionMode || subset[0]?.completionMode || 'full',
-            previousProfile: { narrativeSections: Object.fromEntries(Object.entries(entry.sections).map(([key, text]) => [key, { text }])) },
-            characterCreationTicket: clone(attemptDiscoveryContext?.characterCreationTickets?.[index] || null),
-            __discoveryKey: `${entry.name}\u0000${entry.sourceAnchor}`,
-            __sourceOffset: anchor.offset,
-        }));
+        const recoveredDiscoveryByKey = new Map([...profileById.values()]
+            .map(({ candidate }) => [String(candidate?.__discoveryKey || ''), candidate])
+            .filter(([key]) => key));
+        const discoveryCandidates = orderedDiscoveries.map(({ entry, anchor }, index) => {
+            const discoveryKey = `${entry.name}\u0000${entry.sourceAnchor}`;
+            const recovered = recoveredDiscoveryByKey.get(discoveryKey);
+            if (recovered) return {
+                ...recovered,
+                characterCreationTicket: clone(
+                    attemptDiscoveryContext?.characterCreationTickets?.[index]
+                    ?? recovered.characterCreationTicket
+                    ?? null,
+                ),
+                __discoveryKey: discoveryKey,
+                __sourceOffset: anchor.offset,
+            };
+            const completionMode = attemptDiscoveryContext?.completionMode
+                || subset[0]?.completionMode || 'full';
+            return {
+                actorRef: { actorId: `DISC-${fingerprint(entry.name).slice(0, 16)}`, name: entry.name },
+                name: entry.name,
+                completionMode,
+                previousProfile: {
+                    narrativeSections: Object.fromEntries(Object.entries(entry.sections)
+                        .map(([moduleKey, text]) => [
+                            moduleKey,
+                            actorProfileWorkingSection(
+                                { completionMode },
+                                moduleKey,
+                                text,
+                            ),
+                        ])),
+                },
+                characterCreationTicket: clone(attemptDiscoveryContext?.characterCreationTickets?.[index] || null),
+                __discoveryKey: discoveryKey,
+                __sourceOffset: anchor.offset,
+            };
+        });
         for (const candidate of discoveryCandidates) profileById.set(candidateActorId(candidate), { candidate, sections: clone(candidate.previousProfile.narrativeSections) });
         plan = actorProfileCompletionGroupPlan(workingCandidates(), { allowDiscovery: false })
             .filter((group) => group.key !== 'identity_bootstrap');
@@ -936,10 +1252,14 @@ export async function completeActorProfileBatchTransaction({
             results.push({ group, parsed, preparedApply });
             if (parsed.stale || parsed.requestFailure || parsed.formatUnrecoverable || preparedApply?.failures.length) break;
             commitGroupApply(preparedApply);
+            captureRecoveryProgress();
         }
         const terminal = results.find(({ parsed, preparedApply }) => parsed.stale || parsed.requestFailure || parsed.formatUnrecoverable || preparedApply?.failures.length);
         if (terminal?.parsed?.stale) return { stale: true };
-        if (terminal?.parsed?.requestFailure) return { requestFailure: terminal.parsed.requestFailure };
+        if (terminal?.parsed?.requestFailure) return {
+            requestFailure: terminal.parsed.requestFailure,
+            recoveryProgress: captureRecoveryProgress(),
+        };
         const failures = results.flatMap(({ preparedApply }) => preparedApply?.failures || []).map((entry) => ({ ...entry, retryable: false }));
         if (terminal) {
             return {
@@ -979,9 +1299,20 @@ export async function completeActorProfileBatchTransaction({
         ...result,
         batchMeta: clone(batchMeta),
         batchFormatReplacementAttempted,
+        recoveryProgress: clone(latestRecoveryProgress),
+        timings: {
+            totalMs: Math.max(0, Date.now() - startedAt),
+            modelMs: Math.max(0, modelMs),
+            parseMs: Math.max(0, parseMs),
+            persistMs: Math.max(0, persistMs),
+        },
     });
     try {
     let first = await collect(selected, [], 0);
+    if (first?.recoveryProgress) latestRecoveryProgress = normalizeActorProfileRecoveryProgress(
+        first.recoveryProgress,
+    );
+    base.recoveryProgress = clone(latestRecoveryProgress);
     if (first.requestFailure) {
         return withBatchMeta({
             ...base,
@@ -1093,6 +1424,12 @@ export async function completeActorProfileBatchTransaction({
             1,
             retryDiscoveryTargets,
         );
+        if (retry?.recoveryProgress) {
+            latestRecoveryProgress = normalizeActorProfileRecoveryProgress(
+                retry.recoveryProgress,
+            );
+            base.recoveryProgress = clone(latestRecoveryProgress);
+        }
         if (retry.stale) {
             for (const candidate of retryCandidates) {
                 failureById.set(candidateActorId(candidate), failureFor(
@@ -1168,7 +1505,7 @@ export async function completeActorProfileBatchTransaction({
     }
 
     if (!await current()) {
-        return {
+        return withBatchMeta({
             ...base,
             modelCalls,
             rejected,
@@ -1176,7 +1513,7 @@ export async function completeActorProfileBatchTransaction({
                 candidate,
                 'actor_profile.target_stale',
             ))],
-        };
+        });
     }
 
     let resolved;
@@ -1205,7 +1542,7 @@ export async function completeActorProfileBatchTransaction({
         ...(resolved?.failures || []),
     ];
     if (resolved?.ok !== true) {
-        return {
+        return withBatchMeta({
             ...base,
             ledger: originalLedger,
             modelCalls,
@@ -1220,7 +1557,7 @@ export async function completeActorProfileBatchTransaction({
             ],
             explicitEmpty,
             registry: clone(resolved?.registry || null),
-        };
+        });
     }
 
     const resolvedCandidates = Array.isArray(resolved.candidates)
@@ -1300,7 +1637,7 @@ export async function completeActorProfileBatchTransaction({
     discoveryFailures.push(...candidateClosure.resolutionFailures);
     const { allCandidates } = candidateClosure;
     if (!allCandidates.length) {
-        return {
+        return withBatchMeta({
             ...base,
             ledger: originalLedger,
             candidates: [],
@@ -1316,7 +1653,7 @@ export async function completeActorProfileBatchTransaction({
             explicitEmpty,
             coverageProof,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
 
     // This is one database-style group insert: discovery rows, existing rows
@@ -1334,7 +1671,7 @@ export async function completeActorProfileBatchTransaction({
         ...candidateClosure.groupRowFailures,
     ];
     if (groupFailuresBeforePersist.length) {
-        return {
+        return withBatchMeta({
             ...base,
             ledger: originalLedger,
             candidates: allCandidates,
@@ -1343,7 +1680,7 @@ export async function completeActorProfileBatchTransaction({
             failures: groupFailuresBeforePersist,
             explicitEmpty,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
 
     let workingLedger = clone(resolvedLedger);
@@ -1415,7 +1752,7 @@ export async function completeActorProfileBatchTransaction({
         });
     }
     if (prepared.length !== allCandidates.length) {
-        return {
+        return withBatchMeta({
             ...base,
             ledger: originalLedger,
             candidates: allCandidates,
@@ -1426,10 +1763,10 @@ export async function completeActorProfileBatchTransaction({
                 .filter(Boolean), ...discoveryFailures],
             explicitEmpty,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
     if (!await current()) {
-        return {
+        return withBatchMeta({
             ...base,
             ledger: originalLedger,
             candidates: allCandidates,
@@ -1441,7 +1778,7 @@ export async function completeActorProfileBatchTransaction({
             ))],
             explicitEmpty,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
 
     const preparedFieldRevision = Math.max(
@@ -1463,7 +1800,7 @@ export async function completeActorProfileBatchTransaction({
         for (const entry of prepared) {
             failureById.set(entry.actorId, failureFor(entry, sealed.reason || 'actor_profile.pending_transaction_mismatch'));
         }
-        return {
+        return withBatchMeta({
             ...base,
             ledger: originalLedger,
             candidates: allCandidates,
@@ -1474,11 +1811,12 @@ export async function completeActorProfileBatchTransaction({
                 .filter(Boolean), ...discoveryFailures],
             explicitEmpty,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
     workingLedger = sealed.ledger;
     const { preparedLedgerDigest, writeSetDigest } = sealed;
     let pendingPersisted;
+    const pendingPersistStartedAt = Date.now();
     try {
         pendingPersisted = await persistPendingBatch({
             ledger: workingLedger,
@@ -1494,6 +1832,8 @@ export async function completeActorProfileBatchTransaction({
             ok: false,
             reason: cleanText(error?.message || error, 200) || 'host_save_rejected',
         };
+    } finally {
+        persistMs += Date.now() - pendingPersistStartedAt;
     }
     const pendingLedger = pendingPersisted?.ok === true
         ? normalizeActorLedger(pendingPersisted.ledger, { chatId: originalLedger.chatId })
@@ -1522,7 +1862,7 @@ export async function completeActorProfileBatchTransaction({
         for (const entry of prepared) {
             failureById.set(entry.actorId, failureFor(entry, reason));
         }
-        return {
+        return withBatchMeta({
             ...base,
             ledger: originalLedger,
             candidates: allCandidates,
@@ -1533,7 +1873,7 @@ export async function completeActorProfileBatchTransaction({
                 .filter(Boolean), ...discoveryFailures],
             explicitEmpty,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
 
     const finalized = finalizeActorProfileBaselinesInLedger(
@@ -1542,7 +1882,7 @@ export async function completeActorProfileBatchTransaction({
         { preparedLedgerDigest, preparedFieldRevision, transactionId, writeSetDigest },
     );
     if (!finalized.finalized) {
-        return {
+        return withBatchMeta({
             ...base,
             ledger: pendingLedger,
             candidates: allCandidates,
@@ -1558,10 +1898,11 @@ export async function completeActorProfileBatchTransaction({
             ],
             explicitEmpty,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
 
     let finalPersisted;
+    const finalPersistStartedAt = Date.now();
     try {
         finalPersisted = await persistFinalizedBatch({
             ledger: finalized.ledger,
@@ -1581,6 +1922,8 @@ export async function completeActorProfileBatchTransaction({
             ok: false,
             reason: cleanText(error?.message || error, 200) || 'host_save_rejected',
         };
+    } finally {
+        persistMs += Date.now() - finalPersistStartedAt;
     }
     const persistedLedger = finalPersisted?.ok === true
         ? normalizeActorLedger(finalPersisted.ledger, { chatId: originalLedger.chatId })
@@ -1605,7 +1948,7 @@ export async function completeActorProfileBatchTransaction({
         for (const entry of prepared) {
             failureById.set(entry.actorId, failureFor(entry, reason));
         }
-        return {
+        return withBatchMeta({
             ...base,
             ledger: pendingLedger,
             candidates: allCandidates,
@@ -1616,7 +1959,7 @@ export async function completeActorProfileBatchTransaction({
                 .filter(Boolean), ...discoveryFailures],
             explicitEmpty,
             registry: clone(resolved.registry || null),
-        };
+        });
     }
     return {
         ledger: persistedLedger,
@@ -1634,6 +1977,13 @@ export async function completeActorProfileBatchTransaction({
         registry: clone(resolved.registry || null),
         batchMeta: clone(batchMeta),
         batchFormatReplacementAttempted,
+        recoveryProgress: null,
+        timings: {
+            totalMs: Math.max(0, Date.now() - startedAt),
+            modelMs: Math.max(0, modelMs),
+            parseMs: Math.max(0, parseMs),
+            persistMs: Math.max(0, persistMs),
+        },
     };
     } finally {
         // No proof cache or cross-request identity state is retained.  Every

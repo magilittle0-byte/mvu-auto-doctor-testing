@@ -66,8 +66,8 @@ test('all namespace field writers share one migration guard and raw commits stay
     const directMetadataWrites = [...sourceText.matchAll(/(?:updateChatMetadata\(\{ \[PLUGIN_ID\]|chatMetadata\[PLUGIN_ID\]\s*=)/gu)];
     assert.equal(
         directMetadataWrites.length,
-        4,
-        'only performChatNamespaceWrite apply/rollback may touch plugin chat metadata directly',
+        2,
+        'only the performChatNamespaceWrite snapshot primitive may touch plugin chat metadata directly',
     );
 });
 

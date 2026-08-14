@@ -1,5 +1,6 @@
 import { normalizeActorRefs } from './actor-ref-core.mjs';
 import { normalizeActorActionTarget } from './actor-authority-core.mjs';
+import { fingerprint } from './core.mjs';
 
 const STAGES = new Set([
     'seeded',
@@ -844,9 +845,17 @@ function normalizeNextTurnSettlementProof(value) {
     const source = value && typeof value === 'object' ? value : {};
     const producerTarget = normalizeNextTurnInjectionTarget(source.producerTarget);
     const actorLedgerDigest = cleanText(source.actorLedgerDigest, 240);
+    const targetActionAuthorityDigest = cleanText(source.targetActionAuthorityDigest, 240);
+    const targetActionAttemptCount = boundedInteger(
+        source.targetActionAttemptCount, 0, Number.MAX_SAFE_INTEGER, -1,
+    );
+    const targetActionReceiptCount = boundedInteger(
+        source.targetActionReceiptCount, 0, Number.MAX_SAFE_INTEGER, -1,
+    );
     const digest = cleanText(source.digest, 240);
     if (
-        !producerTarget || !actorLedgerDigest || !digest
+        !producerTarget || !actorLedgerDigest || !targetActionAuthorityDigest || !digest
+        || targetActionAttemptCount < 0 || targetActionReceiptCount < 0
         || !Array.isArray(source.orderedResults)
     ) return null;
     const seen = new Set();
@@ -877,7 +886,15 @@ function normalizeNextTurnSettlementProof(value) {
         });
     }
     orderedResults.sort((left, right) => left.attemptId.localeCompare(right.attemptId));
-    return { producerTarget, actorLedgerDigest, digest, orderedResults };
+    return {
+        producerTarget,
+        actorLedgerDigest,
+        targetActionAuthorityDigest,
+        targetActionAttemptCount,
+        targetActionReceiptCount,
+        digest,
+        orderedResults,
+    };
 }
 
 function normalizeNextTurnInjection(value) {
@@ -912,6 +929,37 @@ function normalizeNextTurnInjection(value) {
         ...(consumerLease ? { consumerLease } : {}),
         ...(consumeProof ? { consumeProof } : {}),
     };
+}
+
+export function continuityCoreSemanticFingerprint(overrides = {}) {
+    return `continuity-core:${fingerprint(JSON.stringify({
+        nextTurnTarget: String(
+            overrides?.normalizeNextTurnInjectionTarget || normalizeNextTurnInjectionTarget,
+        ),
+        nextTurnConsumer: String(
+            overrides?.normalizeNextTurnInjectionConsumer || normalizeNextTurnInjectionConsumer,
+        ),
+        nextTurnStartSnapshot: String(
+            overrides?.normalizeNextTurnInjectionStartSnapshot
+                || normalizeNextTurnInjectionStartSnapshot,
+        ),
+        nextTurnLease: String(
+            overrides?.normalizeNextTurnInjectionLease || normalizeNextTurnInjectionLease,
+        ),
+        nextTurnConsumeProof: String(
+            overrides?.normalizeNextTurnInjectionConsumeProof
+                || normalizeNextTurnInjectionConsumeProof,
+        ),
+        nextTurnSettlementProof: String(
+            overrides?.normalizeNextTurnSettlementProof || normalizeNextTurnSettlementProof,
+        ),
+        nextTurnInjection: String(
+            overrides?.normalizeNextTurnInjection || normalizeNextTurnInjection,
+        ),
+        continuityState: String(
+            overrides?.normalizeContinuityState || normalizeContinuityState,
+        ),
+    }))}`;
 }
 
 export function normalizeSourceRef(value) {
@@ -2620,14 +2668,43 @@ export function parseContinuityOutput(output, options = {}) {
     if (!parsedResult || !parsedResult.value || typeof parsedResult.value !== 'object') {
         return { error: 'ContinuityState JSON 无法在本地恢复' };
     }
-    const parsed = parsedResult.value;
+    const arrayUnwrapped = Array.isArray(parsedResult.value)
+        && parsedResult.value.length === 1
+        && parsedResult.value[0]
+        && typeof parsedResult.value[0] === 'object'
+        && !Array.isArray(parsedResult.value[0])
+        ? parsedResult.value[0]
+        : parsedResult.value;
+    if (
+        arrayUnwrapped
+        && !Array.isArray(arrayUnwrapped)
+        && Object.hasOwn(arrayUnwrapped, 'ContinuityState')
+    ) {
+        if (
+            Object.keys(arrayUnwrapped).length !== 1
+            || !arrayUnwrapped.ContinuityState
+            || typeof arrayUnwrapped.ContinuityState !== 'object'
+            || Array.isArray(arrayUnwrapped.ContinuityState)
+        ) {
+            return { error: 'ContinuityState JSON wrapper 结构非法' };
+        }
+    }
+    const wrapperUnwrapped = arrayUnwrapped
+        && !Array.isArray(arrayUnwrapped)
+        && Object.hasOwn(arrayUnwrapped, 'ContinuityState')
+        ? arrayUnwrapped.ContinuityState
+        : arrayUnwrapped;
+    const parsed = wrapperUnwrapped;
+    if (Array.isArray(parsed)) {
+        return { error: 'ContinuityState JSON 根节点不能是多项数组' };
+    }
     if (Object.hasOwn(parsed, 'actorProfiles')) {
         return { error: 'ContinuityState 包含已停用的人物档案写字段' };
     }
     return {
         state: normalizeContinuityState(parsed, options),
         raw: clone(parsed),
-        repairedLocally: parsedResult.repaired === true,
+        repairedLocally: parsedResult.repaired === true || parsed !== parsedResult.value,
     };
 }
 

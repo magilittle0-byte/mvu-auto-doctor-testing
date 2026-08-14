@@ -669,9 +669,9 @@ export function createPrivacySafeDiagnosticProjection({
                 capturedAt: Math.max(0, Number(prompt.capturedAt) || 0),
                 maxTokens: Math.max(0, Number(prompt.maxTokens) || 0),
                 totalChars: Math.max(0, Number(prompt.totalChars) || 0),
-                segments: (prompt.messages || []).map((message) => ({
-                    role: String(message?.role || ''),
-                    chars: String(message?.content || '').length,
+                segments: (prompt.segments || []).map((segment) => ({
+                    role: String(segment?.role || '').slice(0, 20),
+                    chars: Math.max(0, Number(segment?.chars) || 0),
                 })),
             }
             : null,
@@ -684,6 +684,13 @@ export function createPrivacySafeDiagnosticProjection({
                 status: String(entry?.status || ''),
                 durationMs: Math.max(0, Number(entry?.durationMs) || 0),
                 queueWaitMs: Math.max(0, Number(entry?.queueWaitMs) || 0),
+                modelMs: Math.max(0, Number(entry?.modelMs) || 0),
+                parseMs: Math.max(0, Number(entry?.parseMs) || 0),
+                validationMs: Math.max(0, Number(entry?.validationMs) || 0),
+                persistMs: Math.max(0, Number(entry?.persistMs) || 0),
+                profileTotalMs: Math.max(0, Number(entry?.profileTotalMs) || 0),
+                doctorTotalMs: Math.max(0, Number(entry?.doctorTotalMs) || 0),
+                inputChars: Math.max(0, Number(entry?.inputChars) || 0),
                 outputChars: Math.max(0, Number(entry?.outputChars) || 0),
                 httpStatus: Math.max(0, Number(entry?.httpStatus) || 0),
                 inputTokens: Math.max(0, Number(entry?.inputTokens) || 0),
@@ -693,13 +700,50 @@ export function createPrivacySafeDiagnosticProjection({
                 attempt: Math.max(0, Number(entry?.attempt) || 0),
                 routeSlotIndex: Math.max(0, Number(entry?.routeSlotIndex) || 0),
                 failover: entry?.failover === true,
+                groupKey: String(entry?.groupKey || '')
+                    .replace(/[^a-z0-9_.:-]/giu, '').slice(0, 80),
+                moduleKeys: (Array.isArray(entry?.moduleKeys) ? entry.moduleKeys : [])
+                    .map((value) => String(value || '')
+                        .replace(/[^a-z0-9_.:-]/giu, '').slice(0, 80))
+                    .filter(Boolean).slice(0, 8),
+                targetCount: Math.max(0, Number(entry?.targetCount) || 0),
+                fieldCount: Math.max(0, Number(entry?.fieldCount) || 0),
+                recoveredFieldCount: Math.max(
+                    0,
+                    Number(entry?.recoveredFieldCount) || 0,
+                ),
+                cancelReason: ['foreground_preempted', 'cancelled', '']
+                    .includes(entry?.cancelReason) ? entry.cancelReason : '',
                 targetIndex: Number.isInteger(Number(entry?.targetIndex))
                     ? Number(entry.targetIndex)
                     : -1,
                 failureKind: String(entry?.failureKind || ''),
                 rootType: String(entry?.rootType || ''),
+                ...(/^world\.[a-z0-9_.:-]{1,160}$/u.test(
+                    String(entry?.validationCode || ''),
+                ) ? { validationCode: String(entry.validationCode) } : {}),
+                ...(['read_error', 'namespace_missing', 'revision_behind', 'selected_conflict',
+                    'content_validation_conflict']
+                    .includes(entry?.readbackFailureKind)
+                    ? { readbackFailureKind: entry.readbackFailureKind }
+                    : {}),
+                ...((Array.isArray(entry?.readbackEvidence) && entry.readbackEvidence.length)
+                    ? { readbackEvidence: entry.readbackEvidence.map((item) => ({
+                    field: ['actorLedger', 'continuity', 'continuityCheckpoint']
+                        .includes(item?.field) ? item.field : '',
+                    expectedRevision: Number.isSafeInteger(Number(item?.expectedRevision))
+                        ? Math.max(-1, Number(item.expectedRevision)) : -1,
+                    actualRevision: Number.isSafeInteger(Number(item?.actualRevision))
+                        ? Math.max(-1, Number(item.actualRevision)) : -1,
+                    digestMatch: item?.digestMatch === true,
+                    })).filter((item) => item.field).slice(0, 3) }
+                    : {}),
                 tags: structuredClone(entry?.tags || {}),
                 recovered: entry?.recovered === true,
+                worldFinalPhase: [
+                    'world_committed', 'world_candidate_prepared', 'failed', 'stale',
+                    'blocked', 'disabled', 'foreground_preempted', '',
+                ].includes(entry?.worldFinalPhase) ? entry.worldFinalPhase : '',
             }),
         ),
     };

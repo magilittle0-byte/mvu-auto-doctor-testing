@@ -78,7 +78,14 @@ test('profile runtime delegates one grouped transaction and contains no per-acto
     assert.match(batchSource, /retryFeedbackFor\(preparedApply, parsed, group\)/u);
     assert.match(batchSource, /actor_profile\.format_unrecoverable/u);
     assert.doesNotMatch(completion, /\bpatch(?:es)?\b/u);
-    assert.match(source, /actor_registry_awaiting_p2/u);
+    const worldGate = sourceBetween(
+        'function stage3LedgerReadbackGate',
+        'async function runContinuityTarget',
+    );
+    assert.doesNotMatch(worldGate, /actor_registry_awaiting_p2/u);
+    assert.match(worldGate, /actorProfileReadinessInLedger/u);
+    assert.match(worldGate, /ready_subset/u);
+    assert.match(worldGate, /structure_only/u);
     assert.match(source, /requestKind: 'connection_probe'/u);
     assert.match(source, /仅连通/u);
     const callModel = sourceBetween(
@@ -92,14 +99,34 @@ test('profile runtime delegates one grouped transaction and contains no per-acto
     assert.match(callModel, /const attemptTimeoutMs = noTimeout \|\| runUntilCancelled\s*\? 0/u);
     assert.match(source, /if \(timeout > 0\) \{/u);
     assert.match(source, /function modelFailureKind\(error, controller = null\).*?controller\?\.signal\?\.aborted.*AbortError/su);
-    assert.match(callModel, /!\['validation-error', 'cancelled'\]\.includes\(outerFailureKind\)/u);
-    assert.match(callModel, /if \(!\['validation-error', 'cancelled'\]\.includes\(failureKind\)\)/u);
+    assert.match(callModel, /'validation-error', 'cancelled', 'foreground_preempted'/u);
+    assert.match(callModel, /\.includes\(outerFailureKind\)/u);
+    assert.match(callModel, /\.includes\(failureKind\)/u);
+    assert.match(
+        callModel,
+        /if \(backgroundLane && \(foregroundGenerationStarting \|\| activeGenerationSession\)\)[\s\S]*?FOREGROUND_PREEMPTED[\s\S]*?requestStarted = true/u,
+        'a late host background transport must not start while foreground generation is active',
+    );
+    assert.match(
+        callModel,
+        /controller\.mvuadUsesHostGenerateRaw === true[\s\S]*?foregroundGenerationStarting \|\| activeGenerationSession[\s\S]*?modelConnectionScheduler\.enqueue/u,
+        'host background work must also be rejected before it enters the scheduler queue',
+    );
 });
 
 test('profile commit is durable, content-verified, fail-closed, and accepted only after readback', () => {
     const completion = sourceBetween(
         'async function completeActorProfilesForTurn',
         'async function runActorProfileTarget',
+    );
+    const profileWriter = sourceBetween(
+        'async function persistActorProfilePhaseWithWorldRebase',
+        'async function completeActorProfilesForTurn',
+    );
+    assert.equal(
+        (source.match(/chatScope: fingerprint\(String\(captured\.chatId \|\| ''\)\)/gu) || []).length,
+        2,
+        'both asynchronous P1 summary diagnostics must retain the captured chat scope',
     );
     const pendingWriteAt = batchSource.indexOf('pendingPersisted = await persistPendingBatch');
     const pendingReadbackAt = batchSource.indexOf('const pendingReadbackOk');
@@ -113,18 +140,21 @@ test('profile commit is durable, content-verified, fail-closed, and accepted onl
         && finalReadbackAt > finalWriteAt
         && acceptAt > finalReadbackAt,
     );
-    assert.match(completion, /fields: \['actorLedger'\]/u);
-    assert.match(completion, /durable: true/u);
-    assert.match(completion, /requireReadback: true/u);
-    assert.match(completion, /readbackAttempts: 3/u);
-    assert.match(completion, /contentValidator: \(persisted\) => expectedCommits\.every/u);
-    assert.match(completion, /precondition: \(\) =>/u);
+    assert.match(profileWriter, /fields: \['actorLedger'\]/u);
+    assert.match(profileWriter, /durable: true/u);
+    assert.match(profileWriter, /requireReadback: true/u);
+    assert.match(profileWriter, /readbackAttempts: 3/u);
+    assert.match(profileWriter, /contentValidator: \(persisted\) => expectedCommits\.every/u);
+    assert.match(profileWriter, /precondition: \(\) =>/u);
+    assert.match(profileWriter, /for \(let attempt = 0; attempt < 2; attempt \+= 1\)/u);
+    assert.match(profileWriter, /actorProfileActorLedgerCasCanRebase\(failureSink\)/u);
+    assert.match(profileWriter, /actorProfileRebaseOnWorldOnlyLedgerDrift/u);
     for (const code of [
         'actor_profile.target_stale',
         'actor_profile.commit_rejected',
         'actor_profile.readback_unsupported',
         'actor_profile.readback_mismatch',
-    ]) assert.match(`${completion}\n${batchSource}`, new RegExp(code.replace('.', '\\.')));
+    ]) assert.match(`${completion}\n${profileWriter}\n${batchSource}`, new RegExp(code.replace('.', '\\.')));
     for (const code of [
         'actor_profile.format_unrecoverable',
         'actor_profile.actor_ref_mismatch',
@@ -144,8 +174,12 @@ test('namespace writer rejects stale targets and revisions before mutation and r
     assert.match(writer, /host_save_readback_unsupported/u);
     assert.match(writer, /host_save_readback_mismatch/u);
     assert.match(writer, /host_save_target_stale/u);
-    assert.match(writer, /if \(applied && !retainOnFailure && context\.chatId === expectedChatId\)/u);
-    assert.match(writer, /context\.updateChatMetadata\(\{ \[PLUGIN_ID\]: current \}\)/u);
+    assert.match(
+        writer,
+        /applied[\s\S]*?!retainOnFailure[\s\S]*?selectedTransactionRecovery[\s\S]*?selectedFields\?\.length[\s\S]*?durableSaveStarted[\s\S]*?context\.chatId === expectedChatId/u,
+    );
+    assert.match(writer, /const applyNamespaceSnapshot = \(namespace\)/u);
+    assert.match(writer, /applyNamespaceSnapshot\(current\)/u);
 });
 
 test('stale swipe checks precede materialization and scheduling follows persisted completion', () => {

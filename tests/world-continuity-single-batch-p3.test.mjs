@@ -14,7 +14,9 @@ import {
 import {
     actorLedgerDigest,
     emptyActorLedger,
+    normalizeActorLedger,
 } from '../actor-ledger-core.mjs';
+import { validateWorldAdjudicationBatch } from '../actor-authority-core.mjs';
 import {
     extractFirstBalancedJsonObject,
     sovereigntySourceKey,
@@ -45,6 +47,24 @@ test('world prompts reuse the canonical read-only profile view and expose a sepa
     assert.match(source, /mvuad-world-run'[\s\S]*?enqueueContinuity\(null, \{ force: true, manualRecovery: true \}\)/u);
 });
 
+test('world prompt sends one recalled material block and the compact ownership/output contract', () => {
+    const messages = sourceSection(
+        'function buildContinuityMessages({',
+        'async function generateWorldContinuitySingleBatch',
+    );
+    assert.match(messages, /const compactSystem = \[/u);
+    assert.match(messages, /const compactUser = \[/u);
+    assert.match(messages, /content: compactSystem/u);
+    assert.match(messages, /content: compactUser/u);
+    assert.doesNotMatch(messages, /content: system \}/u);
+    assert.doesNotMatch(messages, /requiredPrefix \+ optionalUser/u);
+    assert.match(messages, /人物尝试不等于世界结果/u);
+    assert.match(messages, /未ready或未召回人物不得获得本轮自主行动/u);
+    assert.match(messages, /success或partial时appliedStateChanges必须非空/u);
+    assert.match(messages, /禁止advanced配空增量/u);
+    assert.match(messages, /输出最小形状/u);
+});
+
 function sourceSection(start, end) {
     const from = source.indexOf(start);
     const to = source.indexOf(end, from + start.length);
@@ -55,7 +75,7 @@ function sourceSection(start, end) {
 
 function loadStage3LocalRecallPacket() {
     const code = sourceSection(
-        'function stage3LocalRecallPacket({',
+        'function stage3WorldbookRegexKey(value) {',
         'function buildContinuityMessages({',
     );
     const sandbox = {
@@ -63,6 +83,23 @@ function loadStage3LocalRecallPacket() {
     };
     vm.runInNewContext(`${code}\nthis.buildRecall = stage3LocalRecallPacket;`, sandbox);
     return sandbox.buildRecall;
+}
+
+function loadContinuityWorldEntryCanonicalizer() {
+    const code = sourceSection(
+        'function usableContinuityWorldEntry(entry)',
+        'function usableForumWorldEntry(entry)',
+    );
+    const sandbox = {
+        fingerprint: (value) => `digest:${String(value).length}:${String(value)}`,
+        deepClone: (value) => structuredClone(value),
+    };
+    vm.runInNewContext(
+        `${code}\nthis.usable = usableContinuityWorldEntry;`
+        + '\nthis.canonical = canonicalContinuityWorldEntries;',
+        sandbox,
+    );
+    return sandbox;
 }
 
 function loadCancelledWorldReservationHarness({ checkpointPhase = 'world_call_reserved' } = {}) {
@@ -225,12 +262,23 @@ function loadPriorReservedManualHarness() {
     };
 }
 
-function loadProductionCallModel(callDirectModel) {
+function loadProductionCallModel(callDirectModel, {
+    routeCount = 1,
+    foregroundStarting = false,
+    duplicateRouteKeys = false,
+} = {}) {
     const activeModelControllers = new Set();
-    const profile = {
-        provider: 'direct', viaBackend: false, maxTokens: 4096,
-        model: 'synthetic-local-model', name: 'synthetic-local-route',
-    };
+    const profiles = Array.from({ length: routeCount }, (_, slotIndex) => ({
+        slotIndex,
+        profile: {
+            provider: 'direct', viaBackend: false, maxTokens: 4096,
+            model: `synthetic-local-model-${duplicateRouteKeys ? 0 : slotIndex}`,
+            name: `synthetic-local-route-${duplicateRouteKeys ? 0 : slotIndex}`,
+        },
+    }));
+    const health = [];
+    const diagnostics = [];
+    const schedulerKeys = [];
     const sandbox = {
         AbortController,
         setTimeout,
@@ -242,26 +290,34 @@ function loadProductionCallModel(callDirectModel) {
         lastPromptSnapshot: null,
         activeModelControllers,
         getSettings: () => ({ modelTimeoutMs: 10, maxTokens: 4096 }),
-        selectChannelConnectionProfile: () => ({ profile, slotIndex: 0 }),
-        modelConnectionKey: () => 'synthetic-local-route',
+        getContext: () => ({ chatId: 'synthetic-call-model' }),
+        foregroundGenerationStarting: foregroundStarting,
+        activeGenerationSession: null,
+        selectChannelConnectionProfile: (_settings, _channel, requestedSlot) => (
+            profiles.find((entry) => entry.slotIndex === Number(requestedSlot)) || profiles[0]
+        ),
+        modelConnectionKey: (profile) => `${profile.provider}:${profile.model}:${profile.name}`,
         syncTaskCancelButtons: () => {},
         scopedModelMessages: (messages) => messages,
         modelInstructionModule: () => 'world',
         normalizeConnectionMaxTokens: (value) => value,
         modelInputLengthBucket: () => 'tiny',
         renderPromptSnapshot: () => {},
-        modelConnectionScheduler: { enqueue: async (_key, run) => run() },
+        modelConnectionScheduler: { enqueue: async (key, run) => { schedulerKeys.push(key); return run(); } },
         modelTaskPriority: () => 0,
-        modelFailureKind: (error, controller) => (
-            controller?.signal?.aborted || error?.name === 'AbortError'
-                ? 'cancelled' : 'transport-error'
-        ),
+        isRateLimitError: (error) => Number(error?.status) === 429,
         safeRouteDiagnostic: ({ failureKind }) => ({ failureKind }),
         structuredOutputShape: () => ({}),
-        channelConnectionProfiles: () => [],
+        channelConnectionProfiles: () => profiles,
+        countDistinctFailoverReservations: ({ maxFailovers, attemptedCount }) => (
+            Math.max(0, maxFailovers - attemptedCount)
+        ),
+        modelRouteHealthRecord: () => ({ openedUntil: 0 }),
         recordModelCall: () => {},
-        markModelRouteHealth: () => {},
-        recordModelDiagnostic: () => {},
+        markModelRouteHealth: (_channel, slotIndex, profile, ok, detail) => {
+            health.push({ slotIndex, model: profile.model, ok, failureKind: detail?.failureKind || '' });
+        },
+        recordModelDiagnostic: (entry) => diagnostics.push(structuredClone(entry)),
         normalizedProviderUsage: () => ({}),
         callDirectModel,
         extractFirstBalancedJsonObject,
@@ -269,6 +325,7 @@ function loadProductionCallModel(callDirectModel) {
         renderSovereigntyHealth: () => {},
         updateFloatingOrb: () => {},
         recordOperation: () => {},
+        fingerprint: (value) => `test:${String(value).length}`,
     };
     const withTimeoutSource = sourceSection(
         'async function withTimeout(promise, milliseconds, label, {',
@@ -278,11 +335,22 @@ function loadProductionCallModel(callDirectModel) {
         'function assertUsableModelOutput(output, options = {}) {',
         'async function probeModelChannelConnections(channel =',
     );
+    const failureClassifierSource = sourceSection(
+        'function modelFailureKind(error, controller = null) {',
+        'function safeRouteDiagnostic({',
+    );
     vm.runInNewContext(
-        `${withTimeoutSource}\n${callSource}\nthis.callModelUnderTest = callModel;`,
+        `${withTimeoutSource}\n${failureClassifierSource}\n${callSource}`
+        + '\nthis.callModelUnderTest = callModel;',
         sandbox,
     );
-    return { callModel: sandbox.callModelUnderTest, activeModelControllers };
+    return {
+        callModel: sandbox.callModelUnderTest,
+        activeModelControllers,
+        health,
+        diagnostics,
+        schedulerKeys,
+    };
 }
 
 function loadStage3PreparedPhase1RevisionGate() {
@@ -306,6 +374,70 @@ function loadStage3PreparedPhase1RevisionGate() {
         sandbox,
     );
     return sandbox;
+}
+
+function loadStage3PreparedAuthorityMatcher() {
+    const authority = sourceSection(
+        'function stage3CanonicalTargetActionReceipt(value, captured) {',
+        'function stage3CanonicalSettlementProof(ledger, results = [], captured) {',
+    );
+    const prepared = sourceSection(
+        'function stage3AttemptProjection(ledger, target) {',
+        'function stage3ValidateWorldCandidateInMemory(captured, settings, ledger, {',
+    );
+    const acceptedTarget = (value) => value ? {
+        chatId: String(value.chatId || ''),
+        index: Math.max(0, Number(value.index) || 0),
+        messageId: String(value.messageId || ''),
+        swipeId: Math.max(0, Number(value.swipeId) || 0),
+        generationSerial: Math.max(0, Number(value.generationSerial) || 0),
+        generationId: String(value.generationId || ''),
+        generationType: String(value.generationType || ''),
+        scopeDigest: String(value.scopeDigest || ''),
+        contentFingerprint: String(value.contentFingerprint || value.fingerprint || ''),
+    } : null;
+    const actionTarget = (value) => value ? {
+        chatId: value.chatId,
+        logicalIndex: value.logicalIndex ?? value.index,
+        index: value.logicalIndex ?? value.index,
+        messageId: value.messageId,
+        swipeId: value.swipeId,
+        generation: value.generation ?? value.generationSerial,
+        generationId: value.generationId,
+        generationType: value.generationType,
+        scopeDigest: value.scopeDigest,
+        contentHash: value.contentHash || value.hash || value.contentFingerprint || value.fingerprint,
+        hash: value.contentHash || value.hash || value.contentFingerprint || value.fingerprint,
+    } : null;
+    const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        fingerprint: (value) => JSON.stringify(value),
+        safeJson: (value) => JSON.stringify(value),
+        actorActionTargetOf: actionTarget,
+        normalizeActorActionTarget: actionTarget,
+        actorActionTargetMatches: (left, right) => exact(actionTarget(left), actionTarget(right)),
+        stage3AcceptedTarget: acceptedTarget,
+        stage3AcceptedTargetsMatch: (left, right) => exact(acceptedTarget(left), acceptedTarget(right)),
+        actorLedgerDigest: (value) => JSON.stringify(value),
+        normalizeActorLedger: (value) => normalizeActorLedger(value),
+    };
+    vm.runInNewContext(
+        `${authority}\n${prepared}\nthis.build = stage3PreparedWorldCheckpoint;`
+        + 'this.matches = stage3PreparedWorldCheckpointMatches;',
+        sandbox,
+    );
+    return sandbox;
+}
+
+function loadStage3UnchangedFieldRebaseGate() {
+    const code = sourceSection(
+        'function stage3FieldStateCanRebaseUnchanged(expected, actual) {',
+        'function stage3PreparedWorldCheckpoint({',
+    );
+    const sandbox = {};
+    vm.runInNewContext(`${code}\nthis.matches = stage3FieldStateCanRebaseUnchanged;`, sandbox);
+    return sandbox.matches;
 }
 
 function loadStage3AcceptedTargetHelpers(overrides = {}) {
@@ -341,6 +473,7 @@ function loadStage3LegacyManualReconciliationRunner(state) {
             version: 2, actorIds: [], threadIds: [], laneIds: [],
             mustActorIds: [], mustThreadIds: [], mustLaneIds: [], digest: 'local-recall',
         }),
+        continuityTickPlan: () => ({ ticksDue: 1 }),
         getSettings: () => ({}),
         getContext: () => ({ chatId: state.captured.chatId, chat: [{ mes: 'natural narrative' }] }),
         readChatNamespace: () => state.namespace,
@@ -348,7 +481,39 @@ function loadStage3LegacyManualReconciliationRunner(state) {
             stored === state.legacyTarget && captured === state.captured
         ),
         stage3CommittedCheckpointIsPriorTerminal: () => false,
+        stage3CommittedCheckpointIsRerollBaseline: () => false,
+        stage3AcceptedTargetIsStrictlyNewer: () => false,
+        stage3PersistedPackageDecision: () => ({ ok: false, code: 'proof_invalid', packet: null }),
+        stage3WorldFailureValidationCode: () => 'world.operation.failed',
         ...state.spies,
+    };
+    sandbox.stage3PersistAttemptlessPreparedWorldCandidate = async (captured, args) => {
+        const preparedCheckpoint = sandbox.stage3PreparedWorldCheckpoint?.({
+            captured,
+            checkpointBase: args.checkpointBase,
+            scheduledBase: args.scheduledBase,
+            parsed: args.parsed,
+            director: args.director,
+            nextTurn: args.nextTurn,
+            actionTarget: args.actionTarget,
+            ledger: args.actionLedger,
+            recall: args.recallPacket,
+            worldContext: args.worldContext,
+            phase1Expected: args.phase1Expected,
+        });
+        const persisted = await sandbox.persistActorActionAttemptsForTurn?.(captured, {
+            previousLedger: args.actionLedger,
+            nextLedger: args.actionLedger,
+            attempts: [],
+            target: args.actionTarget,
+            token: args.token,
+            preparedCheckpoint,
+            expectedFieldStates: args.phase1Expected,
+        });
+        return persisted?.ok ? { ok: true, persisted } : {
+            ok: false,
+            reason: persisted?.reason || 'world_candidate_readback_mismatch',
+        };
     };
     vm.runInNewContext(`${code}\nthis.run = runContinuityTarget;`, sandbox);
     return sandbox.run;
@@ -361,6 +526,20 @@ function loadStage3PersistedPackageValidator({
     const code = sourceSection(
         'function stage3ContinuityDigestWithoutInjection(state) {',
         'function stage3NoActorPermitMatches(permit, captured) {',
+    );
+    const canonicalTarget = (value) => value ? {
+        chatId: String(value.chatId || ''),
+        logicalIndex: Number(value.logicalIndex ?? value.index) || 0,
+        messageId: String(value.messageId || ''),
+        swipeId: Number(value.swipeId) || 0,
+        generation: Number(value.generation ?? value.generationSerial) || 0,
+        generationId: String(value.generationId || ''),
+        generationType: String(value.generationType || ''),
+        scopeDigest: String(value.scopeDigest || ''),
+        contentHash: String(value.contentHash || value.hash || value.contentFingerprint || ''),
+    } : null;
+    const targetMatches = (left, right) => (
+        JSON.stringify(canonicalTarget(left)) === JSON.stringify(canonicalTarget(right))
     );
     const sandbox = {
         deepClone: (value) => structuredClone(value),
@@ -377,6 +556,7 @@ function loadStage3PersistedPackageValidator({
                 String(result.outcome || ''),
             ].join(':');
         }),
+        normalizeActorLedger: (value) => normalizeActorLedger(value),
         fingerprint: (value) => {
             const text = String(value);
             let hash = 0;
@@ -384,11 +564,12 @@ function loadStage3PersistedPackageValidator({
             return `hash:${text.length}:${hash}`;
         },
         actorActionTargetOf: (captured) => ({ ...captured }),
-        actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+        normalizeActorActionTarget: canonicalTarget,
+        actorActionTargetMatches: targetMatches,
         actorActionSettlementsMatchLedger: (ledger, { target, results }) => {
             const settled = (ledger?.actionAttempts || [])
                 .filter((attempt) => (
-                    JSON.stringify(attempt?.target) === JSON.stringify(target)
+                    targetMatches(attempt?.target, target)
                     && attempt?.worldAdjudicationResult
                 ))
                 .map((attempt) => attempt.worldAdjudicationResult);
@@ -396,7 +577,7 @@ function loadStage3PersistedPackageValidator({
         },
         pendingActorActionAttempts: (ledger, { target }) => ({
             attempts: (ledger?.actionAttempts || []).filter((attempt) => (
-                JSON.stringify(attempt?.target) === JSON.stringify(target)
+                targetMatches(attempt?.target, target)
                 && !attempt?.worldAdjudicationResult
             )),
         }),
@@ -406,8 +587,10 @@ function loadStage3PersistedPackageValidator({
         + `${code}\nthis.stage3CanonicalSettlementProof = stage3CanonicalSettlementProof;`
         + 'this.stage3SettlementProofMatchesTarget = stage3SettlementProofMatchesTarget;'
         + 'this.stage3SettlementProofMatchesLedger = stage3SettlementProofMatchesLedger;'
+        + 'this.stage3PersistedPackageDecision = stage3PersistedPackageDecision;'
         + 'this.stage3PersistedPackageForTarget = stage3PersistedPackageForTarget;'
         + 'this.stage3CommittedCheckpointIsPriorTerminal = stage3CommittedCheckpointIsPriorTerminal;'
+        + 'this.stage3CommittedCheckpointIsRerollBaseline = stage3CommittedCheckpointIsRerollBaseline;'
         + 'this.stage3ContinuityDigestWithoutInjection = stage3ContinuityDigestWithoutInjection;',
         sandbox,
     );
@@ -489,9 +672,14 @@ function loadWorldGenerator(callModel) {
         'async function generateWorldContinuitySingleBatch(messages, {',
         'async function persistActorRegistryForTurn(captured, {',
     );
+    const repairHelpers = sourceSection(
+        'function stage3WorldValidationExpectedShape(validationCode)',
+        'async function commitPreparedWorldCandidate(captured, {',
+    );
     const sandbox = {
         callModel,
         parseContinuityOutput,
+        deepClone: (value) => structuredClone(value),
         stage3AcceptedTarget: (value) => value ? structuredClone(value) : null,
         validateWorldAdjudicationBatch: () => ({ valid: true, errors: [] }),
         freshFrozenScopeGuard: async (captured) => (
@@ -501,10 +689,275 @@ function loadWorldGenerator(callModel) {
         ),
     };
     vm.runInNewContext(
-        `${code}\nthis.generateWorldContinuitySingleBatch = generateWorldContinuitySingleBatch;`,
+        `${repairHelpers}\n${code}\nthis.generateWorldContinuitySingleBatch = generateWorldContinuitySingleBatch;`,
         sandbox,
     );
     return sandbox.generateWorldContinuitySingleBatch;
+}
+
+function loadAttemptlessPhase1RebaseHarness({
+    alwaysReject = false,
+    failureCode = 'field_state_mismatch',
+    failureReason = 'action_attempt.commit_rejected',
+    continuity = { turn: 1 },
+    continuityCheckpoint = null,
+    freshActionAttempts = [],
+    freshActionReceipts = [],
+} = {}) {
+    const unchangedGate = sourceSection(
+        'function stage3FieldStateCanRebaseUnchanged(expected, actual) {',
+        'function stage3PreparedWorldCheckpoint({',
+    );
+    const code = sourceSection(
+        'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
+        'function stage3PreparedWorldCheckpointMatches(',
+    );
+    const readbackCode = sourceSection(
+        'function stage3Phase1ReadbackValidationCode(persisted) {',
+        'async function runContinuityTarget(captured, {',
+    );
+    const target = { chatId: 'chat-rebase', index: 2, scopeDigest: 'scope-rebase' };
+    const actionTarget = { chatId: 'chat-rebase', index: 2, generationId: 'generation-2' };
+    let actorRevision = 2;
+    let persistCalls = 0;
+    const latestLedger = () => ({
+        actors: [{ id: 'actor-new-ready', profileV6: { status: 'complete' } }],
+        actionAttempts: structuredClone(freshActionAttempts),
+        actionReceipts: structuredClone(freshActionReceipts),
+        profileRevision: actorRevision,
+    });
+    const namespace = () => ({
+        actorLedger: latestLedger(),
+        continuity: structuredClone(continuity),
+        continuityCheckpoint: structuredClone(continuityCheckpoint),
+        fieldRevisions: { actorLedger: actorRevision, continuity: 1, continuityCheckpoint: 1 },
+    });
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        stage3AttemptProjection: (ledger) => structuredClone(ledger.actionAttempts || []),
+        stage3TargetActionAuthorityProjection: (ledger) => ({
+            attempts: structuredClone(ledger.actionAttempts || []),
+            receipts: structuredClone(ledger.actionReceipts || []),
+        }),
+        fingerprint: (value) => JSON.stringify(value),
+        actorLedgerDigest: (value) => JSON.stringify(value),
+        normalizeActorLedger: (value) => normalizeActorLedger(value),
+        stage3TaskOwnsCurrent: () => true,
+        getContext: () => ({ chatId: target.chatId }),
+        readChatNamespace: () => namespace(),
+        stage3FieldState: (value, field) => ({
+            revision: value.fieldRevisions[field],
+            digest: JSON.stringify(value[field]),
+        }),
+        normalizeActorLedger: (value) => structuredClone(value),
+        stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
+        stage3WorldFailureValidationCode: () => 'world.operation.failed',
+        stage3PreparedWorldCheckpoint: ({ ledger, phase1Expected }) => ({
+            stage3Phase: 'world_candidate_prepared',
+            preparedWorld: {
+                ledger: structuredClone(ledger),
+                phase1Expected: structuredClone(phase1Expected),
+            },
+        }),
+        persistActorActionAttemptsForTurn: async (_captured, options) => {
+            persistCalls += 1;
+            assert.equal(options.attempts.length, 0);
+            assert.equal(options.nextLedger.actors[0].profileV6.status, 'complete');
+            if (alwaysReject || persistCalls === 1) {
+                actorRevision += 1;
+                return {
+                    ok: false,
+                    reason: failureReason,
+                    failureCode,
+                    concurrentFields: ['actorLedger'],
+                };
+            }
+            return {
+                ok: true,
+                ledger: structuredClone(options.nextLedger),
+                checkpoint: structuredClone(options.preparedCheckpoint),
+            };
+        },
+        stage3PreparedWorldCheckpointMatches: () => true,
+    };
+    vm.runInNewContext(
+        `${unchangedGate}\n${readbackCode}\n${code}\nthis.rebase = stage3PersistAttemptlessPreparedWorldCandidate;`,
+        sandbox,
+    );
+    return {
+        run: () => sandbox.rebase(target, {
+            token: {}, settings: {}, actionLedger: { actionAttempts: [] },
+            parsed: { state: { turn: 2 }, raw: { world: {} } },
+            checkpointBase: { turn: 1 }, scheduledBase: { turn: 2 },
+            director: 'standalone', nextTurn: 2, actionTarget,
+            recallPacket: {}, worldContext: { hasSetting: true },
+            phase1Expected: {
+                actorLedger: { revision: 1, digest: 'old-ledger' },
+                continuity: { revision: 0, digest: JSON.stringify({ turn: 1 }) },
+                continuityCheckpoint: { revision: 0, digest: JSON.stringify(null) },
+            },
+        }),
+        persistCalls: () => persistCalls,
+    };
+}
+
+function loadScheduledPhase1RebaseHarness() {
+    const unchangedGate = sourceSection(
+        'function stage3FieldStateCanRebaseUnchanged(expected, actual) {',
+        'function stage3PreparedWorldCheckpoint({',
+    );
+    const code = sourceSection(
+        'async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {',
+        'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
+    );
+    const readbackCode = sourceSection(
+        'function stage3Phase1ReadbackValidationCode(persisted) {',
+        'async function runContinuityTarget(captured, {',
+    );
+    const target = { chatId: 'chat-scheduled-rebase', index: 2, scopeDigest: 'scope-scheduled' };
+    const actionTarget = { chatId: target.chatId, index: 2, generationId: 'generation-2' };
+    const scheduledRef = { actorId: 'actor-old', identityHash: 'stable-ref' };
+    let actorRevision = 2;
+    let persistCalls = 0;
+    const freshLedger = () => ({
+        actors: [
+            { id: 'actor-old', actorRef: scheduledRef, profileV6: { status: 'complete' } },
+            { id: 'actor-new-ready', actorRef: { actorId: 'actor-new-ready' }, profileV6: { status: 'complete' } },
+        ],
+        actionAttempts: [],
+        profileRevision: actorRevision,
+    });
+    const namespace = () => ({
+        actorLedger: freshLedger(), continuity: { turn: 1 }, continuityCheckpoint: null,
+        fieldRevisions: { actorLedger: actorRevision, continuity: 1, continuityCheckpoint: 1 },
+    });
+    const sandbox = {
+        fingerprint: (value) => JSON.stringify(value),
+        safeJson: (value) => JSON.stringify(value),
+        deepClone: (value) => structuredClone(value),
+        stage3AttemptProjection: (ledger) => structuredClone(ledger.actionAttempts || []),
+        stage3TargetActionAuthorityProjection: (ledger) => ({
+            attempts: structuredClone(ledger.actionAttempts || []), receipts: [],
+        }),
+        stage3TaskOwnsCurrent: () => true,
+        getContext: () => ({ chatId: target.chatId }),
+        readChatNamespace: () => namespace(),
+        stage3FieldState: (value, field) => ({
+            revision: value.fieldRevisions[field], digest: JSON.stringify(value[field]),
+        }),
+        normalizeActorLedger: (value) => structuredClone(value),
+        actorActionCandidatesFromShard: (_ledger, proposals) => structuredClone(proposals),
+        prepareActorActionAttempts: (ledger, candidates) => ({
+            ledger: structuredClone(ledger), rejected: [],
+            attempts: candidates.map((candidate) => ({
+                id: `attempt-${candidate.actorId}`,
+                actorId: candidate.actorId,
+                actorRef: structuredClone(scheduledRef),
+                target: structuredClone(actionTarget),
+            })),
+        }),
+        recordActorActionAttempts: (ledger, attempts) => ({
+            ledger: { ...structuredClone(ledger), actionAttempts: structuredClone(attempts) },
+            recorded: structuredClone(attempts), rejected: [],
+        }),
+        stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
+        stage3WorldFailureValidationCode: () => 'world.operation.failed',
+        stage3PreparedWorldCheckpoint: ({ ledger, phase1Expected, phase1WriteMode }) => ({
+            stage3Phase: 'world_candidate_prepared',
+            preparedWorld: {
+                ledger: structuredClone(ledger), phase1Expected: structuredClone(phase1Expected),
+                phase1WriteMode,
+            },
+        }),
+        persistActorActionAttemptsForTurn: async (_captured, options) => {
+            persistCalls += 1;
+            assert.equal(options.phase1WriteMode, 'actor_attempts');
+            assert.deepEqual(options.attempts.map((entry) => entry.actorId), ['actor-old']);
+            assert.equal(options.nextLedger.actors.length, 2, 'fresh P1 actor survives local ATT replay');
+            if (persistCalls === 1) {
+                actorRevision += 1;
+                return {
+                    ok: false, reason: 'action_attempt.commit_rejected',
+                    failureCode: 'stale_namespace_revision', concurrentFields: ['actorLedger'],
+                };
+            }
+            return {
+                ok: true,
+                ledger: structuredClone(options.nextLedger),
+                checkpoint: structuredClone(options.preparedCheckpoint),
+            };
+        },
+        stage3PreparedWorldCheckpointMatches: () => true,
+    };
+    vm.runInNewContext(
+        `${unchangedGate}\n${readbackCode}\n${code}\nthis.rebase = stage3PersistPreparedActorAttemptsOnFreshLedger;`,
+        sandbox,
+    );
+    return {
+        run: () => sandbox.rebase(target, {
+            token: {}, settings: {},
+            actionLedger: {
+                actors: [{ id: 'actor-old', actorRef: scheduledRef, profileV6: { status: 'complete' } }],
+                actionAttempts: [],
+            },
+            parsed: {
+                state: { turn: 2 },
+                raw: {
+                    world: {},
+                    actionAdjudications: [{ actorId: 'actor-old', status: 'held' }],
+                },
+            },
+            checkpointBase: { turn: 1 }, scheduledBase: { turn: 2 },
+            director: 'standalone', nextTurn: 2, actionTarget,
+            recallPacket: {}, worldContext: { hasSetting: true },
+            phase1Expected: {
+                actorLedger: { revision: 1, digest: 'old' },
+                continuity: { revision: 0, digest: JSON.stringify({ turn: 1 }) },
+                continuityCheckpoint: { revision: 0, digest: JSON.stringify(null) },
+            },
+            scheduledActorIds: ['actor-old'],
+            validatedProposals: [{ actorId: 'actor-old', action: 'wait' }],
+            playerNames: [],
+        }),
+        persistCalls: () => persistCalls,
+    };
+}
+
+function loadProductionActionAttemptWriter(
+    getContext,
+    writeOverride = null,
+    checkpointMatcher = null,
+) {
+    const code = sourceSection(
+        'async function persistActorActionAttemptsForTurn(captured, {',
+        'async function completeActorProfilesForTurn(captured, {',
+    );
+    const namespaceWriter = loadNamespaceWriter(getContext);
+    const sandbox = {
+        freshFrozenScopeGuard: async () => ({ ok: true }),
+        continuityTargetIsCurrent: () => ({ ok: true }),
+        getContext,
+        readChatNamespace: (context) => structuredClone(
+            context.chatMetadata.mvu_auto_doctor,
+        ),
+        writeChatNamespace: (...args) => writeOverride
+            ? writeOverride(...args)
+            : namespaceWriter.write(...args),
+        normalizeActorLedger: (value) => structuredClone(value),
+        actorActionAttemptsMatchLedger: () => ({ ok: true }),
+        stage3PreparedWorldCheckpointMatches: checkpointMatcher || ((checkpoint) => (
+            checkpoint?.preparedWorld?.phase1WriteMode === 'checkpoint_only'
+        )),
+        stage3FieldState: (namespace, field) => ({
+            revision: Math.max(0, Number(namespace?.fieldRevisions?.[field]) || 0),
+            digest: field === 'actorLedger'
+                ? JSON.stringify(namespace?.[field])
+                : JSON.stringify(namespace?.[field]),
+        }),
+        deepClone: (value) => structuredClone(value),
+    };
+    vm.runInNewContext(`${code}\nthis.persist = persistActorActionAttemptsForTurn;`, sandbox);
+    return { persist: sandbox.persist, metrics: namespaceWriter.metrics };
 }
 
 function loadPersistenceOutcome() {
@@ -550,10 +1003,10 @@ function loadCommittedWorldDetector(scopeDigest = 'scope-p3') {
 function loadNamespaceWriter(getContext) {
     const readback = sourceSection(
         'async function readPersistedChatNamespace(context, expectedChatId)',
-        'function persistedNamespaceMatches(candidate, persisted, selectedFields)',
+        'function persistedNamespaceMatches(candidate, persisted, selectedFields, {',
     );
     const matches = sourceSection(
-        'function persistedNamespaceMatches(candidate, persisted, selectedFields)',
+        'function persistedNamespaceMatches(candidate, persisted, selectedFields, {',
         'async function verifyPersistedChatNamespace(',
     );
     const verify = sourceSection(
@@ -589,6 +1042,7 @@ function loadNamespaceWriter(getContext) {
         ),
         fingerprint: (value) => JSON.stringify(value),
         safeJson: (value) => JSON.stringify(value),
+        actorLedgerDigest: (value) => JSON.stringify(value),
         safeDiagnosticReason: (value) => String(value),
         deepClone: (value) => structuredClone(value),
         structuredClone,
@@ -602,9 +1056,57 @@ function loadNamespaceWriter(getContext) {
     );
     return {
         write: sandbox.performChatNamespaceWrite,
+        matches: sandbox.persistedNamespaceMatches,
         metrics: sandbox.chatNamespacePersistenceMetrics,
         failureCode: () => sandbox.lastChatNamespaceWriteFailureCode,
     };
+}
+
+function loadNamespaceWriteWrapperRaceHarness(state) {
+    const code = sourceSection(
+        'function rejectChatNamespaceWrite(options, code, detail = \'\') {',
+        'function rebaseIdenticalNamespaceFields(next, current, fields) {',
+    );
+    const sandbox = {
+        PLUGIN_ID: 'mvu_auto_doctor',
+        lastChatNamespaceWriteFailureCode: '',
+        chatNamespacePersistenceMetrics: { migrationGuardBlocked: 0 },
+        getContext: () => state.context,
+        readChatNamespace: () => structuredClone(state.context.chatMetadata.mvu_auto_doctor),
+        actorSovereigntyScopeDigest: () => 'scope-digest',
+        actorSovereigntyScopesMatch: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+        actorSovereigntyMigrationIsCurrent: () => true,
+        ensureActorSovereigntyMigrationPersisted: async () => ({
+            ok: true,
+            current: true,
+            namespace: structuredClone(state.context.chatMetadata.mvu_auto_doctor),
+        }),
+        resolveCurrentActorSovereigntyScope: async () => {
+            await state.concurrentP1Write();
+            return { resolved: true, scope: structuredClone(state.scope) };
+        },
+        prepareActorSovereigntyFieldWriteCandidate: (candidate, current, { fields }) => {
+            const staleFields = fields.filter((field) => (
+                Number(current.fieldRevisions?.[field] || 0)
+                    > Number(candidate.fieldRevisions?.[field] || candidate.rev || 0)
+                && JSON.stringify(current[field]) !== JSON.stringify(candidate[field])
+            ));
+            return staleFields.length
+                ? {
+                    allowed: false,
+                    reason: 'migration.write_field_revision_stale',
+                    staleFields,
+                }
+                : { allowed: true, candidate: structuredClone(candidate), staleFields: [] };
+        },
+        rebaseActorSovereigntyFieldWriteAfterMigration: () => ({ allowed: false }),
+        currentActorSovereigntyScope: () => structuredClone(state.scope),
+        enqueueChatNamespaceWrite: async () => {
+            throw new Error('stale wrapper candidate must not reach the writer queue');
+        },
+    };
+    vm.runInNewContext(`${code}\nthis.write = writeChatNamespace;`, sandbox);
+    return sandbox.write;
 }
 
 function loadProductionPriorReservedRetirementHarness(postApplyMutation = null) {
@@ -717,12 +1219,14 @@ test('0/1/3/6 world events each use exactly one production world-model call', as
     const calls = [];
     const generate = loadWorldGenerator(async (messages, options) => {
         calls.push({ messages, options });
-        assert.equal(options.failover, false);
-        assert.equal(options.maxFailovers, 0);
+        assert.equal(options.failover, true);
+        assert.equal(options.maxFailovers, 1);
+        assert.equal(options.transportFailoverOnly, true);
         assert.equal(options.noTimeout, true);
+        assert.equal(options.runUntilCancelled, true);
         assert.equal(options.timeoutMs, undefined);
+        assert.equal(options.validateOutput, undefined);
         const output = validWorldOutput();
-        assert.equal(options.validateOutput(output), true);
         return output;
     });
     for (const count of [0, 1, 3, 6]) {
@@ -740,11 +1244,444 @@ test('0/1/3/6 world events each use exactly one production world-model call', as
     }
 });
 
+test('an invalid world draft gets one compact targeted repair before any caller can persist it', async () => {
+    const calls = [];
+    const generate = loadWorldGenerator(async (messages, options) => {
+        calls.push({ messages, options });
+        const output = calls.length === 1
+            ? validWorldOutput(1)
+            : JSON.stringify({ world: { digest: 'repaired semantic delta' } });
+        assert.equal(options.validateOutput, undefined);
+        return output;
+    });
+    const output = await generate([{ role: 'user', content: 'large original prompt' }], {
+        captured,
+        settings: generatorSettings,
+        validateCandidateInMemory: (candidateOutput) => (
+            parseContinuityOutput(candidateOutput).raw?.world?.digest
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : { ok: false, validationCode: 'world.semantic_progress_missing' }
+        ),
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].options.task, '活世界定向补缺');
+    assert.equal(calls[1].options.failover, true);
+    assert.equal(calls[1].options.maxFailovers, 1);
+    assert.equal(calls[1].options.transportFailoverOnly, true);
+    assert.match(calls[1].messages[0].content, /world\.semantic_progress_missing/u);
+    assert.match(calls[1].messages[0].content, /"repairPatch"/u);
+    assert.doesNotMatch(calls[1].messages[0].content, /large original prompt/u);
+    assert.equal(parseContinuityOutput(output).raw.world.digest, 'repaired semantic delta');
+    assert.equal(parseContinuityOutput(output).raw.lastTick.action, 'held');
+});
+
+test('a still-invalid targeted repair stops at two calls and preserves its privacy-safe code', async () => {
+    let calls = 0;
+    const generate = loadWorldGenerator(async (_messages, options) => {
+        calls += 1;
+        assert.equal(options.validateOutput, undefined);
+        return calls === 1 ? validWorldOutput(1) : JSON.stringify({ world: {} });
+    });
+    await assert.rejects(
+        generate([{ role: 'user', content: 'synthetic prompt' }], {
+            captured,
+            settings: generatorSettings,
+            validateCandidateInMemory: () => ({
+                ok: false,
+                validationCode: 'world.semantic_progress_missing',
+            }),
+        }),
+        (error) => (
+            error?.failureKind === 'validation-error'
+            && error?.validationReason === 'world.semantic_progress_missing'
+        ),
+    );
+    assert.equal(calls, 2, 'Advance plus one exact repair is the hard call boundary');
+});
+
+test('targeted repair projects allowed fields and ignores unrelated siblings', async () => {
+    let calls = 0;
+    const generate = loadWorldGenerator(async () => {
+        calls += 1;
+        const original = JSON.parse(validWorldOutput(7));
+        original.threads = [{ id: 'THREAD-KEEP', stage: 'seeded' }];
+        return calls === 1
+            ? JSON.stringify(original)
+            : JSON.stringify({
+                actionAdjudications: [],
+                threads: [],
+                turn: 999,
+            });
+    });
+    const output = await generate([], {
+        captured,
+        settings: generatorSettings,
+        validateCandidateInMemory: (candidateOutput) => {
+            const raw = parseContinuityOutput(candidateOutput).raw;
+            return raw?.actionAdjudications
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : { ok: false, validationCode: 'world.actor.adjudication_contract_invalid' };
+        },
+    });
+    const raw = parseContinuityOutput(output).raw;
+    assert.equal(raw.turn, 7, 'unrelated turn cannot overwrite the original');
+    assert.equal(raw.threads.length, 1, 'unrelated threads cannot clear the original');
+    assert.deepEqual(raw.actionAdjudications, []);
+    assert.equal(calls, 2);
+});
+
+test('targeted repair patch accepts only the exact field family named by its code', async () => {
+    let calls = 0;
+    const generate = loadWorldGenerator(async () => {
+        calls += 1;
+        return calls === 1
+            ? validWorldOutput(7)
+            : JSON.stringify({
+                actionProposals: [{ actorId: 'actor-ready', intent: 'wait' }],
+            });
+    });
+    const output = await generate([], {
+        captured,
+        settings: generatorSettings,
+        validateCandidateInMemory: (candidateOutput) => (
+            parseContinuityOutput(candidateOutput).raw?.actionProposals?.length === 1
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : { ok: false, validationCode: 'world.actor.proposals_incomplete' }
+        ),
+    });
+    const parsed = parseContinuityOutput(output);
+    assert.equal(parsed.raw.turn, 7);
+    assert.equal(parsed.raw.lastTick.action, 'held');
+    assert.equal(parsed.raw.actionProposals.length, 1);
+    assert.equal(calls, 2);
+});
+
+test('targeted repair mechanically extracts explicit wrappers aliases and array roots', async () => {
+    const shapes = [
+        JSON.stringify({
+            repairPatch: { action_adjudications: [{ actorId: 'actor-ready', status: 'blocked' }] },
+            explanation: 'ignored transport decoration',
+        }),
+        JSON.stringify({ patch: { adjudications: [{ actorId: 'actor-ready', status: 'blocked' }] } }),
+        JSON.stringify([{ actorId: 'actor-ready', status: 'blocked' }]),
+    ];
+    for (const repairShape of shapes) {
+        let calls = 0;
+        const generate = loadWorldGenerator(async () => {
+            calls += 1;
+            return calls === 1 ? validWorldOutput(7) : repairShape;
+        });
+        const output = await generate([], {
+            captured,
+            settings: generatorSettings,
+            validateCandidateInMemory: (candidateOutput) => {
+                const raw = parseContinuityOutput(candidateOutput).raw;
+                return raw?.actionAdjudications?.[0]?.actorId === 'actor-ready'
+                    ? { ok: true, validationCode: 'world.candidate.valid' }
+                    : { ok: false, validationCode: 'world.actor.adjudication_contract_invalid' };
+            },
+        });
+        const raw = parseContinuityOutput(output).raw;
+        assert.equal(raw.actionAdjudications[0].status, 'blocked');
+        assert.equal(raw.turn, 7);
+        assert.equal(calls, 2);
+    }
+});
+
+test('targeted repair rejects a zero-hit patch and never repairs an unknown family', async () => {
+    let zeroHitCalls = 0;
+    const zeroHit = loadWorldGenerator(async () => {
+        zeroHitCalls += 1;
+        return zeroHitCalls === 1
+            ? validWorldOutput(7)
+            : JSON.stringify({ repairPatch: { explanation: 'no allowed field' } });
+    });
+    await assert.rejects(
+        zeroHit([], {
+            captured,
+            settings: generatorSettings,
+            validateCandidateInMemory: () => ({
+                ok: false,
+                validationCode: 'world.actor.adjudication_contract_invalid',
+            }),
+        }),
+        (error) => (
+            error?.validationReason === 'world.targeted_repair.patch_invalid'
+            && error?.initialValidationCode === 'world.actor.adjudication_contract_invalid'
+            && error?.repairFamily === 'adjudication'
+        ),
+    );
+    assert.equal(zeroHitCalls, 2);
+
+    let unknownCalls = 0;
+    const unknown = loadWorldGenerator(async () => {
+        unknownCalls += 1;
+        return validWorldOutput(7);
+    });
+    await assert.rejects(
+        unknown([], {
+            captured,
+            settings: generatorSettings,
+            validateCandidateInMemory: () => ({
+                ok: false,
+                validationCode: 'world.candidate.invalid',
+            }),
+        }),
+        (error) => error?.validationReason === 'world.candidate.invalid',
+    );
+    assert.equal(unknownCalls, 1, 'unknown repair families do not consume a second model call');
+});
+
+test('an unparseable first draft accepts one strict complete-root repair', async () => {
+    let calls = 0;
+    const generate = loadWorldGenerator(async () => {
+        calls += 1;
+        return calls === 1 ? 'not JSON' : validWorldOutput(9);
+    });
+    const output = await generate([], {
+        captured,
+        settings: generatorSettings,
+        validateCandidateInMemory: (candidateOutput) => (
+            parseContinuityOutput(candidateOutput).state
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : { ok: false, validationCode: 'world.output.parse_invalid' }
+        ),
+    });
+    assert.equal(parseContinuityOutput(output).raw.turn, 9);
+    assert.equal(calls, 2);
+    const generator = sourceSection(
+        'async function generateWorldContinuitySingleBatch(messages, {',
+        'async function persistActorRegistryForTurn(captured, {',
+    );
+    assert.match(generator, /validationCode === 'world\.output\.parse_invalid'[\s\S]*?stage3WorldCompleteParseRepairCandidate/u);
+    assert.doesNotMatch(generator, /writeChatNamespace|persistActorActionAttemptsForTurn/u);
+});
+
+test('parse repair rejects malformed, ambiguous, incomplete and actor-incomplete roots at two calls', async () => {
+    const cases = [
+        { repair: 'still not JSON' },
+        {
+            repair: JSON.stringify({
+                ContinuityState: JSON.parse(validWorldOutput(1)),
+                sibling: 'ambiguous',
+            }),
+        },
+        { repair: JSON.stringify({ world: {} }) },
+        { repair: validWorldOutput(1), scheduledActorIds: ['actor-ready'] },
+    ];
+    for (const item of cases) {
+        let calls = 0;
+        const generate = loadWorldGenerator(async () => {
+            calls += 1;
+            return calls === 1 ? 'not JSON' : item.repair;
+        });
+        await assert.rejects(
+            generate([], {
+                captured,
+                settings: generatorSettings,
+                scheduledActorIds: item.scheduledActorIds || [],
+                validateCandidateInMemory: (candidateOutput) => (
+                    parseContinuityOutput(candidateOutput).state
+                        ? { ok: true, validationCode: 'world.candidate.valid' }
+                        : { ok: false, validationCode: 'world.output.parse_invalid' }
+                ),
+            }),
+            (error) => (
+                error?.failureKind === 'validation-error'
+                && error?.validationReason === 'world.output.parse_invalid'
+            ),
+        );
+        assert.equal(calls, 2);
+    }
+});
+
+test('P3 reports both Advance and its one targeted repair as real world model calls', () => {
+    const generator = sourceSection(
+        'async function generateWorldContinuitySingleBatch(',
+        'async function persistActorRegistryForTurn(',
+    );
+    const run = sourceSection(
+        'async function runContinuityTarget(',
+        'function sameTargetExceptContent(',
+    );
+    assert.match(generator, /onModelCall\('advance'\)[\s\S]*?callModel\(messages/u);
+    assert.match(generator, /onModelCall\('targeted_repair'\)[\s\S]*?callModel\(repairMessages/u);
+    assert.match(run, /let worldModelCalls = 0/u);
+    assert.match(run, /onModelCall:\s*\(\) => \{ worldModelCalls \+= 1; \}/u);
+    assert.doesNotMatch(run, /modelStartedAt/u);
+    assert.match(run, /onMetrics:\s*\(metrics\) => \{[\s\S]*?queueWaitMs \+=[\s\S]*?modelMs \+=[\s\S]*?parseMs \+=[\s\S]*?validationMs \+=/u);
+    assert.match(run, /worldModelCalls,\s*\n\s*timings:/u);
+    assert.doesNotMatch(run, /worldModelCalls:\s*1/u);
+});
+
+test('P3 timing metrics count each model call without charging local validation to modelMs', async () => {
+    const metricEvents = [];
+    let calls = 0;
+    const generate = loadWorldGenerator(async (_messages, options) => {
+        calls += 1;
+        options.timingSink({ queueWaitMs: 3, modelMs: 8 });
+        return calls === 1
+            ? validWorldOutput(1)
+            : JSON.stringify({ world: { digest: 'valid increment' } });
+    });
+    await generate([], {
+        captured,
+        settings: generatorSettings,
+        onMetrics: (entry) => metricEvents.push(entry),
+        validateCandidateInMemory: (candidateOutput) => (
+            parseContinuityOutput(candidateOutput).raw?.world?.digest
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : { ok: false, validationCode: 'world.semantic_progress_missing' }
+        ),
+    });
+    const modelEvents = metricEvents.filter((entry) => Number(entry.modelMs) > 0);
+    assert.equal(modelEvents.length, 2);
+    assert.equal(modelEvents.reduce((sum, entry) => sum + entry.modelMs, 0), 16);
+    assert.equal(modelEvents.reduce((sum, entry) => sum + entry.queueWaitMs, 0), 6);
+    assert.ok(metricEvents.some((entry) => Object.hasOwn(entry, 'parseMs')));
+    assert.ok(metricEvents.some((entry) => Object.hasOwn(entry, 'validationMs')));
+});
+
+test('the production authority validator rejects success with empty applied state before Phase1', () => {
+    const attempt = {
+        id: 'ATT-P3-PREFLIGHT', actorId: 'actor-ready', intent: 'execute',
+        route: 'foreground_attempt', resourceCosts: [],
+    };
+    const result = validateWorldAdjudicationBatch([{
+        attemptId: attempt.id,
+        status: 'success',
+        risk: 'bounded risk',
+        costs: [],
+        actualResourceCosts: [],
+        durationTurns: 1,
+        visibility: 'private',
+        observerActorIds: [],
+        resultSummary: 'the attempt was reported as successful',
+        observableConsequence: 'a bounded trace would exist',
+        revealPath: '',
+        appliedStateChanges: [],
+    }], [attempt]);
+    assert.equal(result.valid, false);
+    assert.equal(result.errors[0].reason, 'world_adjudication_contract_invalid');
+    const helper = sourceSection(
+        'function stage3ValidateWorldDraftInMemory(',
+        'async function commitPreparedWorldCandidate(',
+    );
+    assert.match(helper, /validateWorldAdjudicationBatch/u);
+    assert.match(helper, /stage3ValidateWorldCandidateInMemory/u);
+    assert.match(helper, /stage3WorldAdjudicationValidationFailure\(adjudications\.errors\)/u);
+    assert.match(helper, /world_adjudication_contract_invalid/u);
+    assert.match(helper, /world\.actor\.\$\{firstReason/u);
+    const generator = sourceSection(
+        'async function generateWorldContinuitySingleBatch(',
+        'async function persistActorRegistryForTurn(',
+    );
+    assert.match(generator, /stage3WorldValidationExpectedShape\(validationCode\)/u);
+    assert.match(generator, /最小期望形状/u);
+});
+
+test('production P3 uses the background lane and only host generateRaw is foreground-preemptible', () => {
+    const generator = sourceSection(
+        'async function generateWorldContinuitySingleBatch',
+        'async function persistActorRegistryForTurn',
+    );
+    assert.match(generator, /runUntilCancelled: true/u);
+    const runner = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    assert.match(
+        runner,
+        /generateWorldContinuitySingleBatch[\s\S]*?runUntilCancelled: true/u,
+    );
+    const model = sourceSection(
+        'async function callModel(messages, options = {})',
+        'async function probeModelChannelConnections',
+    );
+    assert.match(model, /const backgroundLane = runUntilCancelled/u);
+    assert.match(model, /mvuadUsesHostGenerateRaw/u);
+    assert.match(model, /!\['direct', 'story-oracle'\]\.includes\(profile\.provider\)/u);
+    assert.match(model, /:background/u);
+    const lifecycle = sourceSection('function bindEvents()', 'async function initialize()');
+    assert.match(lifecycle, /await preemptHostBackgroundModelControllersForForegroundGeneration\(\)/u);
+    assert.match(
+        lifecycle,
+        /foregroundGenerationStarting = starting[\s\S]*?await preemptHostBackgroundModelControllersForForegroundGeneration\(\)[\s\S]*?activeGenerationSession = lastGeneration[\s\S]*?finally[\s\S]*?foregroundGenerationStarting = null/u,
+        'the host-background gate must cover the microtask window before the foreground session is installed',
+    );
+    const preempt = sourceSection(
+        'async function preemptHostBackgroundModelControllersForForegroundGeneration(',
+        "async function cancelRunningSovereigntyTasks(reason = 'user_cancelled')",
+    );
+    assert.match(preempt, /internalQuietGenerationStop = true[\s\S]*?GENERATION_STOPPED[\s\S]*?internalQuietGenerationStop = false/u);
+    assert.match(lifecycle, /GENERATION_STOPPED[\s\S]*?if \(internalQuietGenerationStop\) return/u);
+});
+
+test('a foreground-preempted P3 target is resumed from the existing serial chain before the next target', () => {
+    const run = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    const queue = sourceSection(
+        'async function enqueueContinuity(targetId, {',
+        'function stage3AttemptProjection(ledger, target)',
+    );
+    assert.match(run, /failureKind === 'foreground_preempted'[\s\S]*?'foreground_preempted'/u);
+    assert.match(queue, /continuityChain[\s\S]*?priorResult\?\.stage3RecoveryTarget/u);
+    assert.match(
+        queue,
+        /afterPending[\s\S]*?\.then\(\(priorResult\) => \{[\s\S]*?priorResult\?\.reason === 'foreground_preempted'[\s\S]*?return priorResult/u,
+        'an afterPending wake must preserve foreground-preempted recovery instead of restarting during the narrative',
+    );
+    assert.match(queue, /stage3AcceptedTargetIsStrictlyNewer\(expected, recoveryExpected\)/u);
+    assert.match(queue, /await runContinuityTarget\(recoveryTarget,[\s\S]*?force: true/u);
+    assert.ok(
+        queue.indexOf('await runContinuityTarget(recoveryTarget,')
+            < queue.lastIndexOf('return runContinuityTarget(fresh,'),
+        'the old unsettled accepted target must settle before the new accepted target starts',
+    );
+    assert.doesNotMatch(queue, /new Map\(|localStorage|sessionStorage/u);
+    assert.match(
+        queue,
+        /recoverableCheckpointConflict[\s\S]*?world_committed_manual_reconciliation[\s\S]*?result\?\.status === 'failed' && !recoverableCheckpointConflict/u,
+        'a proof-invalid checkpoint remains retryable after its authority converges',
+    );
+});
+
+test('every post-model P3 failure carries measured world timings', () => {
+    const run = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    assert.match(run, /const finishWorldResult = \(result = \{\}\) =>/u);
+    assert.match(
+        run,
+        /error\?\.code === 'WORLD_TARGET_STALE'[\s\S]*?return finishWorldResult\(\{ status: 'stale'/u,
+        'a stale result after transport must retain measured model time',
+    );
+    for (const reason of [
+        'world_actor_proposals_incomplete',
+        'world_actor_proposal_invalid',
+        'world_candidate_readback_mismatch',
+    ]) {
+        assert.match(
+            run,
+            new RegExp(`finishWorldResult\\(\\{[^}]*reason: ['\"]${reason}`, 'u'),
+            `${reason} must retain model/parse/persistence timings`,
+        );
+    }
+    assert.match(
+        run,
+        /stage3PersistPreparedActorAttemptsOnFreshLedger[\s\S]*?return finishWorldResult\(\{[\s\S]*?reason: rebased\.reason/u,
+        'fresh-ledger adjudication/Phase1 failures must retain measured timings',
+    );
+});
+
 test('Advance outlives the old hard timeout but remains immediately cancellable', async () => {
     let resolved = false;
     const generateLong = loadWorldGenerator(async (_messages, options) => {
         assert.equal(options.noTimeout, true);
-        assert.equal(options.failover, false);
+        assert.equal(options.failover, true);
         await new Promise((resolve) => setTimeout(resolve, 45));
         resolved = true;
         return validWorldOutput();
@@ -814,6 +1751,146 @@ test('production callModel honors noTimeout while its existing controller still 
         error?.name === 'AbortError' && error?.failureKind === 'cancelled'
     ));
     assert.equal(cancelled.activeModelControllers.size, 0);
+});
+
+test('production P3 router hands one empty fast slot to one distinct healthy slot', async () => {
+    const attempts = [];
+    const router = loadProductionCallModel(async (messages, { profile }) => {
+        attempts.push({ profile: profile.model, input: structuredClone(messages) });
+        return profile.model.endsWith('-0') ? '' : validWorldOutput(4);
+    }, { routeCount: 2 });
+    const input = [{ role: 'user', content: 'same accepted-world input' }];
+    const output = await router.callModel(input, {
+        task: 'synthetic P3 Advance', channel: 'fast', noTimeout: true,
+        runUntilCancelled: true, instructionModule: 'world',
+        failover: true, maxFailovers: 1, transportFailoverOnly: true,
+    });
+    assert.equal(parseContinuityOutput(output).raw.turn, 4);
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts[0].input, attempts[1].input, 'handoff keeps the exact input');
+    assert.notEqual(attempts[0].profile, attempts[1].profile, 'only distinct configured slots qualify');
+    assert.deepEqual(router.health.map(({ slotIndex, ok, failureKind }) => ({
+        slotIndex, ok, failureKind,
+    })), [
+        { slotIndex: 0, ok: false, failureKind: 'empty' },
+        { slotIndex: 1, ok: true, failureKind: '' },
+    ]);
+    const transports = router.diagnostics.filter((entry) => entry.phase === 'transport');
+    assert.deepEqual(transports.map((entry) => ({
+        slot: entry.routeSlotIndex,
+        attempt: entry.attempt,
+        failover: entry.failover,
+        inputChars: entry.inputChars,
+    })), [
+        { slot: 0, attempt: 1, failover: false, inputChars: input[0].content.length },
+        { slot: 1, attempt: 2, failover: true, inputChars: input[0].content.length },
+    ]);
+    assert.equal(new Set(router.schedulerKeys).size, 2, 'route queues stay isolated by slot/model key');
+});
+
+test('P3 transport handoff is bounded, distinct, and never applies to semantic or foreground failures', async () => {
+    const predicateSource = sourceSection(
+        'function modelTransportFailureCanFailover(failureKind) {',
+        'function safeRouteDiagnostic({',
+    );
+    const predicateSandbox = {};
+    vm.runInNewContext(`${predicateSource}\nthis.allowed = modelTransportFailureCanFailover;`, predicateSandbox);
+    for (const kind of ['empty', 'transport-error', 'rate-limit']) {
+        assert.equal(predicateSandbox.allowed(kind), true, kind);
+    }
+    for (const kind of [
+        'validation-error', 'cancelled', 'foreground_preempted', 'http', 'unknown', '',
+    ]) assert.equal(predicateSandbox.allowed(kind), false, kind);
+
+    for (const failure of [
+        Object.assign(new Error('validation'), { failureKind: 'validation-error' }),
+        Object.assign(new Error('auth'), { status: 401 }),
+        Object.assign(new Error('unknown'), { failureKind: 'unknown' }),
+    ]) {
+        let calls = 0;
+        const router = loadProductionCallModel(async () => { calls += 1; throw failure; }, {
+            routeCount: 2,
+        });
+        await assert.rejects(router.callModel([{ role: 'user', content: 'input' }], {
+            task: 'synthetic P3 Advance', channel: 'fast', noTimeout: true,
+            failover: true, maxFailovers: 1, transportFailoverOnly: true,
+        }));
+        assert.equal(calls, 1);
+    }
+
+    let rateLimitCalls = 0;
+    const rateLimited = loadProductionCallModel(async () => {
+        rateLimitCalls += 1;
+        if (rateLimitCalls === 1) {
+            throw Object.assign(new Error('rate limited'), {
+                status: 429,
+                failureKind: 'http',
+            });
+        }
+        return validWorldOutput(6);
+    }, { routeCount: 2 });
+    const rateLimitOutput = await rateLimited.callModel([
+        { role: 'user', content: 'same rate-limited input' },
+    ], {
+        task: 'synthetic P3 Advance', channel: 'fast', noTimeout: true,
+        failover: true, maxFailovers: 1, transportFailoverOnly: true,
+    });
+    assert.equal(parseContinuityOutput(rateLimitOutput).raw.turn, 6);
+    assert.equal(rateLimitCalls, 2, '429 overrides a generic http failureKind and hands off once');
+
+    let emptyCalls = 0;
+    const exhausted = loadProductionCallModel(async () => { emptyCalls += 1; return ''; }, {
+        routeCount: 3,
+    });
+    await assert.rejects(exhausted.callModel([{ role: 'user', content: 'input' }], {
+        task: 'synthetic P3 Advance', channel: 'fast', noTimeout: true,
+        failover: true, maxFailovers: 1, transportFailoverOnly: true,
+    }), (error) => error?.failureKind === 'empty');
+    assert.equal(emptyCalls, 2, 'one handoff is the hard bound even when a third slot exists');
+
+    let duplicateCalls = 0;
+    const duplicate = loadProductionCallModel(async () => { duplicateCalls += 1; return ''; }, {
+        routeCount: 2, duplicateRouteKeys: true,
+    });
+    await assert.rejects(duplicate.callModel([{ role: 'user', content: 'input' }], {
+        task: 'synthetic P3 Advance', channel: 'fast', noTimeout: true,
+        failover: true, maxFailovers: 1, transportFailoverOnly: true,
+    }));
+    assert.equal(duplicateCalls, 1, 'a duplicate physical route is not a backup');
+
+    let foregroundCalls = 0;
+    const foreground = loadProductionCallModel(async () => {
+        foregroundCalls += 1;
+        throw Object.assign(new Error('foreground_preempted'), {
+            failureKind: 'foreground_preempted',
+        });
+    }, {
+        routeCount: 2,
+    });
+    await assert.rejects(foreground.callModel([{ role: 'user', content: 'input' }], {
+        task: 'synthetic P3 Advance', channel: 'fast', noTimeout: true,
+        runUntilCancelled: true, instructionModule: 'world',
+        failover: true, maxFailovers: 1, transportFailoverOnly: true,
+    }), (error) => error?.failureKind === 'foreground_preempted');
+    assert.equal(foregroundCalls, 1);
+});
+
+test('production callModel reports scheduler wait separately from transport model time', () => {
+    const model = sourceSection(
+        'async function callModel(messages, options = {})',
+        'async function probeModelChannelConnections',
+    );
+    assert.match(
+        model,
+        /const queuedAt = Date\.now\(\)[\s\S]*?const callStartedAt = Date\.now\(\)[\s\S]*?options\.timingSink\?\.\(\{[\s\S]*?queueWaitMs:[\s\S]*?callStartedAt - queuedAt[\s\S]*?modelMs:[\s\S]*?Date\.now\(\) - callStartedAt/u,
+    );
+    assert.doesNotMatch(
+        sourceSection(
+            'async function generateWorldContinuitySingleBatch(messages, {',
+            'async function persistActorRegistryForTurn(captured, {',
+        ),
+        /startedAt = Date\.now\(\)[\s\S]*?modelMs/u,
+    );
 });
 
 test('explicit user cancellation clears only an exact owned empty reservation', async () => {
@@ -1042,6 +2119,7 @@ test('manual retirement fresh-reads then runs exactly one local Recall and one A
             scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
             detectContinuityDirector: () => 'balanced',
             pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
+            scheduleActorTurns: () => ({ selected: [] }),
             stage3LocalRecallPacket: () => {
                 recallCalls += 1;
                 return { digest: 'recall', actorIds: [], threadIds: [], laneIds: [] };
@@ -1060,6 +2138,9 @@ test('manual retirement fresh-reads then runs exactly one local Recall and one A
                 state: { turn: 2, threads: [], world: {} },
                 raw: { world: {}, actionAdjudications: [] },
             }),
+            stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            currentPlayerActorNames: () => [],
             stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
             persistActorActionAttemptsForTurn: async () => ({
                 ok: true, checkpoint: preparedCheckpoint, ledger,
@@ -1142,12 +2223,12 @@ test('transport failure preserves reserved recovery authority for manual reconci
     assert.equal(reserved.state.writes, 0);
 });
 
-test('transport failure, validation failure, and stale targets never trigger hidden failover', async () => {
+test('transport failover is delegated only to the bounded router while validation and stale stop locally', async () => {
     let calls = 0;
     const transportFailure = loadWorldGenerator(async (_messages, options) => {
         calls += 1;
-        assert.equal(options.failover, false);
-        assert.equal(options.maxFailovers, 0);
+        assert.equal(options.failover, true);
+        assert.equal(options.maxFailovers, 1);
         throw new Error('transport down');
     });
     await assert.rejects(
@@ -1197,7 +2278,7 @@ test('a mixed six-character P1 profile batch cannot fan out the world call', asy
     const generate = loadWorldGenerator(async (_messages, options) => {
         worldCalls += 1;
         const output = validWorldOutput();
-        assert.equal(options.validateOutput(output), true);
+        assert.equal(options.validateOutput, undefined);
         return output;
     });
     const profiles = Array.from({ length: 6 }, (_, index) => ({
@@ -1236,6 +2317,39 @@ test('recoverable punctuation and truncation are repaired locally; unrecoverable
     const invalid = parseContinuityOutput('no JSON and no recoverable state');
     assert.equal(invalid.state, undefined);
     assert.match(invalid.error, /无法在本地恢复/u);
+
+    const singletonArray = parseContinuityOutput(`[${validWorldOutput(3)}]`);
+    assert.ok(singletonArray.state);
+    assert.equal(singletonArray.raw.turn, 3);
+    assert.equal(singletonArray.repairedLocally, true);
+
+    const ambiguousArray = parseContinuityOutput(`[${validWorldOutput(3)},${validWorldOutput(4)}]`);
+    assert.equal(ambiguousArray.state, undefined);
+    assert.match(ambiguousArray.error, /根节点不能是多项数组/u);
+
+    const namedWrapper = parseContinuityOutput(JSON.stringify({
+        ContinuityState: JSON.parse(validWorldOutput(5)),
+    }));
+    assert.ok(namedWrapper.state);
+    assert.equal(namedWrapper.raw.turn, 5);
+    assert.equal(namedWrapper.repairedLocally, true);
+
+    const wrapperWithSibling = parseContinuityOutput(JSON.stringify({
+        ContinuityState: JSON.parse(validWorldOutput(5)),
+        commentary: 'not mechanically unambiguous',
+    }));
+    assert.equal(wrapperWithSibling.state, undefined);
+    assert.match(wrapperWithSibling.error, /wrapper 结构非法/u);
+
+    for (const invalidWrapper of [
+        { ContinuityState: null },
+        { ContinuityState: [] },
+        { ContinuityState: 'not an object' },
+    ]) {
+        const parsed = parseContinuityOutput(JSON.stringify(invalidWrapper));
+        assert.equal(parsed.state, undefined);
+        assert.match(parsed.error, /wrapper 结构非法/u);
+    }
 });
 
 test('stable IDs update and add deterministically without array-position duplication', () => {
@@ -1653,6 +2767,7 @@ test('a fully committed prior generation becomes history only for a strictly new
         stage3Phase: 'world_committed',
         target: structuredClone(previous),
         stage3ProducerTarget: structuredClone(previous),
+        state: { chatId: previous.chatId, turn: 0, threads: [], world: {} },
     };
     assert.equal(
         persisted.stage3PersistedPackageForTarget(continuity, ledger, previous),
@@ -1670,6 +2785,63 @@ test('a fully committed prior generation becomes history only for a strictly new
             checkpoint, continuity, ledger, current,
         ),
         true,
+    );
+    const rerolled = {
+        ...previous,
+        swipeId: 1,
+        generationSerial: 2,
+        generationId: 'generation-swipe-2',
+        generationType: 'swipe',
+        contentFingerprint: 'content-swipe-2',
+    };
+    assert.equal(
+        persisted.stage3CommittedCheckpointIsPriorTerminal(
+            checkpoint, continuity, ledger, rerolled,
+        ),
+        false,
+        'same-index reroll is not a later-floor historical terminal',
+    );
+    assert.equal(
+        persisted.stage3CommittedCheckpointIsRerollBaseline(
+            checkpoint, continuity, ledger, rerolled,
+        ),
+        true,
+        'same-index newer swipe restores the existing pre-generation baseline',
+    );
+    const identicalRegenerate = {
+        ...previous,
+        generationSerial: 2,
+        generationId: 'generation-regenerate-2',
+        generationType: 'regenerate',
+    };
+    assert.equal(
+        persisted.stage3CommittedCheckpointIsRerollBaseline(
+            checkpoint, continuity, ledger, identicalRegenerate,
+        ),
+        true,
+        'a new regenerate identity remains a reroll even when host message/swipe/content are identical',
+    );
+    for (const drift of [
+        { ...rerolled, generationSerial: 1 },
+        { ...rerolled, generationId: previous.generationId },
+        { ...rerolled, generationType: 'normal' },
+        { ...rerolled, scopeDigest: 'other-scope' },
+    ]) {
+        assert.equal(
+            persisted.stage3CommittedCheckpointIsRerollBaseline(
+                checkpoint, continuity, ledger, drift,
+            ),
+            false,
+        );
+    }
+    const runSource = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    assert.match(
+        runSource,
+        /rerollBaselineCheckpoint[\s\S]*?stage3CommittedCheckpointIsRerollBaseline[\s\S]*?const currentCheckpoint = priorCommittedTerminal \|\| rerollBaselineCheckpoint\s*\? null/u,
+        'the accepted P3 run must consume the same-floor checkpoint as a baseline, not manual reconciliation',
     );
 
     for (const [label, candidateCheckpoint, candidateContinuity, candidateCurrent] of [
@@ -1741,6 +2913,7 @@ test('a fully committed prior generation becomes history only for a strictly new
             scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
             detectContinuityDirector: () => 'balanced',
             pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
+            scheduleActorTurns: () => ({ selected: [] }),
             stage3LocalRecallPacket: () => {
                 recallCalls += 1;
                 return { digest: 'recall', actorIds: [], threadIds: [], laneIds: [] };
@@ -1759,6 +2932,9 @@ test('a fully committed prior generation becomes history only for a strictly new
                 state: { turn: 2, threads: [], world: {} },
                 raw: { world: {}, actionAdjudications: [] },
             }),
+            stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            currentPlayerActorNames: () => [],
             stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
             persistActorActionAttemptsForTurn: async () => {
                 namespace.continuityCheckpoint = preparedCheckpoint;
@@ -1777,6 +2953,158 @@ test('a fully committed prior generation becomes history only for a strictly new
     assert.equal(result.status, 'applied');
     assert.equal(recallCalls, 1);
     assert.equal(advanceCalls, 1);
+
+    let rerollRecallCalls = 0;
+    let rerollAdvanceCalls = 0;
+    const rerollNamespace = {
+        continuityCheckpoint: structuredClone(checkpoint),
+        continuity: structuredClone(continuity),
+        actorLedger: structuredClone(ledger),
+    };
+    const rerollChat = Array.from({ length: rerolled.index + 1 }, () => ({ mes: '' }));
+    rerollChat[rerolled.index] = { mes: 'accepted replacement narrative' };
+    const rerollRunner = loadStage3LegacyManualReconciliationRunner({
+        captured: rerolled,
+        namespace: rerollNamespace,
+        spies: {
+            stage3AcceptedTarget: persisted.stage3AcceptedTarget,
+            stage3AcceptedTargetsMatch: persisted.stage3AcceptedTargetsMatch,
+            stage3AcceptedTargetKey: () => 'reroll-target',
+            actorActionTargetOf: (value) => ({ ...value }),
+            actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            stage3CommittedCheckpointIsPriorTerminal:
+                persisted.stage3CommittedCheckpointIsPriorTerminal,
+            stage3CommittedCheckpointIsRerollBaseline:
+                persisted.stage3CommittedCheckpointIsRerollBaseline,
+            stage3PersistedPackageForTarget: persisted.stage3PersistedPackageForTarget,
+            getSettings: () => ({
+                continuityMode: 'manual', continuityMaxThreads: 12,
+                worldFactionSlots: 0, worldEnvironmentSlots: 0,
+                actorLedgerMaxActorsPerTurn: 0, actorLedgerExplorationSlots: 0,
+            }),
+            getContext: () => ({ chatId: rerolled.chatId, chat: rerollChat }),
+            stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: ledger }),
+            deepClone: (value) => structuredClone(value),
+            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
+            continuityBase: () => structuredClone(checkpoint.state),
+            mergeMarkerRecords: (value) => value,
+            collectContinuityWorldContext: async () => ({ hasSetting: true }),
+            currentCharacter: () => ({}),
+            continuityFeatureActive: () => true,
+            advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
+            scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
+            detectContinuityDirector: () => 'balanced',
+            pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
+            scheduleActorTurns: () => ({ selected: [] }),
+            stage3LocalRecallPacket: () => {
+                rerollRecallCalls += 1;
+                return { digest: 'reroll-recall', actorIds: [], threadIds: [], laneIds: [] };
+            },
+            stage3FieldState: () => ({ revision: 1, digest: 'same' }),
+            normalizeActorLedger: () => ledger,
+            actorLedgerDigest: () => 'ledger',
+            setContinuityStatus: () => {},
+            buildContinuityMessages: () => [],
+            generateWorldContinuitySingleBatch: async () => {
+                rerollAdvanceCalls += 1;
+                return '{}';
+            },
+            parseContinuityOutput: () => ({
+                state: { turn: 1, threads: [], world: {} },
+                raw: { world: {}, actionAdjudications: [] },
+            }),
+            stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            currentPlayerActorNames: () => [],
+            stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
+            persistActorActionAttemptsForTurn: async () => {
+                rerollNamespace.continuityCheckpoint = preparedCheckpoint;
+                return { ok: true, checkpoint: preparedCheckpoint, ledger };
+            },
+            stage3PreparedWorldCheckpointMatches: () => true,
+            stage3PreparedPhase1StatesMatch: () => true,
+            commitPreparedWorldCandidate: async () => ({ status: 'applied', worldModelCalls: 1 }),
+            latestWorldLaneDiagnostics: null,
+            latestActorShardDiagnostics: null,
+        },
+    });
+    const rerollResult = await rerollRunner(rerolled);
+    assert.equal(rerollResult.status, 'applied');
+    assert.equal(rerollRecallCalls, 1);
+    assert.equal(rerollAdvanceCalls, 1);
+    assert.notEqual(rerollResult.reason, 'world_committed_manual_reconciliation');
+    let identicalRegenerateAdvanceCalls = 0;
+    const identicalRegenerateRunner = loadStage3LegacyManualReconciliationRunner({
+        captured: identicalRegenerate,
+        namespace: {
+            continuityCheckpoint: structuredClone(checkpoint),
+            continuity: structuredClone(continuity),
+            actorLedger: structuredClone(ledger),
+        },
+        spies: {
+            stage3AcceptedTarget: persisted.stage3AcceptedTarget,
+            stage3AcceptedTargetsMatch: persisted.stage3AcceptedTargetsMatch,
+            stage3AcceptedTargetKey: () => 'identical-regenerate-target',
+            actorActionTargetOf: (value) => ({ ...value }),
+            actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
+            stage3CommittedCheckpointIsPriorTerminal:
+                persisted.stage3CommittedCheckpointIsPriorTerminal,
+            stage3CommittedCheckpointIsRerollBaseline:
+                persisted.stage3CommittedCheckpointIsRerollBaseline,
+            stage3PersistedPackageForTarget: persisted.stage3PersistedPackageForTarget,
+            getSettings: () => ({
+                continuityMode: 'manual', continuityMaxThreads: 12,
+                worldFactionSlots: 0, worldEnvironmentSlots: 0,
+                actorLedgerMaxActorsPerTurn: 0, actorLedgerExplorationSlots: 0,
+            }),
+            getContext: () => ({
+                chatId: identicalRegenerate.chatId,
+                chat: [{ mes: '' }, { mes: 'accepted narrative' }],
+            }),
+            stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: ledger }),
+            deepClone: (value) => structuredClone(value),
+            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
+            continuityBase: () => structuredClone(checkpoint.state),
+            mergeMarkerRecords: (value) => value,
+            collectContinuityWorldContext: async () => ({ hasSetting: true }),
+            currentCharacter: () => ({}),
+            continuityFeatureActive: () => true,
+            advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
+            scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
+            detectContinuityDirector: () => 'balanced',
+            pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
+            scheduleActorTurns: () => ({ selected: [] }),
+            stage3LocalRecallPacket: () => ({ digest: 'identical-regenerate-recall' }),
+            stage3FieldState: () => ({ revision: 1, digest: 'same' }),
+            normalizeActorLedger: () => ledger,
+            actorLedgerDigest: () => 'ledger',
+            setContinuityStatus: () => {},
+            buildContinuityMessages: () => [],
+            generateWorldContinuitySingleBatch: async () => {
+                identicalRegenerateAdvanceCalls += 1;
+                return '{}';
+            },
+            parseContinuityOutput: () => ({
+                state: { turn: 1, threads: [], world: {} },
+                raw: { world: {}, actionAdjudications: [] },
+            }),
+            stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            currentPlayerActorNames: () => [],
+            stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
+            persistActorActionAttemptsForTurn: async () => ({
+                ok: true, checkpoint: preparedCheckpoint, ledger,
+            }),
+            stage3PreparedWorldCheckpointMatches: () => true,
+            stage3PreparedPhase1StatesMatch: () => true,
+            commitPreparedWorldCandidate: async () => ({ status: 'applied', worldModelCalls: 1 }),
+            latestWorldLaneDiagnostics: null,
+            latestActorShardDiagnostics: null,
+        },
+    });
+    const identicalRegenerateResult = await identicalRegenerateRunner(identicalRegenerate);
+    assert.equal(identicalRegenerateResult.status, 'applied');
+    assert.equal(identicalRegenerateAdvanceCalls, 1);
 
     const runManualCase = async (candidateContinuity, candidateCurrent, candidateLedger = ledger) => {
         let modelCalls = 0;
@@ -1797,6 +3125,10 @@ test('a fully committed prior generation becomes history only for a strictly new
                 actorActionTargetMatches: (left, right) => JSON.stringify(left) === JSON.stringify(right),
                 stage3CommittedCheckpointIsPriorTerminal:
                     persisted.stage3CommittedCheckpointIsPriorTerminal,
+                stage3AcceptedTargetIsStrictlyNewer:
+                    persisted.stage3AcceptedTargetIsStrictlyNewer,
+                stage3PersistedPackageDecision:
+                    persisted.stage3PersistedPackageDecision,
                 stage3PersistedPackageForTarget: persisted.stage3PersistedPackageForTarget,
                 getSettings: () => ({ continuityMaxThreads: 12 }),
                 getContext: () => ({ chatId: candidateCurrent.chatId, chat: candidateChat }),
@@ -1863,6 +3195,74 @@ test('a fully committed prior generation becomes history only for a strictly new
         true,
         'an intact old-target settlement remains a historical terminal',
     );
+    const injectedLedger = structuredClone(settledLedger);
+    injectedLedger.actionReceipts = [{
+        receiptId: 'actor-action:attempt-old:injected',
+        actionId: 'attempt-old',
+        attemptId: 'attempt-old',
+        actorId: 'NPC-OLD',
+        actorRef: structuredClone(settledResult.actorRef),
+        stage: 'injected',
+        status: 'pending',
+        target: structuredClone(previous),
+        observableConsequence: 'stable consequence',
+        includesResult: true,
+        playerActionSettled: false,
+        playerConsentSettled: false,
+        playerFeelingSettled: false,
+    }];
+    const injectedProof = persisted.stage3CanonicalSettlementProof(
+        injectedLedger,
+        [settledResult],
+        previous,
+    );
+    const injectedContinuity = structuredClone(settledContinuity);
+    injectedContinuity.nextTurnInjection.settlementProof = injectedProof;
+    const responseSettledLedger = structuredClone(injectedLedger);
+    Object.assign(responseSettledLedger.actionReceipts[0], {
+        stage: 'response_settled',
+        status: 'retained',
+        consumptionEvidence: '',
+        responseSourceRef: {
+            chatId: previous.chatId,
+            messageId: current.messageId,
+            index: current.index,
+            swipeId: current.swipeId,
+            generationSerial: current.generationSerial,
+            generationId: current.generationId,
+            generationType: current.generationType,
+            scopeDigest: current.scopeDigest,
+            hash: current.contentFingerprint,
+        },
+        settledAt: 123456,
+    });
+    assert.equal(
+        persisted.stage3CommittedCheckpointIsPriorTerminal(
+            checkpoint, injectedContinuity, responseSettledLedger, current,
+        ),
+        false,
+        'an unwired response-settled transition cannot be treated as authority-equivalent',
+    );
+    const strictReceiptMutations = [
+        ['receipt status changed', (receipt) => { receipt.status = 'retained'; }],
+        ['response source added', (receipt) => {
+            receipt.responseSourceRef = structuredClone(responseSettledLedger.actionReceipts[0].responseSourceRef);
+        }],
+        ['observable consequence changed', (receipt) => {
+            receipt.observableConsequence = 'tampered consequence';
+        }],
+    ];
+    for (const [label, mutate] of strictReceiptMutations) {
+        const changedLedger = structuredClone(injectedLedger);
+        mutate(changedLedger.actionReceipts[0]);
+        assert.equal(
+            persisted.stage3CommittedCheckpointIsPriorTerminal(
+                checkpoint, injectedContinuity, changedLedger, current,
+            ),
+            false,
+            `${label} must change the strict target authority digest`,
+        );
+    }
     const deletedSettlement = { ...settledLedger, actionAttempts: [] };
     const tamperedSettlement = structuredClone(settledLedger);
     tamperedSettlement.actionAttempts[0].worldAdjudicationResult.outcome = '被篡改';
@@ -1873,8 +3273,168 @@ test('a fully committed prior generation becomes history only for a strictly new
         const rejected = await runManualCase(settledContinuity, current, candidateLedger);
         assert.equal(rejected.result.status, 'failed', label);
         assert.equal(rejected.result.reason, 'world_committed_manual_reconciliation', label);
+        assert.equal(
+            rejected.result.validationCode,
+            'world.checkpoint.prior_terminal.authority_digest_mismatch',
+            label,
+        );
         assert.equal(rejected.modelCalls, 0, label);
     }
+});
+
+test('P4 unrelated-ledger allowance keeps the complete same-target ATT authority exact', () => {
+    const persisted = loadStage3PersistedPackageValidator();
+    const target = {
+        chatId: 'chat-p4-authority', index: 2, messageId: 'message-2', swipeId: 0,
+        generationSerial: 2, generationId: 'generation-2', generationType: 'normal',
+        scopeDigest: 'scope-p4-authority', contentFingerprint: 'content-2',
+    };
+    const actorRef = { actorId: 'actor-a', displayName: 'Actor A' };
+    const result = {
+        attemptId: 'attempt-a', id: 'result-a', status: 'success', actorRef,
+        outcome: 'confirmed', worldAdjudicated: true,
+    };
+    const attempt = {
+        id: result.attemptId, actorId: actorRef.actorId, actorRef,
+        target: structuredClone(target), action: 'perform bounded action', status: 'success',
+        outcome: result.id, settlementEligible: false,
+        worldAdjudicationResult: structuredClone(result),
+    };
+    const receipt = {
+        id: 'receipt-a', receiptId: 'receipt-a', stage: 'attempted', attemptId: attempt.id,
+        actorId: actorRef.actorId, actorRef, target: structuredClone(target),
+        summary: attempt.action, route: 'background_attempt', status: 'adjudicated',
+        resultId: result.id, worldAdjudicated: true,
+    };
+    const ledger = {
+        actors: [{ id: actorRef.actorId, profileV6: { status: 'complete' } }],
+        actionAttempts: [attempt], actionReceipts: [receipt],
+    };
+    const proof = persisted.stage3CanonicalSettlementProof(ledger, [result], target);
+    const withoutPacket = { chatId: target.chatId, turn: 2, nextTurnInjection: null };
+    const continuity = {
+        ...withoutPacket,
+        nextTurnInjection: {
+            status: 'pending', producerTarget: structuredClone(target),
+            sourceContinuityDigest: persisted.stage3ContinuityDigestWithoutInjection(withoutPacket),
+            settlementProof: proof,
+        },
+    };
+    const accepts = (candidateLedger) => !!persisted.stage3PersistedPackageForTarget(
+        continuity,
+        candidateLedger,
+        target,
+        { allowUnrelatedLedgerEvolution: true },
+    );
+    assert.equal(accepts(ledger), true);
+    const profileChanged = structuredClone(ledger);
+    profileChanged.actors[0].profileV6.moduleCount = 9;
+    assert.equal(accepts(profileChanged), true, 'P1 profile evolution is unrelated');
+    const otherTargetChanged = structuredClone(profileChanged);
+    otherTargetChanged.actionAttempts.push({
+        ...structuredClone(attempt), id: 'attempt-other',
+        target: { ...target, index: 4, generationId: 'generation-4' },
+        worldAdjudicationResult: null, status: 'held', outcome: null,
+    });
+    assert.equal(accepts(otherTargetChanged), true, 'other-target ATT evolution is unrelated');
+
+    const rawPhase2Ledger = structuredClone(ledger);
+    rawPhase2Ledger.actionReceipts.push({
+        receiptId: 'receipt-world-settled',
+        actionId: attempt.id,
+        attemptId: attempt.id,
+        actorId: actorRef.actorId,
+        actorRef: structuredClone(actorRef),
+        stage: 'world_settled',
+        status: 'settled',
+        target: { ...structuredClone(target), compatibilityOnly: false },
+        resultId: result.id,
+        observableConsequence: 'bounded observable consequence',
+    });
+    const rawPhase2Proof = persisted.stage3CanonicalSettlementProof(
+        rawPhase2Ledger,
+        [result],
+        target,
+    );
+    const rawPhase2Continuity = structuredClone(continuity);
+    rawPhase2Continuity.nextTurnInjection.settlementProof = rawPhase2Proof;
+    const durableNormalizedLedger = structuredClone(rawPhase2Ledger);
+    durableNormalizedLedger.actionReceipts = normalizeActorLedger({
+        chatId: target.chatId,
+        actionReceipts: rawPhase2Ledger.actionReceipts,
+    }).actionReceipts;
+    const normalizedDecision = persisted.stage3PersistedPackageDecision(
+        rawPhase2Continuity,
+        durableNormalizedLedger,
+        target,
+        { allowUnrelatedLedgerEvolution: true },
+    );
+    assert.equal(
+        normalizedDecision.code,
+        'ok',
+        'raw Phase2 receipts and the durable normalized read use one canonical proof shape',
+    );
+    const normalizedReceiptTamper = structuredClone(durableNormalizedLedger);
+    normalizedReceiptTamper.actionReceipts.find((entry) => (
+        entry.receiptId === 'receipt-world-settled'
+    )).observableConsequence = 'tampered observable consequence';
+    assert.equal(
+        persisted.stage3PersistedPackageDecision(
+            rawPhase2Continuity,
+            normalizedReceiptTamper,
+            target,
+            { allowUnrelatedLedgerEvolution: true },
+        ).code,
+        'authority_digest_mismatch',
+        'normalization compatibility never permits same-target receipt authority tampering',
+    );
+
+    const mutations = [];
+    for (const [label, mutate] of [
+        ['action', (value) => { value.actionAttempts[0].action = 'tampered action'; }],
+        ['status', (value) => { value.actionAttempts[0].status = 'failure'; }],
+        ['actorRef', (value) => { value.actionAttempts[0].actorRef.actorId = 'actor-b'; }],
+        ['target', (value) => { value.actionAttempts[0].target.generationId = 'generation-x'; }],
+        ['result', (value) => { value.actionAttempts[0].worldAdjudicationResult.id = 'result-x'; }],
+        ['receipt status', (value) => { value.actionReceipts[0].status = 'pending_player'; }],
+        ['receipt result', (value) => { value.actionReceipts[0].resultId = 'result-x'; }],
+        ['receipt actorRef', (value) => { value.actionReceipts[0].actorRef.actorId = 'actor-b'; }],
+        ['receipt target', (value) => { value.actionReceipts[0].target.generationId = 'generation-x'; }],
+    ]) {
+        const changed = structuredClone(ledger);
+        mutate(changed);
+        mutations.push([label, changed]);
+    }
+    const addedTerminal = structuredClone(ledger);
+    addedTerminal.actionAttempts.push({
+        ...structuredClone(attempt), id: 'attempt-terminal', status: 'held',
+        outcome: null, worldAdjudicationResult: null,
+    });
+    mutations.push(['added same-target terminal/no-result ATT', addedTerminal]);
+    const deletedAttempt = structuredClone(ledger);
+    deletedAttempt.actionAttempts = [];
+    mutations.push(['deleted ATT', deletedAttempt]);
+    const addedReceipt = structuredClone(ledger);
+    addedReceipt.actionReceipts.push({ ...structuredClone(receipt), id: 'receipt-extra' });
+    mutations.push(['added same-target receipt', addedReceipt]);
+    const deletedReceipt = structuredClone(ledger);
+    deletedReceipt.actionReceipts = [];
+    mutations.push(['deleted receipt', deletedReceipt]);
+    for (const [label, candidate] of mutations) {
+        assert.equal(accepts(candidate), false, label);
+    }
+
+    const legacy = structuredClone(continuity);
+    delete legacy.nextTurnInjection.settlementProof.targetActionAuthorityDigest;
+    delete legacy.nextTurnInjection.settlementProof.targetActionAttemptCount;
+    delete legacy.nextTurnInjection.settlementProof.targetActionReceiptCount;
+    assert.equal(
+        persisted.stage3PersistedPackageForTarget(
+            legacy, ledger, target, { allowUnrelatedLedgerEvolution: true },
+        ),
+        null,
+        'old proof without target authority binding fails closed',
+    );
 });
 
 test('P3 target, recovery key, and legacy reconciliation require generation ID and type', () => {
@@ -1931,7 +3491,7 @@ test('P3 target, recovery key, and legacy reconciliation require generation ID a
 
     const settlement = sourceSection(
         'function stage3CanonicalSettlementProof(ledger, results = [], captured) {',
-        'function stage3PersistedPackageForTarget(state, ledger, captured, {',
+        'function stage3PersistedPackageForTarget(state, ledger, captured, options = {}) {',
     );
     assert.match(settlement, /producerTarget,/u);
     assert.match(settlement, /stage3AcceptedTargetsMatch\(proof\.producerTarget, producerTarget\)/u);
@@ -1983,9 +3543,9 @@ test('P3 current guard, permit gate, old package reconciliation, and settlement 
     };
     assert.equal(noActorGate(current, permit).reason, 'no_candidates');
     assert.equal(noActorGate(current, { ...permit, target: { ...permitTarget, generationType: 'swipe' } }).reason,
-        'actor_registry_awaiting_p2');
+        'structure_only');
     assert.equal(noActorGate(current, { ...permit, profileBatch: { readbackVerified: false } }).reason,
-        'actor_registry_awaiting_p2');
+        'structure_only');
 
     const persisted = loadStage3PersistedPackageValidator();
     const actionTarget = { ...current };
@@ -2087,18 +3647,24 @@ test('saved no-candidates proof survives refresh and reopens P3 without rerunnin
     assert.equal(loadStage3NoActorPermitGate({
         namespace: damagedNamespace,
         currentSourceRef: captured,
-    })(captured, null).reason, 'actor_registry_awaiting_p2');
+    })(captured, null).reason, 'structure_only');
 
-    for (const staleCleanup of [
-        { actorProfileRetryReceipt: { status: 'not_completed' } },
-        { characterCreationTicketBatches: [{ acceptedTarget: structuredClone(captured) }] },
-    ]) {
-        const incompleteCleanup = { ...structuredClone(savedNamespace), ...staleCleanup };
-        assert.equal(loadStage3NoActorPermitGate({
-            namespace: incompleteCleanup,
-            currentSourceRef: captured,
-        })(captured, null).reason, 'actor_registry_awaiting_p2');
-    }
+    const unrelatedReceipt = {
+        ...structuredClone(savedNamespace),
+        actorProfileRetryReceipt: { status: 'not_completed' },
+    };
+    assert.equal(loadStage3NoActorPermitGate({
+        namespace: unrelatedReceipt,
+        currentSourceRef: captured,
+    })(captured, null).reason, 'no_candidates');
+    const unclearedCurrentTickets = {
+        ...structuredClone(savedNamespace),
+        characterCreationTicketBatches: [{ acceptedTarget: structuredClone(captured) }],
+    };
+    assert.equal(loadStage3NoActorPermitGate({
+        namespace: unclearedCurrentTickets,
+        currentSourceRef: captured,
+    })(captured, null).reason, 'structure_only');
 
     for (const drift of [
         { contentHash: 'changed', contentFingerprint: 'changed' },
@@ -2110,7 +3676,7 @@ test('saved no-candidates proof survives refresh and reopens P3 without rerunnin
         assert.equal(loadStage3NoActorPermitGate({
             namespace: savedNamespace,
             currentSourceRef: changed,
-        })(changed, null).reason, 'actor_registry_awaiting_p2');
+        })(changed, null).reason, 'structure_only');
     }
 });
 
@@ -2161,13 +3727,47 @@ test('P3 Registry lookup tolerates only mechanism full-hash drift for a ready ac
     ]) {
         assert.equal(
             runGate({ ...currentSourceRef, ...drift }).reason,
-            'actor_registry_awaiting_p2',
+            'structure_only',
         );
     }
     assert.equal(
         runGate(currentSourceRef, false).reason,
-        'actor_profile.not_ready:actor-ready',
+        'structure_only',
     );
+});
+
+test('P3 admits the durable ready subset while a newly discovered unready actor stays unscheduled', () => {
+    const source = {
+        chatId: 'chat-ready-subset', messageId: 'message-2', logicalIndex: 2, index: 2,
+        swipeId: 0, generation: 4, generationSerial: 4,
+        generationId: 'generation-4', generationType: 'normal', type: 'normal',
+        identityScopeId: 'chat-ready-subset|card', scopeDigest: 'scope-ready-subset',
+        contentHash: 'accepted-content', contentFingerprint: 'accepted-content', hash: 'host-hash',
+    };
+    const registryEntry = (actorId) => ({
+        actorRef: { actorId, displayName: actorId },
+        sourceRefs: [structuredClone(source)],
+    });
+    const ledger = {
+        actorRegistry: { registered: {
+            'actor-ready': registryEntry('actor-ready'),
+            'actor-new': registryEntry('actor-new'),
+        } },
+        actors: [{ id: 'actor-ready' }, { id: 'actor-new' }],
+    };
+    const result = loadStage3NoActorPermitGate({
+        namespace: { actorLedger: ledger },
+        currentSourceRef: source,
+        ledger,
+        readiness: { 'actor-ready': true, 'actor-new': false },
+    })(source, null);
+    assert.equal(result.ok, true, JSON.stringify({
+        reason: result.reason,
+        checkpoint: result.checkpoint?.stage3Phase || null,
+    }));
+    assert.equal(result.reason, 'ready_subset');
+    assert.deepEqual([...result.readyActorIds], ['actor-ready']);
+    assert.deepEqual([...result.unreadySourceActorIds], ['actor-new']);
 });
 
 test('P3 normalize and durable readback retain the complete packet and settlement generation identity', async () => {
@@ -2293,6 +3893,7 @@ test('P3 Phase1 readback requires one shared advanced transaction revision', () 
     const continuityDigest = gate.fieldState({ continuity }, 'continuity').digest;
     const checkpoint = {
         preparedWorld: {
+            phase1WriteMode: 'actor_attempts',
             phase1ActorLedgerDigest: ledger.digest,
             phase1Expected: {
                 actorLedger: { revision: 1, digest: 'actor-before' },
@@ -2304,10 +3905,10 @@ test('P3 Phase1 readback requires one shared advanced transaction revision', () 
     const namespaceAt = ({ actorRevision = 6, checkpointRevision = 6,
         continuityRevision = 4, actorDigest = ledger.digest,
         actorLedgerValue = { ...ledger, digest: actorDigest },
-        continuityValue = continuity } = {}) => ({
+        continuityValue = continuity, checkpointValue = checkpoint } = {}) => ({
         actorLedger: actorLedgerValue,
         continuity: continuityValue,
-        continuityCheckpoint: checkpoint,
+        continuityCheckpoint: checkpointValue,
         fieldRevisions: {
             actorLedger: actorRevision,
             continuityCheckpoint: checkpointRevision,
@@ -2320,7 +3921,8 @@ test('P3 Phase1 readback requires one shared advanced transaction revision', () 
         true,
         'global revision 6 is one atomic commit after actor S0=1 and checkpoint S0=5',
     );
-    assert.equal(gate.matches(checkpoint, namespaceAt({ actorRevision: 6, checkpointRevision: 7 }), ledger, {}), false);
+    assert.equal(gate.matches(checkpoint, namespaceAt({ actorRevision: 7, checkpointRevision: 6 }), ledger, {}), true,
+        'a later unrelated P1 actor revision does not invalidate the durable prepared checkpoint');
     assert.equal(gate.matches(checkpoint, namespaceAt({ actorRevision: 1, checkpointRevision: 6 }), ledger, {}), false);
     assert.equal(gate.matches(checkpoint, namespaceAt({ actorRevision: 6, checkpointRevision: 5 }), ledger, {}), false);
     assert.equal(gate.matches(checkpoint, namespaceAt({ actorDigest: 'actor-digest-drift' }), ledger, {}), false);
@@ -2336,16 +3938,1484 @@ test('P3 Phase1 readback requires one shared advanced transaction revision', () 
     assert.equal(
         gate.matches(
             ordinaryCheckpoint,
-            namespaceAt({ actorLedgerValue: attemptLedger }),
+            namespaceAt({ actorLedgerValue: attemptLedger, checkpointValue: ordinaryCheckpoint }),
             attemptLedger,
             {},
         ),
         true,
         'ordinary attempt Phase1 also advances both selected fields from 5 to shared revision 6',
     );
+
+    const checkpointOnly = structuredClone(checkpoint);
+    checkpointOnly.preparedWorld.phase1WriteMode = 'checkpoint_only';
+    checkpointOnly.preparedWorld.phase1Expected.actorLedger = {
+        revision: 6,
+        digest: ledger.digest,
+    };
+    checkpointOnly.preparedWorld.phase1Expected.continuityCheckpoint.revision = 5;
+    assert.equal(gate.matches(
+        checkpointOnly,
+        namespaceAt({ actorRevision: 6, checkpointRevision: 7, checkpointValue: checkpointOnly }),
+        ledger,
+        {},
+    ), true, 'checkpoint-only Phase1 advances only the checkpoint field');
+    assert.equal(gate.matches(
+        checkpointOnly,
+        namespaceAt({ actorRevision: 8, checkpointRevision: 7, checkpointValue: checkpointOnly }),
+        ledger,
+        {},
+    ), true, 'a later P1 profile commit remains compatible with checkpoint-only Phase1');
 });
 
-test('P3 wiring uses local structured recall then one Advance call, with ATT plus prepared checkpoint before Phase2', () => {
+test('prepared Phase1/Phase2 authority allows only profile or other-target ledger evolution', () => {
+    const matcher = loadStage3PreparedAuthorityMatcher();
+    const captured = {
+        chatId: 'chat-prepared-authority', index: 2, messageId: 'message-2', swipeId: 0,
+        generationSerial: 2, generationId: 'generation-2', generationType: 'normal',
+        scopeDigest: 'scope-prepared', contentFingerprint: 'content-2',
+    };
+    const actorRef = { actorId: 'actor-a' };
+    const attempt = {
+        id: 'attempt-a', actorId: actorRef.actorId, actorRef,
+        target: structuredClone(captured), action: 'bounded action', status: 'success',
+        worldAdjudicationResult: { attemptId: 'attempt-a', id: 'result-a', status: 'success' },
+    };
+    const receipt = {
+        id: 'receipt-a', stage: 'attempted', attemptId: attempt.id,
+        actorId: actorRef.actorId, actorRef, target: structuredClone(captured),
+        status: 'adjudicated', resultId: 'result-a',
+    };
+    const ledger = {
+        actors: [{ id: actorRef.actorId, profileV6: { status: 'complete' } }],
+        actionAttempts: [attempt], actionReceipts: [receipt],
+    };
+    const checkpoint = matcher.build({
+        captured,
+        checkpointBase: { turn: 1 },
+        scheduledBase: { turn: 2 },
+        parsed: { state: { turn: 2 }, raw: { world: {}, actionAdjudications: [] } },
+        director: 'standalone', nextTurn: 2, actionTarget: captured,
+        ledger, recall: {}, worldContext: { hasSetting: true },
+        phase1Expected: {}, phase1WriteMode: 'actor_attempts',
+    });
+    assert.equal(matcher.matches(checkpoint, ledger, captured, {
+        allowUnrelatedActorEvolution: true,
+    }), true);
+    const profileChanged = structuredClone(ledger);
+    profileChanged.actors[0].profileV6.moduleCount = 9;
+    assert.equal(matcher.matches(checkpoint, profileChanged, captured, {
+        allowUnrelatedActorEvolution: true,
+    }), true);
+    const otherTarget = structuredClone(profileChanged);
+    otherTarget.actionAttempts.push({
+        ...structuredClone(attempt), id: 'attempt-other',
+        target: { ...captured, index: 4, generationId: 'generation-4' },
+    });
+    assert.equal(matcher.matches(checkpoint, otherTarget, captured, {
+        allowUnrelatedActorEvolution: true,
+    }), true);
+    for (const [label, candidate] of [
+        ['same-target action', (() => { const v = structuredClone(ledger); v.actionAttempts[0].action = 'changed'; return v; })()],
+        ['same-target terminal/no-result', (() => { const v = structuredClone(ledger); v.actionAttempts.push({ ...structuredClone(attempt), id: 'terminal', status: 'held', worldAdjudicationResult: null }); return v; })()],
+        ['same-target receipt', (() => { const v = structuredClone(ledger); v.actionReceipts[0].status = 'pending_player'; return v; })()],
+    ]) {
+        assert.equal(matcher.matches(checkpoint, candidate, captured, {
+            allowUnrelatedActorEvolution: true,
+        }), false, label);
+    }
+});
+
+test('production checkpoint-only writer guards but never rewrites a concurrent P1 ledger', async () => {
+    const actorLedger = {
+        actors: [{ id: 'actor-ready-after-model', profileV6: { status: 'complete' } }],
+        actionAttempts: [],
+        profileRevision: 7,
+    };
+    const initial = {
+        version: 13,
+        chatId: 'chat-checkpoint-only',
+        rev: 10,
+        actorSovereigntyScope: { scopeDigest: 'scope-checkpoint-only' },
+        actorLedger: structuredClone(actorLedger),
+        continuity: { turn: 1 },
+        continuityCheckpoint: null,
+        fieldRevisions: { actorLedger: 10, continuity: 4, continuityCheckpoint: 4 },
+    };
+    let persisted = structuredClone(initial);
+    const context = {
+        chatId: initial.chatId,
+        chatMetadata: { mvu_auto_doctor: structuredClone(initial) },
+        updateChatMetadata(patch) {
+            this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+        },
+        async saveMetadata() {
+            persisted = structuredClone(this.chatMetadata.mvu_auto_doctor);
+        },
+        async readPersistedChatMetadata() {
+            return structuredClone(persisted);
+        },
+    };
+    const writer = loadProductionActionAttemptWriter(() => context);
+    const checkpoint = {
+        stage3Phase: 'world_candidate_prepared',
+        preparedWorld: { phase1WriteMode: 'checkpoint_only' },
+    };
+    const result = await writer.persist({
+        chatId: initial.chatId,
+        scopeDigest: 'scope-checkpoint-only',
+    }, {
+        previousLedger: actorLedger,
+        nextLedger: actorLedger,
+        attempts: [],
+        target: { chatId: initial.chatId, index: 2 },
+        preparedCheckpoint: checkpoint,
+        phase1WriteMode: 'checkpoint_only',
+        expectedFieldStates: {
+            actorLedger: { revision: 10, digest: JSON.stringify(actorLedger) },
+            continuity: { revision: 4, digest: JSON.stringify(JSON.stringify(initial.continuity)) },
+            continuityCheckpoint: { revision: 4, digest: JSON.stringify(JSON.stringify(null)) },
+        },
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.readbackNamespace.actorLedger, actorLedger);
+    assert.deepEqual(persisted.actorLedger, actorLedger);
+    assert.equal(persisted.fieldRevisions.actorLedger, 10, 'P3 does not advance P1 ownership');
+    assert.equal(persisted.fieldRevisions.continuityCheckpoint, 11);
+    assert.equal(persisted.continuityCheckpoint.preparedWorld.phase1WriteMode, 'checkpoint_only');
+
+    const p1Writer = loadNamespaceWriter(() => context);
+    const afterP3 = structuredClone(context.chatMetadata.mvu_auto_doctor);
+    const p1Ledger = structuredClone(afterP3.actorLedger);
+    p1Ledger.actors[0].profileV6.moduleCount = 9;
+    const p1Candidate = { ...afterP3, actorLedger: p1Ledger };
+    assert.equal(await p1Writer.write(p1Candidate, initial.chatId, {
+        fields: ['actorLedger'], durable: true, force: true, requireReadback: true,
+        expectedFieldStates: {
+            actorLedger: {
+                revision: 10,
+                digest: JSON.stringify(afterP3.actorLedger),
+            },
+        },
+        contentValidator: (value) => value.actorLedger?.actors?.[0]?.profileV6?.moduleCount === 9,
+    }), true, 'P1 remains able to atomically commit after P3 checkpoint-only Phase1');
+    assert.equal(persisted.actorLedger.actors[0].profileV6.moduleCount, 9);
+    assert.equal(persisted.continuityCheckpoint.preparedWorld.phase1WriteMode, 'checkpoint_only');
+});
+
+test('production prepared checkpoint survives the actual JSON durable readback matcher', async () => {
+    const captured = {
+        chatId: 'chat-real-prepared-readback', index: 2, messageId: 'message-2', swipeId: 0,
+        generationSerial: 2, generationId: 'generation-2', generationType: 'normal',
+        scopeDigest: 'scope-real-prepared', contentFingerprint: 'content-real-prepared',
+    };
+    const actionTarget = {
+        chatId: captured.chatId, logicalIndex: captured.index, index: captured.index,
+        messageId: captured.messageId, swipeId: captured.swipeId,
+        generation: captured.generationSerial, generationId: captured.generationId,
+        generationType: captured.generationType, scopeDigest: captured.scopeDigest,
+        contentHash: captured.contentFingerprint, hash: captured.contentFingerprint,
+    };
+    const actorLedger = {
+        chatId: captured.chatId,
+        actors: [], actorRegistry: { registered: {} }, actionAttempts: [], actionReceipts: [],
+    };
+    const initial = {
+        version: 13, chatId: captured.chatId, rev: 10,
+        actorSovereigntyScope: { scopeDigest: captured.scopeDigest },
+        actorLedger: structuredClone(actorLedger), continuity: { turn: 0 },
+        continuityCheckpoint: null,
+        fieldRevisions: { actorLedger: 10, continuity: 4, continuityCheckpoint: 4 },
+    };
+    let persisted = JSON.parse(JSON.stringify(initial));
+    let readbackMutations = [];
+    let readbackCallCount = 0;
+    let readbackReturnNullAt = 0;
+    const context = {
+        chatId: captured.chatId,
+        chatMetadata: { mvu_auto_doctor: structuredClone(initial) },
+        updateChatMetadata(patch) {
+            this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+        },
+        async saveMetadata() {
+            persisted = JSON.parse(JSON.stringify(this.chatMetadata.mvu_auto_doctor));
+        },
+        async readPersistedChatMetadata() {
+            readbackCallCount += 1;
+            if (readbackMutations.length) {
+                const mutate = readbackMutations.shift();
+                mutate(persisted);
+                this.chatMetadata.mvu_auto_doctor = structuredClone(persisted);
+            }
+            if (readbackReturnNullAt === readbackCallCount) return null;
+            return JSON.parse(JSON.stringify(persisted));
+        },
+    };
+    const authority = loadStage3PreparedAuthorityMatcher();
+    const preModelExpected = {
+        actorLedger: { revision: 10, digest: JSON.stringify(actorLedger) },
+        continuity: { revision: 3, digest: JSON.stringify(JSON.stringify(initial.continuity)) },
+        continuityCheckpoint: { revision: 3, digest: JSON.stringify(JSON.stringify(null)) },
+    };
+    const phase1Expected = {
+        actorLedger: { revision: 10, digest: JSON.stringify(actorLedger) },
+        continuity: { revision: 4, digest: JSON.stringify(JSON.stringify(initial.continuity)) },
+        continuityCheckpoint: { revision: 4, digest: JSON.stringify(JSON.stringify(null)) },
+    };
+    const unchangedGate = loadStage3UnchangedFieldRebaseGate();
+    assert.equal(unchangedGate(preModelExpected.continuity, phase1Expected.continuity), true);
+    assert.equal(
+        unchangedGate(preModelExpected.continuityCheckpoint, phase1Expected.continuityCheckpoint),
+        true,
+    );
+    assert.equal(unchangedGate(preModelExpected.continuity, {
+        revision: 4,
+        digest: 'changed-continuity',
+    }), false, 'a real continuity change remains fail-closed');
+    const checkpoint = authority.build({
+        captured,
+        checkpointBase: { turn: 0 }, scheduledBase: { turn: 1 },
+        parsed: {
+            state: { turn: 1, threads: [], world: {} },
+            raw: { world: {}, actionProposals: [], actionAdjudications: [] },
+        },
+        director: 'standalone', nextTurn: 1, actionTarget,
+        ledger: actorLedger,
+        recall: {
+            digest: 'recall',
+            worldbookEntryIds: Array.from({ length: 44 }, (_, index) => `entry-${index}`),
+            worldbookSourceRefs: [{ world: 'embedded', nativeId: 0, aliases: undefined }],
+        },
+        worldContext: { hasSetting: true }, phase1Expected,
+        phase1WriteMode: 'checkpoint_only',
+    });
+    assert.equal(authority.matches(checkpoint, actorLedger, captured), true);
+    const writer = loadProductionActionAttemptWriter(
+        () => context,
+        null,
+        authority.matches,
+    );
+    readbackMutations.push((value) => {
+        value.actorLedger = {
+            ...structuredClone(value.actorLedger),
+            updatedAt: 99,
+            p1ProfileReadbackMarker: { status: 'complete', moduleCount: 9 },
+        };
+        value.rev = Math.max(12, Number(value.rev) || 0);
+        value.fieldRevisions.actorLedger = 12;
+    });
+    const result = await writer.persist(captured, {
+        previousLedger: actorLedger, nextLedger: actorLedger, attempts: [], actionTarget,
+        preparedCheckpoint: checkpoint, phase1WriteMode: 'checkpoint_only',
+        expectedFieldStates: phase1Expected,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(authority.matches(result.checkpoint, result.readbackNamespace.actorLedger, captured, {
+        allowUnrelatedActorEvolution: true,
+    }), true);
+    assert.equal(
+        result.readbackNamespace.actorLedger.p1ProfileReadbackMarker.moduleCount,
+        9,
+        'checkpoint-only readback retains the profile committed during verification',
+    );
+    for (const [label, mutateLedger] of [
+        ['same-target ATT', (ledger) => {
+            ledger.actionAttempts = [{ id: 'same-target-attempt', target: structuredClone(actionTarget) }];
+        }],
+        ['same-target receipt', (ledger) => {
+            ledger.actionReceipts = [{ id: 'same-target-receipt', target: structuredClone(actionTarget) }];
+        }],
+    ]) {
+        persisted = JSON.parse(JSON.stringify(initial));
+        context.chatMetadata.mvu_auto_doctor = structuredClone(initial);
+        readbackMutations.push((value) => {
+            mutateLedger(value.actorLedger);
+            value.actorLedger.updatedAt = 100;
+            value.rev = 12;
+            value.fieldRevisions.actorLedger = 12;
+        });
+        const rejected = await writer.persist(captured, {
+            previousLedger: actorLedger, nextLedger: actorLedger, attempts: [], actionTarget,
+            preparedCheckpoint: checkpoint, phase1WriteMode: 'checkpoint_only',
+            expectedFieldStates: phase1Expected,
+        });
+        assert.equal(rejected.ok, false, label);
+        assert.equal(rejected.reason, 'action_attempt.readback_mismatch', label);
+        assert.equal(
+            rejected.failureCode,
+            'host_save_content_validation_compensated',
+            `${label}: the durable selected-field compensation is explicit`,
+        );
+        assert.equal(context.chatMetadata.mvu_auto_doctor.continuityCheckpoint, null, label);
+        assert.equal(persisted.continuityCheckpoint, null, `${label}: durable checkpoint compensated`);
+        assert.deepEqual(
+            context.chatMetadata.mvu_auto_doctor.actorLedger,
+            persisted.actorLedger,
+            `${label}: memory and durable actor authority remain identical`,
+        );
+        assert.equal(
+            persisted.actorLedger.actionAttempts.length
+                + persisted.actorLedger.actionReceipts.length,
+            1,
+            `${label}: concurrent same-target authority is never erased`,
+        );
+    }
+
+    persisted = JSON.parse(JSON.stringify(initial));
+    context.chatMetadata.mvu_auto_doctor = structuredClone(initial);
+    const competingCheckpoint = {
+        stage3Phase: 'world_prepared',
+        preparedWorld: { phase1WriteMode: 'checkpoint_only', candidateDigest: 'competing' },
+    };
+    readbackMutations.push(
+        (value) => {
+            value.actorLedger.actionAttempts = [{
+                id: 'same-target-race', target: structuredClone(actionTarget),
+            }];
+            value.rev = 12;
+            value.fieldRevisions.actorLedger = 12;
+        },
+        () => undefined,
+        () => undefined,
+        (value) => {
+            value.continuityCheckpoint = structuredClone(competingCheckpoint);
+            value.rev = 13;
+            value.fieldRevisions.continuityCheckpoint = 13;
+        },
+    );
+    const conflicted = await writer.persist(captured, {
+        previousLedger: actorLedger, nextLedger: actorLedger, attempts: [], actionTarget,
+        preparedCheckpoint: checkpoint, phase1WriteMode: 'checkpoint_only',
+        expectedFieldStates: phase1Expected,
+    });
+    assert.equal(conflicted.ok, false);
+    assert.equal(conflicted.reason, 'action_attempt.readback_mismatch');
+    assert.equal(conflicted.failureCode, 'host_save_content_validation_conflict');
+    assert.deepEqual(
+        context.chatMetadata.mvu_auto_doctor.continuityCheckpoint,
+        competingCheckpoint,
+        'a competing selected-field write stays recoverable in memory',
+    );
+    assert.deepEqual(
+        persisted.continuityCheckpoint,
+        competingCheckpoint,
+        'a competing selected-field write stays recoverable durably',
+    );
+    assert.equal(persisted.actorLedger.actionAttempts[0].id, 'same-target-race');
+    assert.deepEqual(
+        context.chatMetadata.mvu_auto_doctor.actorLedger,
+        persisted.actorLedger,
+        'the compensation conflict does not fork actor authority',
+    );
+
+    persisted = JSON.parse(JSON.stringify(initial));
+    context.chatMetadata.mvu_auto_doctor = structuredClone(initial);
+    readbackCallCount = 0;
+    readbackReturnNullAt = 5;
+    readbackMutations.push(
+        (value) => {
+            value.actorLedger.actionReceipts = [{
+                id: 'same-target-unknown', target: structuredClone(actionTarget),
+            }];
+            value.rev = 12;
+            value.fieldRevisions.actorLedger = 12;
+        },
+        () => undefined,
+        () => undefined,
+    );
+    const unknown = await writer.persist(captured, {
+        previousLedger: actorLedger, nextLedger: actorLedger, attempts: [], actionTarget,
+        preparedCheckpoint: checkpoint, phase1WriteMode: 'checkpoint_only',
+        expectedFieldStates: phase1Expected,
+    });
+    readbackReturnNullAt = 0;
+    assert.equal(unknown.ok, false);
+    assert.equal(unknown.failureCode, 'host_save_content_validation_readback_unknown');
+    assert.deepEqual(
+        context.chatMetadata.mvu_auto_doctor.continuityCheckpoint,
+        JSON.parse(JSON.stringify(checkpoint)),
+        'an unverifiable compensation retains the last proven prepared checkpoint in memory',
+    );
+    assert.equal(
+        context.chatMetadata.mvu_auto_doctor.actorLedger.actionReceipts[0].id,
+        'same-target-unknown',
+        'an unverifiable compensation never restores the stale pre-save actor ledger',
+    );
+    const verifiedPhase1 = structuredClone(result.readbackNamespace);
+    context.chatMetadata.mvu_auto_doctor.actorLedger = {
+        ...structuredClone(actorLedger),
+        actors: [{ id: 'p1-completed-after-phase1-readback' }],
+    };
+    context.chatMetadata.mvu_auto_doctor.fieldRevisions.actorLedger = 12;
+    assert.deepEqual(
+        result.readbackNamespace,
+        verifiedPhase1,
+        'the durable Phase1 snapshot is not replaced by a later mutable host read',
+    );
+    const run = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    assert.match(
+        run,
+        /phase1Persisted\?\.readbackNamespace[\s\S]*?deepClone\(phase1Persisted\.readbackNamespace\)/u,
+    );
+});
+
+test('checkpoint-only Phase1 locally recovers one swallowed host save without losing P1 authority', async () => {
+    const chatId = 'chat-phase1-host-save-recovery';
+    const baseline = {
+        version: 13, chatId, rev: 4,
+        actorLedger: { actors: [{ id: 'actor-ready', profileV6: { status: 'complete' } }] },
+        continuity: { turn: 0 }, continuityCheckpoint: null,
+        fieldRevisions: { actorLedger: 4, continuity: 4, continuityCheckpoint: 4 },
+    };
+    const prepared = {
+        stage3Phase: 'world_candidate_prepared',
+        target: { generationId: 'generation-2' },
+        preparedWorld: { phase1WriteMode: 'checkpoint_only' },
+    };
+    let persisted = structuredClone(baseline);
+    let saveCalls = 0;
+    const context = {
+        chatId,
+        chatMetadata: { mvu_auto_doctor: structuredClone(baseline) },
+        updateChatMetadata(patch) {
+            this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+        },
+        async saveMetadata() {
+            saveCalls += 1;
+            if (saveCalls === 1) return; // SillyTavern saveMetadata swallowed saveChat failure.
+            persisted = structuredClone(this.chatMetadata.mvu_auto_doctor);
+        },
+        async readPersistedChatMetadata() {
+            if (saveCalls === 1) {
+                persisted.actorLedger.actors[0].profileV6.moduleCount = 9;
+                persisted.rev = 5;
+                persisted.fieldRevisions.actorLedger = 5;
+            }
+            return structuredClone(persisted);
+        },
+    };
+    const writer = loadNamespaceWriter(() => context);
+    const candidate = { ...structuredClone(baseline), continuityCheckpoint: prepared };
+    const failureSink = {};
+    const successSink = {};
+    const saved = await writer.write(candidate, chatId, {
+        fields: ['continuityCheckpoint'], durable: true, force: true,
+        requireReadback: true, readbackAttempts: 1,
+        allowUnselectedFieldEvolution: true,
+        compensateSelectedContentValidationFailure: true,
+        failureSink, successSink,
+        contentValidator: (value) => (
+            value?.continuityCheckpoint?.stage3Phase === 'world_candidate_prepared'
+            && value?.actorLedger?.actors?.[0]?.profileV6?.status === 'complete'
+        ),
+    });
+    assert.equal(saved, true);
+    assert.equal(saveCalls, 2, 'one local host save/readback retry, no model retry');
+    assert.equal(persisted.continuityCheckpoint.stage3Phase, 'world_candidate_prepared');
+    assert.equal(persisted.actorLedger.actors[0].profileV6.moduleCount, 9);
+    assert.deepEqual(context.chatMetadata.mvu_auto_doctor, persisted);
+    assert.equal(successSink.readbackNamespace.fieldRevisions.actorLedger, 5);
+    assert.equal(writer.metrics.rolledBackWrites, 0);
+});
+
+test('checkpoint-only retry never republishes a durable actor ledger behind current P1', async () => {
+    const run = async ({
+        durableCatchesUp = false, wrongChat = false, wrongScope = false,
+        worldAhead = false,
+    }) => {
+        const chatId = 'chat-p1-non-regression';
+        const scope = { scopeDigest: 'scope-current' };
+        const current = {
+            version: 13, chatId, rev: 5, actorSovereigntyScope: scope,
+            actorLedger: { actors: [{ id: 'actor-ready', profileV6: {
+                status: 'complete', moduleCount: 9,
+            } }], actionAttempts: [], actionReceipts: [] },
+            continuity: { turn: 0 }, continuityCheckpoint: null,
+            fieldRevisions: { actorSovereigntyScope: 1, actorLedger: 5,
+                continuity: 4, continuityCheckpoint: 4 },
+        };
+        const oldDurable = {
+            ...structuredClone(current), rev: 4,
+            actorLedger: { actors: [], actionAttempts: [], actionReceipts: [] },
+            fieldRevisions: { ...current.fieldRevisions, actorLedger: 4 },
+        };
+        if (wrongChat) oldDurable.chatId = 'other-chat';
+        if (wrongScope) oldDurable.actorSovereigntyScope = { scopeDigest: 'other-scope' };
+        if (worldAhead) {
+            oldDurable.actorLedger = structuredClone(current.actorLedger);
+            oldDurable.fieldRevisions.actorLedger = 5;
+            oldDurable.continuity = { turn: 1 };
+            oldDurable.fieldRevisions.continuity = 6;
+            oldDurable.rev = 6;
+        }
+        let persisted = structuredClone(oldDurable);
+        let saves = 0;
+        let reads = 0;
+        const context = {
+            chatId,
+            chatMetadata: { mvu_auto_doctor: structuredClone(current) },
+            updateChatMetadata(patch) {
+                this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+            },
+            async saveMetadata() {
+                saves += 1;
+                if (saves > 1) persisted = structuredClone(this.chatMetadata.mvu_auto_doctor);
+            },
+            async readPersistedChatMetadata() {
+                reads += 1;
+                if (durableCatchesUp && reads === 2) persisted = structuredClone(current);
+                return structuredClone(persisted);
+            },
+        };
+        const prepared = { stage3Phase: 'world_candidate_prepared', preparedWorld: {
+            phase1WriteMode: 'checkpoint_only', targetActionAuthorityDigest: 'empty',
+        } };
+        const failureSink = {};
+        const writer = loadNamespaceWriter(() => context);
+        const saved = await writer.write({
+            ...structuredClone(current), continuityCheckpoint: prepared,
+        }, chatId, {
+            fields: ['continuityCheckpoint'], durable: true, force: true,
+            requireReadback: true, readbackAttempts: 1,
+            allowUnselectedFieldEvolution: true,
+            compensateSelectedContentValidationFailure: true,
+            failureSink,
+            contentValidator: (value) => (
+                value?.continuityCheckpoint?.stage3Phase === 'world_candidate_prepared'
+                && value?.actorLedger?.actors?.[0]?.profileV6?.moduleCount === 9
+                && (value?.actorLedger?.actionAttempts?.length || 0) === 0
+                && (value?.actorLedger?.actionReceipts?.length || 0) === 0
+            ),
+        });
+        return { saved, failureSink, saves, persisted, context, prepared };
+    };
+
+    const behind = await run({});
+    assert.equal(behind.saved, false);
+    assert.equal(behind.saves, 1, 'the swallowed first save is never followed by a stale-ledger resave');
+    assert.equal(behind.failureSink.code, 'host_save_readback_authority_unknown');
+    assert.equal(
+        behind.context.chatMetadata.mvu_auto_doctor.actorLedger.actors[0]
+            .profileV6.moduleCount,
+        9,
+    );
+    assert.equal(
+        behind.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint.stage3Phase,
+        'world_candidate_prepared',
+        'unknown durable state retains the current P1 plus recoverable prepared candidate',
+    );
+
+    const caughtUp = await run({ durableCatchesUp: true });
+    assert.equal(caughtUp.saved, true);
+    assert.equal(caughtUp.saves, 2, 'fresh rev5 authority permits one checkpoint-only resave');
+    assert.equal(caughtUp.persisted.actorLedger.actors[0].profileV6.moduleCount, 9);
+    assert.equal(caughtUp.persisted.continuityCheckpoint.stage3Phase, 'world_candidate_prepared');
+
+    for (const options of [{ wrongChat: true }, { wrongScope: true }]) {
+        const rejected = await run(options);
+        assert.equal(rejected.saved, false);
+        assert.equal(rejected.saves, 1, 'wrong chat/scope performs no local resave');
+        assert.equal(rejected.failureSink.code, 'host_save_readback_authority_unknown');
+    }
+    const worldAhead = await run({ worldAhead: true });
+    assert.equal(worldAhead.saved, false);
+    assert.equal(worldAhead.saves, 1, 'P3 never adopts a newer unselected world field');
+    assert.equal(worldAhead.failureSink.code, 'host_save_readback_selected_conflict');
+});
+
+test('checkpoint-only retry binds baseline and prepared content to selected field revisions', async () => {
+    const run = async ({ durablePrepared }) => {
+        const chatId = `chat-selected-revision-${durablePrepared ? 'prepared' : 'baseline'}`;
+        const baseline = {
+            version: 13, chatId, rev: 4,
+            actorLedger: { actors: [{ id: 'p1-authority' }], actionAttempts: [], actionReceipts: [] },
+            continuity: { turn: 0 }, continuityCheckpoint: null,
+            fieldRevisions: { actorLedger: 4, continuity: 4, continuityCheckpoint: 4 },
+        };
+        const prepared = { stage3Phase: 'world_candidate_prepared', preparedWorld: {
+            phase1WriteMode: 'checkpoint_only', targetActionAuthorityDigest: 'empty',
+        } };
+        let saves = 0;
+        let persisted = structuredClone(baseline);
+        const context = {
+            chatId,
+            chatMetadata: { mvu_auto_doctor: structuredClone(baseline) },
+            updateChatMetadata(patch) {
+                this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+            },
+            async saveMetadata() {
+                saves += 1;
+                if (durablePrepared) {
+                    persisted = structuredClone(this.chatMetadata.mvu_auto_doctor);
+                    persisted.rev += 1;
+                    persisted.fieldRevisions.continuityCheckpoint += 1;
+                } else {
+                    // A competing checkpoint write advanced only its selected
+                    // revision while retaining the old baseline content.
+                    persisted.rev = 5;
+                    persisted.fieldRevisions.continuityCheckpoint = 5;
+                }
+            },
+            async readPersistedChatMetadata() {
+                return structuredClone(persisted);
+            },
+        };
+        const writer = loadNamespaceWriter(() => context);
+        const failureSink = {};
+        const successSink = {};
+        const saved = await writer.write({
+            ...structuredClone(baseline), continuityCheckpoint: prepared,
+        }, chatId, {
+            fields: ['continuityCheckpoint'], durable: true, force: true,
+            requireReadback: true, readbackAttempts: 1,
+            allowUnselectedFieldEvolution: true,
+            compensateSelectedContentValidationFailure: true,
+            failureSink, successSink,
+            contentValidator: (value) => (
+                value?.continuityCheckpoint?.stage3Phase === 'world_candidate_prepared'
+            ),
+        });
+        return { saved, saves, persisted, context, failureSink, successSink };
+    };
+
+    const advancedBaseline = await run({ durablePrepared: false });
+    assert.equal(advancedBaseline.saved, false);
+    assert.equal(advancedBaseline.saves, 1, 'advanced baseline revision is never overwritten');
+    assert.equal(
+        advancedBaseline.failureSink.code,
+        'host_save_readback_selected_conflict',
+    );
+    assert.equal(
+        advancedBaseline.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint,
+        null,
+        'the higher-revision durable baseline remains authoritative',
+    );
+    assert.equal(
+        advancedBaseline.context.chatMetadata.mvu_auto_doctor
+            .fieldRevisions.continuityCheckpoint,
+        5,
+    );
+
+    const alreadyPrepared = await run({ durablePrepared: true });
+    assert.equal(alreadyPrepared.saved, true);
+    assert.equal(alreadyPrepared.saves, 1, 'a higher-revision identical prepared write is not saved twice');
+    assert.equal(
+        alreadyPrepared.successSink.readbackNamespace.fieldRevisions.continuityCheckpoint,
+        6,
+    );
+    assert.deepEqual(
+        alreadyPrepared.context.chatMetadata.mvu_auto_doctor,
+        alreadyPrepared.persisted,
+    );
+});
+
+test('checkpoint-only retry checks unrevisioned own fields and rejects unsafe global revisions', async () => {
+    const chatId = 'chat-unrevisioned-authority';
+    const baseline = {
+        version: 13, chatId, rev: 4,
+        actorLedger: { actors: [], actionAttempts: [], actionReceipts: [] },
+        continuity: { turn: 0 }, continuityCheckpoint: null,
+        unrevisionedAuthority: { value: 'current' },
+        fieldRevisions: { actorLedger: 4, continuity: 4, continuityCheckpoint: 4 },
+    };
+    const prepared = { stage3Phase: 'world_candidate_prepared', preparedWorld: {
+        phase1WriteMode: 'checkpoint_only', targetActionAuthorityDigest: 'empty',
+    } };
+    const persisted = {
+        ...structuredClone(baseline),
+        unrevisionedAuthority: { value: 'different-durable-authority' },
+    };
+    let saves = 0;
+    const context = {
+        chatId,
+        chatMetadata: { mvu_auto_doctor: structuredClone(baseline) },
+        updateChatMetadata(patch) {
+            this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+        },
+        async saveMetadata() { saves += 1; },
+        async readPersistedChatMetadata() { return structuredClone(persisted); },
+    };
+    const writer = loadNamespaceWriter(() => context);
+    const failureSink = {};
+    const saved = await writer.write({
+        ...structuredClone(baseline), continuityCheckpoint: prepared,
+    }, chatId, {
+        fields: ['continuityCheckpoint'], durable: true, force: true,
+        requireReadback: true, readbackAttempts: 1,
+        allowUnselectedFieldEvolution: true,
+        compensateSelectedContentValidationFailure: true,
+        failureSink,
+        contentValidator: (value) => (
+            value?.continuityCheckpoint?.stage3Phase === 'world_candidate_prepared'
+        ),
+    });
+    assert.equal(saved, false);
+    assert.equal(saves, 1, 'unknown unrevisioned authority performs no local resave');
+    assert.equal(failureSink.code, 'host_save_readback_authority_unknown');
+
+    for (const unsafeRevision of [Infinity, -1, 1.5]) {
+        const unsafe = structuredClone(baseline);
+        unsafe.rev = unsafeRevision;
+        let unsafeSaves = 0;
+        const unsafeContext = {
+            chatId,
+            chatMetadata: { mvu_auto_doctor: structuredClone(unsafe) },
+            updateChatMetadata() {},
+            async saveMetadata() { unsafeSaves += 1; },
+        };
+        const unsafeWriter = loadNamespaceWriter(() => unsafeContext);
+        const unsafeFailure = {};
+        assert.equal(await unsafeWriter.write(structuredClone(unsafe), chatId, {
+            fields: ['continuityCheckpoint'], durable: true, force: true,
+            failureSink: unsafeFailure,
+        }), false);
+        assert.equal(unsafeFailure.code, 'namespace_revision_invalid');
+        assert.equal(unsafeSaves, 0, 'unsafe global revision is rejected before host save');
+    }
+});
+
+test('Phase2 selected transaction polls, locally resaves once, and rejects mixed authority', async () => {
+    const run = async (mode) => {
+        let behavior = mode;
+        const chatId = `chat-phase2-selected-${mode}`;
+        const preparedCheckpoint = {
+            stage3Phase: 'world_candidate_prepared',
+            target: { generationId: 'generation-phase2' },
+            preparedWorld: { phase1WriteMode: 'checkpoint_only' },
+        };
+        const committedCheckpoint = {
+            stage3Phase: 'world_committed',
+            target: { generationId: 'generation-phase2' },
+        };
+        const baseline = {
+            version: 13, chatId, rev: 11,
+            actorSovereigntyScope: { scopeDigest: 'scope-phase2-selected' },
+            actorLedger: {
+                actors: [{ id: 'p1-ready', profileV6: { status: 'complete', moduleCount: 9 } }],
+                actionAttempts: [], actionReceipts: [],
+            },
+            continuity: { turn: 0 }, continuityCheckpoint: preparedCheckpoint,
+            continuityDirector: 'standalone', continuityDetected: true,
+            fieldRevisions: {
+                actorSovereigntyScope: 1, actorLedger: 9,
+                continuity: 7, continuityCheckpoint: 7,
+                continuityDirector: 7, continuityDetected: 7,
+            },
+        };
+        const desired = {
+            ...structuredClone(baseline),
+            continuity: { turn: 1, nextTurnInjection: { status: 'pending' } },
+            continuityCheckpoint: committedCheckpoint,
+        };
+        const selected = [
+            'continuity', 'continuityCheckpoint', 'continuityDirector', 'continuityDetected',
+        ];
+        let persisted = structuredClone(baseline);
+        let savedCandidate = null;
+        let saves = 0;
+        let reads = 0;
+        const context = {
+            chatId,
+            chatMetadata: { mvu_auto_doctor: structuredClone(baseline) },
+            updateChatMetadata(patch) {
+                this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+            },
+            async saveMetadata() {
+                saves += 1;
+                savedCandidate = structuredClone(this.chatMetadata.mvu_auto_doctor);
+                if (behavior === 'normal_persist') {
+                    persisted = structuredClone(savedCandidate);
+                } else if (behavior === 'stale_three_then_visible') {
+                    persisted = structuredClone(savedCandidate);
+                } else if (behavior === 'swallowed_then_resaved' && saves === 2) {
+                    persisted = structuredClone(savedCandidate);
+                } else if (behavior === 'already_committed') {
+                    persisted = structuredClone(savedCandidate);
+                    persisted.rev += 1;
+                    for (const field of selected) persisted.fieldRevisions[field] += 1;
+                }
+            },
+            async readPersistedChatMetadata() {
+                reads += 1;
+                if (behavior === 'unknown') throw new Error('synthetic durable read failure');
+                if (behavior === 'resave_error' && reads > 6) {
+                    throw new Error('synthetic retry read failure');
+                }
+                if (behavior === 'resave_null' && reads > 6) return null;
+                if (behavior === 'stale_three_then_visible' && reads <= 3) {
+                    return structuredClone(baseline);
+                }
+                if (behavior === 'mixed_selected' && reads > 5) {
+                    const mixed = structuredClone(baseline);
+                    mixed.continuity = structuredClone(savedCandidate.continuity);
+                    mixed.rev = 13;
+                    for (const field of selected) mixed.fieldRevisions[field] = 13;
+                    return mixed;
+                }
+                if (behavior === 'higher_baseline' && reads > 5) {
+                    const higher = structuredClone(baseline);
+                    higher.rev = 13;
+                    for (const field of selected) higher.fieldRevisions[field] = 13;
+                    return higher;
+                }
+                if (behavior === 'authority_drift' && reads > 5) {
+                    const drift = structuredClone(baseline);
+                    drift.actorLedger.actionAttempts.push({
+                        id: 'same-target-authority-attempt',
+                        target: { generationId: 'generation-phase2' },
+                    });
+                    drift.actorLedger.actionReceipts.push({
+                        id: 'same-target-authority-drift',
+                        target: { generationId: 'generation-phase2' },
+                    });
+                    drift.rev = 13;
+                    drift.fieldRevisions.actorLedger = 13;
+                    return drift;
+                }
+                if (behavior === 'precondition_after_fresh' && reads > 5) {
+                    const fresh = structuredClone(baseline);
+                    fresh.actorLedger.actors[0].profileV6.moduleCount = 10;
+                    fresh.actorLedger.actionAttempts.push({
+                        id: 'precondition-fresh-attempt',
+                        target: { generationId: 'generation-phase2' },
+                    });
+                    fresh.actorLedger.actionReceipts.push({
+                        id: 'precondition-fresh-receipt',
+                        target: { generationId: 'generation-phase2' },
+                    });
+                    fresh.rev = 13;
+                    fresh.fieldRevisions.actorLedger = 13;
+                    return fresh;
+                }
+                if (behavior === 'resave_older_actor' && reads > 6) {
+                    const older = structuredClone(baseline);
+                    older.actorLedger.actors = [];
+                    older.rev = 10;
+                    older.fieldRevisions.actorLedger = 8;
+                    return older;
+                }
+                return structuredClone(persisted);
+            },
+        };
+        const writer = loadNamespaceWriter(() => context);
+        const failureSink = {};
+        const successSink = {};
+        const ok = await writer.write(desired, chatId, {
+            fields: selected, durable: true, force: true,
+            requireReadback: true, readbackAttempts: 5,
+            allowUnselectedFieldEvolution: true,
+            recoverSelectedTransaction: true,
+            failureSink, successSink,
+            precondition: mode === 'precondition_before_save'
+                ? (() => {
+                    let checks = 0;
+                    return () => ++checks < 3;
+                })()
+                : mode === 'precondition_after_fresh'
+                    ? (() => reads < 6)
+                : null,
+            contentValidator: (value) => (
+                value?.continuity?.turn === 1
+                && value?.continuityCheckpoint?.stage3Phase === 'world_committed'
+                && (
+                    mode === 'precondition_after_fresh'
+                    || (
+                        (value?.actorLedger?.actionAttempts?.length || 0) === 0
+                        && (value?.actorLedger?.actionReceipts?.length || 0) === 0
+                    )
+                )
+            ),
+        });
+        return {
+            ok, saves, reads, persisted, context, failureSink, successSink, writer,
+            setBehavior(value) { behavior = value; },
+            getPersisted() { return persisted; },
+        };
+    };
+
+    const delayed = await run('stale_three_then_visible');
+    assert.equal(delayed.ok, true);
+    assert.equal(delayed.saves, 1);
+    assert.equal(delayed.reads, 4, 'bounded polling observes the original Phase2 save');
+
+    const swallowed = await run('swallowed_then_resaved');
+    assert.equal(swallowed.ok, true);
+    assert.equal(swallowed.saves, 2, 'one swallowed Phase2 save receives one local re-save');
+    assert.equal(swallowed.persisted.continuityCheckpoint.stage3Phase, 'world_committed');
+    assert.equal(swallowed.persisted.actorLedger.actors[0].profileV6.moduleCount, 9);
+
+    const already = await run('already_committed');
+    assert.equal(already.ok, true);
+    assert.equal(already.saves, 1, 'a higher-revision identical commit is accepted without re-save');
+
+    const preSave = await run('precondition_before_save');
+    assert.equal(preSave.ok, false);
+    assert.equal(preSave.saves, 0, 'a pre-save target failure reaches no durable writer');
+    assert.equal(
+        preSave.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint.stage3Phase,
+        'world_candidate_prepared',
+    );
+
+    const staleAfterFresh = await run('precondition_after_fresh');
+    assert.equal(staleAfterFresh.ok, false);
+    assert.equal(staleAfterFresh.saves, 1, 'fresh-target loss performs no local re-save');
+    assert.equal(staleAfterFresh.failureSink.code, 'write_precondition_failed');
+    assert.equal(staleAfterFresh.failureSink.readbackFailureKind, 'selected_conflict');
+    assert.equal(
+        staleAfterFresh.context.chatMetadata.mvu_auto_doctor
+            .actorLedger.actors[0].profileV6.moduleCount,
+        10,
+    );
+    assert.equal(
+        staleAfterFresh.context.chatMetadata.mvu_auto_doctor
+            .actorLedger.actionAttempts[0].id,
+        'precondition-fresh-attempt',
+    );
+    assert.equal(
+        staleAfterFresh.context.chatMetadata.mvu_auto_doctor
+            .actorLedger.actionReceipts[0].id,
+        'precondition-fresh-receipt',
+    );
+    assert.equal(
+        staleAfterFresh.context.chatMetadata.mvu_auto_doctor
+            .continuityCheckpoint.stage3Phase,
+        'world_candidate_prepared',
+    );
+    assert.equal(
+        staleAfterFresh.context.chatMetadata.mvu_auto_doctor
+            .continuity.nextTurnInjection ?? null,
+        null,
+    );
+    staleAfterFresh.setBehavior('normal_persist');
+    const staleDiagnostic = structuredClone(
+        staleAfterFresh.context.chatMetadata.mvu_auto_doctor,
+    );
+    staleDiagnostic.phase2DiagnosticMarker = { status: 'target_stale' };
+    assert.equal(await staleAfterFresh.writer.write(staleDiagnostic, staleDiagnostic.chatId, {
+        fields: ['phase2DiagnosticMarker'], durable: true, force: true,
+        requireReadback: true, readbackAttempts: 1,
+    }), true);
+    assert.equal(
+        staleAfterFresh.getPersisted().actorLedger.actionAttempts[0].id,
+        'precondition-fresh-attempt',
+    );
+    assert.equal(
+        staleAfterFresh.getPersisted().actorLedger.actionReceipts[0].id,
+        'precondition-fresh-receipt',
+    );
+    assert.equal(
+        staleAfterFresh.getPersisted().continuityCheckpoint.stage3Phase,
+        'world_candidate_prepared',
+    );
+
+    for (const mode of ['resave_null', 'resave_error', 'resave_older_actor']) {
+        const rejected = await run(mode);
+        assert.equal(rejected.ok, false, mode);
+        assert.equal(rejected.saves, 2, `${mode}: exactly one local re-save`);
+        assert.equal(
+            rejected.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint.stage3Phase,
+            'world_candidate_prepared',
+            `${mode}: an unverified committed checkpoint is never exposed`,
+        );
+        assert.equal(
+            rejected.context.chatMetadata.mvu_auto_doctor.continuity.turn,
+            0,
+            `${mode}: P4 has no committed package to consume`,
+        );
+        assert.equal(
+            rejected.context.chatMetadata.mvu_auto_doctor.continuity.nextTurnInjection ?? null,
+            null,
+            `${mode}: P4 payload stays absent`,
+        );
+        assert.equal(
+            rejected.context.chatMetadata.mvu_auto_doctor.actorLedger
+                .actors[0].profileV6.moduleCount,
+            9,
+            `${mode}: an older retry readback never replaces safe P1 authority`,
+        );
+        if (mode === 'resave_null') {
+            rejected.setBehavior('normal_persist');
+            const diagnosticNext = structuredClone(
+                rejected.context.chatMetadata.mvu_auto_doctor,
+            );
+            diagnosticNext.phase2DiagnosticMarker = { status: 'failed' };
+            assert.equal(await rejected.writer.write(diagnosticNext, diagnosticNext.chatId, {
+                fields: ['phase2DiagnosticMarker'], durable: true, force: true,
+                requireReadback: true, readbackAttempts: 1,
+            }), true);
+            assert.equal(
+                rejected.context.chatMetadata.mvu_auto_doctor
+                    .continuityCheckpoint.stage3Phase,
+                'world_candidate_prepared',
+                'an unrelated diagnostic save cannot publish an unverified commit',
+            );
+        }
+    }
+
+    for (const [mode, expectedCode] of [
+        ['mixed_selected', 'host_save_readback_selected_conflict'],
+        ['higher_baseline', 'host_save_readback_selected_conflict'],
+        ['authority_drift', 'host_save_content_validation_conflict'],
+        ['unknown', 'host_save_readback_read_error'],
+    ]) {
+        const rejected = await run(mode);
+        assert.equal(rejected.ok, false, mode);
+        assert.equal(rejected.saves, 1, `${mode}: no second host save`);
+        assert.equal(rejected.failureSink.code, expectedCode, mode);
+        assert.equal(
+            rejected.context.chatMetadata.mvu_auto_doctor.actorLedger
+                .actors[0].profileV6.moduleCount,
+            9,
+            `${mode}: P1 authority survives`,
+        );
+        if (mode === 'authority_drift') {
+            assert.equal(
+                rejected.context.chatMetadata.mvu_auto_doctor
+                    .actorLedger.actionAttempts[0].id,
+                'same-target-authority-attempt',
+            );
+            assert.equal(
+                rejected.context.chatMetadata.mvu_auto_doctor
+                    .actorLedger.actionReceipts[0].id,
+                'same-target-authority-drift',
+            );
+            assert.equal(
+                rejected.context.chatMetadata.mvu_auto_doctor
+                    .continuityCheckpoint.stage3Phase,
+                'world_candidate_prepared',
+            );
+            assert.equal(
+                rejected.context.chatMetadata.mvu_auto_doctor
+                    .continuity.nextTurnInjection ?? null,
+                null,
+            );
+            rejected.setBehavior('normal_persist');
+            const diagnosticNext = structuredClone(
+                rejected.context.chatMetadata.mvu_auto_doctor,
+            );
+            diagnosticNext.phase2DiagnosticMarker = { status: 'authority_conflict' };
+            assert.equal(await rejected.writer.write(diagnosticNext, diagnosticNext.chatId, {
+                fields: ['phase2DiagnosticMarker'], durable: true, force: true,
+                requireReadback: true, readbackAttempts: 1,
+            }), true);
+            assert.equal(
+                rejected.getPersisted().actorLedger.actionAttempts[0].id,
+                'same-target-authority-attempt',
+                'later diagnostic persistence retains the fresh ATT authority',
+            );
+            assert.equal(
+                rejected.getPersisted().actorLedger.actionReceipts[0].id,
+                'same-target-authority-drift',
+                'later diagnostic persistence retains the fresh receipt authority',
+            );
+            assert.equal(
+                rejected.getPersisted().continuityCheckpoint.stage3Phase,
+                'world_candidate_prepared',
+            );
+        }
+    }
+});
+
+test('Phase2 host-save failures use fixed phase-specific diagnostic codes', () => {
+    const code = sourceSection(
+        'function stage3Phase2ReadbackValidationCode(failureSink) {',
+        'async function runContinuityTarget(captured, {',
+    );
+    const sandbox = {};
+    vm.runInNewContext(
+        `${code}\nthis.mapPhase2 = stage3Phase2ReadbackValidationCode;`,
+        sandbox,
+    );
+    assert.equal(
+        sandbox.mapPhase2({ code: 'host_save_readback_revision_behind' }),
+        'world.phase2.host_save_revision_behind',
+    );
+    assert.equal(
+        sandbox.mapPhase2({ code: 'host_save_readback_selected_conflict' }),
+        'world.phase2.host_save_selected_conflict',
+    );
+    assert.equal(
+        sandbox.mapPhase2({ code: 'host_save_content_validation_conflict' }),
+        'world.phase2.host_save_authority_conflict',
+    );
+});
+
+test('checkpoint-only Phase1 classifies durable readback lag, conflict, missing and read error', async () => {
+    const make = ({ mode }) => {
+        const chatId = `chat-readback-${mode}`;
+        const baseline = {
+            version: 13, chatId, rev: 4,
+            actorLedger: { actors: [], actionAttempts: [], actionReceipts: [] },
+            continuity: { turn: 0 }, continuityCheckpoint: null,
+            fieldRevisions: { actorLedger: 4, continuity: 4, continuityCheckpoint: 4 },
+        };
+        const prepared = { stage3Phase: 'world_candidate_prepared', preparedWorld: {
+            phase1WriteMode: 'checkpoint_only', targetActionAuthorityDigest: 'empty',
+        } };
+        let persisted = structuredClone(baseline);
+        let saveCalls = 0;
+        const competing = { stage3Phase: 'world_candidate_prepared', preparedWorld: {
+            phase1WriteMode: 'checkpoint_only', targetActionAuthorityDigest: 'competing',
+        } };
+        const context = {
+            chatId,
+            chatMetadata: { mvu_auto_doctor: structuredClone(baseline) },
+            updateChatMetadata(patch) {
+                this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) };
+            },
+            async saveMetadata() {
+                saveCalls += 1;
+                if (mode === 'already_persisted') persisted = structuredClone(
+                    this.chatMetadata.mvu_auto_doctor,
+                );
+            },
+            async readPersistedChatMetadata() {
+                if (mode === 'read_error') throw new Error('synthetic read error');
+                if (mode === 'namespace_missing') return null;
+                if (mode === 'selected_conflict') {
+                    persisted.continuityCheckpoint = structuredClone(competing);
+                    persisted.rev = 6;
+                    persisted.fieldRevisions.continuityCheckpoint = 6;
+                }
+                return structuredClone(persisted);
+            },
+        };
+        return { baseline, prepared, competing, context, persisted: () => persisted, saves: () => saveCalls };
+    };
+
+    for (const [mode, expectedCode, expectedKind] of [
+        ['revision_behind', 'host_save_readback_revision_behind', 'revision_behind'],
+        ['namespace_missing', 'host_save_readback_namespace_missing', 'namespace_missing'],
+        ['read_error', 'host_save_readback_read_error', 'read_error'],
+        ['selected_conflict', 'host_save_readback_selected_conflict', 'selected_conflict'],
+    ]) {
+        const fixture = make({ mode });
+        const writer = loadNamespaceWriter(() => fixture.context);
+        const failureSink = {};
+        const saved = await writer.write({
+            ...structuredClone(fixture.baseline),
+            continuityCheckpoint: fixture.prepared,
+        }, fixture.baseline.chatId, {
+            fields: ['continuityCheckpoint'], durable: true, force: true,
+            requireReadback: true, readbackAttempts: 1,
+            allowUnselectedFieldEvolution: true,
+            compensateSelectedContentValidationFailure: true,
+            failureSink,
+            contentValidator: (value) => (
+                value?.continuityCheckpoint?.stage3Phase === 'world_candidate_prepared'
+                && value?.continuityCheckpoint?.preparedWorld?.targetActionAuthorityDigest
+                    === 'empty'
+            ),
+        });
+        assert.equal(saved, false, mode);
+        assert.equal(failureSink.code, expectedCode, mode);
+        assert.equal(failureSink.readbackFailureKind, expectedKind, mode);
+        assert.equal(writer.metrics.rolledBackWrites, 0, `${mode}: no stale whole rollback`);
+        if (mode === 'selected_conflict') {
+            assert.deepEqual(
+                fixture.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint,
+                fixture.competing,
+                'competing durable checkpoint remains authoritative',
+            );
+        } else if (mode === 'revision_behind') {
+            assert.equal(
+                fixture.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint,
+                null,
+                'a proven durable baseline is restored as authority after retry exhaustion',
+            );
+        } else {
+            assert.equal(
+                fixture.context.chatMetadata.mvu_auto_doctor.continuityCheckpoint.stage3Phase,
+                'world_candidate_prepared',
+                `${mode}: unknown save outcome retains recoverable prepared memory`,
+            );
+        }
+    }
+
+    const already = make({ mode: 'already_persisted' });
+    const actualRead = already.context.readPersistedChatMetadata.bind(already.context);
+    let reads = 0;
+    already.context.readPersistedChatMetadata = async () => {
+        reads += 1;
+        if (reads === 1) return structuredClone(already.baseline);
+        return actualRead();
+    };
+    const writer = loadNamespaceWriter(() => already.context);
+    const saved = await writer.write({
+        ...structuredClone(already.baseline), continuityCheckpoint: already.prepared,
+    }, already.baseline.chatId, {
+        fields: ['continuityCheckpoint'], durable: true, force: true,
+        requireReadback: true, readbackAttempts: 1,
+        allowUnselectedFieldEvolution: true,
+        compensateSelectedContentValidationFailure: true,
+        contentValidator: (value) => (
+            value?.continuityCheckpoint?.stage3Phase === 'world_candidate_prepared'
+        ),
+    });
+    assert.equal(saved, true, 'fresh durable read proves the first save without a second write');
+    assert.equal(already.saves(), 1);
+});
+
+test('unselected-field readback allowance rejects non-finite or negative revisions', () => {
+    const writer = loadNamespaceWriter(() => null);
+    const candidate = {
+        chatId: 'chat-revision-domain',
+        rev: 4,
+        fieldRevisions: { continuityCheckpoint: 4 },
+    };
+    const persisted = {
+        ...structuredClone(candidate),
+        rev: 5,
+    };
+    assert.equal(writer.matches(candidate, persisted, ['continuityCheckpoint'], {
+        allowUnselectedFieldEvolution: true,
+    }), true);
+    for (const invalid of [-1, Infinity, -Infinity, Number.NaN, 1.5]) {
+        assert.equal(writer.matches(candidate, {
+            ...persisted,
+            rev: invalid,
+        }, ['continuityCheckpoint'], {
+            allowUnselectedFieldEvolution: true,
+        }), false);
+        assert.equal(writer.matches(candidate, {
+            ...persisted,
+            fieldRevisions: { continuityCheckpoint: invalid },
+        }, ['continuityCheckpoint'], {
+            allowUnselectedFieldEvolution: true,
+        }), false);
+    }
+});
+
+test('namespace wrapper exposes actor-only stale revision from its async scope window', async () => {
+    const scope = { chatId: 'chat-wrapper-race', cardId: 'card', runtimeVersion: 'test' };
+    const initial = {
+        version: 13,
+        chatId: scope.chatId,
+        rev: 4,
+        actorSovereigntyScope: structuredClone(scope),
+        actorLedger: { actors: [{ id: 'actor-before-p1' }] },
+        continuityCheckpoint: null,
+        fieldRevisions: { actorLedger: 4, continuityCheckpoint: 4 },
+    };
+    const state = {
+        scope,
+        context: {
+            chatId: scope.chatId,
+            chatMetadata: { mvu_auto_doctor: structuredClone(initial) },
+        },
+        concurrentP1Write: async () => {
+            const live = state.context.chatMetadata.mvu_auto_doctor;
+            live.actorLedger = { actors: [{ id: 'actor-after-p1', profileV6: { status: 'complete' } }] };
+            live.rev = 5;
+            live.fieldRevisions.actorLedger = 5;
+        },
+    };
+    const write = loadNamespaceWriteWrapperRaceHarness(state);
+    const failureSink = {};
+    const saved = await write(structuredClone(initial), scope.chatId, {
+        fields: ['actorLedger', 'continuityCheckpoint'],
+        failureSink,
+    });
+    assert.equal(saved, false);
+    assert.equal(failureSink.code, 'stale_namespace_revision');
+    assert.deepEqual([...failureSink.staleFields], ['actorLedger']);
+
+    state.context.chatMetadata.mvu_auto_doctor = structuredClone(initial);
+    const wrappedProductionWriter = loadNamespaceWriteWrapperRaceHarness(state);
+    const productionWriter = loadProductionActionAttemptWriter(
+        () => state.context,
+        wrappedProductionWriter,
+    );
+    const preparedCheckpoint = {
+        stage3Phase: 'world_candidate_prepared',
+        preparedWorld: { phase1WriteMode: 'actor_attempts' },
+    };
+    const productionResult = await productionWriter.persist({
+        chatId: scope.chatId,
+        scopeDigest: 'scope-digest',
+    }, {
+        previousLedger: structuredClone(initial.actorLedger),
+        nextLedger: { actors: [{ id: 'actor-with-world-attempt' }] },
+        attempts: [{ id: 'attempt-1' }],
+        target: { chatId: scope.chatId, index: 1 },
+        preparedCheckpoint,
+        phase1WriteMode: 'actor_attempts',
+        expectedFieldStates: {
+            actorLedger: { revision: 4, digest: JSON.stringify(initial.actorLedger) },
+            continuityCheckpoint: { revision: 4, digest: JSON.stringify(null) },
+        },
+    });
+    assert.equal(productionResult.ok, false);
+    assert.equal(productionResult.reason, 'action_attempt.commit_rejected');
+    assert.equal(productionResult.failureCode, 'stale_namespace_revision');
+    assert.deepEqual([...productionResult.concurrentFields], ['actorLedger']);
+
+    const persistence = sourceSection(
+        'async function persistActorActionAttemptsForTurn(captured, {',
+        'async function completeActorProfilesForTurn(captured, {',
+    );
+    assert.match(
+        persistence,
+        /failureSink\.code === 'stale_namespace_revision'[\s\S]*?failureSink\.staleFields/u,
+    );
+    for (const helper of [
+        sourceSection(
+            'async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {',
+            'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
+        ),
+        sourceSection(
+            'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
+            'function stage3PreparedWorldCheckpointMatches(',
+        ),
+        sourceSection(
+            'async function commitPreparedWorldCandidate(captured, {',
+            'async function enqueueActorProfiles(targetId, {',
+        ),
+    ]) {
+        assert.match(helper, /\['field_state_mismatch', 'stale_namespace_revision'\]/u);
+        assert.match(helper, /concurrentFields\?*\.length === 1/u);
+        assert.match(helper, /concurrentFields\[0\] === 'actorLedger'/u);
+    }
+});
+
+test('attemptless P3 rebases a concurrent P1 profile commit without rerunning Advance', async () => {
+    const harness = loadAttemptlessPhase1RebaseHarness({
+        failureCode: 'stale_namespace_revision',
+    });
+    const result = await harness.run();
+    assert.equal(result.ok, true);
+    assert.equal(result.localAttempts, 2);
+    assert.equal(harness.persistCalls(), 2);
+    assert.equal(result.persisted.ledger.actors[0].profileV6.status, 'complete');
+    assert.deepEqual(result.persisted.ledger.actionAttempts, []);
+    assert.equal(
+        result.persisted.checkpoint.preparedWorld.ledger.profileRevision,
+        3,
+        'prepared proof binds the fresh P1 ledger, not the pre-model snapshot',
+    );
+    const helper = sourceSection(
+        'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
+        'function stage3PreparedWorldCheckpointMatches(',
+    );
+    assert.doesNotMatch(helper, /generateWorldContinuitySingleBatch|callModel|world_call_reserved/u);
+    assert.match(helper, /localAttempt < 2/u);
+    assert.match(helper, /stage3TargetActionAuthorityProjection\([\s\S]*?freshLedger/u);
+});
+
+test('scheduled P3 replays only its frozen actor attempt onto the fresh P1 ledger', async () => {
+    const harness = loadScheduledPhase1RebaseHarness();
+    const result = await harness.run();
+    assert.equal(result.ok, true);
+    assert.equal(result.localAttempts, 2);
+    assert.equal(harness.persistCalls(), 2);
+    assert.deepEqual(
+        result.persisted.ledger.actionAttempts.map((attempt) => attempt.actorId),
+        ['actor-old'],
+        'the actor that became ready during Advance is not autonomously scheduled this turn',
+    );
+    assert.equal(
+        result.persisted.ledger.actors.find((actor) => actor.id === 'actor-new-ready')
+            .profileV6.status,
+        'complete',
+        'the concurrent P1 profile commit is retained',
+    );
+});
+
+test('unresolved attemptless Phase1 CAS drift stays zero-write with a fixed code', async () => {
+    const harness = loadAttemptlessPhase1RebaseHarness({ alwaysReject: true });
+    const result = await harness.run();
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'action_attempt.commit_rejected');
+    assert.equal(harness.persistCalls(), 2);
+    const map = sourceSection(
+        'function stage3WorldFailureValidationCode(reason)',
+        'async function runContinuityTarget(captured, {',
+    );
+    assert.match(map, /'action_attempt\.commit_rejected': 'world\.phase1\.concurrent_actor_ledger_changed'/u);
+    const run = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    assert.match(run, /stage3PersistAttemptlessPreparedWorldCandidate/u);
+    assert.match(run, /validationCode: rebased\.validationCode/u);
+});
+
+test('Phase1 readback diagnostics distinguish host verification from candidate authority', async () => {
+    const hostMismatch = loadAttemptlessPhase1RebaseHarness({
+        alwaysReject: true,
+        failureCode: 'host_save_readback_mismatch',
+        failureReason: 'action_attempt.readback_mismatch',
+    });
+    const hostResult = await hostMismatch.run();
+    assert.equal(hostResult.validationCode, 'world.phase1.host_save_readback_mismatch');
+
+    const candidateMismatch = loadAttemptlessPhase1RebaseHarness({
+        alwaysReject: true,
+        failureCode: '',
+        failureReason: 'action_attempt.readback_mismatch',
+    });
+    const candidateResult = await candidateMismatch.run();
+    assert.equal(candidateResult.validationCode, 'world.phase1.candidate_readback_mismatch');
+
+    for (const failureCode of [
+        'host_save_content_validation_compensated',
+        'host_save_content_validation_conflict',
+    ]) {
+        const contentAuthorityMismatch = loadAttemptlessPhase1RebaseHarness({
+            alwaysReject: true,
+            failureCode,
+            failureReason: 'action_attempt.readback_mismatch',
+        });
+        const contentResult = await contentAuthorityMismatch.run();
+        assert.equal(
+            contentResult.validationCode,
+            'world.phase1.candidate_readback_mismatch',
+            `${failureCode} is an authority mismatch, not a host readback failure`,
+        );
+    }
+    const compensationReadbackUnknown = loadAttemptlessPhase1RebaseHarness({
+        alwaysReject: true,
+        failureCode: 'host_save_content_validation_readback_unknown',
+        failureReason: 'action_attempt.readback_mismatch',
+    });
+    assert.equal(
+        (await compensationReadbackUnknown.run()).validationCode,
+        'world.phase1.host_save_readback_unknown',
+    );
+
+    const scheduled = sourceSection(
+        'async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {',
+        'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
+    );
+    assert.match(scheduled, /stage3Phase1ReadbackValidationCode\(persisted\)/u);
+});
+
+test('production Phase1 rebase gate rejects semantic or same-target authority drift before writing', async () => {
+    const cases = [
+        ['continuity digest', { continuity: { turn: 1, changed: true } }],
+        ['checkpoint digest', { continuityCheckpoint: { stage3Phase: 'other-target' } }],
+        ['same-target ATT', {
+            freshActionAttempts: [{ id: 'same-target-attempt', target: { generationId: 'generation-2' } }],
+        }],
+        ['same-target receipt', {
+            freshActionReceipts: [{ id: 'same-target-receipt', target: { generationId: 'generation-2' } }],
+        }],
+    ];
+    for (const [label, options] of cases) {
+        const harness = loadAttemptlessPhase1RebaseHarness(options);
+        const result = await harness.run();
+        assert.equal(result.ok, false, label);
+        assert.equal(harness.persistCalls(), 0, `${label} writes no prepared checkpoint`);
+        assert.ok([
+            'world_candidate_readback_mismatch',
+            'action_attempt.concurrent_change',
+        ].includes(result.reason), label);
+    }
+});
+
+test('P3 normal path writes nothing before Recall, Advance, parse, and full in-memory validation', () => {
     const run = sourceSection(
         'async function runContinuityTarget(captured, {',
         'function sameTargetExceptContent(left, right)',
@@ -2354,19 +5424,30 @@ test('P3 wiring uses local structured recall then one Advance call, with ATT plu
     assert.doesNotMatch(run, /buildContinuityRepairMessages/u);
     const recallAt = run.indexOf('stage3LocalRecallPacket({');
     const reserveAt = run.indexOf("stage3Phase: 'world_call_reserved'");
-    const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', reserveAt);
-    const proposalAt = run.indexOf('actorActionCandidatesFromShard', worldAt);
-    const prepareAt = run.indexOf('prepareActorActionAttempts', proposalAt);
-    const recordAt = run.indexOf('recordActorActionAttempts', prepareAt);
-    const persistAt = run.indexOf('await persistActorActionAttemptsForTurn', recordAt);
-    const preparedAt = run.indexOf("stage3Phase: 'world_candidate_prepared'", persistAt);
-    assert.ok(recallAt >= 0 && reserveAt > recallAt && worldAt > reserveAt);
-    assert.ok(proposalAt > worldAt && prepareAt > proposalAt && recordAt > prepareAt && persistAt > recordAt);
+    const snapshotAt = run.indexOf("const phase1Namespace = readChatNamespace", recallAt);
+    const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', snapshotAt);
+    const draftValidatorAt = run.indexOf('stage3ValidateWorldDraftInMemory', worldAt);
+    const proposalAt = run.indexOf('stage3PersistPreparedActorAttemptsOnFreshLedger', worldAt);
+    const preparedAt = run.indexOf("stage3Phase: 'world_candidate_prepared'");
+    assert.ok(recallAt >= 0 && snapshotAt > recallAt && worldAt > snapshotAt);
+    assert.equal(reserveAt, -1, 'normal execution never persists world_call_reserved');
+    assert.ok(draftValidatorAt > worldAt && proposalAt > draftValidatorAt);
+    const scheduledRebase = sourceSection(
+        'async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {',
+        'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
+    );
+    const prepareAt = scheduledRebase.indexOf('prepareActorActionAttempts');
+    const recordAt = scheduledRebase.indexOf('recordActorActionAttempts', prepareAt);
+    const validateAt = scheduledRebase.indexOf('stage3ValidateWorldCandidateInMemory', recordAt);
+    const persistAt = scheduledRebase.indexOf('await persistActorActionAttemptsForTurn', recordAt);
+    assert.ok(prepareAt >= 0 && recordAt > prepareAt);
+    assert.ok(validateAt > recordAt && persistAt > validateAt);
+    assert.match(scheduledRebase, /phase1WriteMode: 'actor_attempts'/u);
+    assert.match(scheduledRebase, /stage3PreparedWorldCheckpoint\(/u);
+    assert.match(scheduledRebase, /stage3PreparedWorldCheckpointMatches\(/u);
     assert.ok(preparedAt < 0, 'checkpoint state is created by the pure helper, not duplicated in the runner');
     assert.match(run, /return commitPreparedWorldCandidate\(captured/u);
-    assert.match(run, /stage3PreparedWorldCheckpoint\(/u);
-    assert.match(run, /stage3PreparedWorldCheckpointMatches\(/u);
-    assert.match(run, /target: deepClone\(actionTarget\),[\s\S]*?stage3Phase: 'world_call_reserved'/u);
+    assert.match(run, /validateCandidateInMemory/u);
     const preparedCheckpoint = sourceSection(
         'function stage3PreparedWorldCheckpoint({',
         'function stage3PreparedWorldCheckpointMatches(',
@@ -2384,6 +5465,142 @@ test('P3 wiring uses local structured recall then one Advance call, with ATT plu
     assert.match(source, /async function commitPreparedWorldCandidate/u);
     assert.match(source, /expectedFieldStates/u);
     assert.doesNotMatch(source, /collectActorShardProposals/u);
+});
+
+test('production Phase2 consumes validated scheduledBase and reaches committed readback', async () => {
+    const producerTarget = {
+        chatId: 'chat-phase2', index: 2, messageId: 'message-2', swipeId: 0,
+        generationSerial: 2, generationId: 'generation-2', generationType: 'normal',
+        scopeDigest: 'scope-phase2', contentFingerprint: 'content-phase2',
+    };
+    const actionTarget = { ...producerTarget };
+    const scheduledBase = { turn: 2, threads: [], world: { digest: 'before' } };
+    const candidateNext = { turn: 2, threads: [], world: { digest: 'after' } };
+    const checkpoint = {
+        stage3Phase: 'world_candidate_prepared',
+        preparedWorld: {
+            scheduledState: structuredClone(scheduledBase), continuityState: {}, world: {},
+            actionAdjudications: [], nextTurn: 2, director: 'standalone', checkpointState: {},
+            phase1WriteMode: 'checkpoint_only',
+        },
+    };
+    const namespace = { actorLedger: {}, continuity: {}, continuityCheckpoint: checkpoint };
+    const freshNamespace = {
+        actorLedger: { actors: [{ id: 'p1-ready', profileV6: { status: 'complete' } }] },
+        continuity: {}, continuityCheckpoint: checkpoint,
+    };
+    let attachedFrom = null;
+    let written = null;
+    let phase2Writes = 0;
+    const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const sandbox = {
+        Date,
+        pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
+        actorActionTargetOf: () => structuredClone(actionTarget),
+        stage3PreparedPhase1StatesMatch: () => true,
+        stage3FieldState: () => ({ revision: 1, digest: 'stable' }),
+        stage3ValidateWorldCandidateInMemory: () => ({
+            ok: true, settlement: null,
+            scheduledBase: structuredClone(scheduledBase),
+            next: structuredClone(candidateNext),
+        }),
+        markActorSchedulingFailure: () => {},
+        attachChangedSourceRefs: (base, next) => {
+            attachedFrom = structuredClone(base);
+            return structuredClone(next);
+        },
+        sourceRefOf: () => structuredClone(producerTarget),
+        normalizeContinuityState: (value) => structuredClone(value),
+        stage3CanonicalSettlementProof: () => ({ orderedResults: [] }),
+        stage3AcceptedTarget: () => structuredClone(producerTarget),
+        stage3ContinuityDigestWithoutInjection: () => 'continuity-digest',
+        buildContinuityInjection: () => '',
+        deepClone: (value) => structuredClone(value),
+        stage3TaskOwnsCurrent: () => true,
+        stage3TargetIsCurrent: () => ({ ok: true }),
+        actorActionTargetMatches: exact,
+        stage3AcceptedTargetsMatch: exact,
+        readChatNamespace: () => structuredClone(freshNamespace),
+        getContext: () => ({ chatId: producerTarget.chatId }),
+        normalizeActorLedger: (value) => structuredClone(value),
+        stage3PersistedPackageForTarget: () => ({ settlementProof: { orderedResults: [] } }),
+        actorActionSettlementsMatchLedger: () => ({ ok: true }),
+        writeChatNamespace: async (candidate, _chatId, options) => {
+            phase2Writes += 1;
+            assert.equal(options.readbackAttempts, 5);
+            assert.equal(options.allowUnselectedFieldEvolution, true);
+            assert.equal(options.recoverSelectedTransaction, true);
+            assert.equal(options.retainOnFailure, undefined);
+            if (phase2Writes === 1) {
+                options.failureSink.code = 'stale_namespace_revision';
+                options.failureSink.staleFields = ['actorLedger'];
+                return false;
+            }
+            written = structuredClone(candidate);
+            return options.precondition() === true && options.contentValidator(candidate) === true;
+        },
+        markActorSchedulingSettled: () => {},
+    };
+    const code = sourceSection(
+        'async function commitPreparedWorldCandidate(captured, {',
+        'async function enqueueActorProfiles(targetId, {',
+    );
+    const phase2DiagnosticCode = sourceSection(
+        'function stage3Phase2ReadbackValidationCode(failureSink) {',
+        'async function runContinuityTarget(captured, {',
+    );
+    vm.runInNewContext(
+        `${phase2DiagnosticCode}\n${code}\nthis.commit = commitPreparedWorldCandidate;`,
+        sandbox,
+    );
+    const result = await sandbox.commit(producerTarget, {
+        token: {}, settings: { continuityMaxThreads: 64, continuityMaxVisible: 4 },
+        namespace, checkpoint, ledger: {}, worldModelCalls: 0,
+    });
+    assert.deepEqual(attachedFrom, scheduledBase);
+    assert.equal(written.continuityCheckpoint.stage3Phase, 'world_committed');
+    assert.equal(written.actorLedger.actors[0].profileV6.status, 'complete');
+    assert.equal(phase2Writes, 2, 'Phase2 locally rebases one P1-only CAS drift');
+    assert.equal(result.status, 'applied');
+    assert.equal(result.worldFinalPhase, 'world_committed');
+
+    phase2Writes = 0;
+    written = null;
+    sandbox.writeChatNamespace = async (_candidate, _chatId, options) => {
+        phase2Writes += 1;
+        assert.equal(options.recoverSelectedTransaction, true);
+        options.failureSink.code = 'stale_namespace_revision';
+        options.failureSink.staleFields = ['actorLedger'];
+        return false;
+    };
+    const exhausted = await sandbox.commit(producerTarget, {
+        token: {}, settings: { continuityMaxThreads: 64, continuityMaxVisible: 4 },
+        namespace, checkpoint, ledger: {}, worldModelCalls: 0,
+    });
+    assert.equal(phase2Writes, 2, 'Phase2 actor-only CAS retry is bounded');
+    assert.equal(written, null, 'retry exhaustion commits no world candidate');
+    assert.equal(exhausted.status, 'failed');
+    assert.equal(exhausted.reason, 'world_phase2_actor_ledger_changed');
+    assert.equal(exhausted.validationCode, 'world.phase2.concurrent_actor_ledger_changed');
+
+    sandbox.writeChatNamespace = async (_candidate, _chatId, options) => {
+        options.failureSink.code = 'host_save_readback_read_error';
+        options.failureSink.readbackFailureKind = 'read_error';
+        options.failureSink.readbackEvidence = [{
+            field: 'continuityCheckpoint', expectedRevision: 8,
+            actualRevision: -1, digestMatch: false,
+        }];
+        return false;
+    };
+    const hostFailed = await sandbox.commit(producerTarget, {
+        token: {}, settings: { continuityMaxThreads: 64, continuityMaxVisible: 4 },
+        namespace, checkpoint, ledger: {}, worldModelCalls: 0,
+    });
+    assert.equal(hostFailed.status, 'failed');
+    assert.equal(hostFailed.validationCode, 'world.phase2.host_save_read_error');
+    assert.equal(hostFailed.worldFinalPhase, 'world_candidate_prepared');
+    assert.equal(hostFailed.readbackFailureKind, 'read_error');
+    assert.equal(hostFailed.readbackEvidence[0].field, 'continuityCheckpoint');
 });
 
 test('P3 keeps full persistent thread history while P4 remains a separate visible projection', () => {
@@ -2465,10 +5682,12 @@ test('P3 local recall preserves every scheduled ID and adds linked structured su
         mustActorIds: ['actor-must'],
         mustThreadIds: ['thread-must'],
         mustLaneIds: ['lane-must'],
+        acceptedNarrative: '人物甲提到了甲地的规则',
         worldbookKeys: ['world-b', 'world-a', 'world-a'],
         worldbookEntries: [
-            { id: 'entry-b', world: 'embedded', title: '规则乙', keys: ['乙'], content: '完整规则乙' },
+            { id: 'entry-b', world: 'embedded', title: '规则乙', keys: ['乙'], constant: true, content: '完整规则乙' },
             { id: 'entry-a', world: 'embedded', title: '规则甲', keys: ['甲'], content: '完整规则甲' },
+            { id: 'entry-unrelated', world: 'embedded', title: '无关规则', keys: ['永不命中'], content: '无关内容' },
         ],
         actorLedger: { actors: [
             { id: 'actor-must', name: '人物甲' },
@@ -2496,6 +5715,9 @@ test('P3 local recall preserves every scheduled ID and adds linked structured su
     assert.deepEqual(Array.from(packet.mustActorIds), ['actor-must']);
     assert.deepEqual(Array.from(packet.worldbookKeys), ['world-a', 'world-b']);
     assert.deepEqual(Array.from(packet.worldbookEntryIds), ['entry-a', 'entry-b']);
+    assert.deepEqual(Array.from(packet.worldbookSourceRefs).map((entry) => entry.id), ['entry-a', 'entry-b']);
+    assert.equal(packet.selectedWorldbookCount, 2);
+    assert.ok(packet.scanTextChars > 0);
     assert.match(packet.worldbookDigest, /^test-digest:/u);
     assert.equal(buildRecall({ ...options, mustActorIds: ['actor-unknown'] }), null);
     assert.equal(buildRecall({ ...options, mustThreadIds: ['thread-unknown'] }), null);
@@ -2503,7 +5725,7 @@ test('P3 local recall preserves every scheduled ID and adds linked structured su
 });
 
 test('P3 local recall is deterministic and adds zero model calls', () => {
-    const recallSource = sourceSection('function stage3LocalRecallPacket({', 'function buildContinuityMessages({');
+    const recallSource = sourceSection('function stage3WorldbookRegexKey(value) {', 'function buildContinuityMessages({');
     assert.doesNotMatch(recallSource, /callModel\(|await |maxTokens|timeout|failover/u);
     assert.match(recallSource, /local_structured_schedule/u);
     assert.match(recallSource, /packet\.digest = fingerprint\(JSON\.stringify\(packet\)\)/u);
@@ -2512,12 +5734,12 @@ test('P3 local recall is deterministic and adds zero model calls', () => {
     assert.equal((run.match(/stage3LocalRecallPacket\(/gu) || []).length, 1);
 });
 
-test('P3 materializes complete embedded worldbook entries instead of key-only projections', () => {
+test('P3 materializes complete content only for locally activated worldbook entries', () => {
     const collector = sourceSection(
         'function usableContinuityWorldEntry(entry)',
         'function usableForumWorldEntry(entry)',
     );
-    assert.match(collector, /content,\s*\n\s*contentDigest: fingerprint\(content\)/u);
+    assert.match(collector, /const contentDigest = fingerprint\(content\)[\s\S]*?content,\s*\n\s*contentDigest,/u);
     assert.doesNotMatch(collector, /cropText\(content,\s*1400/u);
     const collection = sourceSection(
         'async function collectContinuityWorldContextUncached',
@@ -2530,7 +5752,116 @@ test('P3 materializes complete embedded worldbook entries instead of key-only pr
     assert.doesNotMatch(collection, /worldBlocks\.length >= 12/u);
     const prompt = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
     assert.match(prompt, /recalledWorldbookEntries/u);
+    assert.match(prompt, /recalledWorldbookIds/u);
+    assert.match(prompt, /filter\(\(entry\) => recalledWorldbookIds\.has\(entry\.id\)\)/u);
     assert.match(prompt, /content: entry\.content/u);
+});
+
+test('P3 canonicalizes duplicate host acquisition paths by physical worldbook SourceRef', () => {
+    const { usable, canonical } = loadContinuityWorldEntryCanonicalizer();
+    const raw = (sourceKind, content = '同一条物理设定') => ({
+        uid: 7,
+        world: '当前世界书',
+        comment: '同一条目',
+        content,
+        key: ['条目'],
+        __doctorSourceKind: sourceKind,
+    });
+    const selected = usable(raw('external_selected'));
+    const active = usable(raw('external_active'));
+    assert.equal(selected.id, active.id);
+    assert.deepEqual(selected.sourceRef, active.sourceRef);
+    const one = canonical([selected, active]);
+    assert.equal(one.length, 1);
+    assert.equal(one[0].sourceKind, 'external_active');
+    assert.deepEqual(Array.from(one[0].acquisitionSources), ['external_active', 'external_selected']);
+
+    const embedded = usable(raw('embedded'));
+    const separateDomains = canonical([active, embedded]);
+    assert.equal(separateDomains.length, 2);
+    assert.deepEqual(
+        Array.from(separateDomains).map((entry) => entry.sourceDomain).sort(),
+        ['embedded', 'external'],
+    );
+    const embeddedMirror = usable({
+        ...raw('embedded', '内嵌权威内容'),
+        __doctorEmbeddedBookName: '当前世界书',
+    });
+    const importedMirror = usable(raw('external_active', '宿主转换后的表示'));
+    const mirrored = canonical([importedMirror, embeddedMirror], {
+        primaryWorld: '当前世界书',
+    });
+    assert.equal(mirrored.length, 1);
+    assert.equal(mirrored[0].sourceKind, 'embedded');
+    assert.equal(mirrored[0].content, '内嵌权威内容');
+    assert.equal(mirrored[0].sourceRef.sourceDomain, 'embedded');
+    assert.equal(mirrored[0].acquisitionAliases.length, 1);
+
+    const changedPhysicalEntry = usable(raw('external_selected', '同一原生ID的新内容'));
+    const sameExternalPhysicalEntry = canonical([changedPhysicalEntry, active]);
+    assert.equal(sameExternalPhysicalEntry.length, 1);
+    assert.equal(sameExternalPhysicalEntry[0].sourceKind, 'external_active');
+    assert.equal(sameExternalPhysicalEntry[0].content, active.content);
+
+    const differentNativeEntry = usable({ ...raw('external_selected'), uid: 8 });
+    const distinct = canonical([active, differentNativeEntry]);
+    assert.equal(distinct.length, 2, 'different native worldbook entries are never merged');
+
+    const zeroActive = usable({ ...raw('external_active'), uid: 0 });
+    const zeroSelected = usable({ ...raw('external_selected'), uid: 0 });
+    assert.equal(zeroActive.nativeId, '0');
+    assert.equal(zeroActive.id, zeroSelected.id);
+    assert.equal(JSON.stringify(zeroActive.sourceRef), JSON.stringify(zeroSelected.sourceRef));
+});
+
+test('P3 normalizes embedded card-book fields and preserves its book identity', () => {
+    const { usable } = loadContinuityWorldEntryCanonicalizer();
+    const embedded = usable({
+        id: 0,
+        world: '卡书名称',
+        __doctorEmbeddedBookName: '卡书名称',
+        __doctorSourceKind: 'embedded',
+        content: '内嵌规则',
+        keys: ['主键'],
+        secondary_keys: ['次键'],
+        extensions: {
+            vectorized: true,
+            selectiveLogic: 3,
+            case_sensitive: true,
+            match_whole_words: true,
+        },
+        selective: true,
+    });
+    assert.equal(embedded.nativeId, '0');
+    assert.equal(embedded.bookName, '卡书名称');
+    assert.deepEqual(Array.from(embedded.keys), ['主键']);
+    assert.deepEqual(Array.from(embedded.secondaryKeys), ['次键']);
+    assert.equal(embedded.vectorized, true);
+    assert.equal(embedded.selectiveLogic, 3);
+    assert.equal(embedded.caseSensitive, true);
+    assert.equal(embedded.matchWholeWords, true);
+    const collection = sourceSection(
+        'async function collectContinuityWorldContextUncached',
+        'async function collectContinuityWorldContext(',
+    );
+    assert.match(collection, /__doctorEmbeddedBookName: String\(book\?\.name \|\| ''\)/u);
+    assert.match(collection, /canonicalContinuityWorldEntries\(candidates, \{ primaryWorld \}\)/u);
+});
+
+test('P3 worldbook activation reuses constant, primary/secondary logic and never self-triggers vector entries', () => {
+    const buildRecall = loadStage3LocalRecallPacket();
+    const common = {
+        actorLedger: { actors: [] }, base: { threads: [] },
+        worldLaneSchedule: { candidates: [] }, acceptedNarrative: 'Dragon 门已经开启',
+        worldbookEntries: [
+            { id: 'const', content: '常驻', constant: true },
+            { id: 'whole', content: '整词', keys: ['dragon'], matchWholeWords: true },
+            { id: 'and-any', content: '次键', keys: ['门'], secondaryKeys: ['开启', '关闭'], selective: true, selectiveLogic: 0 },
+            { id: 'and-all-miss', content: '次键全中', keys: ['门'], secondaryKeys: ['开启', 'moon'], selective: true, selectiveLogic: 3 },
+            { id: 'vector', content: '向量', keys: ['门'], vectorized: true },
+        ],
+    };
+    assert.deepEqual(Array.from(buildRecall(common).worldbookEntryIds), ['and-any', 'const', 'whole']);
 });
 
 test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudications', () => {

@@ -73,6 +73,9 @@ function persistedWorldPacket({
             settlementProof: {
                 producerTarget,
                 actorLedgerDigest: 'empty-actor-ledger',
+                targetActionAuthorityDigest: 'empty-target-action-authority',
+                targetActionAttemptCount: 0,
+                targetActionReceiptCount: 0,
                 digest: 'world-only-settlement',
                 orderedResults: [],
             },
@@ -177,9 +180,14 @@ test('P3 uses local structured recall then one Advance call; no separate actor p
     const run = source.slice(runStart, runEnd);
     const recall = run.indexOf('stage3LocalRecallPacket({');
     const advance = run.indexOf('await generateWorldContinuitySingleBatch', recall);
-    const prepare = run.indexOf('prepareActorActionAttempts', advance);
-    const persist = run.indexOf('await persistActorActionAttemptsForTurn', prepare);
-    assert.ok(recall >= 0 && advance > recall && prepare > advance && persist > prepare);
+    const rebase = run.indexOf('stage3PersistPreparedActorAttemptsOnFreshLedger', advance);
+    const helperStart = source.indexOf('async function stage3PersistPreparedActorAttemptsOnFreshLedger');
+    const helperEnd = source.indexOf('async function stage3PersistAttemptlessPreparedWorldCandidate', helperStart);
+    const helper = source.slice(helperStart, helperEnd);
+    const prepare = helper.indexOf('prepareActorActionAttempts');
+    const persist = helper.indexOf('await persistActorActionAttemptsForTurn', prepare);
+    assert.ok(recall >= 0 && advance > recall && rebase > advance);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart && prepare >= 0 && persist > prepare);
     assert.doesNotMatch(source, /collectActorShardProposals|runActorShardProposalBatch|buildActorShardBatchMessages/u);
     assert.match(source, /stage3Phase: 'world_candidate_prepared'/u);
     assert.match(source, /async function commitPreparedWorldCandidate/u);
@@ -233,7 +241,7 @@ test('fresh-chat P3 build, normalize and P4 projection receive the current gener
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const identityStart = source.indexOf('function runtimeGenerationSerialFloor(context) {');
     const identityEnd = source.indexOf('\nfunction cardScopeIdentity(context, character)', identityStart);
-    const verifyStart = source.indexOf('function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope)');
+    const verifyStart = source.indexOf('function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope, decisionSink = null)');
     const verifyEnd = source.indexOf('\nasync function precomposeNextTurnConsumer(session)', verifyStart);
     const leaseStart = source.indexOf('async function writeNextTurnConsumerLease(session, scopeDigest, payload, provider, leaseToken = \'\')');
     const leaseEnd = source.indexOf('\nasync function cleanupNextTurnProvider(active, reason)', leaseStart);
@@ -289,11 +297,13 @@ test('fresh-chat P3 build, normalize and P4 projection receive the current gener
             assert.deepEqual(oldReply.extra, before, 'P4 read must not rewrite the old producer extra');
             return { ...previous, ...identity };
         },
-        stage3PersistedPackageForTarget: (_continuity, ledger, captured, options) => {
+        stage3PersistedPackageDecision: (_continuity, ledger, captured, options) => {
             assert.equal(ledger, evolvedLedger);
             assert.deepEqual(captured, previous);
             persistedOptions = structuredClone(options);
-            return options?.allowUnrelatedLedgerEvolution === true ? packet : null;
+            return options?.allowUnrelatedLedgerEvolution === true
+                ? { ok: true, code: 'ok', packet }
+                : { ok: false, code: 'ledger_digest_mismatch', packet: null };
         },
         getContext: () => context,
         currentActorSovereigntyScope: () => ({ id: previous.scopeDigest }),
@@ -409,7 +419,7 @@ test('P3 keeps due actors outside optional budgets through local recall and one 
     assert.match(ledger, /const optional = scored\.filter\(\(item\) => !isMustInclude\(item\)\)\.slice\(0, coreLimit\)/u);
     assert.match(source, /scheduledActorIds = actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);
     assert.match(source, /stage3LocalRecallPacket\(\{[\s\S]*?await generateWorldContinuitySingleBatch/u);
-    assert.match(source, /await persistActorActionAttemptsForTurn[\s\S]*?stage3Phase: 'world_candidate_prepared'/u);
+    assert.match(source, /stage3PersistPreparedActorAttemptsOnFreshLedger[\s\S]*?stage3PreparedWorldCheckpoint[\s\S]*?await persistActorActionAttemptsForTurn/u);
     assert.doesNotMatch(source, /collectActorShardProposals|runActorShardProposalBatch/u);
     assert.match(source, /precomposeNextTurnConsumer/u);
 });

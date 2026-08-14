@@ -43,8 +43,16 @@ test('full and full_adult plans have bounded compatible groups instead of one ca
         'identity_bootstrap', 'character_core',
     ]);
     assert.deepEqual(actorProfileCompletionGroupPlan([actor('NPC-A', null, 'full_adult')], { allowDiscovery: true }).map((group) => group.key), [
-        'identity_bootstrap', 'character_core', 'physiology_optional',
+        'identity_bootstrap', 'character_core',
     ]);
+    const adultCore = actorProfileCompletionGroupPlan([
+        actor('NPC-A', null, 'full_adult'),
+    ], { allowDiscovery: false })[0];
+    assert.deepEqual(adultCore.modules, [
+        'person', 'personality', 'history', 'relationshipsMotives',
+        'currentState', 'knowledgeCapabilitiesResources', 'physiology',
+    ]);
+    assert.deepEqual(adultCore.targets.physiology.map((row) => row.actorId), ['NPC-A']);
 });
 
 test('adult upgrade of a completed core dossier requests physiology only', () => {
@@ -58,8 +66,10 @@ test('adult upgrade of a completed core dossier requests physiology only', () =>
         narrativeSections: coreSections,
     }, 'full_adult');
     const plan = actorProfileCompletionGroupPlan([upgrade], { allowDiscovery: false });
-    assert.deepEqual(plan.map((group) => group.key), ['physiology_optional']);
+    assert.deepEqual(plan.map((group) => group.key), ['character_core']);
     assert.deepEqual(plan[0].targets.physiology.map((row) => row.actorId), ['NPC-adult-upgrade']);
+    assert.ok(plan[0].modules.filter((key) => key !== 'physiology')
+        .every((key) => plan[0].targets[key].length === 0));
 });
 
 test('old generic adult physiology is refreshed and current contract is not regenerated', () => {
@@ -78,7 +88,7 @@ test('old generic adult physiology is refreshed and current contract is not rege
     assert.deepEqual(
         actorProfileCompletionGroupPlan([stale], { allowDiscovery: false })
             .map((group) => group.key),
-        ['physiology_optional'],
+        ['character_core'],
     );
     stale.previousProfile.narrativeSections.physiology.contractVersion =
         ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION;
@@ -88,7 +98,7 @@ test('old generic adult physiology is refreshed and current contract is not rege
 test('adult physiology prompt requires sexual physiology instead of accepting a generic body paragraph', () => {
     const group = actorProfileCompletionGroupPlan([
         actor('NPC-adult-prompt', null, 'full_adult'),
-    ], { allowDiscovery: false }).find((entry) => entry.key === 'physiology_optional');
+    ], { allowDiscovery: false }).find((entry) => entry.key === 'character_core');
     const prompt = buildActorProfileModuleGroupMessages(group, {
         discoveryContext: { acceptedNarrative: '该成年人站在门边等待。' },
     }).map((message) => message.content).join('\n');
@@ -98,29 +108,33 @@ test('adult physiology prompt requires sexual physiology instead of accepting a 
     assert.match(prompt, /性刺激下的生理反应/u);
     assert.match(prompt, /不能只写体型、伤病、服装或机械改造/u);
     assert.match(prompt, /不得把性经历、性行为、偏好、同意或关系当成生理事实/u);
+    assert.match(prompt, /<field key="generalBaseline">/u);
+    assert.match(prompt, /<field key="limitations">/u);
+    assert.doesNotMatch(prompt, /physiology-coverage/u);
 });
 
-test('adult physiology requires complete non-persistent coverage declarations and stores only prose', () => {
+test('adult physiology uses six explicit fragments and stores only composed natural prose', () => {
     const group = actorProfileCompletionGroupPlan([
         actor('NPC-adult-coverage', null, 'full_adult'),
-    ], { allowDiscovery: false }).find((entry) => entry.key === 'physiology_optional');
+    ], { allowDiscovery: false }).find((entry) => entry.key === 'character_core');
     const excerpts = Object.fromEntries(ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key, index) => [
         key,
         `覆盖项目${index + 1}具有彼此独立且可核验的自然中文说明`,
     ]));
-    const body = `${Object.values(excerpts).join('。')}。${prose('完整成人生理基线')}`;
     const complete = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => (
-        `<physiology-coverage key="${key}">${excerpts[key]}</physiology-coverage>`
+        `<field key="${key}">${excerpts[key]}</field>`
     )).join('');
     const accepted = parseActorProfileModuleGroupOutput(
-        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${body}${complete}</module></profile-target>`,
+        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${complete}</module></profile-target>`,
         group,
     );
     assert.deepEqual(accepted.failures, []);
-    assert.equal(accepted.entries[0].modules.physiology, body);
-    assert.equal(accepted.entries[0].modules.physiology.includes('physiology-coverage'), false);
+    assert.match(accepted.entries[0].modules.physiology, /^一般体征：/u);
+    assert.match(accepted.entries[0].modules.physiology, /生殖解剖：/u);
+    assert.match(accepted.entries[0].modules.physiology, /生理限制：/u);
+    assert.equal(accepted.entries[0].modules.physiology.includes('<field'), false);
     const missing = parseActorProfileModuleGroupOutput(
-        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${body}${complete.replace(/<physiology-coverage key="limitations">[\s\S]*?<\/physiology-coverage>/u, '')}</module></profile-target>`,
+        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${complete.replace(/<field key="limitations">[\s\S]*?<\/field>/u, '')}</module></profile-target>`,
         group,
     );
     assert.ok(missing.failures.some((entry) => (
@@ -128,37 +142,74 @@ test('adult physiology requires complete non-persistent coverage declarations an
         && entry.missingFields.includes('physiology.limitations')
     )));
     const reused = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => (
-        `<physiology-coverage key="${key}">${excerpts.generalBaseline}</physiology-coverage>`
+        `<field key="${key}">${excerpts.generalBaseline}</field>`
     )).join('');
     const rejectedReuse = parseActorProfileModuleGroupOutput(
-        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${body}${reused}</module></profile-target>`,
+        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${reused}</module></profile-target>`,
         group,
     );
     assert.ok(rejectedReuse.failures.some((entry) => (
         entry.reason === 'actor_profile.physiology_coverage_incomplete'
     )));
-    const taglessComplete = [
-        '一般体征具有稳定而清楚的物种与年龄基线描述',
-        '生殖解剖依照该人物已经确认的物种和生理性别补全',
-        '第二性征以自然客观的完整句子说明其长期特征',
-        '生殖功能与周期分泌按照当前世界设定保持一致',
-        '性刺激下的生理反应和敏感部位只陈述身体事实',
-        '限制部分明确区分生理事实与经历偏好同意关系',
-    ].join('。');
-    const repairedWithoutTags = parseActorProfileModuleGroupOutput(
-        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${taglessComplete}</module></profile-target>`,
+    const labelledLines = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS
+        .map((key) => `${key}：${excerpts[key]}`).join('\n');
+    const repairedLabels = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${labelledLines}</module></profile-target>`,
         group,
     );
-    assert.deepEqual(repairedWithoutTags.failures, []);
-    assert.equal(repairedWithoutTags.entries[0].modules.physiology, taglessComplete);
-    const repeatedGeneric = Array.from({ length: 6 }, () => '身体状态正常且没有其他可用的具体生理资料').join('。');
-    const unrecoverableGeneric = parseActorProfileModuleGroupOutput(
-        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${repeatedGeneric}</module></profile-target>`,
+    assert.deepEqual(repairedLabels.failures, []);
+    assert.match(repairedLabels.entries[0].modules.physiology, /一般体征：/u);
+    const unlabeled = Object.values(excerpts).join('。');
+    const unrecoverableUnlabelled = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="NPC-adult-coverage" name="人物NPC-adult-coverage"><module key="physiology">${unlabeled}</module></profile-target>`,
         group,
     );
-    assert.ok(unrecoverableGeneric.failures.some((entry) => (
+    assert.ok(unrecoverableUnlabelled.failures.some((entry) => (
         entry.reason === 'actor_profile.physiology_coverage_incomplete'
     )));
+});
+
+test('module parser normalizes an exact ActorRef with a known name alias', () => {
+    const candidate = actor('NPC-alias-route');
+    candidate.identity = { aliases: ['鍙湪 Registry 涓凡鐭ョ殑鍒悕'] };
+    const group = actorProfileCompletionGroupPlan([candidate], { allowDiscovery: false })[0];
+    const parsed = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="NPC-alias-route" name="鍙湪 Registry 涓凡鐭ョ殑鍒悕"><module key="person">${prose('person')}</module></profile-target>`,
+        { ...group, modules: ['person'], targets: { person: [candidate] } },
+    );
+    assert.deepEqual(parsed.failures, []);
+    assert.equal(parsed.entries[0].actorId, 'NPC-alias-route');
+    assert.equal(parsed.entries[0].name, candidate.actorRef.name);
+    assert.deepEqual(parsed.routeRepairs, ['actor_profile.route_name_alias_normalized']);
+});
+
+test('single-target parser maps a known row label in actor attribute to the exact ActorRef', () => {
+    const candidate = actor('NPC-single-route');
+    candidate.identity = { aliases: ['鍞竴鐩爣鐨勫凡鐭ヨ鍒悕'] };
+    const group = actorProfileCompletionGroupPlan([candidate], { allowDiscovery: false })[0];
+    const parsed = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="鍞竴鐩爣鐨勫凡鐭ヨ鍒悕"><module key="person">${prose('person')}</module></profile-target>`,
+        { ...group, modules: ['person'], targets: { person: [candidate] } },
+    );
+    assert.deepEqual(parsed.failures, []);
+    assert.equal(parsed.entries[0].actorId, 'NPC-single-route');
+    assert.equal(parsed.entries[0].name, candidate.actorRef.name);
+    assert.deepEqual(parsed.routeRepairs, ['actor_profile.route_single_target_label_normalized']);
+});
+
+test('module parser never guesses between two scheduled actors sharing an alias', () => {
+    const first = actor('NPC-ambiguous-a');
+    const second = actor('NPC-ambiguous-b');
+    first.identity = { aliases: ['鍏变韩鍒悕'] };
+    second.identity = { aliases: ['鍏变韩鍒悕'] };
+    const group = actorProfileCompletionGroupPlan([first, second], { allowDiscovery: false })[0];
+    const parsed = parseActorProfileModuleGroupOutput(
+        `<profile-target actor="鍏变韩鍒悕"><module key="person">${prose('person')}</module></profile-target>`,
+        { ...group, modules: ['person'], targets: { person: [first, second] } },
+    );
+    assert.ok(parsed.failures.some((entry) => entry.reason === 'actor_profile.actor_ref_mismatch')
+        || parsed.entries[0]?.actorId === '鍏变韩鍒悕');
+    assert.deepEqual(parsed.routeRepairs, []);
 });
 
 test('group parser accepts fences, surrounding prose, unheaded Chinese values, aliases and loose attributes', () => {
@@ -185,7 +236,7 @@ test('group parser rejects lone dossier prose, short shells, duplicates and unex
         + `<module key="personality">太短</module>`
         + `<module key="personality">${prose('首次')}</module>`
         + `<module key="personality">${prose('重复')}</module>`
-        + `<module key="physiology">${prose('越界')}</module>`
+        + `<module key="unknownModule">${prose('越界')}</module>`
         + `</profile-target>`;
     const parsed = parseActorProfileModuleGroupOutput(broken, group);
     assert.ok(parsed.failures.some((failure) => failure.reason === 'actor_profile.module_content_incomplete'));
@@ -198,12 +249,12 @@ test('module prompt contains per-module notes, fresh current rows and no visible
         .find((entry) => entry.key === 'character_core');
     const messages = buildActorProfileModuleGroupMessages(group, {
         evidenceText: '权威材料',
-        discoveryContext: { acceptedNarrative: '最终接受正文只出现一次。' },
+        discoveryContext: { acceptedNarrative: '人物NPC-1在最终接受正文只出现一次。' },
     });
     const all = messages.map((message) => message.content).join('\n');
     assert.match(all, /currentState:/u);
     assert.match(all, /knowledgeCapabilitiesResources:/u);
-    assert.match(all, /目标行与当前值/u);
+    assert.match(all, /目标 ActorRef×字段/u);
     assert.match(all, /"requestedModules"/u);
     assert.match(all, /"actors"/u);
     assert.equal(all.match(/"authority"/gu)?.length, 1);
@@ -211,8 +262,7 @@ test('module prompt contains per-module notes, fresh current rows and no visible
     assert.doesNotMatch(all, /七个标题|人物档案：姓名/u);
 });
 
-test('compact projector bounds six and twenty-four long rows without repeating full profiles or raw tickets', () => {
-    const acceptedNarrative = `ACCEPTED_ONCE_${'N'.repeat(41986)}`;
+test('compact projector bounds rows and omits unrelated shared authority, full profiles, and raw tickets', () => {
     const evidenceText = `AUTHORITY_ONCE_${'A'.repeat(41985)}`;
     const makeLongActor = (index) => ({
         ...actor(`NPC-pressure-${index}`, null, 'full_adult'),
@@ -235,6 +285,10 @@ test('compact projector bounds six and twenty-four long rows without repeating f
     });
     for (const count of [6, 24]) {
         const candidates = Array.from({ length: count }, (_, index) => makeLongActor(index));
+        const acceptedNarrative = [
+            ...candidates.map((candidate) => `${candidate.name}在本轮逐字正文中真实出现。`),
+            `ACCEPTED_LONG_TAIL_${'N'.repeat(41000)}`,
+        ].join('\n');
         const core = actorProfileCompletionGroupPlan(candidates, { allowDiscovery: false })
             .find((entry) => entry.key === 'character_core');
         const buildMessages = (chunk) => buildActorProfileModuleGroupMessages(chunk, {
@@ -245,11 +299,13 @@ test('compact projector bounds six and twenty-four long rows without repeating f
         assert.equal(chunks.length, Math.ceil(count / 6));
         for (const chunk of chunks) {
             const prompt = buildMessages(chunk).map((message) => message.content).join('\n');
-            assert.equal(prompt.match(/ACCEPTED_ONCE_/gu)?.length, 1);
-            assert.equal(prompt.match(/AUTHORITY_ONCE_/gu)?.length, 1);
+            assert.equal(prompt.match(/AUTHORITY_ONCE_/gu)?.length || 0, 0);
+            assert.doesNotMatch(prompt, /sharedAuthority/u);
             assert.doesNotMatch(prompt, /FULL_PROFILE_SENTINEL|RAW_TICKET_SENTINEL/u);
             assert.doesNotMatch(prompt, /workingModules|identityContext|"profileV6"/u);
-            assert.doesNotMatch(prompt, /physiology-\d+-/u);
+            assert.equal(prompt.includes('N'.repeat(2000)), false);
+            assert.ok(prompt.length < 80_000);
+            assert.ok(chunk.transportChunk.actorCount === 6 || count % 6 === chunk.transportChunk.actorCount);
             const omittedLegacyEnvelopeChars = Number(chunk.transportChunk.actorCount) * 24_000;
             assert.ok(omittedLegacyEnvelopeChars >= 144_000);
         }

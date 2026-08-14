@@ -6,10 +6,13 @@ import test from 'node:test';
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const lifecycleVmStubs = `
 let generationLifecycleTrace = [];
+let foregroundGenerationStarting = null;
 function fixedGenerationLifecycleReason(value) { return String(value || 'other'); }
 function recordGenerationLifecycleTrace() {}
 function runtimeGenerationSerialFloor() { return -1; }
 function recordNextTurnConsumerInspection() {}
+function preemptHostBackgroundModelControllersForForegroundGeneration() { return 0; }
+function recordModelDiagnostic(entry) { globalThis.__doctorDiagnostics?.push(entry); }
 `;
 
 function sourceSection(start, end) {
@@ -380,6 +383,7 @@ function loadAcceptedFinalRuntimeHarness({
 
 function loadAcceptedFinalFullDispatchHarness({
     profileResult = { status: 'not_completed' },
+    realCleanupFailed = false,
 } = {}) {
     const support = sourceSection(
         'function acceptedFinalScopeDecision(generation, scopeDigest)',
@@ -393,6 +397,14 @@ function loadAcceptedFinalFullDispatchHarness({
         'async function acceptFinalGeneration(generation)',
         'function frozenIdentityScopeId(scope)',
     );
+    const ensureCleanup = realCleanupFailed ? sourceSection(
+        'async function ensureNextTurnConsumerSlotCleaned(session, active, reason)',
+        'async function releaseNextTurnConsumer(session, reason = \'released\'',
+    ) : '';
+    const commitConsumer = realCleanupFailed ? sourceSection(
+        'async function commitNextTurnConsumer(session, envelope)',
+        'function continuityStateForInjection(namespace, { isReroll = false } = {})',
+    ) : '';
     const state = {
         scope: { chatId: 'chat-a', cardId: 'character:card-a', runtimeVersion: 'rc14' },
         dispatchedTargets: [],
@@ -402,6 +414,8 @@ function loadAcceptedFinalFullDispatchHarness({
         worldModelCalls: 0,
         worldWrites: 0,
         continuityProfileRetrySignals: new Map(),
+        worldLaunched: false,
+        diagnostics: [],
     };
     const message = {
         mes: '<content>真实自然正文：林舟把钥匙放在桌上，转身等候答复。</content>',
@@ -442,7 +456,6 @@ function loadAcceptedFinalFullDispatchHarness({
             generationId: 'generation-a', generationSerial: 3, generationType: 'normal',
             contentFingerprint: 'after', epoch: 7, operationEpoch: 11, ...options,
         }),
-        commitNextTurnConsumer: async () => true,
         releaseNextTurnConsumer: async () => true,
         enqueue: (_index, options) => captureUse(options.queuedTarget),
         enqueueOpeningResourceSync: (_index, options) => captureUse(options.expectedTarget),
@@ -459,9 +472,8 @@ function loadAcceptedFinalFullDispatchHarness({
                 target: options.expectedTarget,
                 noActorPermit: options.noActorPermit || null,
             });
-            if (!options.noActorPermit) {
-                return Promise.resolve({ status: 'actor_registry_awaiting_p2' });
-            }
+            if (state.worldLaunched) return Promise.resolve({ status: 'duplicate' });
+            state.worldLaunched = true;
             state.worldModelCalls += 1;
             state.worldWrites += 1;
             return Promise.resolve({ status: 'applied' });
@@ -469,11 +481,27 @@ function loadAcceptedFinalFullDispatchHarness({
         continuityProfileRetrySignals: state.continuityProfileRetrySignals,
         stage3AcceptedTargetKey: () => 'stage3-key',
         safeDiagnosticReason: (value) => String(value || ''),
+        recordStage3WorldFinalDiagnostic: () => undefined,
         recordOperation: (...args) => state.errors.push(args),
         setStatus: () => undefined,
+        ...(realCleanupFailed ? {
+            activeGenerationSession: generation,
+            activeNextTurnConsumer: { generationId: generation.id, cleanupConfirmed: false },
+            lastInjectionInspection: {},
+            readChatNamespace: () => ({
+                continuity: {
+                    nextTurnInjection: {
+                        consumerLease: { state: 'cleanup_failed', generationId: generation.id },
+                    },
+                },
+            }),
+            nextTurnLeaseCleanupBlocked: () => true,
+        } : {
+            commitNextTurnConsumer: async () => true,
+        }),
     };
     vm.runInNewContext(
-        `${lifecycleVmStubs}\n${support}\n${dispatch}\n${accept}\nthis.acceptFinalGeneration = acceptFinalGeneration;`,
+        `${lifecycleVmStubs}\n${support}\n${dispatch}\n${accept}\n${ensureCleanup}\n${commitConsumer}\nthis.acceptFinalGeneration = acceptFinalGeneration;`,
         sandbox,
     );
     return { state, generation, accept: sandbox.acceptFinalGeneration };
@@ -550,12 +578,12 @@ test('provider error placeholders release P4 and never become accepted narrative
     );
 });
 
-test('accepted-final dispatch gives variables and P1 the same frozen target, then wakes P3 only after P1 readback', async () => {
+test('accepted-final dispatch gives variables, P3, and P1 the same frozen target', async () => {
     const runtime = loadAcceptedFinalFullDispatchHarness();
     assert.equal(await runtime.accept(runtime.generation), true);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(runtime.state.dispatchedTargets.length, 2);
-    assert.equal(runtime.state.continuityCalls.length, 0);
+    assert.equal(runtime.state.dispatchedTargets.length, 3);
+    assert.equal(runtime.state.continuityCalls.length, 1);
     for (const target of runtime.state.dispatchedTargets) {
         assert.equal(target.scopeDigest, 'chat-a|character:card-a|rc14');
         assert.deepEqual(
@@ -566,7 +594,21 @@ test('accepted-final dispatch gives variables and P1 the same frozen target, the
     assert.deepEqual(runtime.state.errors, []);
 });
 
-test('a P1 not-completed result never grants a P3 permit or world launch', async () => {
+test('real P4 cleanup_failed commit returns false but accepted-final still dispatches variable P1 and P3', async () => {
+    const runtime = loadAcceptedFinalFullDispatchHarness({ realCleanupFailed: true });
+    assert.equal(await runtime.accept(runtime.generation), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runtime.state.dispatchedTargets.length, 3);
+    assert.equal(runtime.state.profileTargets.length, 1);
+    assert.equal(runtime.state.continuityCalls.length, 1);
+    assert.equal(runtime.state.worldModelCalls, 1);
+    assert.equal(runtime.state.worldWrites, 1);
+    assert.ok(runtime.state.dispatchedTargets.every((target) => (
+        target.scopeDigest === 'chat-a|character:card-a|rc14'
+    )));
+});
+
+test('a P1 not-completed result grants no retry permit but cannot block independent P3', async () => {
     const flushDispatch = async (runtime) => {
         assert.equal(await runtime.accept(runtime.generation), true);
         await new Promise((resolve) => setImmediate(resolve));
@@ -583,10 +625,10 @@ test('a P1 not-completed result never grants a P3 permit or world launch', async
     });
     await flushDispatch(incomplete);
     assert.equal(incomplete.state.profileTargets.length, 1);
-    // A not-completed P1 result cannot wake P3 at all.
-    assert.equal(incomplete.state.continuityCalls.length, 0);
-    assert.equal(incomplete.state.worldModelCalls, 0);
-    assert.equal(incomplete.state.worldWrites, 0);
+    assert.equal(incomplete.state.continuityCalls.length, 1);
+    assert.equal(incomplete.state.worldModelCalls, 1);
+    assert.equal(incomplete.state.worldWrites, 1);
+    assert.equal(incomplete.state.continuityCalls[0].noActorPermit, null);
     assert.equal(incomplete.state.errors.length, 0);
     assert.equal(incomplete.state.continuityProfileRetrySignals.size, 0);
 
@@ -594,7 +636,7 @@ test('a P1 not-completed result never grants a P3 permit or world launch', async
         profileResult: { status: 'atomic_readback' },
     });
     await flushDispatch(atomic);
-    assert.equal(atomic.state.continuityCalls.length, 1);
+    assert.equal(atomic.state.continuityCalls.length, 2);
     assert.equal(atomic.state.continuityProfileRetrySignals.size, 0);
     assert.equal(atomic.state.continuityCalls.every((call) => call.noActorPermit === null), true);
 
@@ -602,7 +644,7 @@ test('a P1 not-completed result never grants a P3 permit or world launch', async
         profileResult: { status: 'no_candidates' },
     });
     await flushDispatch(noCandidates);
-    assert.equal(noCandidates.state.continuityCalls.length, 1);
+    assert.equal(noCandidates.state.continuityCalls.length, 2);
     assert.equal(noCandidates.state.continuityProfileRetrySignals.size, 0);
     assert.equal(noCandidates.state.continuityCalls.filter((call) => (
         call.noActorPermit?.status === 'no_candidates'
@@ -611,7 +653,7 @@ test('a P1 not-completed result never grants a P3 permit or world launch', async
     assert.equal(noCandidates.state.worldWrites, 1);
 });
 
-test('strict no-candidates wakes P3 only after terminal recovery save and content readback proof', async () => {
+test('strict no-candidates proof controls only the P1 wake while accepted-final P3 stays independent', async () => {
     const finalize = loadActorProfileRecoveryOutcomeFinalizer();
     const captured = { chatId: 'chat-a', generationId: 'generation-a' };
     const raw = {
@@ -636,8 +678,9 @@ test('strict no-candidates wakes P3 only after terminal recovery save and conten
     assert.equal(await successfulDispatch.accept(successfulDispatch.generation), true);
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(successfulDispatch.state.continuityCalls.length, 1);
-    assert.equal(successfulDispatch.state.continuityCalls[0].noActorPermit.profileBatch.readbackVerified, true);
+    assert.equal(successfulDispatch.state.continuityCalls.length, 2);
+    assert.equal(successfulDispatch.state.continuityCalls.find((call) => call.noActorPermit)
+        .noActorPermit.profileBatch.readbackVerified, true);
     assert.equal(successfulDispatch.state.worldModelCalls, 1);
 
     const failureCalls = [];
@@ -662,9 +705,10 @@ test('strict no-candidates wakes P3 only after terminal recovery save and conten
     assert.equal(await failedDispatch.accept(failedDispatch.generation), true);
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(failedDispatch.state.continuityCalls.length, 0);
-    assert.equal(failedDispatch.state.worldModelCalls, 0);
-    assert.equal(failedDispatch.state.worldWrites, 0);
+    assert.equal(failedDispatch.state.continuityCalls.length, 1);
+    assert.equal(failedDispatch.state.continuityCalls[0].noActorPermit, null);
+    assert.equal(failedDispatch.state.worldModelCalls, 1);
+    assert.equal(failedDispatch.state.worldWrites, 1);
 });
 
 test('accepted-final rejection is ephemeral and an old epoch cannot touch the new chat', async () => {
@@ -753,7 +797,7 @@ function loadP4StaleLeasePrecomposeHarness({
     );
     const ownership = sourceSection(
         'function persistedStaleWorldLeaseOwnership(context, namespace)',
-        'function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope)',
+        'function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope, decisionSink = null)',
     );
     const precompose = sourceSection(
         'async function precomposeNextTurnConsumer(session)',
@@ -921,6 +965,7 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
         namespaceWrites: 0,
         providerCleanup: 0,
         releases: 0,
+        diagnostics: [],
     };
     const message = { mes: '<content>Natural final text.</content>', swipe_id: 1 };
     const scope = { chatId: 'chat-a', cardId: 'character:card-a', runtimeVersion: 'rc14' };
@@ -930,6 +975,7 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
         operationEpoch: 12,
         runtimeGenerationSerialFloor: () => -1,
         activeGenerationSession: null,
+        foregroundGenerationStarting: null,
         activeNextTurnConsumer: null,
         document: { body: { dataset: {} } },
         lastGeneration: {
@@ -961,6 +1007,7 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
         acceptedFinalSnapshot: () => ({ index: 0, swipeId: 1, contentFingerprint: 'before' }),
         invalidateOperations: () => { sandbox.operationEpoch += 1; },
         resetCurrentModelCallStats: () => undefined,
+        preemptHostBackgroundModelControllersForForegroundGeneration: () => 0,
         currentActorSovereigntyScope: () => scope,
         actorSovereigntyScopeDigest: (value) => `${value.chatId}|${value.cardId}|${value.runtimeVersion}`,
         actorSovereigntyScopesMatch: (left, right) => left.chatId === right.chatId
@@ -1004,11 +1051,13 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
         stage3AcceptedTargetKey: () => 'p3',
         safeDiagnosticReason: (value) => String(value || ''),
         recordOperation: () => undefined,
+        recordModelDiagnostic: (entry) => state.diagnostics.push(entry),
         setStatus: () => undefined,
         setTimeout: (callback) => { state.timer = callback; return 1; },
         clearTimeout: () => undefined,
         Date: { now: () => 7 },
         Math,
+        __doctorDiagnostics: state.diagnostics,
     };
     vm.runInNewContext(
         `${trace}\n${candidate}\n${identity}\n${support}\n${dispatch}\n${accept}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents; this.readTrace = () => generationLifecycleTraceDiagnosticProjection(getContext());`,
@@ -1056,11 +1105,16 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
     assert.equal(state.acceptedEnvelopes[0].generationId, session.id);
     assert.equal(state.acceptedEnvelopes[0].contentFingerprint, 'after');
     assert.equal(state.acceptedEnvelopes[0].scopeDigest, 'chat-a|character:card-a|rc14');
+    assert.equal(state.diagnostics.length, 1);
+    assert.equal(state.diagnostics[0].task, 'doctor_total');
+    assert.equal(state.diagnostics[0].targetIndex, 0);
+    assert.equal(state.diagnostics[0].targetCount, 3);
+    assert.ok(state.diagnostics[0].doctorTotalMs >= 0);
     const p1 = state.dispatches.find(({ kind }) => kind === 'p1')?.target;
     const p3 = state.dispatches.find(({ kind }) => kind === 'p3')?.target;
     assert.ok(p1);
-    assert.equal(p3, undefined, 'P3 is only woken by an atomic P1 result');
-    for (const target of [p1]) {
+    assert.ok(p3, 'accepted-final launches P3 independently of P1 completion');
+    for (const target of [p1, p3]) {
         assert.equal(target.chatId, 'chat-a');
         assert.equal(target.scopeDigest, 'chat-a|character:card-a|rc14');
         assert.deepEqual(
@@ -1429,12 +1483,12 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
         setNextTurnConsumerFallback: (text) => { state.fallbackText = text; return true; },
         lastInjectionInspection: {},
         Date: { now: () => 1 }, Math,
-        enqueue: (_index, options) => { state.dispatches.push(options.queuedTarget); return Promise.resolve({ status: 'not_completed' }); },
+        enqueue: (_index, options) => { state.dispatches.push({ kind: 'variable', target: options.queuedTarget }); return Promise.resolve({ status: 'not_completed' }); },
         enqueueOpeningResourceSync: (_index, options) => { state.dispatches.push(options.expectedTarget); return Promise.resolve({ status: 'not_completed' }); },
         runSocialAuditTarget: (target) => { state.dispatches.push(target); return Promise.resolve({ status: 'not_completed' }); },
         enqueueForum: (_index, options) => { state.dispatches.push(options.expectedTarget); return Promise.resolve({ status: 'not_completed' }); },
-        enqueueActorProfiles: (_index, options) => { state.dispatches.push(options.expectedTarget); return Promise.resolve({ status: 'not_completed' }); },
-        enqueueContinuity: (_index, options) => { state.dispatches.push(options.expectedTarget); return Promise.resolve({ status: 'not_completed' }); },
+        enqueueActorProfiles: (_index, options) => { state.dispatches.push({ kind: 'p1', target: options.expectedTarget }); return Promise.resolve({ status: 'not_completed' }); },
+        enqueueContinuity: (_index, options) => { state.dispatches.push({ kind: 'p3', target: options.expectedTarget }); return Promise.resolve({ status: 'not_completed' }); },
         continuityProfileRetrySignals: new Map(), stage3AcceptedTargetKey: () => 'p3',
         safeDiagnosticReason: (value) => String(value || ''), recordOperation: () => { state.writes += 1; },
         setStatus: (...args) => state.statuses.push(args), setSocialStatus: () => undefined,
@@ -1469,8 +1523,9 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(state.identitySaves, 1);
     assert.equal(messages['chat-b'].extra.mvu_auto_doctor_generation_id, bSession.id);
-    assert.equal(state.dispatches.length, 2);
-    assert.ok(state.dispatches.every((target) => target.scopeDigest === 'scope-chat-b'));
+    assert.equal(state.dispatches.length, 3);
+    assert.deepEqual(state.dispatches.map((entry) => entry.kind).sort(), ['p1', 'p3', 'variable']);
+    assert.ok(state.dispatches.every((entry) => entry.target.scopeDigest === 'scope-chat-b'));
 
     state.chatId = 'chat-a';
     sandbox.lastGeneration = {
@@ -1530,6 +1585,7 @@ test('P4 reads the prior producer without rewriting identity and three accepted 
     const sandbox = {
         currentGenerationEpoch: 0, operationEpoch: 3, generationSerial: 0,
         activeGenerationSession: null, activeNextTurnConsumer: null,
+        foregroundGenerationStarting: null,
         lastGeneration: { id: '', serial: 0, type: 'normal' },
         pendingAcceptedFinalTimer: null, lastInjectionInspection: {}, continuationIdentityHint: null,
         document: { body: { dataset: {} } }, ui: {}, window: {},
@@ -1611,6 +1667,8 @@ test('P4 reads the prior producer without rewriting identity and three accepted 
         dispatchAcceptedFinal: (envelope) => state.dispatches.push(envelope),
         invalidateOperations: () => undefined,
         resetCurrentModelCallStats: () => undefined,
+        preemptHostBackgroundModelControllersForForegroundGeneration: () => 0,
+        recordModelDiagnostic: () => undefined,
         recordGenerationLifecycleTrace: () => undefined,
         fixedGenerationLifecycleReason: (value) => String(value || 'other'),
         setStatus: () => undefined,
@@ -1858,6 +1916,7 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
             state.writes += 1;
             return { status: 'applied' };
         },
+        recordStage3WorldFinalDiagnostic: () => undefined,
         safeDiagnosticReason: (value) => String(value || ''),
         setContinuityStatus: (...args) => state.statuses.push(args),
         scheduleSovereigntyAutoRetry: () => {
@@ -1879,7 +1938,7 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
     };
 }
 
-test('accepted-final dispatch starts variables and P1, then P1 readback wakes independent P3 without a global barrier', async () => {
+test('accepted-final dispatch starts P3 independently and lets P1 readback issue an idempotent wake', async () => {
     const handler = sourceSection(
         'function dispatchAcceptedFinal(envelope)',
         'async function acceptFinalGeneration(generation)',
@@ -1887,19 +1946,21 @@ test('accepted-final dispatch starts variables and P1, then P1 readback wakes in
     const profileAt = handler.indexOf("launchScoped('人物档案'");
     const profileEnqueueAt = handler.indexOf('const profileTask = enqueueActorProfiles', profileAt);
     const profileReadbackAt = handler.indexOf("['atomic_readback', 'no_candidates']", profileEnqueueAt);
-    const profileRetryAt = handler.indexOf('void enqueueContinuity(envelope.index', profileReadbackAt);
+    const profileRetryAt = handler.indexOf('await enqueueContinuity(envelope.index', profileReadbackAt);
     assert.ok(profileAt >= 0 && profileEnqueueAt > profileAt);
     assert.ok(profileReadbackAt > profileEnqueueAt);
     assert.ok(profileRetryAt > profileReadbackAt);
     assert.match(
         handler.slice(profileAt),
-        /\['atomic_readback', 'no_candidates'\][\s\S]*?void enqueueContinuity\(envelope\.index/u,
+        /\['atomic_readback', 'no_candidates'\][\s\S]*?await enqueueContinuity\(envelope\.index/u,
     );
-    assert.doesNotMatch(handler, /launchScoped\('世界连续性'/u);
+    assert.match(handler, /launchScoped\('世界连续性'[\s\S]*?enqueueContinuity/u);
     assert.doesNotMatch(
         handler,
         /createTargetSettlementRecord|barrierRecord|waitAutomaticTargetSettled|isDuringExtraAnalysis|getMvuData/u,
     );
+    assert.match(handler, /Promise\.allSettled\(\[variableTask, \.\.\.moduleTasks\]\)/u);
+    assert.match(handler, /doctorTotalMs: Date\.now\(\) - acceptedAt/u);
 
 });
 
@@ -1961,7 +2022,7 @@ test('existing continuity queue dedupes event storms and performs zero writes fo
     assert.equal(storm.state.writes, 1);
     assert.deepEqual(
         storm.state.statuses.at(-1),
-        ['世界连续性：本回合因果已整理并保存。', 'ok'],
+        ['世界连续性：本回合因果已整理并保存，终态为已提交。', 'ok'],
     );
 
     const mechanism = loadContinuityQueueHarness({
@@ -1979,7 +2040,7 @@ test('existing continuity queue dedupes event storms and performs zero writes fo
     assert.equal((await recovered.enqueue()).status, 'applied');
     assert.deepEqual(
         recovered.state.statuses.at(-1),
-        ['世界连续性：本回合已完成，持久记录已确认。', 'ok'],
+        ['世界连续性：本回合已完成，终态为已提交，持久记录已确认。', 'ok'],
     );
 
     for (const changed of [
@@ -2000,6 +2061,70 @@ test('existing continuity queue dedupes event storms and performs zero writes fo
         assert.equal(stale.state.starts, 0, JSON.stringify(changed));
         assert.equal(stale.state.writes, 0, JSON.stringify(changed));
     }
+});
+
+test('P1 wake coalesces behind an in-flight accepted-final P3 without a duplicate world run', async () => {
+    const target = makeTarget();
+    const queue = loadContinuityQueueHarness({ expected: target });
+    const first = queue.enqueue();
+    const wake = queue.enqueue({
+        afterPending: true,
+        noActorPermit: { status: 'no_candidates' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(queue.state.starts, 1);
+    queue.gate.resolve();
+    assert.equal((await first).status, 'applied');
+    assert.equal((await wake).status, 'applied');
+    assert.equal(queue.state.starts, 1);
+    assert.equal(queue.state.writes, 1);
+});
+
+test('P1 wake does not resend a failed accepted target, while explicit force can retry it', async () => {
+    const target = makeTarget();
+    const queue = loadContinuityQueueHarness({
+        expected: target,
+        worldResult: {
+            status: 'failed',
+            reason: 'world_targeted_repair_invalid',
+            validationCode: 'world.semantic_progress_missing',
+        },
+    });
+    assert.equal((await queue.enqueue()).status, 'failed');
+    assert.equal(queue.state.starts, 1);
+    const wake = await queue.enqueue({ afterPending: true });
+    assert.equal(wake.status, 'duplicate');
+    assert.equal(queue.state.starts, 1, 'P1 idempotent wake cannot issue a second full P3 run');
+    assert.equal((await queue.enqueue({ force: true })).status, 'failed');
+    assert.equal(queue.state.starts, 2, 'the existing explicit recovery control remains available');
+});
+
+test('an in-flight failed P3 is joined verbatim by P1 without recursive enqueue', async () => {
+    const target = makeTarget();
+    const queue = loadContinuityQueueHarness({
+        expected: target,
+        worldResult: {
+            status: 'failed',
+            reason: 'world_targeted_repair_invalid',
+            validationCode: 'world.actor.adjudication_contract_invalid',
+        },
+    });
+    const first = queue.enqueue();
+    const wake = queue.enqueue({ afterPending: true });
+    assert.equal((await first).status, 'failed');
+    const joined = await wake;
+    assert.equal(joined.status, 'failed');
+    assert.equal(joined.validationCode, 'world.actor.adjudication_contract_invalid');
+    assert.equal(queue.state.starts, 1);
+    const queueSource = sourceSection(
+        'async function enqueueContinuity(targetId, {',
+        'function stage3AttemptProjection(ledger, target)',
+    );
+    const afterPendingBranch = queueSource.slice(
+        queueSource.indexOf('if (afterPending)'),
+        queueSource.indexOf("return { status: 'duplicate', reason: 'world_target_pending' }"),
+    );
+    assert.doesNotMatch(afterPendingBranch, /enqueueContinuity\(/u);
 });
 
 test('Doctor keeps the external database outside its event and promise ownership', () => {

@@ -18,6 +18,30 @@ export interface ActorProfileBatchTransactionResult {
     finalLedger?: Record<string, unknown> | null;
     batchMeta?: ActorProfileBatchParseMeta | null;
     batchFormatReplacementAttempted?: boolean;
+    recoveryProgress?: ActorProfileRecoveryProgress | null;
+    timings?: {
+        totalMs: number;
+        modelMs: number;
+        parseMs: number;
+        persistMs: number;
+    };
+}
+
+export interface ActorProfileRecoveryProgressRow {
+    actorId: string;
+    name: string;
+    discovery: boolean;
+    sourceAnchor: string;
+    modules: Record<string, string>;
+    identityReveal?: object;
+}
+
+export interface ActorProfileRecoveryProgress {
+    version: 1;
+    identityAttempted: boolean;
+    identityLocked: boolean;
+    rows: ActorProfileRecoveryProgressRow[];
+    verifiedFieldCount: number;
 }
 
 export interface ActorProfileBatchPersistenceContext {
@@ -55,6 +79,13 @@ export function actorProfileFinalCandidateClosure(options?: Record<string, unkno
     resolutionFailures: object[];
     groupRowFailures: object[];
 };
+export function normalizeActorProfileRecoveryProgress(
+    value: unknown,
+): ActorProfileRecoveryProgress | null;
+export function actorProfileRecoveryProgressDigest(
+    value: unknown,
+    sourceDigest?: string,
+): string;
 
 export function completeActorProfileBatchTransaction(options?: {
     persistPendingBatch?: ActorProfileBatchPersistenceCallback;
@@ -62,5 +93,6 @@ export function completeActorProfileBatchTransaction(options?: {
     requestBatch?: (context: object) => Promise<unknown>;
     preflightDiscoveries?: (context: object) => Promise<object>;
     resolveDiscoveries?: (context: object) => Promise<object>;
+    recoveryProgress?: ActorProfileRecoveryProgress | null;
     [key: string]: unknown;
 }): Promise<ActorProfileBatchTransactionResult>;

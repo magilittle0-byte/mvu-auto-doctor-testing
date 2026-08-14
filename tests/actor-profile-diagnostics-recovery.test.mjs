@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 import { fingerprint } from '../core.mjs';
 import { actorProfileBatchSemanticFingerprint } from '../actor-profile-batch-core.mjs';
+import { continuityCoreSemanticFingerprint } from '../continuity-core.mjs';
 import { createDoctorRuntimePresentation, createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
@@ -62,6 +64,7 @@ test('live profile diagnostics are bound to the exact current SourceRef and proj
         'actorProfileNoCandidatesTerminalReadbackMatches',
         'actorProfileTicketBatchPersistenceMatches',
         'actorProfileRetryReceiptMatches',
+        'actorProfileRecoveryProgressFromReceipt',
         `${helperSource}; return hydratedActorProfileDiagnostic;`,
     )(
         latestDiagnostic,
@@ -73,6 +76,7 @@ test('live profile diagnostics are bound to the exact current SourceRef and proj
         (stored, current) => stored?.proofTarget?.generationId === current?.generationId,
         () => false,
         () => false,
+        () => null,
     )(namespace);
     const cancelled = load({
         status: 'not_completed', failingModules: ['physiology'],
@@ -83,6 +87,7 @@ test('live profile diagnostics are bound to the exact current SourceRef and proj
         status: 'not_completed', failingModules: ['physiology'],
         lastFailureCodes: ['actor_profile.cancelled'], canRetry: true,
         abortCause: 'cancelled',
+        recoveredFieldCount: 0,
     });
     const replaced = load({
         status: 'no_candidates', failingModules: [], lastFailureCodes: [],
@@ -466,6 +471,7 @@ test('user cancel after epoch invalidation persists only the exact current profi
         'sourceRefOf', 'actorProfileRecoverySourceMatches',
         'actorProfileNoCandidatesTerminalReadbackMatches',
         'actorProfileTicketBatchPersistenceMatches', 'actorProfileRetryReceiptMatches',
+        'actorProfileRecoveryProgressFromReceipt',
         `${hydrateSource}; return hydratedActorProfileDiagnostic;`,
     )(
         { status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false },
@@ -477,6 +483,7 @@ test('user cancel after epoch invalidation persists only the exact current profi
         () => false,
         actorProfileTicketBatchPersistenceMatches,
         actorProfileRetryReceiptMatches,
+        () => null,
     );
     assert.deepEqual(hydrate({ actorProfileRetryReceipt: receipt }), {
         status: 'not_completed',
@@ -484,6 +491,7 @@ test('user cancel after epoch invalidation persists only the exact current profi
         lastFailureCodes: ['actor_profile.cancelled'],
         canRetry: true,
         abortCause: 'cancelled',
+        recoveredFieldCount: 0,
     });
 
     mark(new Set([controller]));
@@ -535,6 +543,18 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
                 'private text',
             ],
         },
+        prompt: {
+            task: 'private task name', capturedAt: 10, maxTokens: 2048, totalChars: 9876,
+            segments: [{ role: 'user', chars: 9876 }],
+        },
+        modelDiagnostics: [{
+            at: 20, phase: 'validation', task: 'doctor_total', status: 'succeeded',
+            durationMs: 300, queueWaitMs: 20, modelMs: 200, parseMs: 30,
+            persistMs: 50, profileTotalMs: 280, doctorTotalMs: 350,
+            inputChars: 9876, outputChars: 1234, groupKey: 'character_core',
+            moduleKeys: ['person', 'physiology'], targetCount: 2, fieldCount: 14,
+            recoveredFieldCount: 6, cancelReason: 'foreground_preempted', targetIndex: 4,
+        }],
     });
     assert.equal(projected.plugin.runtimeCriticalFingerprint, 'runtime-critical:12345:abcdef12');
     assert.deepEqual(projected.latestStatuses.profile, {
@@ -554,6 +574,18 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
         'actor_candidate.identity_excluded',
     ]);
     assert.deepEqual(projected.actorShards, { deprecated: true });
+    assert.deepEqual(projected.lastPrompt.segments, [{ role: 'user', chars: 9876 }]);
+    assert.deepEqual(projected.modelDiagnostics[0], {
+        at: 20, phase: 'validation', taskDigest: projected.modelDiagnostics[0].taskDigest,
+        channel: '', status: 'succeeded', durationMs: 300, queueWaitMs: 20,
+        modelMs: 200, parseMs: 30, validationMs: 0, persistMs: 50, profileTotalMs: 280,
+        doctorTotalMs: 350, inputChars: 9876, outputChars: 1234, httpStatus: 0,
+        inputTokens: 0, outputTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0,
+        attempt: 0, routeSlotIndex: 0, failover: false, groupKey: 'character_core',
+        moduleKeys: ['person', 'physiology'], targetCount: 2, fieldCount: 14,
+        recoveredFieldCount: 6, cancelReason: 'foreground_preempted', targetIndex: 4,
+        failureKind: '', rootType: '', tags: {}, recovered: false, worldFinalPhase: '',
+    });
 });
 
 test('privacy projection admits only the bounded actor identity failure whitelist', () => {
@@ -613,6 +645,12 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     );
     assert.match(fingerprintSource, /actorProfileRecoveryCriticalFingerprint\(\)/u);
     assert.match(fingerprintSource, /hydratedActorProfileDiagnostic\.toString\(\)/u);
+    assert.match(
+        fingerprintSource,
+        /preemptHostBackgroundModelControllersForForegroundGeneration\.toString\(\)/u,
+    );
+    assert.match(fingerprintSource, /modelFailureKind\.toString\(\)/u);
+    assert.match(fingerprintSource, /assertUsableModelOutput\.toString\(\)/u);
     assert.match(fingerprintSource, /callModel\.toString\(\)/u);
     assert.match(fingerprintSource, /worldCallReservedForUserCancellation\.toString\(\)/u);
     assert.match(fingerprintSource, /clearWorldCallReservationWithReadback\.toString\(\)/u);
@@ -629,6 +667,13 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /stage3PriorReservedCallCanRetire\.toString\(\)/u);
     assert.match(fingerprintSource, /retirePriorReservedWorldCallForManualRecovery\.toString\(\)/u);
     assert.match(fingerprintSource, /writeChatNamespace\.toString\(\)/u);
+    assert.match(fingerprintSource, /persistedNamespaceReadbackEvidence\.toString\(\)/u);
+    assert.match(fingerprintSource, /selectedTransactionUnselectedAuthority\.toString\(\)/u);
+    assert.match(fingerprintSource, /selectedTransactionSafeFailureNamespace\.toString\(\)/u);
+    assert.match(fingerprintSource, /checkpointOnlyRetryAuthorityMerge\.toString\(\)/u);
+    assert.match(fingerprintSource, /selectedTransactionReadbackResolution\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3Phase1ReadbackValidationCode\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3Phase2ReadbackValidationCode\.toString\(\)/u);
     assert.match(fingerprintSource, /rebaseActorSovereigntyFieldWriteAfterMigration\.toString\(\)/u);
     assert.match(fingerprintSource, /persistNpcDesignTicketBatch\.toString\(\)/u);
     assert.match(fingerprintSource, /assistantTargetHasPriorRealPlayerInput\.toString\(\)/u);
@@ -638,13 +683,20 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /actorProfileNoCandidatesTerminalReadbackMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /runActorProfileTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /actorActionTargetOf\.toString\(\)/u);
+    assert.match(fingerprintSource, /persistActorActionAttemptsForTurn\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3PreparedWorldCheckpoint\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3PersistPreparedActorAttemptsOnFreshLedger\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3PersistAttemptlessPreparedWorldCandidate\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3PreparedWorldCheckpointMatches\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3PreparedPhase1StatesMatch\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3ValidateWorldCandidateInMemory\.toString\(\)/u);
+    assert.match(fingerprintSource, /parseContinuityOutput\.toString\(\)/u);
     assert.match(fingerprintSource, /extractFirstBalancedJsonObject\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3LocalRecallPacket\.toString\(\)/u);
     assert.match(fingerprintSource, /generateWorldContinuitySingleBatch\.toString\(\)/u);
     assert.match(fingerprintSource, /actorActionCandidatesFromShard\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3TargetActionAuthorityProjection\.toString\(\)/u);
+    assert.match(fingerprintSource, /stage3CanonicalSettlementProof\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3SettlementProofMatchesTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /stage3PersistedPackageForTarget\.toString\(\)/u);
     assert.match(fingerprintSource, /buildContinuityInjection\.toString\(\)/u);
@@ -659,6 +711,7 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.match(fingerprintSource, /buildContinuityMessages\.toString\(\)/u);
     assert.match(fingerprintSource, /enqueueContinuity\.toString\(\)/u);
     assert.match(fingerprintSource, /commitPreparedWorldCandidate\.toString\(\)/u);
+    assert.match(fingerprintSource, /recordStage3WorldFinalDiagnostic\.toString\(\)/u);
     assert.match(fingerprintSource, /precomposeNextTurnConsumer\.toString\(\)/u);
     assert.match(fingerprintSource, /recordNextTurnConsumerInspection\.toString\(\)/u);
     assert.match(fingerprintSource, /commitNextTurnConsumer\.toString\(\)/u);
@@ -670,10 +723,25 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
     assert.notEqual(changedHydration, fingerprintSource);
     assert.notEqual(fingerprint(changedHydration), fingerprint(fingerprintSource));
     for (const helperName of [
+        'preemptHostBackgroundModelControllersForForegroundGeneration',
+        'modelFailureKind',
+        'assertUsableModelOutput',
+        'persistedNamespaceReadbackEvidence',
+        'selectedTransactionUnselectedAuthority',
+        'selectedTransactionSafeFailureNamespace',
+        'checkpointOnlyRetryAuthorityMerge',
+        'selectedTransactionReadbackResolution',
+        'stage3Phase1ReadbackValidationCode',
+        'stage3Phase2ReadbackValidationCode',
         'clearWorldCallReservationWithReadback',
         'stage3AcceptedTargetIsStrictlyNewer',
         'stage3PriorReservedCallCanRetire',
         'retirePriorReservedWorldCallForManualRecovery',
+        'persistActorActionAttemptsForTurn',
+        'stage3PersistPreparedActorAttemptsOnFreshLedger',
+        'stage3PersistAttemptlessPreparedWorldCandidate',
+        'stage3TargetActionAuthorityProjection',
+        'stage3CanonicalSettlementProof',
     ]) {
         const changed = fingerprintSource.replace(
             `${helperName}.toString()`,
@@ -683,6 +751,48 @@ test('diagnostic critical fingerprint is runtime-derived and covers the accepted
         assert.notEqual(fingerprint(changed), fingerprint(fingerprintSource), helperName);
     }
     assert.doesNotMatch(fingerprintSource, /[0-9a-f]{7,40}/u);
+});
+
+test('last prompt diagnostics retain only privacy-safe role and length metadata', () => {
+    const promptTextSource = sourceBetween(
+        indexSource,
+        'function promptSnapshotText',
+        'function renderPromptSnapshot',
+    );
+    const promptSnapshotText = Function(
+        `${promptTextSource}; return promptSnapshotText;`,
+    )();
+    const privateContent = 'PRIVATE-NARRATIVE-AND-NAME';
+    const safeSnapshot = {
+        totalChars: privateContent.length,
+        segments: [{ role: 'user', chars: privateContent.length }],
+    };
+    const summary = promptSnapshotText(safeSnapshot);
+    assert.match(summary, /USER/u);
+    assert.match(summary, new RegExp(String(privateContent.length), 'u'));
+    assert.doesNotMatch(summary, new RegExp(privateContent, 'u'));
+    assert.doesNotMatch(promptTextSource, /\.content\b|\.messages\b/u);
+
+    const callModelSource = sourceBetween(
+        indexSource,
+        'async function callModel',
+        'async function probeModelChannelConnections',
+    );
+    const snapshotStart = callModelSource.indexOf('lastPromptSnapshot = {');
+    const snapshotEnd = callModelSource.indexOf('renderPromptSnapshot();', snapshotStart);
+    assert.ok(snapshotStart >= 0 && snapshotEnd > snapshotStart);
+    const snapshotAssignment = callModelSource.slice(snapshotStart, snapshotEnd);
+    assert.match(snapshotAssignment, /segments:\s*messageCopies\.map/u);
+    assert.match(snapshotAssignment, /chars:\s*message\.content\.length/u);
+    assert.doesNotMatch(snapshotAssignment, /messages:\s*messageCopies/u);
+
+    const publicApiSource = sourceBetween(
+        indexSource,
+        'getLastPromptInfo:',
+        'exportDiagnosticPackage,',
+    );
+    assert.match(publicApiSource, /lastPromptSnapshot\.segments\.map/u);
+    assert.doesNotMatch(publicApiSource, /\.content\b|lastPromptSnapshot\.messages/u);
 });
 
 test('prompt context and ticket normalizer implementations change generation and runtime fingerprints', () => {
@@ -699,6 +809,7 @@ test('prompt context and ticket normalizer implementations change generation and
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
         'actorProfileBatchSemanticFingerprint',
+        'continuityCoreSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
@@ -707,6 +818,7 @@ test('prompt context and ticket normalizer implementations change generation and
         () => 'recovery-fingerprint',
         () => generationFingerprint,
         () => 'batch-fingerprint',
+        () => 'continuity-fingerprint',
         ...helperNames.map((name) => Function(`return function ${name}(){}`)()),
     )();
     const baselineGeneration = actorProfileGenerationCriticalFingerprint();
@@ -723,6 +835,131 @@ test('prompt context and ticket normalizer implementations change generation and
     assert.notEqual(runtimeFor(changedTicketNormalizer), baselineRuntime);
 });
 
+test('runtime fingerprint includes every P1 writer used for bounded world-only rebase', () => {
+    const runtimeSource = sourceBetween(
+        indexSource,
+        'function doctorRuntimeCriticalFingerprint',
+        'function diagnosticPayload',
+    );
+    for (const helper of [
+        'actorProfileRebaseOnWorldOnlyLedgerDrift',
+        'actorProfileActorLedgerCasCanRebase',
+        'persistActorRegistryForTurn',
+        'persistActorProfilePhaseWithWorldRebase',
+    ]) {
+        assert.match(runtimeSource, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
+    }
+});
+
+test('continuity recovery normalizer mutations change semantic and runtime fingerprints', () => {
+    const runtimeSource = sourceBetween(
+        indexSource,
+        'function doctorRuntimeCriticalFingerprint',
+        'function diagnosticPayload',
+    );
+    const helperNames = [...new Set([...runtimeSource.matchAll(/\b([A-Za-z_$][\w$]*)\.toString\(\)/gu)]
+        .map((match) => match[1]))];
+    const runtimeFor = (continuityFingerprint, helperOverrides = {}) => Function(
+        'VERSION',
+        'fingerprint',
+        'actorProfileRecoveryCriticalFingerprint',
+        'actorProfileGenerationCriticalFingerprint',
+        'actorProfileBatchSemanticFingerprint',
+        'continuityCoreSemanticFingerprint',
+        ...helperNames,
+        `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
+    )(
+        'test-version',
+        fingerprint,
+        () => 'recovery-fingerprint',
+        () => 'generation-fingerprint',
+        () => 'batch-fingerprint',
+        () => continuityFingerprint,
+        ...helperNames.map((name) => helperOverrides[name]
+            || Function(`return function ${name}(){}`)()),
+    )();
+    const baseline = continuityCoreSemanticFingerprint();
+    const mutations = [
+        continuityCoreSemanticFingerprint({
+            normalizeNextTurnSettlementProof:
+                function normalizeNextTurnSettlementProofChanged() { return null; },
+        }),
+        continuityCoreSemanticFingerprint({
+            normalizeNextTurnInjection:
+                function normalizeNextTurnInjectionChanged() { return null; },
+        }),
+        continuityCoreSemanticFingerprint({
+            normalizeContinuityState:
+                function normalizeContinuityStateChanged() { return null; },
+        }),
+    ];
+    const baselineRuntime = runtimeFor(baseline);
+    for (const changed of mutations) {
+        assert.notEqual(changed, baseline);
+        assert.notEqual(runtimeFor(changed), baselineRuntime);
+    }
+    assert.notEqual(runtimeFor(baseline, {
+        stage3FieldStateCanRebaseUnchanged:
+            function stage3FieldStateCanRebaseUnchangedChanged() { return false; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        persistedNamespaceMatches:
+            function persistedNamespaceMatchesChanged() { return false; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        selectedChatNamespaceFieldsMatch:
+            function selectedChatNamespaceFieldsMatchChanged() { return false; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        performChatNamespaceWrite:
+            async function performChatNamespaceWriteChanged() { return false; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        stage3ParseWorldTargetedRepairOutput:
+            function stage3ParseWorldTargetedRepairOutputChanged() { return null; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        normalizedModelDiagnostics:
+            function normalizedModelDiagnosticsChanged() { return []; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        modelTransportFailureCanFailover:
+            function modelTransportFailureCanFailoverChanged() { return true; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        assertUsableModelOutput:
+            function assertUsableModelOutputChanged() { return 'changed'; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        persistedNamespaceReadbackEvidence:
+            function persistedNamespaceReadbackEvidenceChanged() { return null; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        selectedTransactionUnselectedAuthority:
+            function selectedTransactionUnselectedAuthorityChanged() { return null; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        selectedTransactionSafeFailureNamespace:
+            function selectedTransactionSafeFailureNamespaceChanged() { return null; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        checkpointOnlyRetryAuthorityMerge:
+            function checkpointOnlyRetryAuthorityMergeChanged() { return null; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        selectedTransactionReadbackResolution:
+            function selectedTransactionReadbackResolutionChanged() { return null; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        stage3Phase1ReadbackValidationCode:
+            function stage3Phase1ReadbackValidationCodeChanged() { return 'changed'; },
+    }), baselineRuntime);
+    assert.notEqual(runtimeFor(baseline, {
+        stage3Phase2ReadbackValidationCode:
+            function stage3Phase2ReadbackValidationCodeChanged() { return 'changed'; },
+    }), baselineRuntime);
+});
+
 test('resolver closure and group failure attribution helpers change batch and runtime fingerprints', () => {
     const runtimeSource = sourceBetween(
         indexSource,
@@ -737,6 +974,7 @@ test('resolver closure and group failure attribution helpers change batch and ru
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
         'actorProfileBatchSemanticFingerprint',
+        'continuityCoreSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
@@ -745,6 +983,7 @@ test('resolver closure and group failure attribution helpers change batch and ru
         () => 'recovery-fingerprint',
         () => 'generation-fingerprint',
         () => batchFingerprint,
+        () => 'continuity-fingerprint',
         ...helperNames.map((name) => Function(`return function ${name}(){}`)()),
     )();
     const baselineBatch = actorProfileBatchSemanticFingerprint();
@@ -757,6 +996,9 @@ test('resolver closure and group failure attribution helpers change batch and ru
         }),
         actorProfileBatchSemanticFingerprint({
             finalCandidateClosure: function actorProfileFinalCandidateClosureChanged() {},
+        }),
+        actorProfileBatchSemanticFingerprint({
+            workingSection: function actorProfileWorkingSectionChanged() {},
         }),
     ];
     const baselineRuntime = runtimeFor(baselineBatch);
@@ -854,6 +1096,75 @@ test('namespace writer rebases the selected field after first migration and befo
     assert.match(writer, /migration\.write_rebase_field_changed[\s\S]*?'stale_namespace_revision'/u);
 });
 
+test('real namespace wrapper reports actor-only stale drift created during async scope resolution', async () => {
+    const wrapperSource = sourceBetween(
+        indexSource,
+        'function rejectChatNamespaceWrite',
+        'function rebaseIdenticalNamespaceFields',
+    );
+    const scope = { chatId: 'chat-wrapper-race', cardId: 'card', runtimeVersion: 'test' };
+    const initial = {
+        chatId: scope.chatId,
+        actorSovereigntyScope: scope,
+        actorLedger: { turn: 0 },
+        fieldRevisions: { actorLedger: 0 },
+    };
+    const context = {
+        chatId: scope.chatId,
+        chatMetadata: { plugin: structuredClone(initial) },
+    };
+    let insertedP3 = false;
+    const sandbox = {
+        PLUGIN_ID: 'plugin',
+        lastChatNamespaceWriteFailureCode: '',
+        chatNamespacePersistenceMetrics: { migrationGuardAttempts: 0, migrationGuardBlocked: 0 },
+        getContext: () => context,
+        readChatNamespace: () => structuredClone(context.chatMetadata.plugin),
+        deepClone: (value) => structuredClone(value),
+        actorSovereigntyScopeDigest: () => 'scope-digest',
+        actorSovereigntyMigrationIsCurrent: () => true,
+        ensureActorSovereigntyMigrationPersisted: async () => ({
+            ok: true,
+            current: true,
+            namespace: structuredClone(context.chatMetadata.plugin),
+        }),
+        resolveCurrentActorSovereigntyScope: async () => {
+            context.chatMetadata.plugin = {
+                ...context.chatMetadata.plugin,
+                actorLedger: { turn: 0, actionAttempts: [{ id: 'ATT-wrapper-race' }] },
+                fieldRevisions: { actorLedger: 1 },
+            };
+            insertedP3 = true;
+            return { resolved: true, scope };
+        },
+        actorSovereigntyScopesMatch: () => true,
+        rebaseActorSovereigntyFieldWriteAfterMigration: () => {
+            throw new Error('migration was already current');
+        },
+        prepareActorSovereigntyFieldWriteCandidate: () => ({
+            allowed: false,
+            reason: 'migration.write_field_revision_stale',
+            staleFields: ['actorLedger'],
+        }),
+        enqueueChatNamespaceWrite: () => {
+            throw new Error('stale wrapper must reject before enqueue');
+        },
+    };
+    vm.runInNewContext(
+        `${wrapperSource}\nthis.writeNamespace = writeChatNamespace;`,
+        sandbox,
+    );
+    const failureSink = {};
+    const saved = await sandbox.writeNamespace(structuredClone(initial), scope.chatId, {
+        fields: ['actorLedger'],
+        failureSink,
+    });
+    assert.equal(insertedP3, true);
+    assert.equal(saved, false);
+    assert.equal(failureSink.code, 'stale_namespace_revision');
+    assert.deepEqual(Array.from(failureSink.staleFields), ['actorLedger']);
+});
+
 test('P1 failure explicitly marks P3 actor scheduling as not reached', () => {
     const marker = sourceBetween(
         indexSource,
@@ -864,6 +1175,36 @@ test('P1 failure explicitly marks P3 actor scheduling as not reached', () => {
     assert.match(marker, /actor_scheduling\.not_reached_by_p1/u);
     const enqueue = sourceBetween(indexSource, 'async function enqueueActorProfiles', 'async function confirmDangerousAction');
     assert.match(enqueue, /!\['atomic_readback', 'no_candidates'\]\.includes\(result\?\.status\)[\s\S]*?markActorSchedulingNotReachedByProfile/u);
+});
+
+test('an unrecoverable previous profile receipt cannot swallow the current accepted target', () => {
+    const enqueue = sourceBetween(
+        indexSource,
+        'async function enqueueActorProfiles',
+        'async function confirmDangerousAction',
+    );
+    const resumeStart = enqueue.indexOf('const resumed = await enqueueActorProfiles(recoveryIndex');
+    const currentResume = enqueue.indexOf('const currentAfterRecovery = captureTarget', resumeStart);
+    assert.ok(resumeStart >= 0 && currentResume > resumeStart);
+    const recoveryBranch = enqueue.slice(resumeStart, currentResume);
+    assert.match(recoveryBranch, /previous_recovery_not_completed/u);
+    assert.match(recoveryBranch, /recordModelDiagnostic\(\{/u);
+    assert.doesNotMatch(recoveryBranch, /return resumed/u);
+    assert.match(
+        enqueue.slice(currentResume),
+        /const dedupeKey = capturedTargetKey\(expected\)[\s\S]*?runActorProfileTarget\(current/u,
+    );
+
+    const persistence = sourceBetween(
+        indexSource,
+        'async function persistActorProfileRecoveryState',
+        'async function finalizeActorProfileRecoveryOutcome',
+    );
+    assert.match(
+        persistence,
+        /actorProfileRecoverySourceMatches\([\s\S]*?actorProfileRetryReceipt\?\.sourceRef,[\s\S]*?acceptedTarget[\s\S]*?actorProfileRetryReceipt = null/u,
+    );
+    assert.match(persistence, /expectedRetainedReceipt/u);
 });
 
 test('profile recovery merges with world failures and outranks blue busy', () => {
@@ -894,12 +1235,12 @@ test('production actor scheduling diagnostics records schedule and pending ATT r
     );
     assert.match(run, /if \(pendingActions\.attempts\.length\) \{[\s\S]*?status: 'attempts_prepared'/u);
     assert.match(run, /status: scheduledActorIds\.length \? 'scheduled' : 'idle'/u);
-    assert.match(run, /catch \(error\) \{[\s\S]*?markActorSchedulingFailure\('actor_scheduling\.advance_transport_failed'[^]*?return \{ status: 'failed'/u);
+    assert.match(run, /catch \(error\) \{[\s\S]*?markActorSchedulingFailure\('actor_scheduling\.advance_transport_failed'[^]*?return finishWorldResult\(\{\s*status: 'failed'/u);
     assert.match(run, /if \(!parsed\.state\) \{[\s\S]*?actor_scheduling\.advance_parse_failed[^]*?continuity_output_invalid/u);
-    assert.match(run, /if \(!persisted\.ok\) \{[\s\S]*?actor_scheduling\.phase1_persistence_failed[^]*?return \{ status: 'failed'/u);
+    assert.match(run, /stage3PersistPreparedActorAttemptsOnFreshLedger[^]*?if \(!rebased\.ok\) \{[^]*?actor_scheduling\.phase1_persistence_failed[^]*?return finishWorldResult\(\{/u);
     assert.match(run, /actor_scheduling\.phase1_attempt_readback_incomplete/u);
     assert.match(phase2, /status: 'attempts_prepared'[^]*?stage3PreparedPhase1StatesMatch/u);
-    assert.match(phase2, /actor_scheduling\.phase2_persistence_readback_failed[^]*?return \{ status: 'failed'/u);
+    assert.match(phase2, /actor_scheduling\.phase2_persistence_readback_failed[^]*?return\s*\{\s*status: 'failed'/u);
     assert.ok(
         phase2.indexOf('if (!saved)') < phase2.indexOf('markActorSchedulingSettled('),
         'Phase2 may only report settlement after durable save/readback succeeds',
@@ -921,4 +1262,85 @@ test('P3 settings expose the real exploration budget and inject actor addon only
     assert.doesNotMatch(profile, /actorShardPromptAddon|customActorAdvanceInstruction/u);
     assert.match(indexSource, /actorActionAdvance: userPromptSlotMetadata\(settings\.actorShardPromptAddon\)/u);
     assert.match(indexSource, /actorShard: \{ deprecated: true \}/u);
+});
+
+test('P3 final diagnostics expose only bounded timings, cancellation and terminal phase', () => {
+    const recorder = sourceBetween(
+        indexSource,
+        'function recordStage3WorldFinalDiagnostic',
+        'async function runContinuityTarget',
+    );
+    const projection = sourceBetween(
+        indexSource,
+        'function normalizedModelDiagnostics',
+        'function modelDiagnosticsForChat',
+    );
+    assert.match(recorder, /modelMs:[\s\S]*?parseMs:[\s\S]*?validationMs:[\s\S]*?persistMs:/u);
+    assert.match(recorder, /worldFinalPhase: phase/u);
+    assert.match(recorder, /cancelReason:[\s\S]*?'foreground_preempted'/u);
+    assert.match(recorder, /validationCode:[\s\S]*?world\\\./u);
+    assert.match(recorder, /targetCount:[\s\S]*?selectedWorldbookCount/u);
+    assert.match(recorder, /inputChars:[\s\S]*?scanTextChars/u);
+    assert.match(recorder, /readbackFailureKind:[\s\S]*?readbackEvidence:/u);
+    assert.doesNotMatch(recorder, /\.mes\b|contentFingerprint|displayName|actorName/u);
+    assert.match(projection, /worldFinalPhase:[\s\S]*?'world_committed'[\s\S]*?'foreground_preempted'/u);
+    const projected = createPrivacySafeDiagnosticProjection({
+        modelDiagnostics: [{
+            phase: 'validation', task: 'world_continuity', status: 'failed',
+            validationCode: 'world.actor.adjudication_invalid',
+            reason: 'private validator detail must not be exported',
+        }],
+    });
+    assert.equal(
+        projected.modelDiagnostics[0].validationCode,
+        'world.actor.adjudication_invalid',
+    );
+    assert.equal(Object.hasOwn(projected.modelDiagnostics[0], 'reason'), false);
+    const readbackProjected = createPrivacySafeDiagnosticProjection({
+        modelDiagnostics: [{
+            phase: 'validation', task: 'world_continuity', status: 'failed',
+            validationCode: 'world.phase1.host_save_revision_behind',
+            readbackFailureKind: 'revision_behind',
+            readbackEvidence: [{
+                field: 'continuityCheckpoint', expectedRevision: 7,
+                actualRevision: 6, digestMatch: false, private: 'must disappear',
+            }],
+        }],
+    }).modelDiagnostics[0];
+    assert.deepEqual(readbackProjected.readbackEvidence, [{
+        field: 'continuityCheckpoint', expectedRevision: 7,
+        actualRevision: 6, digestMatch: false,
+    }]);
+    assert.equal(readbackProjected.readbackFailureKind, 'revision_behind');
+    const authorityConflictProjected = createPrivacySafeDiagnosticProjection({
+        modelDiagnostics: [{
+            phase: 'validation', task: 'world_continuity', status: 'failed',
+            validationCode: 'world.phase2.host_save_authority_conflict',
+            readbackFailureKind: 'content_validation_conflict',
+        }],
+    }).modelDiagnostics[0];
+    assert.equal(
+        authorityConflictProjected.readbackFailureKind,
+        'content_validation_conflict',
+    );
+    const run = sourceBetween(
+        indexSource,
+        'async function runContinuityTarget',
+        'function sameTargetExceptContent',
+    );
+    assert.match(run, /stage3WorldFailureValidationCode\(result\?\.reason\)/u);
+    assert.match(run, /finishWorldResult\(\{ status: 'failed', reason: 'world_candidate_readback_mismatch'/u);
+    const codeMap = sourceBetween(
+        indexSource,
+        'function stage3WorldFailureValidationCode',
+        'async function runContinuityTarget',
+    );
+    for (const fixedCode of [
+        'world.actor.proposals_incomplete',
+        'world.actor.adjudication_invalid',
+        'world.phase1.attempt_readback_incomplete',
+        'world.phase1.candidate_readback_mismatch',
+        'world.operation.failed',
+    ]) assert.match(codeMap, new RegExp(fixedCode.replaceAll('.', '\\.')));
+    assert.doesNotMatch(codeMap, /safeDiagnosticReason|displayName|actorName|\.mes\b/u);
 });

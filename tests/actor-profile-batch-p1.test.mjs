@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
+import { actorActionTargetMatches } from '../actor-authority-core.mjs';
 
 import {
     ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
@@ -9,17 +11,28 @@ import {
     bindCharacterCreationTicketsToRegisteredActors,
     buildActorProfileCompletionMessages,
     issueCharacterCreationTicket,
+    actorProfileRecoverySourceMatches,
     parseActorProfileCompletionBatchOutput,
     prepareActorLedgerProfilesV6,
     selectActorProfileCompletionCandidates,
 } from '../actor-profile-v6-core.mjs';
-import { completeActorProfileBatchTransaction } from '../actor-profile-batch-core.mjs';
+import {
+    actorProfileRecoveryProgressDigest,
+    completeActorProfileBatchTransaction,
+    normalizeActorProfileRecoveryProgress,
+} from '../actor-profile-batch-core.mjs';
 import {
     discoverActorsFromTurnSources,
+    actorLedgerDigest,
+    actorRegistryDigest,
+    actorRegistryMatchesLedger,
+    actorProfileCommitMatchesLedger,
     emptyActorLedger,
     mergeActorIdentityReveal,
     normalizeActorLedger,
+    prepareActorActionAttempts,
     promoteActorCandidatesToRegistry,
+    recordActorActionAttempts,
     runActorRegistryUpsert,
 } from '../actor-ledger-core.mjs';
 
@@ -52,6 +65,151 @@ function narrativeDiscoverySourceRef(ref) {
         contentFingerprint: ref.hash,
     };
 }
+
+test('P1 recovery progress seals only bounded ActorRef fields against the current source', () => {
+    const progress = normalizeActorProfileRecoveryProgress({
+        identityLocked: true,
+        rows: [{
+            actorId: 'NPC-recovery-1',
+            name: '合成人物',
+            discovery: true,
+            sourceAnchor: '合成正文中的合成人物首次出现。',
+            modules: {
+                person: '这是已经通过本地解析与目标行校验的身份档案字段。',
+                personality: '这是已经通过本地解析与目标行校验的性格档案字段。',
+                unexpected: '不得进入恢复回执。',
+            },
+        }],
+    });
+    assert.equal(progress.identityLocked, true);
+    assert.equal(progress.verifiedFieldCount, 2);
+    assert.deepEqual(Object.keys(progress.rows[0].modules), ['person', 'personality']);
+    const digest = actorProfileRecoveryProgressDigest(progress, 'profile-source:one');
+    assert.match(digest, /^profile-recovery-progress:/u);
+    assert.notEqual(
+        digest,
+        actorProfileRecoveryProgressDigest(progress, 'profile-source:two'),
+        'the same verified fields cannot be replayed under another SourceRef digest',
+    );
+});
+
+test('production P1 uses the background lane and host-only foreground preemption', async () => {
+    const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const callModelSource = source.slice(
+        source.indexOf('async function callModel'),
+        source.indexOf('async function probeModelChannelConnections'),
+    );
+    assert.match(callModelSource, /const runUntilCancelled = options\.runUntilCancelled === true/u);
+    assert.match(callModelSource, /mvuadUsesHostGenerateRaw/u);
+    assert.match(source, /FOREGROUND_PREEMPTED/u);
+    const profileSource = source.slice(
+        source.indexOf('async function completeActorProfilesForTurn'),
+        source.indexOf('function actorProfileTransientResult'),
+    );
+    assert.match(profileSource, /runUntilCancelled: true/u);
+    assert.match(
+        profileSource,
+        /moduleKeys\.every\(\(moduleKey\) => moduleKey === 'physiology'\)/u,
+        'mixed core plus physiology must stay on the profile lane',
+    );
+    const generationSource = source.slice(
+        source.indexOf('function bindEvents'),
+        source.indexOf('function bindUiEvents'),
+    );
+    assert.match(
+        generationSource,
+        /preemptHostBackgroundModelControllersForForegroundGeneration\(\)/u,
+    );
+});
+
+test('foreground preemption resumes only fields missing after validated transport chunks', async () => {
+    const fixture = prepareRegisteredBatch(7);
+    const moduleText = (actorId, moduleKey) => (
+        `${actorId} ${moduleKey}：${'这是完整、自然、可读且仅属于当前目标字段的合成档案内容。'.repeat(6)}`
+    );
+    const outputFor = ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+        `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+        ...moduleKeys.map((moduleKey) => (
+            `<module key="${moduleKey}">${moduleText(candidate.actorRef.actorId, moduleKey)}</module>`
+        )),
+        '</profile-target>',
+    ].join('\n')).join('\n');
+    let firstChunkCount = 0;
+    const first = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        semanticRetry: false,
+        requestBatch: async (request) => {
+            firstChunkCount += 1;
+            if (firstChunkCount === 1) return outputFor(request);
+            const error = new Error('foreground_preempted');
+            error.failureKind = 'foreground_preempted';
+            error.profileBatchFailureCategory = 'foreground_preempted';
+            throw error;
+        },
+    });
+    assert.equal(first.result.persistenceStatus, 'not_completed');
+    assert.equal(first.saveCount, 0, 'a partial working clone is never public ledger state');
+    assert.equal(first.result.recoveryProgress.verifiedFieldCount, 36);
+
+    const resumedTargets = [];
+    const resumed = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        semanticRetry: false,
+        recoveryProgress: first.result.recoveryProgress,
+        requestBatch: async (request) => {
+            resumedTargets.push(...request.candidates.map((candidate) => candidate.actorRef.actorId));
+            return outputFor(request);
+        },
+    });
+    assert.equal(resumed.result.persistenceStatus, 'atomic_readback');
+    assert.equal(resumed.saveCount, 2);
+    assert.deepEqual(
+        resumedTargets,
+        [fixture.candidates[6].actorRef.actorId],
+        'the six validated rows must not be regenerated after foreground preemption',
+    );
+});
+
+test('identity bootstrap failure calls the full accepted narrative model once and writes no partial profile', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-identity-once' });
+    let identityCalls = 0;
+    const options = {
+        moduleProtocol: true,
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative: '\u5c91\u9065\u8d70\u8fdb\u5927\u5385\u5e76\u6e05\u695a\u62a5\u4e0a\u59d3\u540d\u3002',
+            completionMode: 'full',
+        },
+        requestBatch: ({ groupKey }) => {
+            assert.equal(groupKey, 'identity_bootstrap');
+            identityCalls += 1;
+            return 'not a recoverable identity route';
+        },
+    };
+    const first = await runBatch({ ...fixture, candidates: [] }, options);
+    assert.equal(identityCalls, 1);
+    assert.equal(first.result.modelCalls, 1);
+    assert.equal(first.result.persistenceStatus, 'not_completed');
+    assert.equal(first.saveCount, 0);
+    assert.equal(first.result.ledger.actors.length, 0);
+    assert.equal(Object.keys(first.result.ledger.actorRegistry?.registered || {}).length, 0);
+    assert.equal(first.result.recoveryProgress?.identityAttempted, true);
+    assert.equal(first.result.recoveryProgress?.identityLocked, false);
+
+    const resumed = await runBatch({ ...fixture, candidates: [] }, {
+        ...options,
+        recoveryProgress: first.result.recoveryProgress,
+    });
+    assert.equal(identityCalls, 1, 'sealed recovery must not resend the accepted narrative');
+    assert.equal(resumed.result.modelCalls, 0);
+    assert.equal(resumed.result.persistenceStatus, 'not_completed');
+    assert.equal(resumed.saveCount, 0);
+    assert.equal(resumed.result.ledger.actors.length, 0);
+    assert.equal(Object.keys(resumed.result.ledger.actorRegistry?.registered || {}).length, 0);
+    assert.ok(resumed.result.failures.some((failure) => (
+        failure.reason === 'actor_profile.identity_bootstrap_already_attempted'
+    )));
+});
 
 function registryPreflight(fixture, acceptedNarrative, {
     excludedActorNames = [],
@@ -412,6 +570,7 @@ async function runBatch(fixture, {
     preflightDiscoveries = async () => ({ ok: true, failures: [] }),
     resolveDiscoveries = null,
     moduleProtocol = false,
+    recoveryProgress = null,
 } = {}) {
     let saveCount = 0;
     let readbackCount = 0;
@@ -552,6 +711,7 @@ async function runBatch(fixture, {
         semanticRetry,
         allowDiscovery,
         discoveryContext,
+        recoveryProgress,
         preflightDiscoveries,
         requestBatch: moduleProtocol === 'raw'
             ? requestBatch
@@ -862,7 +1022,7 @@ test('rowless nonempty batch output keeps only bounded parse metadata', () => {
     assert.equal(parsed.unexpected.length, 0);
 });
 
-test('rowless current-source discovery response gets one full replacement and then atomic readback', async () => {
+test('rowless current-source identity response fails after one model call with zero writes', async () => {
     const fixture = prepareRegisteredBatch(1);
     const resolvedCandidates = structuredClone(fixture.candidates);
     const name = fixture.candidates[0].actorRef.name;
@@ -905,18 +1065,16 @@ test('rowless current-source discovery response gets one full replacement and th
             };
         },
     });
-    assert.deepEqual(calls.slice(0, 2), [
+    assert.deepEqual(calls, [
         { groupKey: 'identity_bootstrap', attempt: 0, count: 0 },
-        { groupKey: 'identity_bootstrap', attempt: 1, count: 0 },
     ]);
     assert.equal(resolverCalls, 1);
-    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.result.batchFormatReplacementAttempted, false);
-    assert.equal(run.result.batchMeta.protocol, 'module-groups-v1');
-    assert.equal(run.saveCount, 2);
+    assert.equal(run.saveCount, 0);
 });
 
-test('holdout invented discovery name gets executable retry guidance and a literal newcomer commits atomically', async () => {
+test('holdout invented discovery name fails once without resending accepted narrative', async () => {
     const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-literal-retry' });
     const literalName = '\u9646\u7d20\u82e9';
     const inventedName = '\u6c88\u96fe\u9065';
@@ -952,28 +1110,16 @@ test('holdout invented discovery name gets executable retry guidance and a liter
             ].join('\n')).join('\n');
         },
     });
-    assert.deepEqual(calls.slice(0, 2).map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
+    assert.deepEqual(calls.map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
         { groupKey: 'identity_bootstrap', attempt: 0 },
-        { groupKey: 'identity_bootstrap', attempt: 1 },
     ]);
-    const retryPrompt = calls[1].messages.map((entry) => entry.content).join('\n');
-    assert.match(retryPrompt, /actor_profile\.discovery_name_not_in_narrative/u);
-    assert.match(retryPrompt, /\u5220\u9664\u8be5\u675c\u64b0\u884c\u952e\u5019\u9009/u);
-    assert.match(retryPrompt, /\u5df2\u63a5\u53d7\u6b63\u6587/u);
-    assert.match(retryPrompt, /\u9010\u5b57\u590d\u5236/u);
-    assert.match(retryPrompt, /\u65e0\u4eba\u7269\u6863\u6848/u);
-    assert.doesNotMatch(retryPrompt, new RegExp(inventedName, 'u'));
-    assert.equal(run.result.persistenceStatus, 'atomic_readback');
-    assert.equal(run.result.readbackVerified, true);
-    assert.equal(run.saveCount, 2);
-    assert.equal(run.persistencePayloads[1].ledger.actors[0]?.name, literalName);
-    const personText = run.persistencePayloads[1].ledger.actors[0]?.profileV6?.narrativeSections?.person?.text || '';
-    assert.match(personText, new RegExp(lockedCore, 'u'));
-    assert.doesNotMatch(personText, new RegExp(probeNoise, 'u'));
-    assert.equal(actorProfileReadyForAction(run.persistencePayloads[1].ledger.actors[0]), true);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.result.readbackVerified, false);
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.result.ledger.actors.length, 0);
 });
 
-test('an invented-only first identity answer cannot be erased by retry strict no-candidates', async () => {
+test('an invented-only identity answer fails once and cannot become strict no-candidates', async () => {
     const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-empty-retry' });
     const inventedName = '\u97e9\u77f3\u8c61';
     const acceptedNarrative = '\u7a7a\u8d70\u5eca\u91cc\u53ea\u6709\u98ce\u5439\u52a8\u5e18\u5b50\uff0c\u6ca1\u6709\u4efb\u4f55\u5177\u540d\u4eba\u7269\u51fa\u573a\u3002';
@@ -997,15 +1143,14 @@ test('an invented-only first identity answer cannot be erased by retry strict no
             ].join('\n');
         },
     });
-    assert.match(retryPrompt, /actor_profile\.discovery_name_not_in_narrative/u);
-    assert.doesNotMatch(retryPrompt, new RegExp(inventedName, 'u'));
+    assert.equal(retryPrompt, '');
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.ok(run.result.failures.some((entry) => (
         entry.reason === 'actor_profile.discovery_name_not_in_narrative'
     )));
     assert.equal(run.result.readbackVerified, false);
     assert.equal(run.saveCount, 0);
-    assert.equal(identityCalls, 2);
+    assert.equal(identityCalls, 1);
 });
 
 test('full unit coverage with no-new still fills an existing incomplete ActorRef', async () => {
@@ -1033,7 +1178,7 @@ test('full unit coverage with no-new still fills an existing incomplete ActorRef
     assert.equal(run.saveCount, 2);
 });
 
-test('two naked empty answers and coverage retry failures stay fail-closed', async () => {
+test('one naked empty identity answer stays fail-closed without a second full-narrative call', async () => {
     for (const mode of ['empty', 'transport', 'format']) {
         const fixture = prepareRegisteredBatch(0, { chatId: `chat-empty-${mode}` });
         let calls = 0;
@@ -1056,15 +1201,15 @@ test('two naked empty answers and coverage retry failures stay fail-closed', asy
                 return 'not a profile route';
             },
         });
-        assert.equal(calls, 2, mode);
-        assert.equal(run.result.modelCalls, 2, mode);
+        assert.equal(calls, 1, mode);
+        assert.equal(run.result.modelCalls, 1, mode);
         assert.equal(run.result.persistenceStatus, 'not_completed', mode);
         assert.equal(run.saveCount, 0, mode);
         assert.ok(run.result.failures.length > 0, mode);
     }
 });
 
-test('a valid identity retry still fails closed when resolver drops its discovery', async () => {
+test('an invalid first identity answer fails before resolver or profile groups', async () => {
     const fixture = prepareRegisteredBatch(1);
     const registered = fixture.candidates[0];
     const literalName = '\u6b63\u6587\u65b0\u4eba';
@@ -1093,14 +1238,10 @@ test('a valid identity retry still fails closed when resolver drops its discover
                 : narrativeProfileBlock(literalName);
         },
     });
-    assert.deepEqual(calls.slice(0, 2).map(({ attempt, actorIds }) => ({ attempt, actorIds })), [
+    assert.deepEqual(calls.map(({ attempt, actorIds }) => ({ attempt, actorIds })), [
         { attempt: 0, actorIds: [] },
-        { attempt: 1, actorIds: [] },
     ]);
-    assert.ok(calls.slice(2).some(({ actorIds }) => (
-        actorIds.includes(registered.actorRef.actorId)
-    )));
-    assert.equal(run.result.modelCalls, 4);
+    assert.equal(run.result.modelCalls, 1);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
 });
@@ -1149,13 +1290,13 @@ test('invalid narrative discovery rows fail closed before Registry or profile pe
                 };
             },
         });
-        assert.deepEqual(calls.slice(0, 2), [0, 1], label);
-        assert.ok(run.result.modelCalls >= 2 && run.result.modelCalls <= 4, label);
+        assert.deepEqual(calls, [0], label);
+        assert.equal(run.result.modelCalls, 1, label);
         assert.equal(run.result.persistenceStatus, 'not_completed', label);
         assert.equal(run.result.readbackVerified, false, `${label}: must not issue a P3 no-candidate permit`);
         assert.deepEqual(
-            run.result.batchMeta.moduleGroups.filter((entry) => entry.attempt === 1).map((entry) => entry.groupKey),
-            ['identity_bootstrap'],
+            run.result.batchMeta.moduleGroups.filter((entry) => entry.attempt === 1),
+            [],
             label,
         );
         assert.equal(resolverCalls, 1, label);
@@ -1209,9 +1350,8 @@ test('a rejected narrative discovery blocks a first-pass ActorRef peer from dura
             };
         },
     });
-    assert.deepEqual(calls.slice(0, 2), [
+    assert.deepEqual(calls, [
         { attempt: 0, actorIds: [] },
-        { attempt: 1, actorIds: [] },
     ]);
     assert.ok(calls.every((entry) => entry.actorIds.length === 0));
     assert.equal(resolverCalls, 1);
@@ -1285,9 +1425,8 @@ test('a rejected narrative discovery blocks a first-pass discovery peer from dur
             };
         },
     });
-    assert.deepEqual(calls.slice(0, 2), [
+    assert.deepEqual(calls, [
         { attempt: 0, actorIds: [] },
-        { attempt: 1, actorIds: [] },
     ]);
     assert.equal(resolverCalls, 1);
     assert.equal(run.result.persistenceStatus, 'not_completed');
@@ -1316,7 +1455,7 @@ test('valid existing plus valid discovery silently dropped by resolver keeps the
             omitTitle: NARRATIVE_SECTION_TITLES[0],
         }),
     });
-    assert.equal(malformed.result.modelCalls, 2);
+    assert.equal(malformed.result.modelCalls, 1);
     assert.equal(malformed.saveCount, 0);
 
     const mixedCalls = [];
@@ -1335,8 +1474,8 @@ test('valid existing plus valid discovery silently dropped by resolver keeps the
             ].join('\n');
         },
     });
-    assert.deepEqual(mixedCalls, [0, 1]);
-    assert.equal(mixed.result.modelCalls, 2);
+    assert.deepEqual(mixedCalls, [0]);
+    assert.equal(mixed.result.modelCalls, 1);
     assert.equal(mixed.saveCount, 0);
 
     const fixture = prepareRegisteredBatch(1);
@@ -1574,7 +1713,7 @@ test('explicit row-key reveal keeps one ActorId, aliases the old label and atomi
     assert.equal(actorProfileReadyForAction(finalActor), true);
 });
 
-test('identity preflight retries only bootstrap with the exact safe local reason before later groups', async () => {
+test('identity preflight failure performs one bootstrap call and no later group', async () => {
     const fixture = prepareRegisteredBatch(0);
     const invalidName = '系统';
     const validName = '合成人物甲';
@@ -1603,21 +1742,17 @@ test('identity preflight retries only bootstrap with the exact safe local reason
             ].join('\n')).join('\n');
         },
     });
-    assert.deepEqual(calls.slice(0, 2).map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
+    assert.deepEqual(calls.map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
         { groupKey: 'identity_bootstrap', attempt: 0 },
-        { groupKey: 'identity_bootstrap', attempt: 1 },
     ]);
-    assert.match(calls[1].prompt, /actor_candidate\.identity_system/u);
-    assert.ok(calls.slice(2).every((entry) => entry.groupKey !== 'identity_bootstrap'));
-    assert.deepEqual(calls.slice(2).map((entry) => entry.groupKey), [
-        'character_core',
-    ]);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
     assert.ok(run.result.failures.some((failure) => (
-        failure.reason === 'actor_profile.discovery_promotion_mapping_missing'
+        failure.reason === 'actor_candidate.identity_system'
     )));
 });
 
-test('a deterministic-invalid identity row cannot be erased by a retry empty', async () => {
+test('a deterministic-invalid identity row fails after one call and zero writes', async () => {
     const fixture = prepareRegisteredBatch(0);
     const invalidName = '系统';
     const acceptedNarrative = `${invalidName}广播出现在这段合成材料中。`;
@@ -1640,16 +1775,14 @@ test('a deterministic-invalid identity row cannot be erased by a retry empty', a
     });
     assert.deepEqual(calls.map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
         { groupKey: 'identity_bootstrap', attempt: 0 },
-        { groupKey: 'identity_bootstrap', attempt: 1 },
     ]);
-    assert.match(calls[1].prompt, /actor_candidate\.identity_system/u);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
     assert.ok(run.result.failures.length > 0);
     assert.ok(run.result.failures.some((failure) => failure.groupKey === 'identity_bootstrap'));
 });
 
-test('mixed valid and deterministic-invalid identity candidates cannot be erased by retry empty', async () => {
+test('mixed valid and invalid identity candidates fail atomically after one call', async () => {
     const fixture = prepareRegisteredBatch(0);
     const invalidName = '系统';
     const validName = '合成人物乙';
@@ -1673,7 +1806,6 @@ test('mixed valid and deterministic-invalid identity candidates cannot be erased
     });
     assert.deepEqual(calls, [
         { groupKey: 'identity_bootstrap', attempt: 0 },
-        { groupKey: 'identity_bootstrap', attempt: 1 },
     ]);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
@@ -1682,7 +1814,7 @@ test('mixed valid and deterministic-invalid identity candidates cannot be erased
     )));
 });
 
-test('identity module or format failure cannot be erased by retry empty', async () => {
+test('identity module or format failure gets no second model call', async () => {
     const fixture = prepareRegisteredBatch(0);
     const acceptedNarrative = '合成人物丙走进大厅。';
     const calls = [];
@@ -1700,7 +1832,6 @@ test('identity module or format failure cannot be erased by retry empty', async 
     });
     assert.deepEqual(calls, [
         { groupKey: 'identity_bootstrap', attempt: 0 },
-        { groupKey: 'identity_bootstrap', attempt: 1 },
     ]);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
@@ -1709,7 +1840,7 @@ test('identity module or format failure cannot be erased by retry empty', async 
     )));
 });
 
-test('protected identity context drives a semantic retry while another newcomer completes pending and final readback', async () => {
+test('protected identity failure stops after one bootstrap call and keeps the ledger at S0', async () => {
     const fixture = prepareRegisteredBatch(0);
     const protectedName = '\u73a9\u5bb6\u7532';
     const validName = '\u5c91\u9065';
@@ -1811,34 +1942,24 @@ test('protected identity context drives a semantic retry while another newcomer 
         },
     });
     const identityCalls = calls.filter((entry) => entry.groupKey === 'identity_bootstrap');
-    assert.equal(identityCalls.length, 2);
+    assert.equal(identityCalls.length, 1);
     const firstUserPrompt = identityCalls[0].messages.find((entry) => entry.role === 'user').content;
     assert.equal((firstUserPrompt.match(/\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09/g) || []).length, 1);
     assert.match(firstUserPrompt, /\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a\["\u73a9\u5bb6\u7532"\]/u);
-    const retrySystemPrompt = identityCalls[1].messages.find((entry) => entry.role === 'system').content;
-    assert.match(retrySystemPrompt, /actor_candidate\.identity_excluded/u);
-    assert.match(retrySystemPrompt, /\u5220\u9664\u8be5\u53d7\u4fdd\u62a4\u8eab\u4efd\u5019\u9009/u);
-    assert.match(retrySystemPrompt, /\u65e0\u4eba\u7269\u6863\u6848/u);
-    assert.doesNotMatch(retrySystemPrompt, new RegExp(protectedName, 'u'));
-    for (const call of calls.filter((entry) => entry.groupKey !== 'identity_bootstrap')) {
-        const prompt = call.messages.map((entry) => entry.content).join('\n');
-        assert.doesNotMatch(prompt, /\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09/u);
-    }
-    assert.equal(run.result.persistenceStatus, 'atomic_readback');
-    assert.equal(run.result.readbackVerified, true);
-    assert.equal(run.saveCount, 2);
-    assert.ok(run.persistencePayloads[0].ledger.actors[0]?.pendingProfile);
-    assert.equal(run.persistencePayloads[1].ledger.actors[0]?.pendingProfile, null);
-    assert.equal(run.persistencePayloads[1].ledger.actors[0]?.name, validName);
-    assert.equal(actorProfileReadyForAction(run.persistencePayloads[1].ledger.actors[0]), true);
+    assert.equal(calls.filter((entry) => entry.groupKey !== 'identity_bootstrap').length, 0);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.result.readbackVerified, false);
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.result.ledger.actors.length, 0);
+    assert.equal(Object.keys(run.result.ledger.actorRegistry?.registered || {}).length, 0);
 });
 
-test('identity retry feedback replaces an untrusted preflight reason with a bounded local code', async () => {
+test('identity preflight failure reports a bounded local code without retrying the model', async () => {
     const fixture = prepareRegisteredBatch(0);
     const name = '\u5c91\u9065';
     const acceptedNarrative = `${name}\u8d70\u8fdb\u5927\u5385\u5e76\u62a5\u4e0a\u59d3\u540d\u3002`;
     const secretReason = 'private transport detail must not return to model';
-    let retryPrompt = '';
+    let calls = 0;
     const run = await runBatch({ ...fixture, candidates: [] }, {
         moduleProtocol: true,
         allowDiscovery: true,
@@ -1849,10 +1970,8 @@ test('identity retry feedback replaces an untrusted preflight reason with a boun
             validCandidateCount: 0,
             allDiscoveriesDeterministicallyInvalid: false,
         }),
-        requestBatch: ({ attempt, groupKey, messages }) => {
-            if (groupKey === 'identity_bootstrap' && attempt === 1) {
-                retryPrompt = messages.map((entry) => entry.content).join('\n');
-            }
+        requestBatch: () => {
+            calls += 1;
             return [
                 `<profile-target actor="new" name="${name}">`,
                 `<module key="person">${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u4eba\u7269\u8eab\u4efd\u6863\u6848\u5185\u5bb9\uff0c\u5305\u542b\u660e\u786e\u4e8b\u5b9e\u3001\u73b0\u5b9e\u9650\u5236\u4e0e\u540e\u7eed\u884c\u52a8\u4f9d\u636e\u3002'.repeat(4)}</module>`,
@@ -1860,13 +1979,14 @@ test('identity retry feedback replaces an untrusted preflight reason with a boun
             ].join('\n');
         },
     });
-    assert.doesNotMatch(retryPrompt, new RegExp(secretReason, 'u'));
-    assert.match(retryPrompt, /actor_profile\.module_invalid/u);
+    assert.equal(calls, 1);
+    assert.ok(run.result.failures.length > 0);
+    assert.ok(run.result.failures.every((failure) => failure.reason !== secretReason));
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
 });
 
-test('all seven controlled identity failures receive bounded executable retry semantics', async () => {
+test('all seven controlled identity failures report locally without a second model call', async () => {
     const fixture = prepareRegisteredBatch(0);
     const name = '\u5c91\u9065';
     const acceptedNarrative = `${name}\u8d70\u8fdb\u5927\u5385\u5e76\u62a5\u4e0a\u59d3\u540d\u3002`;
@@ -1880,7 +2000,7 @@ test('all seven controlled identity failures receive bounded executable retry se
         'actor_candidate.identity_quarantined',
     ];
     for (const code of codes) {
-        let retryPrompt = '';
+        let calls = 0;
         const run = await runBatch({ ...fixture, candidates: [] }, {
             moduleProtocol: true,
             allowDiscovery: true,
@@ -1891,8 +2011,8 @@ test('all seven controlled identity failures receive bounded executable retry se
                 validCandidateCount: 0,
                 allDiscoveriesDeterministicallyInvalid: false,
             }),
-            requestBatch: ({ attempt, messages }) => {
-                if (attempt === 1) retryPrompt = messages.map((entry) => entry.content).join('\n');
+            requestBatch: () => {
+                calls += 1;
                 return [
                     `<profile-target actor="new" name="${name}">`,
                     `<module key="person">${'\u8fd9\u662f\u5b8c\u6574\u3001\u81ea\u7136\u4e14\u53ef\u7528\u7684\u4e2d\u6587\u4eba\u7269\u8eab\u4efd\u6863\u6848\u5185\u5bb9\uff0c\u5305\u542b\u660e\u786e\u4e8b\u5b9e\u3001\u73b0\u5b9e\u9650\u5236\u4e0e\u540e\u7eed\u884c\u52a8\u4f9d\u636e\u3002'.repeat(4)}</module>`,
@@ -1900,10 +2020,8 @@ test('all seven controlled identity failures receive bounded executable retry se
                 ].join('\n');
             },
         });
-        assert.match(retryPrompt, new RegExp(code.replaceAll('.', '\\.').replaceAll('-', '\\-'), 'u'), code);
-        assert.match(retryPrompt, /\u5220\u9664/u, code);
-        assert.match(retryPrompt, /\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba/u, code);
-        assert.match(retryPrompt, /\u65e0\u4eba\u7269\u6863\u6848/u, code);
+        assert.equal(calls, 1, code);
+        assert.ok(run.result.failures.some((failure) => failure.reason === code), code);
         assert.equal(run.saveCount, 0, code);
     }
 });
@@ -2415,7 +2533,7 @@ test('parsed narrative discoveries remain ordinary local data within one resolut
     assert.equal(replay.candidates.length, 1, 'the resolver revalidates ordinary local rows against the current narrative');
 });
 
-test('a second rowless discovery response fails closed with a fixed parse code and no save', async () => {
+test('a rowless identity response fails closed after one call with no save', async () => {
     const fixture = prepareRegisteredBatch(1);
     const calls = [];
     const run = await runBatch({ ...fixture, candidates: [] }, {
@@ -2426,7 +2544,7 @@ test('a second rowless discovery response fails closed with a fixed parse code a
             return 'not a profile array';
         },
     });
-    assert.deepEqual(calls, [{ attempt: 0, count: 0 }, { attempt: 1, count: 0 }]);
+    assert.deepEqual(calls, [{ attempt: 0, count: 0 }]);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.result.batchFormatReplacementAttempted, false);
     assert.equal(run.saveCount, 0);
@@ -2617,9 +2735,8 @@ test('full_adult identity, core and physiology share one atomic working transact
         'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
         'reproductiveFunction', 'sexualResponse', 'limitations',
     ];
-    const physiologyBody = `${physiologyClauses.join('. ')}. ${moduleText('physiology')}`;
-    const physiologyCoverage = coverageKeys.map((key, index) => (
-        `<physiology-coverage key="${key}">${physiologyClauses[index]}</physiology-coverage>`
+    const physiologyFields = coverageKeys.map((key, index) => (
+        `<field key="${key}">${physiologyClauses[index]}</field>`
     )).join('');
     const run = await runBatch(fixture, {
         moduleProtocol: true,
@@ -2632,7 +2749,7 @@ test('full_adult identity, core and physiology share one atomic working transact
             )).join('\n');
             return candidates.map((candidate) => [
                 `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
-                ...moduleKeys.map((key) => `<module key="${key}">${key === 'physiology' ? `${physiologyBody}${physiologyCoverage}` : moduleText(key)}</module>`),
+                ...moduleKeys.map((key) => `<module key="${key}">${key === 'physiology' ? physiologyFields : moduleText(key)}</module>`),
                 '</profile-target>',
             ].join('\n')).join('\n');
         },
@@ -2640,13 +2757,835 @@ test('full_adult identity, core and physiology share one atomic working transact
     assert.deepEqual(calls.map(({ groupKey, attempt }) => [groupKey, attempt]), [
         ['identity_bootstrap', 0],
         ['character_core', 0],
-        ['physiology_optional', 0],
     ]);
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.result.accepted.length, 1);
     assert.equal(run.saveCount, 2);
     assert.equal(run.readbackCount, 2);
     assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+});
+
+test('two-person recovery maps the missing adult row by its unique alias without dropping the whole row', async () => {
+    const fixture = prepareRegisteredBatch(2, { chatId: 'chat-two-adult-alias-recovery' });
+    fixture.candidates.forEach((candidate) => {
+        candidate.completionMode = 'full_adult';
+    });
+    const [ready, missing] = fixture.candidates;
+    missing.identity = {
+        ...(missing.identity || {}),
+        aliases: ['第二人物已知别名'],
+    };
+    const moduleKeys = [
+        'person', 'personality', 'history', 'relationshipsMotives',
+        'currentState', 'knowledgeCapabilitiesResources', 'physiology',
+    ];
+    const moduleText = (key, label = ready.actorRef.name) => (
+        `${label} ${key}. ${'Complete natural dossier prose records stable facts, limits, choices, and usable future action context. '.repeat(6)}`
+    );
+    const physiologyKeys = [
+        'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
+        'reproductiveFunction', 'sexualResponse', 'limitations',
+    ];
+    const physiologyFields = physiologyKeys.map((key) => (
+        `<field key="${key}">${key} records a durable objective physiological fact with its species limits and no invented consent preference history or action.</field>`
+    )).join('');
+    const recoveryProgress = normalizeActorProfileRecoveryProgress({
+        version: 1,
+        identityAttempted: true,
+        identityLocked: true,
+        rows: [
+            {
+                actorId: ready.actorRef.actorId,
+                name: ready.actorRef.name,
+                modules: Object.fromEntries(moduleKeys.map((key) => [
+                    key,
+                    moduleText(key),
+                ])),
+            },
+            {
+                actorId: missing.actorRef.actorId,
+                name: missing.actorRef.name,
+                modules: {},
+            },
+        ],
+    });
+    const calls = [];
+    const run = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        recoveryProgress,
+        requestBatch: ({ candidates, groupKey, moduleKeys: requested, attempt }) => {
+            calls.push({
+                groupKey,
+                attempt,
+                actorIds: candidates.map((candidate) => candidate.actorRef.actorId),
+                moduleKeys: [...requested],
+            });
+            assert.deepEqual(candidates.map((candidate) => candidate.actorRef.actorId), [missing.actorRef.actorId]);
+            return [
+                '<profile-target actor="第二人物已知别名" name="第二人物已知别名">',
+                ...requested.map((key) => (
+                    `<module key="${key}">${key === 'physiology' ? physiologyFields : moduleText(key, '第二人物已知别名')}</module>`
+                )),
+                '</profile-target>',
+            ].join('\n');
+        },
+    });
+    assert.deepEqual(calls.map(({ groupKey, attempt }) => [groupKey, attempt]), [
+        ['character_core', 0],
+    ]);
+    assert.deepEqual(calls[0].moduleKeys, moduleKeys);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(run.result.accepted.length, 2);
+    assert.equal(run.saveCount, 2);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+    const repaired = run.result.batchMeta.moduleGroups.find((entry) => (
+        entry.groupKey === 'character_core' && entry.attempt === 0
+    ));
+    assert.equal(repaired.routeRepairCount, 1);
+    assert.deepEqual(repaired.routeRepairCodes, [
+        'actor_profile.route_single_target_label_normalized',
+    ]);
+});
+
+test('discovery recovery keeps completed adult physiology versioned and requests only the empty second row', async () => {
+    const fixture = prepareRegisteredBatch(2, { chatId: 'chat-discovery-adult-recovery' });
+    fixture.candidates.forEach((candidate) => {
+        candidate.completionMode = 'full_adult';
+    });
+    const names = ['发现人物一', '发现人物二'];
+    const anchors = ['发现人物一站在门边。', '发现人物二守在窗边。'];
+    const acceptedNarrative = `${anchors[0]}${anchors[1]}`;
+    const actorIds = ['DISC-recovery-one', 'DISC-recovery-two'];
+    const recoveryTickets = ticketBatch(fixture.ref, 2).tickets;
+    const moduleKeys = [
+        'person', 'personality', 'history', 'relationshipsMotives',
+        'currentState', 'knowledgeCapabilitiesResources', 'physiology',
+    ];
+    const moduleText = (key, label) => (
+        `${label} ${key}. ${'Complete natural dossier prose records stable facts, limitations, choices, and future action context. '.repeat(6)}`
+    );
+    const physiologyKeys = [
+        'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
+        'reproductiveFunction', 'sexualResponse', 'limitations',
+    ];
+    const physiology = physiologyKeys.map((key) => (
+        `<field key="${key}">${key} records one complete durable physiological fact with species limits and no invented action or consent.</field>`
+    )).join('');
+    const recoveryProgress = normalizeActorProfileRecoveryProgress({
+        version: 1,
+        identityAttempted: true,
+        identityLocked: true,
+        rows: [
+            {
+                actorId: actorIds[0],
+                name: names[0],
+                discovery: true,
+                sourceAnchor: anchors[0],
+                modules: Object.fromEntries(moduleKeys.map((key) => [
+                    key,
+                    moduleText(key, names[0]),
+                ])),
+            },
+            {
+                actorId: actorIds[1],
+                name: names[1],
+                discovery: true,
+                sourceAnchor: anchors[1],
+                modules: {},
+            },
+        ],
+    });
+    const calls = [];
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        recoveryProgress,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full_adult',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+            characterCreationTickets: structuredClone(recoveryTickets),
+        },
+        requestBatch: ({ candidates, groupKey, moduleKeys: requested, attempt, messages }) => {
+            calls.push({
+                groupKey,
+                attempt,
+                actorIds: candidates.map((candidate) => candidate.actorRef.actorId),
+                moduleKeys: [...requested],
+            });
+            assert.deepEqual(candidates.map((candidate) => candidate.actorRef.actorId), [actorIds[1]]);
+            assert.deepEqual(candidates[0].characterCreationTicket, recoveryTickets[1]);
+            const prompt = messages.map((message) => message.content).join('\n');
+            assert.ok(prompt.includes(recoveryTickets[1].ticketId));
+            assert.equal(prompt.includes(recoveryTickets[0].ticketId), false);
+            return [
+                `<profile-target actor="${actorIds[1]}" name="${names[1]}">`,
+                ...requested.map((key) => (
+                    `<module key="${key}">${key === 'physiology' ? physiology : moduleText(key, names[1])}</module>`
+                )),
+                '</profile-target>',
+            ].join('\n');
+        },
+        resolveDiscoveries: async ({ discoveries }) => ({
+            ok: true,
+            ledger: structuredClone(fixture.ledger),
+            candidates: structuredClone(fixture.candidates),
+            entries: discoveries.map((discovery, index) => ({
+                candidateId: `RECOVERY-${index + 1}`,
+                actorRef: {
+                    actorId: fixture.candidates[index].actorRef.actorId,
+                    name: fixture.candidates[index].actorRef.name,
+                },
+                candidate: structuredClone(discovery.candidate),
+                repairs: [],
+            })),
+            rejected: [],
+            failures: [],
+            registry: fixture.registration,
+            snapshot: { fieldRevision: 0 },
+        }),
+    });
+    assert.deepEqual(calls, [{
+        groupKey: 'character_core',
+        attempt: 0,
+        actorIds: [actorIds[1]],
+        moduleKeys,
+    }]);
+    assert.equal(calls.length, 1, 'refresh recovery must add neither a retry nor a third call');
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(run.result.accepted.length, 2);
+    assert.equal(run.saveCount, 2);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+    const diagnosticJson = JSON.stringify(run.result.batchMeta);
+    assert.equal(diagnosticJson.includes(recoveryTickets[0].ticketId), false);
+    assert.equal(diagnosticJson.includes(recoveryTickets[1].ticketId), false);
+});
+
+test('two full-adult rows use only the existing one missing-row retry and commit both atomically', async () => {
+    const fixture = prepareRegisteredBatch(2, { chatId: 'chat-two-adult-one-retry' });
+    fixture.candidates.forEach((candidate) => {
+        candidate.completionMode = 'full_adult';
+    });
+    const [first, second] = fixture.candidates;
+    second.identity = {
+        ...(second.identity || {}),
+        aliases: ['第二人物补缺别名'],
+    };
+    const physiologyKeys = [
+        'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
+        'reproductiveFunction', 'sexualResponse', 'limitations',
+    ];
+    const physiology = physiologyKeys.map((key) => (
+        `<field key="${key}">${key} records one complete durable physiological fact, species boundary, and objective limitation without invented action.</field>`
+    )).join('');
+    const moduleText = (key, label) => (
+        `${label} ${key}. ${'Complete natural dossier prose records stable facts, limitations, choices, and future action context. '.repeat(6)}`
+    );
+    const row = (candidate, moduleKeys, route = candidate.actorRef.actorId, name = candidate.actorRef.name) => [
+        `<profile-target actor="${route}" name="${name}">`,
+        ...moduleKeys.map((key) => (
+            `<module key="${key}">${key === 'physiology' ? physiology : moduleText(key, name)}</module>`
+        )),
+        '</profile-target>',
+    ].join('\n');
+    const calls = [];
+    const run = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt }) => {
+            calls.push({
+                groupKey,
+                attempt,
+                actorIds: candidates.map((candidate) => candidate.actorRef.actorId),
+                moduleKeys: [...moduleKeys],
+            });
+            if (attempt === 0) return row(first, moduleKeys);
+            assert.deepEqual(candidates.map((candidate) => candidate.actorRef.actorId), [second.actorRef.actorId]);
+            return row(second, moduleKeys, '第二人物补缺别名', '第二人物补缺别名');
+        },
+    });
+    assert.deepEqual(calls.map(({ groupKey, attempt }) => [groupKey, attempt]), [
+        ['character_core', 0],
+        ['character_core', 1],
+    ]);
+    assert.equal(calls.length, 2, 'no third model call may be added');
+    assert.deepEqual(calls[1].moduleKeys, calls[0].moduleKeys);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(run.result.accepted.length, 2);
+    assert.equal(run.saveCount, 2);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+    const retryDiagnostic = run.result.batchMeta.moduleGroups.find((entry) => (
+        entry.groupKey === 'character_core' && entry.attempt === 1
+    ));
+    assert.equal(retryDiagnostic.routeRepairCount, 1);
+});
+
+test('real P1 pending and final writers rebase once over a P3 ATT win without losing either side', async () => {
+    const fixture = prepareRegisteredBatch(1, { chatId: 'chat-p1-p3-reverse-race' });
+    const moduleText = (key) => `${key}. ${'Complete natural profile prose records stable facts, limits, choices, and usable future context. '.repeat(6)}`;
+    const preparedRun = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        requestBatch: ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+            `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+            ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+            '</profile-target>',
+        ].join('\n')).join('\n'),
+    });
+    assert.equal(preparedRun.persistencePayloads.length, 2);
+    const pendingPayload = preparedRun.persistencePayloads[0];
+    const finalPayload = preparedRun.persistencePayloads[1];
+    const captured = { ...fixture.ref, epoch: 1, fingerprint: fixture.ref.contentFingerprint };
+    const attempt = {
+        id: 'ATT-reverse-race',
+        actorId: fixture.candidates[0].actorRef.actorId,
+        status: 'attempted',
+        action: 'bounded synthetic world attempt',
+    };
+    const receipt = {
+        receiptId: 'AR-reverse-race',
+        attemptId: attempt.id,
+        actorId: attempt.actorId,
+        stage: 'attempted',
+        status: 'pending_world',
+    };
+    const p3Ledger = normalizeActorLedger({
+        ...structuredClone(fixture.ledger),
+        actionAttempts: [attempt],
+        actionReceipts: [receipt],
+    }, { chatId: fixture.ref.chatId, scopeDigest: fixture.ref.scopeDigest });
+    let liveNamespace = {
+        actorLedger: p3Ledger,
+        actorProfileRetryReceipt: { status: 'not_completed', marker: 'must-survive' },
+        fieldRevisions: { actorLedger: 1 },
+    };
+    let writes = 0;
+    const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const helperSource = indexSource.slice(
+        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('async function completeActorProfilesForTurn'),
+    );
+    const sandbox = {
+        normalizeActorLedger,
+        actorProfileRecoverySourceMatches,
+        actorProfileCommitMatchesLedger,
+        actorLedgerDigest,
+        actorActionTargetMatches,
+        deepClone: (value) => structuredClone(value),
+        sourceRefOf: () => structuredClone(fixture.ref),
+        freshFrozenScopeGuard: async () => ({ ok: true }),
+        continuityTargetIsCurrent: () => ({ ok: true }),
+        getContext: () => ({ chatId: fixture.ref.chatId }),
+        readChatNamespace: () => structuredClone(liveNamespace),
+        writeChatNamespace: async (candidate, _chatId, options) => {
+            writes += 1;
+            if (writes === 1 || writes === 3) {
+                options.failureSink.code = 'field_state_mismatch';
+                options.failureSink.actualFieldStates = { actorLedger: {} };
+                return false;
+            }
+            assert.equal(options.precondition(), true);
+            assert.equal(options.contentValidator(candidate), true);
+            liveNamespace = {
+                ...liveNamespace,
+                actorLedger: structuredClone(candidate.actorLedger),
+                fieldRevisions: { actorLedger: writes },
+            };
+            options.successSink.namespace = structuredClone(liveNamespace);
+            options.successSink.readbackNamespace = structuredClone(liveNamespace);
+            return true;
+        },
+    };
+    vm.runInNewContext(
+        `${helperSource}\nthis.persistProfile = persistActorProfilePhaseWithWorldRebase;`,
+        sandbox,
+    );
+    const pending = await sandbox.persistProfile(captured, {
+        ledger: pendingPayload.ledger,
+        baseLedger: fixture.ledger,
+        expectedCommits: pendingPayload.expectedCommits,
+        expectedState: { fieldRevision: 0, digest: actorLedgerDigest(fixture.ledger) },
+        phase: 'pending',
+    });
+    assert.equal(pending.ok, true);
+    assert.equal(writes, 2);
+    assert.ok(pending.ledger.actionAttempts.some((entry) => entry.id === attempt.id));
+    assert.ok(pending.ledger.actionReceipts.some((entry) => entry.receiptId === receipt.receiptId));
+    assert.ok(pendingPayload.expectedCommits.every((entry) => (
+        actorProfileCommitMatchesLedger(pending.ledger, { ...entry, phase: 'pending' }).ok
+    )));
+
+    const final = await sandbox.persistProfile(captured, {
+        ledger: finalPayload.ledger,
+        baseLedger: pendingPayload.ledger,
+        expectedCommits: finalPayload.expectedCommits,
+        expectedState: pending.snapshot,
+        phase: 'final',
+    });
+    assert.equal(final.ok, true);
+    assert.equal(writes, 4);
+    assert.ok(final.ledger.actionAttempts.some((entry) => entry.id === attempt.id));
+    assert.ok(final.ledger.actionReceipts.some((entry) => entry.receiptId === receipt.receiptId));
+    assert.ok(finalPayload.expectedCommits.every((entry) => (
+        actorProfileCommitMatchesLedger(final.ledger, { ...entry, phase: 'final' }).ok
+    )));
+    assert.equal(liveNamespace.actorProfileRetryReceipt.marker, 'must-survive');
+});
+
+test('P1 reveal waits for current-target P3 ATT but preserves and ignores an older pending ATT', async () => {
+    const fixture = prepareRegisteredBatch(1, { chatId: 'chat-p1-reveal-p3-reverse-race' });
+    const actorId = fixture.candidates[0].actorRef.actorId;
+    const oldName = fixture.candidates[0].actorRef.name;
+    const revealedName = 'revealed-current-source-name';
+    const fullProfileText = (key) => `${key}. ${'Complete natural profile prose records stable facts, limits, choices, and usable future context. '.repeat(6)}`;
+    const initialProfile = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        requestBatch: ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+            `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+            ...moduleKeys.map((key) => `<module key="${key}">${fullProfileText(key)}</module>`),
+            '</profile-target>',
+        ].join('\n')).join('\n'),
+    });
+    assert.equal(initialProfile.result.persistenceStatus, 'atomic_readback');
+    const baseLedger = initialProfile.result.ledger;
+    const revealedLedger = mergeActorIdentityReveal(baseLedger, {
+        actorId,
+        revealedName,
+        aliases: [oldName],
+        evidence: [`${fixture.ref.messageId}:${fixture.ref.swipeId}:${fixture.ref.generation}:${fixture.ref.hash}`],
+        sourceRef: fixture.ref,
+        turn: fixture.ref.generation,
+    });
+    const preparedRevealed = prepareActorLedgerProfilesV6(revealedLedger, {
+        mode: 'full',
+        turn: fixture.ref.generation,
+    }).ledger;
+    const revealedCandidates = selectActorProfileCompletionCandidates(preparedRevealed, {
+        initialActorIds: [actorId],
+        includeReadyActorIds: [actorId],
+        refreshModulesByActorId: {
+            [actorId]: ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
+        },
+        maintenanceMaxActors: 0,
+        turn: fixture.ref.generation,
+    });
+    assert.equal(revealedCandidates[0].actorRef.name, revealedName);
+    const moduleText = fullProfileText;
+    const preparedRun = await runBatch({
+        ...fixture,
+        ledger: preparedRevealed,
+        candidates: revealedCandidates,
+    }, {
+        moduleProtocol: 'raw',
+        requestBatch: ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+            `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+            ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+            '</profile-target>',
+        ].join('\n')).join('\n'),
+    });
+    assert.equal(preparedRun.persistencePayloads.length, 2);
+    const pendingPayload = preparedRun.persistencePayloads[0];
+    const finalPayload = preparedRun.persistencePayloads[1];
+    const worldTarget = {
+        chatId: fixture.ref.chatId,
+        messageId: fixture.ref.messageId,
+        logicalIndex: fixture.ref.index,
+        index: fixture.ref.index,
+        swipeId: fixture.ref.swipeId,
+        generation: fixture.ref.generation,
+        generationId: fixture.ref.generationId,
+        generationType: fixture.ref.generationType,
+        scopeDigest: fixture.ref.scopeDigest,
+        contentHash: fixture.ref.contentHash,
+        hash: fixture.ref.hash,
+    };
+    const readyActor = baseLedger.actors.find((entry) => entry.id === actorId);
+    const worldCandidate = {
+        actorId,
+        actorName: oldName,
+        currentGoal: 'complete one bounded local check',
+        intent: 'wait',
+        time: { turn: fixture.ledger.turn, window: 'this bounded action window' },
+        location: {
+            from: readyActor.location.name,
+            to: readyActor.location.name,
+            travelTurns: 0,
+        },
+        action: `${oldName} waits for one bounded local condition.`,
+        actionWindow: 'this bounded action window',
+        expectedCost: 'one bounded action window',
+        expectedDuration: 'one turn',
+        expectedRisk: 'the condition may remain unmet',
+        observableConsequence: 'the local condition remains checkable',
+        knowledgeRefs: [],
+        knowledgeBasis: [],
+        resourceCosts: [],
+        capabilityUsed: '',
+        stateChanges: [],
+        interactionTargets: [],
+        evidence: [],
+        sourceThreads: [],
+        causalChain: [],
+        waitCondition: 'wait until one specific local signal can be verified',
+    };
+    const preparedAttempt = prepareActorActionAttempts(baseLedger, [worldCandidate], {
+        turn: baseLedger.turn,
+        sourceRef: worldTarget,
+        target: worldTarget,
+    });
+    assert.equal(preparedAttempt.attempts.length, 1, JSON.stringify(preparedAttempt.rejected));
+    const recordedAttempt = recordActorActionAttempts(
+        preparedAttempt.ledger,
+        preparedAttempt.attempts,
+        { target: worldTarget },
+    );
+    assert.equal(recordedAttempt.recorded.length, 1);
+    const attempt = recordedAttempt.recorded[0];
+    const receipt = recordedAttempt.ledger.actionReceipts.find((entry) => (
+        entry.attemptId === attempt.id && entry.status === 'pending_world'
+    ));
+    const p3Ledger = recordedAttempt.ledger;
+    let liveNamespace = {
+        actorLedger: p3Ledger,
+        continuityCheckpoint: { stage3Phase: 'prepared' },
+        fieldRevisions: { actorLedger: 1 },
+    };
+    let writes = 0;
+    const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const helperSource = indexSource.slice(
+        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('async function completeActorProfilesForTurn'),
+    );
+    const captured = { ...fixture.ref, epoch: 1, fingerprint: fixture.ref.contentFingerprint };
+    const sandbox = {
+        normalizeActorLedger,
+        actorProfileRecoverySourceMatches,
+        actorProfileCommitMatchesLedger,
+        actorLedgerDigest,
+        actorActionTargetMatches,
+        deepClone: (value) => structuredClone(value),
+        continuityChain: {
+            catch: () => Promise.resolve().then(() => {
+                liveNamespace = {
+                    ...liveNamespace,
+                    actorLedger: normalizeActorLedger({
+                        ...structuredClone(liveNamespace.actorLedger),
+                        actionAttempts: [{ ...attempt, status: 'success' }],
+                        actionReceipts: [{ ...receipt, status: 'adjudicated' }],
+                    }, { chatId: fixture.ref.chatId, scopeDigest: fixture.ref.scopeDigest }),
+                    continuityCheckpoint: { stage3Phase: 'world_committed' },
+                    fieldRevisions: { actorLedger: 2 },
+                };
+            }),
+        },
+        sourceRefOf: () => structuredClone(fixture.ref),
+        freshFrozenScopeGuard: async () => ({ ok: true }),
+        continuityTargetIsCurrent: () => ({ ok: true }),
+        getContext: () => ({ chatId: fixture.ref.chatId }),
+        readChatNamespace: () => structuredClone(liveNamespace),
+        writeChatNamespace: async (candidate, _chatId, options) => {
+            writes += 1;
+            if (writes === 1 || writes === 3) {
+                options.failureSink.code = 'field_state_mismatch';
+                options.failureSink.actualFieldStates = { actorLedger: {} };
+                return false;
+            }
+            assert.equal(options.contentValidator(candidate), true);
+            liveNamespace = {
+                ...liveNamespace,
+                actorLedger: structuredClone(candidate.actorLedger),
+                fieldRevisions: { actorLedger: writes },
+            };
+            options.successSink.namespace = structuredClone(liveNamespace);
+            options.successSink.readbackNamespace = structuredClone(liveNamespace);
+            return true;
+        },
+    };
+    vm.runInNewContext(
+        `${helperSource}\nthis.persistProfile = persistActorProfilePhaseWithWorldRebase;`,
+        sandbox,
+    );
+    const pending = await sandbox.persistProfile(captured, {
+        ledger: pendingPayload.ledger,
+        baseLedger,
+        expectedCommits: pendingPayload.expectedCommits,
+        expectedState: { fieldRevision: 0, digest: actorLedgerDigest(baseLedger) },
+        phase: 'pending',
+    });
+    assert.equal(pending.ok, true, pending.reason);
+    const final = await sandbox.persistProfile(captured, {
+        ledger: finalPayload.ledger,
+        baseLedger: pendingPayload.ledger,
+        expectedCommits: finalPayload.expectedCommits,
+        expectedState: pending.snapshot,
+        phase: 'final',
+    });
+    assert.equal(final.ok, true, final.reason);
+    assert.equal(writes, 4);
+    const actor = final.ledger.actors.find((entry) => entry.id === actorId);
+    const registryEntry = Object.values(final.ledger.actorRegistry.registered)
+        .find((entry) => entry.actorRef.actorId === actorId);
+    assert.equal(actor.name, revealedName);
+    assert.ok(actor.identity.aliases.includes(oldName));
+    assert.equal(registryEntry.actorRef.displayName, revealedName);
+    assert.ok(final.ledger.actionAttempts.some((entry) => entry.id === attempt.id));
+    assert.ok(final.ledger.actionReceipts.some((entry) => entry.receiptId === receipt.receiptId));
+    assert.ok(actorProfileReadyForAction(actor));
+    assert.equal(liveNamespace.continuityCheckpoint.stage3Phase, 'world_committed');
+    assert.equal(final.ledger.actionReceipts.some((entry) => entry.status === 'pending_world'), false);
+
+    const oldTarget = {
+        ...worldTarget,
+        messageId: 'message-old-target',
+        logicalIndex: Math.max(0, worldTarget.logicalIndex - 1),
+        index: Math.max(0, worldTarget.index - 1),
+        generation: Math.max(0, worldTarget.generation - 1),
+        generationId: 'generation-old-target',
+        contentHash: 'hash-old-target',
+        hash: 'hash-old-target',
+    };
+    const oldPrepared = prepareActorActionAttempts(baseLedger, [worldCandidate], {
+        turn: baseLedger.turn,
+        sourceRef: oldTarget,
+        target: oldTarget,
+    });
+    assert.equal(oldPrepared.attempts.length, 1, JSON.stringify(oldPrepared.rejected));
+    const oldRecorded = recordActorActionAttempts(
+        oldPrepared.ledger,
+        oldPrepared.attempts,
+        { target: oldTarget },
+    );
+    assert.equal(oldRecorded.recorded.length, 1);
+    const oldAttempt = structuredClone(oldRecorded.recorded[0]);
+    const oldReceipt = structuredClone(oldRecorded.ledger.actionReceipts.find((entry) => (
+        entry.attemptId === oldAttempt.id && entry.status === 'pending_world'
+    )));
+    liveNamespace = {
+        actorLedger: oldRecorded.ledger,
+        continuityCheckpoint: { stage3Phase: 'world_committed' },
+        fieldRevisions: { actorLedger: 1 },
+    };
+    writes = 0;
+    let oldTargetWaits = 0;
+    sandbox.continuityChain = {
+        catch: () => {
+            oldTargetWaits += 1;
+            return Promise.resolve();
+        },
+    };
+    const oldPending = await sandbox.persistProfile(captured, {
+        ledger: pendingPayload.ledger,
+        baseLedger,
+        expectedCommits: pendingPayload.expectedCommits,
+        expectedState: { fieldRevision: 0, digest: actorLedgerDigest(baseLedger) },
+        phase: 'pending',
+    });
+    assert.equal(oldPending.ok, true, oldPending.reason);
+    const oldFinal = await sandbox.persistProfile(captured, {
+        ledger: finalPayload.ledger,
+        baseLedger: pendingPayload.ledger,
+        expectedCommits: finalPayload.expectedCommits,
+        expectedState: oldPending.snapshot,
+        phase: 'final',
+    });
+    assert.equal(oldFinal.ok, true, oldFinal.reason);
+    assert.equal(oldTargetWaits, 0, 'an older target ATT must not join the current continuity chain');
+    assert.deepEqual(
+        oldFinal.ledger.actionAttempts.find((entry) => entry.id === oldAttempt.id),
+        normalizeActorLedger(oldRecorded.ledger, {
+            chatId: fixture.ref.chatId,
+            scopeDigest: fixture.ref.scopeDigest,
+        }).actionAttempts.find((entry) => entry.id === oldAttempt.id),
+    );
+    assert.deepEqual(
+        oldFinal.ledger.actionReceipts.find((entry) => entry.receiptId === oldReceipt.receiptId),
+        oldReceipt,
+    );
+});
+
+test('real P1 registry writer rebases one new ActorRef over a P3 ATT win and preserves both write-sets', async () => {
+    const fixture = prepareRegisteredBatch(1, { chatId: 'chat-p1-registry-p3-reverse-race' });
+    const moduleText = (key) => `${key}. ${'Complete natural profile prose records stable facts, limits, choices, and usable future context. '.repeat(6)}`;
+    const profileRun = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        requestBatch: ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+            `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+            ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+            '</profile-target>',
+        ].join('\n')).join('\n'),
+    });
+    assert.equal(profileRun.result.persistenceStatus, 'atomic_readback');
+    const baseLedger = profileRun.result.ledger;
+    assert.ok(baseLedger.actors.every(actorProfileReadyForAction));
+
+    const registryRef = sourceRef(fixture.ref.chatId, 2);
+    const registered = registerNames(baseLedger, ['registry-race-new-actor'], registryRef);
+    const desiredLedger = registered.registration.ledger;
+    const newActorIds = registered.registration.promoted
+        .filter((entry) => entry.created)
+        .map((entry) => entry.actorRef.actorId);
+    assert.equal(newActorIds.length, 1);
+
+    const existingActorId = baseLedger.actors[0].id;
+    const attempt = {
+        id: 'ATT-registry-reverse-race',
+        actorId: existingActorId,
+        status: 'attempted',
+        action: 'bounded synthetic world attempt before registry save',
+    };
+    const receipt = {
+        receiptId: 'AR-registry-reverse-race',
+        attemptId: attempt.id,
+        actorId: existingActorId,
+        stage: 'attempted',
+        status: 'pending_world',
+    };
+    const p3Ledger = normalizeActorLedger({
+        ...structuredClone(baseLedger),
+        actionAttempts: [attempt],
+        actionReceipts: [receipt],
+    }, { chatId: registryRef.chatId, scopeDigest: registryRef.scopeDigest });
+    let liveNamespace = {
+        actorLedger: p3Ledger,
+        fieldRevisions: { actorLedger: 1 },
+    };
+    let writes = 0;
+    const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const registrySource = indexSource.slice(
+        indexSource.indexOf('async function persistActorRegistryForTurn'),
+        indexSource.indexOf('async function persistActorActionAttemptsForTurn'),
+    );
+    const rebaseSource = indexSource.slice(
+        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('async function persistActorProfilePhaseWithWorldRebase'),
+    );
+    const captured = {
+        ...registryRef,
+        epoch: 2,
+        fingerprint: registryRef.contentFingerprint,
+    };
+    const sandbox = {
+        normalizeActorLedger,
+        actorProfileRecoverySourceMatches,
+        actorLedgerDigest,
+        actorActionTargetMatches,
+        actorRegistryDigest,
+        actorRegistryMatchesLedger,
+        deepClone: (value) => structuredClone(value),
+        sourceRefOf: () => structuredClone(registryRef),
+        freshFrozenScopeGuard: async () => ({ ok: true }),
+        continuityTargetIsCurrent: () => ({ ok: true }),
+        getContext: () => ({ chatId: registryRef.chatId }),
+        readChatNamespace: () => structuredClone(liveNamespace),
+        writeChatNamespace: async (candidate, _chatId, options) => {
+            writes += 1;
+            if (writes === 1) {
+                options.failureSink.code = 'stale_namespace_revision';
+                options.failureSink.staleFields = ['actorLedger'];
+                return false;
+            }
+            assert.equal(options.precondition(), true);
+            assert.equal(options.contentValidator(candidate), true);
+            liveNamespace = {
+                ...liveNamespace,
+                actorLedger: structuredClone(candidate.actorLedger),
+                fieldRevisions: { actorLedger: 2 },
+            };
+            options.successSink.namespace = structuredClone(liveNamespace);
+            options.successSink.readbackNamespace = structuredClone(liveNamespace);
+            return true;
+        },
+    };
+    vm.runInNewContext(
+        `${rebaseSource}\n${registrySource}\nthis.persistRegistry = persistActorRegistryForTurn;`,
+        sandbox,
+    );
+    const result = await sandbox.persistRegistry(captured, {
+        previousLedger: baseLedger,
+        nextLedger: desiredLedger,
+        actorIds: newActorIds,
+        expectedState: { fieldRevision: 0, digest: actorLedgerDigest(baseLedger) },
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(writes, 2, 'registry CAS is replayed locally only once');
+    assert.ok(result.ledger.actors.some((actor) => actor.id === newActorIds[0]));
+    assert.ok(result.ledger.actionAttempts.some((entry) => entry.id === attempt.id));
+    assert.ok(result.ledger.actionReceipts.some((entry) => entry.receiptId === receipt.receiptId));
+    assert.equal(
+        actorRegistryMatchesLedger(result.ledger, {
+            chatId: registryRef.chatId,
+            scopeDigest: registryRef.scopeDigest,
+            actorIds: newActorIds,
+            digest: actorRegistryDigest(desiredLedger.actorRegistry),
+        }).ok,
+        true,
+    );
+});
+
+test('P1 writer rejects profile drift and bounds repeated actor CAS failure without clearing recovery receipt', async () => {
+    const fixture = prepareRegisteredBatch(1, { chatId: 'chat-p1-rebase-reject' });
+    const moduleText = (key) => `${key}. ${'Complete natural profile prose records stable facts, limits, choices, and usable future context. '.repeat(6)}`;
+    const preparedRun = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        requestBatch: ({ candidates, moduleKeys }) => candidates.map((candidate) => [
+            `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+            ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key)}</module>`),
+            '</profile-target>',
+        ].join('\n')).join('\n'),
+    });
+    const pendingPayload = preparedRun.persistencePayloads[0];
+    const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const helperSource = indexSource.slice(
+        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('async function completeActorProfilesForTurn'),
+    );
+    const captured = { ...fixture.ref, epoch: 1, fingerprint: fixture.ref.contentFingerprint };
+    const runCase = async (profileDrift) => {
+        const freshLedger = structuredClone(fixture.ledger);
+        if (profileDrift) freshLedger.actors[0].profileV6.updatedTurn += 1;
+        const receipt = { status: 'not_completed', marker: 'preserved-recovery' };
+        let liveNamespace = {
+            actorLedger: freshLedger,
+            actorProfileRetryReceipt: receipt,
+            fieldRevisions: { actorLedger: 1 },
+        };
+        let writes = 0;
+        const sandbox = {
+            normalizeActorLedger, actorProfileRecoverySourceMatches,
+            actorProfileCommitMatchesLedger, actorLedgerDigest,
+            actorActionTargetMatches,
+            deepClone: (value) => structuredClone(value),
+            sourceRefOf: () => structuredClone(fixture.ref),
+            freshFrozenScopeGuard: async () => ({ ok: true }),
+            continuityTargetIsCurrent: () => ({ ok: true }),
+            getContext: () => ({ chatId: fixture.ref.chatId }),
+            readChatNamespace: () => structuredClone(liveNamespace),
+            writeChatNamespace: async (_candidate, _chatId, options) => {
+                writes += 1;
+                options.failureSink.code = 'field_state_mismatch';
+                options.failureSink.actualFieldStates = { actorLedger: {} };
+                return false;
+            },
+        };
+        vm.runInNewContext(
+            `${helperSource}\nthis.persistProfile = persistActorProfilePhaseWithWorldRebase;`,
+            sandbox,
+        );
+        const result = await sandbox.persistProfile(captured, {
+            ledger: pendingPayload.ledger,
+            baseLedger: fixture.ledger,
+            expectedCommits: pendingPayload.expectedCommits,
+            expectedState: { fieldRevision: 0, digest: actorLedgerDigest(fixture.ledger) },
+            phase: 'pending',
+        });
+        assert.equal(liveNamespace.actorProfileRetryReceipt.marker, 'preserved-recovery');
+        return { result, writes };
+    };
+    const drift = await runCase(true);
+    assert.equal(drift.result.ok, false);
+    assert.equal(drift.writes, 1, 'profile drift is rejected before any retry overwrite');
+    assert.match(drift.result.reason, /profile_or_identity_drift/u);
+    const exhausted = await runCase(false);
+    assert.equal(exhausted.result.ok, false);
+    assert.equal(exhausted.writes, 2, 'actor-only CAS retry is bounded to one local replay');
 });
 
 test('twenty-four full_adult rows finish every transport chunk before one atomic save', async () => {
@@ -2686,11 +3625,10 @@ test('twenty-four full_adult rows finish every transport chunk before one atomic
                     if (key !== 'physiology') {
                         return `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`;
                     }
-                    const body = `${physiologyClauses.join('. ')}. ${moduleText(key, candidate.actorRef.name)}`;
-                    const proof = physiologyKeys.map((coverageKey, index) => (
-                        `<physiology-coverage key="${coverageKey}">${physiologyClauses[index]}</physiology-coverage>`
+                    const fields = physiologyKeys.map((fieldKey, index) => (
+                        `<field key="${fieldKey}">${physiologyClauses[index]}</field>`
                     )).join('');
-                    return `<module key="physiology">${body}${proof}</module>`;
+                    return `<module key="physiology">${fields}</module>`;
                 });
                 return [
                     `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
@@ -2700,9 +3638,9 @@ test('twenty-four full_adult rows finish every transport chunk before one atomic
             }).join('\n');
         },
     });
-    assert.equal(calls.length, 9);
+    assert.equal(calls.length, 5);
     assert.deepEqual(calls.filter((entry) => entry.groupKey !== 'identity_bootstrap')
-        .map((entry) => entry.count), Array(8).fill(6));
+        .map((entry) => entry.count), Array(4).fill(6));
     assert.equal(run.result.persistenceStatus, 'atomic_readback');
     assert.equal(run.result.accepted.length, 24);
     assert.equal(run.saveCount, 2);

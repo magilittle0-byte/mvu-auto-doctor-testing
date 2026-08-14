@@ -939,7 +939,7 @@ test('no new actor action creates no progress while an independent world process
 test('production persists supplied attempts before adjudication and settle has no reconstruction fallback', async () => {
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const ledgerSource = await readFile(new URL('../actor-ledger-core.mjs', import.meta.url), 'utf8');
-    const runtimeStart = indexSource.indexOf('const prepared = prepareActorActionAttempts');
+    const runtimeStart = indexSource.indexOf('async function stage3PersistPreparedActorAttemptsOnFreshLedger');
     const persistAt = indexSource.indexOf('await persistActorActionAttemptsForTurn', runtimeStart);
     const settleAt = indexSource.indexOf('settleActorActionCandidates(', persistAt);
     assert.ok(runtimeStart >= 0 && persistAt > runtimeStart && settleAt > persistAt);
@@ -949,7 +949,10 @@ test('production persists supplied attempts before adjudication and settle has n
     assert.match(runtime, /sourceRef: actionTarget/u);
     assert.match(runtime, /target: actionTarget/u);
     assert.match(indexSource, /actorActionSettlementsMatchLedger/u);
-    assert.match(indexSource, /requireReadback: true,\s*readbackAttempts: 1,\s*failureSink/u);
+    assert.match(
+        indexSource,
+        /requireReadback: true,\s*readbackAttempts: 5,\s*failureSink,\s*successSink,\s*allowUnselectedFieldEvolution: true,\s*recoverSelectedTransaction: true/u,
+    );
     assert.match(indexSource, /scheduledActorIds\.length/u);
     assert.match(indexSource, /pendingActorActionAttempts\(actionLedger, \{ target: actionTarget \}\)/u);
     assert.match(indexSource, /world_task_owner_changed/u);
@@ -1054,8 +1057,9 @@ test('production player identity and adjudicated duration remain hard action aut
     assert.equal(failedActor.nextActionTurn, 11);
 
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-    const prepareAt = indexSource.indexOf('const prepared = prepareActorActionAttempts');
-    assert.match(indexSource.slice(prepareAt, prepareAt + 500), /playerNames:\s*currentPlayerActorNames\(context\)/u);
+    const runStart = indexSource.indexOf('async function runContinuityTarget');
+    const helperCall = indexSource.indexOf('stage3PersistPreparedActorAttemptsOnFreshLedger', runStart);
+    assert.match(indexSource.slice(helperCall, helperCall + 900), /playerNames:\s*currentPlayerActorNames\(context\)/u);
     assert.match(indexSource, /interactionTargets/u);
     assert.match(indexSource, /knowledge: actor\.knowledge/u);
     assert.match(indexSource, /resources: actor\.resources/u);
