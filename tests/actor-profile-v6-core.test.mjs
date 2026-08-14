@@ -407,7 +407,7 @@ test('fact priority is applied per field and AI fill never impersonates confirme
                 goals: { strategy: { reviewConditions: '骰票约定的复核条件。' } },
             },
             confirmedProfile: { identity: { role: '旧档案角色' } },
-            stitcher: { identity: { role: '缝合怪明确角色' } },
+            authorityProposal: { identity: { role: '中性权威提案角色' } },
             acceptedNarrative: { identity: { role: '正文确认的港口抄写员' } },
             authority: { identity: { age: '27岁' } },
         },

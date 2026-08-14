@@ -13,6 +13,7 @@ function runtimeGenerationSerialFloor() { return -1; }
 function recordNextTurnConsumerInspection() {}
 function preemptHostBackgroundModelControllersForForegroundGeneration() { return 0; }
 function recordModelDiagnostic(entry) { globalThis.__doctorDiagnostics?.push(entry); }
+function hydrateVariableRepairCenterStatus() {}
 `;
 
 function sourceSection(start, end) {
@@ -788,8 +789,8 @@ test('late P4 precompose session executes the real release guard before any clea
 
 function loadP4StaleLeasePrecomposeHarness({
     externalProvider = false,
-    tombstoned = false,
     cleanupFailed = false,
+    currentSessionLease = false,
 } = {}) {
     const sessionSupport = sourceSection(
         'function acceptedFinalScopeDecision(generation, scopeDigest)',
@@ -798,6 +799,10 @@ function loadP4StaleLeasePrecomposeHarness({
     const ownership = sourceSection(
         'function persistedStaleWorldLeaseOwnership(context, namespace)',
         'function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope, decisionSink = null)',
+    );
+    const leaseOwnership = sourceSection(
+        'function doctorOwnsNextTurnConsumerLease(lease)',
+        'async function markNextTurnConsumerCleanupFailed(session, lease, reason)',
     );
     const precompose = sourceSection(
         'async function precomposeNextTurnConsumer(session)',
@@ -808,6 +813,7 @@ function loadP4StaleLeasePrecomposeHarness({
         fallbackClears: 0,
         ticketBatches: 0,
         fallbackText: '',
+        externalCallbacks: 0,
         injectionInspection: {},
     };
     const session = {
@@ -817,9 +823,12 @@ function loadP4StaleLeasePrecomposeHarness({
     };
     const lease = {
         state: cleanupFailed ? 'cleanup_failed' : 'reserved',
-        chatId: 'chat-a', generationId: 'generation-old',
-        generationSerial: 4, generationType: 'normal', scopeDigest: 'scope-old',
-        expectedScopeDigest: 'scope-old', consumerPayloadDigest: 'old-payload',
+        chatId: 'chat-a', generationId: currentSessionLease ? session.id : 'generation-old',
+        generationSerial: currentSessionLease ? session.serial : 4,
+        generationType: 'normal',
+        scopeDigest: currentSessionLease ? session.frozenScopeDigest : 'scope-old',
+        expectedScopeDigest: currentSessionLease ? session.frozenScopeDigest : 'scope-old',
+        consumerPayloadDigest: 'old-payload',
         providerId: externalProvider ? 'unknown-provider' : 'sillytavern-fallback',
         slotId: externalProvider ? 'unknown-provider' : 'mvu-auto-doctor-next-turn-consumer',
         providerCleanupToken: externalProvider ? 'unknown-token' : '',
@@ -840,6 +849,7 @@ function loadP4StaleLeasePrecomposeHarness({
         currentGenerationEpoch: 9, operationEpoch: 11, lastGeneration: session,
         activeGenerationSession: session, activeNextTurnConsumer: null,
         NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+        DOCTOR_NEXT_TURN_PROVIDER_ID: 'doctor-extension-prompt',
         getContext: () => ({ chatId: 'chat-a' }),
         currentActorSovereigntyScope: () => ({ id: 'scope-current' }),
         actorSovereigntyScopeDigest: (scope) => scope.id || '',
@@ -857,8 +867,8 @@ function loadP4StaleLeasePrecomposeHarness({
             return options.contentValidator(state.namespace);
         },
         clearNextTurnConsumerFallback: () => { state.fallbackClears += 1; return true; },
+        cleanupNextTurnProvider: async () => { state.externalCallbacks += 1; return true; },
         clearLegacyNextTurnSlots: () => true,
-        nextTurnConsumerTombstoneForChat: () => (tombstoned ? { chatId: 'chat-a' } : null),
         verifiedNextTurnWorldPackage: (_context, namespace) => ({
             packet: namespace.continuity.nextTurnInjection,
             captured: null,
@@ -873,16 +883,50 @@ function loadP4StaleLeasePrecomposeHarness({
             text: [worldText, ticketText].filter(Boolean).join('\n'),
             digest: 'new-payload',
         }),
-        nextTurnConsumerLeaseToken: () => 'new-lease',
-        selectNextTurnConsumerProvider: () => ({ provider: null, conflict: false }),
         setNextTurnConsumerFallback: (text) => { state.fallbackText = text; return true; },
         lastInjectionInspection: state.injectionInspection,
         recordNextTurnConsumerInspection: () => undefined,
         Date: { now: () => 1 },
     };
-    vm.runInNewContext(`${sessionSupport}\n${ownership}\n${precompose}\nthis.precomposeNextTurnConsumer = precomposeNextTurnConsumer;`, sandbox);
+    vm.runInNewContext(`${sessionSupport}\n${leaseOwnership}\n${ownership}\n${precompose}\nthis.precomposeNextTurnConsumer = precomposeNextTurnConsumer;`, sandbox);
     return { state, session, precompose: sandbox.precomposeNextTurnConsumer };
 }
+
+test('production P4 lease matchers require Doctor ownership even when every session field collides', () => {
+    const leaseChecks = sourceSection(
+        'function nextTurnLeaseMatches(lease, session)',
+        'async function writeNextTurnConsumerLease(session, scopeDigest, payload)',
+    );
+    const leaseOwnership = sourceSection(
+        'function doctorOwnsNextTurnConsumerLease(lease)',
+        'async function markNextTurnConsumerCleanupFailed(session, lease, reason)',
+    );
+    const sandbox = {
+        DOCTOR_NEXT_TURN_PROVIDER_ID: 'doctor-extension-prompt',
+        NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+    };
+    vm.runInNewContext(
+        `${leaseChecks}\n${leaseOwnership}\nthis.belongs = nextTurnLeaseBelongsToSession; this.blocked = nextTurnLeaseCleanupBlocked;`,
+        sandbox,
+    );
+    const session = {
+        chatId: 'chat-a', id: 'generation-current', serial: 5, type: 'normal',
+        frozenScopeDigest: 'scope-current',
+    };
+    const lease = (providerId, state, providerCleanupToken = '') => ({
+        state, chatId: session.chatId, generationId: session.id,
+        generationSerial: session.serial, generationType: session.type,
+        scopeDigest: session.frozenScopeDigest,
+        expectedScopeDigest: session.frozenScopeDigest,
+        providerId, slotId: 'mvu-auto-doctor-next-turn-consumer', providerCleanupToken,
+    });
+    for (const providerId of ['doctor-extension-prompt', 'sillytavern-fallback']) {
+        assert.equal(sandbox.belongs(lease(providerId, 'reserved'), session), true);
+        assert.equal(sandbox.blocked(lease(providerId, 'cleanup_failed'), session), true);
+    }
+    assert.equal(sandbox.belongs(lease('external-provider', 'reserved', 'foreign-token'), session), false);
+    assert.equal(sandbox.blocked(lease('external-provider', 'cleanup_failed', 'foreign-token'), session), false);
+});
 
 test('fresh persisted old P3 fallback lease converges without blocking current ticket-only precompose', async () => {
     const runtime = loadP4StaleLeasePrecomposeHarness();
@@ -900,15 +944,22 @@ test('unowned persisted lease never cleans a provider and still degrades current
     assert.equal(runtime.state.fallbackClears, 0);
     assert.equal(runtime.state.ticketBatches, 1);
     assert.equal(runtime.state.fallbackText, 'current ticket');
+    assert.equal(runtime.state.externalCallbacks, 0);
+    assert.equal(runtime.state.namespace.continuity.nextTurnInjection.consumeProof, undefined);
 });
 
-test('returning to a chat with an external-provider tombstone never retries cleanup', async () => {
-    const runtime = loadP4StaleLeasePrecomposeHarness({ tombstoned: true, externalProvider: true });
+test('unowned cleanup-failed persisted lease cannot block the Doctor ticket slot or invoke a callback', async () => {
+    const runtime = loadP4StaleLeasePrecomposeHarness({
+        externalProvider: true, cleanupFailed: true, currentSessionLease: true,
+    });
     await runtime.precompose(runtime.session);
     assert.equal(runtime.state.writes, 0);
     assert.equal(runtime.state.fallbackClears, 0);
-    assert.equal(runtime.state.ticketBatches, 0);
-    assert.equal(runtime.state.fallbackText, '');
+    assert.equal(runtime.state.ticketBatches, 1);
+    assert.equal(runtime.state.fallbackText, 'current ticket');
+    assert.equal(runtime.state.externalCallbacks, 0);
+    assert.equal(runtime.state.namespace.continuity.nextTurnInjection.consumerLease.state, 'cleanup_failed');
+    assert.equal(runtime.state.namespace.continuity.nextTurnInjection.consumeProof, undefined);
 });
 
 test('a cleanup-failed P4 lease blocks placement only', async () => {
@@ -919,6 +970,183 @@ test('a cleanup-failed P4 lease blocks placement only', async () => {
     assert.equal(runtime.state.ticketBatches, 0);
     assert.equal(runtime.state.fallbackText, '');
     assert.equal(runtime.state.injectionInspection.status, 'blocked');
+});
+
+async function runProductionP4CommitLeaseGate({ externalProvider, cleanupFailed }) {
+    const leaseChecks = sourceSection(
+        'function nextTurnLeaseMatches(lease, session)',
+        'async function writeNextTurnConsumerLease(session, scopeDigest, payload)',
+    );
+    const leaseOwnership = sourceSection(
+        'function doctorOwnsNextTurnConsumerLease(lease)',
+        'async function markNextTurnConsumerCleanupFailed(session, lease, reason)',
+    );
+    const cleanupGate = sourceSection(
+        'async function ensureNextTurnConsumerSlotCleaned(session, active, reason)',
+        "async function releaseNextTurnConsumer(session, reason = 'released', {",
+    );
+    const commit = sourceSection(
+        'async function commitNextTurnConsumer(session, envelope)',
+        'function continuityStateForInjection(namespace, { isReroll = false } = {})',
+    );
+    const session = {
+        id: 'generation-current', serial: 5, type: 'normal', chatId: 'chat-a',
+        frozenScopeDigest: 'scope-current',
+    };
+    const envelope = {
+        chatId: 'chat-a', index: 5, messageId: 'message-current', swipeId: 0,
+        scopeDigest: 'scope-current', contentFingerprint: 'content-current',
+    };
+    const lease = {
+        state: cleanupFailed ? 'cleanup_failed' : 'reserved',
+        chatId: session.chatId, generationId: session.id,
+        generationSerial: session.serial, generationType: session.type,
+        scopeDigest: session.frozenScopeDigest,
+        expectedScopeDigest: session.frozenScopeDigest,
+        providerId: externalProvider ? 'unknown-provider' : 'doctor-extension-prompt',
+        slotId: externalProvider ? 'unknown-slot' : 'mvu-auto-doctor-next-turn-consumer',
+        providerCleanupToken: externalProvider ? 'unknown-token' : '',
+    };
+    const state = {
+        clears: 0, externalCallbacks: 0, namespaceWrites: 0, releases: 0,
+        namespace: { continuity: { nextTurnInjection: { consumerLease: lease } } },
+    };
+    const sandbox = {
+        activeNextTurnConsumer: {
+            generationId: session.id, digest: 'ticket-only-digest',
+            providerId: 'doctor-extension-prompt',
+            slotId: 'mvu-auto-doctor-next-turn-consumer', fallback: true,
+        },
+        DOCTOR_NEXT_TURN_PROVIDER_ID: 'doctor-extension-prompt',
+        NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+        lastInjectionInspection: {},
+        getContext: () => ({ chatId: session.chatId }),
+        readChatNamespace: () => state.namespace,
+        clearNextTurnConsumerFallback: () => { state.clears += 1; return true; },
+        cleanupNextTurnProvider: async () => { state.externalCallbacks += 1; return true; },
+        acceptedFinalEnvelopeMatchesContext: () => true,
+        resolveCurrentActorSovereigntyScope: async () => ({
+            resolved: true, scope: { digest: envelope.scopeDigest },
+        }),
+        actorSovereigntyScopeDigest: (scope) => scope.digest,
+        releaseNextTurnConsumer: async () => { state.releases += 1; return true; },
+        markNextTurnConsumerCleanupFailed: async () => {
+            throw new Error('foreign lease must not be rewritten');
+        },
+        confirmNextTurnConsumerCleanup: async () => {
+            throw new Error('foreign lease must not be confirmed');
+        },
+        writeChatNamespace: async () => { state.namespaceWrites += 1; return true; },
+        deepClone: (value) => structuredClone(value),
+        Date,
+    };
+    vm.runInNewContext(
+        `${leaseChecks}\n${leaseOwnership}\n${cleanupGate}\n${commit}\nthis.commit = commitNextTurnConsumer;`,
+        sandbox,
+    );
+    const result = await sandbox.commit(session, envelope);
+    return { result, state, active: sandbox.activeNextTurnConsumer };
+}
+
+for (const cleanupFailed of [false, true]) {
+    test(`production P4 commit ignores an external ${cleanupFailed ? 'cleanup_failed' : 'reserved'} lease without callback or consume`, async () => {
+        const runtime = await runProductionP4CommitLeaseGate({ externalProvider: true, cleanupFailed });
+        assert.equal(runtime.result, true);
+        assert.equal(runtime.state.clears, 1);
+        assert.equal(runtime.state.externalCallbacks, 0);
+        assert.equal(runtime.state.namespaceWrites, 0);
+        assert.equal(runtime.state.releases, 0);
+        assert.equal(runtime.state.namespace.continuity.nextTurnInjection.consumeProof, undefined);
+        assert.equal(runtime.active, null);
+    });
+}
+
+test('production P4 commit keeps Doctor-owned cleanup_failed fail-closed', async () => {
+    const runtime = await runProductionP4CommitLeaseGate({ externalProvider: false, cleanupFailed: true });
+    assert.equal(runtime.result, false);
+    assert.equal(runtime.state.clears, 0);
+    assert.equal(runtime.state.externalCallbacks, 0);
+    assert.equal(runtime.state.namespaceWrites, 0);
+    assert.equal(runtime.active?.generationId, 'generation-current');
+    assert.equal(runtime.state.namespace.continuity.nextTurnInjection.consumeProof, undefined);
+});
+
+test('production P4 release ignores a fully current external cleanup_failed packet after clearing only the Doctor slot', async () => {
+    const leaseChecks = sourceSection(
+        'function nextTurnLeaseMatches(lease, session)',
+        'async function writeNextTurnConsumerLease(session, scopeDigest, payload)',
+    );
+    const leaseOwnership = sourceSection(
+        'function doctorOwnsNextTurnConsumerLease(lease)',
+        'async function markNextTurnConsumerCleanupFailed(session, lease, reason)',
+    );
+    const cleanupGate = sourceSection(
+        'async function ensureNextTurnConsumerSlotCleaned(session, active, reason)',
+        "async function releaseNextTurnConsumer(session, reason = 'released', {",
+    );
+    const release = sourceSection(
+        "async function releaseNextTurnConsumer(session, reason = 'released', {",
+        'function persistedStaleWorldLeaseOwnership(context, namespace)',
+    );
+    const session = {
+        id: 'generation-current', serial: 5, type: 'normal', epoch: 9,
+        operationEpoch: 11, chatId: 'chat-a', frozenScopeDigest: 'scope-current',
+    };
+    const packet = {
+        consumerLease: {
+            state: 'cleanup_failed', chatId: session.chatId, generationId: session.id,
+            generationSerial: session.serial, generationType: session.type,
+            scopeDigest: session.frozenScopeDigest,
+            expectedScopeDigest: session.frozenScopeDigest,
+            providerId: 'external-provider', slotId: 'external-slot',
+            providerCleanupToken: 'external-token',
+        },
+    };
+    const state = {
+        clears: 0, writes: 0, externalCallbacks: 0, retiredTickets: 0,
+        namespace: { continuity: { nextTurnInjection: packet } },
+    };
+    const sandbox = {
+        currentGenerationEpoch: 9, operationEpoch: 11, lastGeneration: session,
+        activeNextTurnConsumer: {
+            generationId: session.id, digest: 'ticket-only-digest', fallback: true,
+            providerId: 'doctor-extension-prompt',
+            slotId: 'mvu-auto-doctor-next-turn-consumer',
+        },
+        DOCTOR_NEXT_TURN_PROVIDER_ID: 'doctor-extension-prompt',
+        NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+        lastInjectionInspection: {},
+        getContext: () => ({ chatId: session.chatId }),
+        readChatNamespace: () => state.namespace,
+        acceptedFinalReleaseIsCurrent: async () => true,
+        clearNextTurnConsumerFallback: () => { state.clears += 1; return true; },
+        cleanupNextTurnProvider: async () => { state.externalCallbacks += 1; return true; },
+        writeChatNamespace: async () => { state.writes += 1; return true; },
+        retireNpcDesignTicketInjection: () => { state.retiredTickets += 1; },
+        npcDesignTicketBatches: new Map([[session.id, {}]]),
+        markNextTurnConsumerCleanupFailed: async () => {
+            throw new Error('foreign packet must not be marked');
+        },
+        confirmNextTurnConsumerCleanup: async () => {
+            throw new Error('foreign packet must not be confirmed');
+        },
+        persistedNextTurnConsumerCleanup: () => {
+            throw new Error('foreign packet must not be decoded as Doctor cleanup');
+        },
+        deepClone: (value) => structuredClone(value),
+    };
+    vm.runInNewContext(
+        `${leaseChecks}\n${leaseOwnership}\n${cleanupGate}\n${release}\nthis.release = releaseNextTurnConsumer;`,
+        sandbox,
+    );
+    assert.equal(await sandbox.release(session, 'upgrade_cleanup', { preserveTickets: true }), true);
+    assert.equal(state.clears, 1);
+    assert.equal(state.writes, 0);
+    assert.equal(state.externalCallbacks, 0);
+    assert.equal(state.retiredTickets, 0);
+    assert.equal(state.namespace.continuity.nextTurnInjection, packet);
+    assert.equal(state.namespace.continuity.nextTurnInjection.consumeProof, undefined);
+    assert.equal(sandbox.activeNextTurnConsumer, null);
 });
 
 async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandidate, hostPreflight = false }) {
@@ -1295,22 +1523,22 @@ test('R7 ENDED without a session is an ephemeral diagnostic with zero release or
     assert.equal(state.writes, 0);
 });
 
-test('actual chat-change handler isolates old provider state so the new chat can start and accept normally', async () => {
+test('actual chat-change handler clears the old Doctor slot so the new chat can start and accept normally', async () => {
     const bind = sourceSection(
         'function bindEvents()',
         'async function mutateActorProfileV6',
     );
     const state = {
-        writes: 0, releases: 0, invalidates: 0, callbacks: new Map(), status: [], precomposed: [], accepted: [],
+        writes: 0, releases: 0, invalidates: 0, clears: 0,
+        callbacks: new Map(), status: [], precomposed: [], accepted: [],
     };
     const oldSession = {
         id: 'generation-old', chatId: 'chat-old', epoch: 7, operationEpoch: 11,
-        providerLease: { chatId: 'chat-old' },
     };
     const sandbox = {
         ui: {}, window: {}, document: {},
         activeGenerationSession: oldSession,
-        activeNextTurnConsumer: { generationId: 'generation-old', fallback: false },
+        activeNextTurnConsumer: { generationId: 'generation-old', fallback: true },
         lastGeneration: oldSession,
         currentGenerationEpoch: 7,
         generationSerial: 1,
@@ -1342,11 +1570,8 @@ test('actual chat-change handler isolates old provider state so the new chat can
         setStatus: (...args) => state.status.push(args), setSocialStatus: (...args) => state.status.push(args),
         setActorProfileStatus: (...args) => state.status.push(args), setContinuityStatus: (...args) => state.status.push(args),
         setForumStatus: (...args) => state.status.push(args), loadOperationLogFromChat: () => undefined,
-        renderForum: () => undefined, clearNextTurnConsumerFallback: () => { throw new Error('must not clear provider'); },
-        retireNextTurnConsumerForChat: (active) => {
-            state.retired = active;
-            return true;
-        },
+        renderForum: () => undefined,
+        clearNextTurnConsumerFallback: () => { state.clears += 1; return true; },
         readChatNamespace: () => ({}),
         generationCandidateAllowed: () => ({ allowed: true, generationType: 'normal' }),
         acceptedFinalSnapshot: () => ({ index: -1, swipeId: 0, contentFingerprint: '' }),
@@ -1366,7 +1591,7 @@ test('actual chat-change handler isolates old provider state so the new chat can
     assert.equal(sandbox.forumPendingKeys.size, 0);
     assert.equal(sandbox.lastGeneration.id, '');
     assert.equal(sandbox.activeNextTurnConsumer, null);
-    assert.equal(state.retired.generationId, 'generation-old');
+    assert.equal(state.clears, 1);
     assert.equal(state.writes, 0);
     const statusBeforeLateEnded = state.status.length;
     state.callbacks.get('generation_ended')();
@@ -1385,7 +1610,7 @@ test('actual chat-change handler isolates old provider state so the new chat can
     assert.equal(state.accepted[0].chatId, 'chat-new');
 });
 
-test('event lifecycle runs real current-chat precompose and accept after an old-chat provider tombstone', async () => {
+test('event lifecycle runs real current-chat precompose and accept after clearing an old Doctor slot', async () => {
     const identity = sourceSection(
         'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
         'function acceptedFinalEnvelopeMatchesContext(context, envelope, session)',
@@ -1402,9 +1627,9 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
         'async function acceptFinalGeneration(generation)',
         'function frozenIdentityScopeId(scope)',
     );
-    const tombstones = sourceSection(
-        'function retireNextTurnConsumerForChat(active, reason = \'chat_changed\')',
-        'async function writeNextTurnConsumerLease(session, scopeDigest, payload, provider, leaseToken = \'\')',
+    const ownership = sourceSection(
+        'function persistedStaleWorldLeaseOwnership(context, namespace)',
+        'function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope, decisionSink = null)',
     );
     const precompose = sourceSection(
         'async function precomposeNextTurnConsumer(session)',
@@ -1424,8 +1649,7 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
         'chat-b': { mes: '<content>B 的自然正文</content>', swipe_id: 0 },
     };
     const oldActive = {
-        generationId: 'generation-a', providerId: 'external-provider', fallback: false,
-        providerLease: { chatId: 'chat-a' },
+        generationId: 'generation-a', providerId: 'doctor-extension-prompt', fallback: true,
     };
     const context = () => ({
         chatId: state.chatId,
@@ -1440,9 +1664,9 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
     const sandbox = {
         currentGenerationEpoch: 7, operationEpoch: 11, generationSerial: 1,
         NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+        DOCTOR_NEXT_TURN_PROVIDER_ID: 'doctor-extension-prompt',
         lastGeneration: { id: 'generation-a', chatId: 'chat-a', epoch: 7, operationEpoch: 11 },
         activeGenerationSession: null, activeNextTurnConsumer: oldActive,
-        retiredNextTurnConsumerTombstones: new Map(),
         pendingChatSaveTimer: null, pendingOperationLogSaveTimer: null, pendingAcceptedFinalTimer: null,
         automaticPendingKeys: new Set(['a']), automaticCompletedKeys: new Set(['a']),
         openingSyncPendingKeys: new Set(['a']), openingSyncCompletedKeys: new Set(['a']),
@@ -1473,13 +1697,10 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
         commitNextTurnConsumer: async () => true,
         releaseNextTurnConsumer: async () => { throw new Error('no release is expected'); },
         clearLegacyNextTurnSlots: () => true,
-        nextTurnConsumerTombstoneForChat: (chatId) => sandbox.retiredNextTurnConsumerTombstones.get(chatId) || null,
         readChatNamespace: () => ({}),
         prepareNpcDesignTicketBatch: () => { state.precomposed += 1; return { tickets: [] }; },
         npcDesignTicketPrompt: () => 'ticket',
         immutableNextTurnConsumerPayload: (_world, ticket) => ({ text: ticket, digest: 'ticket-digest' }),
-        nextTurnConsumerLeaseToken: () => 'lease-token',
-        selectNextTurnConsumerProvider: () => ({ provider: null, conflict: false }),
         setNextTurnConsumerFallback: (text) => { state.fallbackText = text; return true; },
         lastInjectionInspection: {},
         Date: { now: () => 1 }, Math,
@@ -1504,13 +1725,12 @@ test('event lifecycle runs real current-chat precompose and accept after an old-
         setTimeout: (callback) => { state.timers.push(callback); return state.timers.length; },
     };
     vm.runInNewContext(
-        `${lifecycleVmStubs}\n${identity}\n${support}\n${dispatch}\n${accept}\n${tombstones}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents;`,
+        `${lifecycleVmStubs}\n${identity}\n${support}\n${dispatch}\n${accept}\n${ownership}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents;`,
         sandbox,
     );
     sandbox.bindEvents();
     await state.callbacks.get('chat_changed')();
     assert.equal(sandbox.activeNextTurnConsumer, null);
-    assert.equal(sandbox.retiredNextTurnConsumerTombstones.get('chat-a').providerId, 'external-provider');
     assert.equal(state.writes, 0);
     assert.equal(state.providerCleanup, 0);
 

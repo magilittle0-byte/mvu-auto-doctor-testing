@@ -150,7 +150,7 @@ const PROFILE_INSERT_SOURCE_LAYERS = Object.freeze([
     'ai',
     'characterCreationTicket',
     'confirmedProfile',
-    'stitcher',
+    'authorityProposal',
     'acceptedNarrative',
     'authority',
 ]);

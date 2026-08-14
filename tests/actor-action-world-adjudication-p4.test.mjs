@@ -204,7 +204,7 @@ test('manifest entry imports only current v2 leaf modules, not retired aggregate
     assert.doesNotMatch(diagnostics, /from '\.\.\/transaction\/index\.mjs'|from '\.\/core\.mjs'/u);
 });
 
-test('P4 has one strict next-turn consumer: verified world package plus ticket payload, provider or ST fallback', async () => {
+test('P4 has one Doctor-owned exact-once consumer for the verified world package plus ticket payload', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const start = source.indexOf('async function precomposeNextTurnConsumer(session)');
     const end = source.indexOf('async function commitNextTurnConsumer(session, envelope)', start);
@@ -215,26 +215,19 @@ test('P4 has one strict next-turn consumer: verified world package plus ticket p
     const projectAt = consumer.indexOf('buildContinuityConsumerPayload', verifyAt);
     const ticketAt = consumer.indexOf('npcDesignTicketPrompt');
     const payloadAt = consumer.indexOf('immutableNextTurnConsumerPayload', ticketAt);
-    const providerAt = consumer.indexOf('selectNextTurnConsumerProvider()', payloadAt);
-    const fallbackAt = consumer.indexOf('setNextTurnConsumerFallback(payload.text)', providerAt);
+    const leaseAt = consumer.indexOf('writeNextTurnConsumerLease(', payloadAt);
+    const fallbackAt = consumer.indexOf('setNextTurnConsumerFallback(payload.text)', leaseAt);
     assert.ok(clearAt >= 0 && verifyAt > clearAt && projectAt > verifyAt);
-    assert.ok(ticketAt > projectAt && payloadAt > ticketAt && providerAt > payloadAt);
-    assert.ok(fallbackAt > providerAt);
-    assert.match(consumer, /receipt\?\.placementConfirmed !== true[\s\S]*?receipt\?\.consumerPayloadDigest !== payload\.digest/u);
-    assert.match(consumer, /providerId: 'sillytavern-fallback'/u);
+    assert.ok(ticketAt > projectAt && payloadAt > ticketAt && leaseAt > payloadAt);
+    assert.ok(fallbackAt > leaseAt);
+    assert.match(consumer, /providerId: DOCTOR_NEXT_TURN_PROVIDER_ID/u);
     assert.match(consumer, /recordNextTurnConsumerInspection\(session,[\s\S]*?worldPackage: packet \? 'verified' : 'ticket_only'/u);
     assert.doesNotMatch(
         consumer,
         /runSovereigntyAgentPool|CONTINUITY_INJECTION_NAME|SOCIAL_INJECTION_NAME|SERENDIPITY_INJECTION_NAME/u,
     );
 
-    const providerRegistration = source.slice(
-        source.indexOf('function registerNextTurnConsumerProvider(provider)'),
-        source.indexOf('function nextTurnConsumerProviderView()', source.indexOf('function registerNextTurnConsumerProvider(provider)')),
-    );
-    assert.match(providerRegistration, /typeof provider\?\.precompose !== 'function'/u);
-    assert.match(providerRegistration, /typeof provider\?\.cleanup !== 'function'/u);
-    assert.doesNotMatch(providerRegistration, /window\.|Stitches|TavernDB|combined/u);
+    assert.doesNotMatch(source, /registerNextTurnConsumerProvider|selectNextTurnConsumerProvider|configureNextTurnConsumerProviderPreference/u);
 });
 
 test('fresh-chat P3 build, normalize and P4 projection receive the current generation lease after P1 evolution', async () => {
@@ -243,8 +236,8 @@ test('fresh-chat P3 build, normalize and P4 projection receive the current gener
     const identityEnd = source.indexOf('\nfunction cardScopeIdentity(context, character)', identityStart);
     const verifyStart = source.indexOf('function verifiedNextTurnWorldPackage(context, namespace, packet, frozenScope, decisionSink = null)');
     const verifyEnd = source.indexOf('\nasync function precomposeNextTurnConsumer(session)', verifyStart);
-    const leaseStart = source.indexOf('async function writeNextTurnConsumerLease(session, scopeDigest, payload, provider, leaseToken = \'\')');
-    const leaseEnd = source.indexOf('\nasync function cleanupNextTurnProvider(active, reason)', leaseStart);
+    const leaseStart = source.indexOf('async function writeNextTurnConsumerLease(session, scopeDigest, payload)');
+    const leaseEnd = source.indexOf('\nfunction persistedNextTurnConsumerCleanup(lease)', leaseStart);
     assert.ok(identityStart >= 0 && identityEnd > identityStart);
     assert.ok(verifyStart >= 0 && verifyEnd > verifyStart);
     assert.ok(leaseStart >= 0 && leaseEnd > leaseStart);
@@ -322,6 +315,7 @@ test('fresh-chat P3 build, normalize and P4 projection receive the current gener
         },
         Date: { now: () => 3 },
         NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+        DOCTOR_NEXT_TURN_PROVIDER_ID: 'doctor-extension-prompt',
     };
     vm.runInNewContext(
         `${source.slice(identityStart, identityEnd)}\n${source.slice(verifyStart, verifyEnd)}`
@@ -349,7 +343,6 @@ test('fresh-chat P3 build, normalize and P4 projection receive the current gener
         session,
         previous.scopeDigest,
         { digest: 'payload-digest', text: projection.text },
-        null,
     );
     assert.equal(lease.ok, true);
     assert.equal(namespace.continuity.nextTurnInjection.consumerLease.state, 'reserved');
@@ -397,7 +390,7 @@ test('P4 cleanup failure fails closed and never restarts a producer or legacy br
     );
     assert.match(
         consumer,
-        /refreshedPacket\?\.consumerLease\?\.state === 'reserved'[\s\S]*?convergePersistedStaleNextTurnWorldLease\([\s\S]*?packet = null;[\s\S]*?worldText = ''[\s\S]*?selected = \{ provider: null, conflict: false \}/u,
+        /refreshedPacket\?\.consumerLease\?\.state === 'reserved'[\s\S]*?convergePersistedStaleNextTurnWorldLease\([\s\S]*?packet = null;[\s\S]*?worldText = ''[\s\S]*?immutableNextTurnConsumerPayload/u,
     );
     assert.doesNotMatch(consumer, /releaseStaleNextTurnWorldLease/u);
     assert.match(

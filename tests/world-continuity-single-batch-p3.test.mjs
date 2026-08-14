@@ -2018,7 +2018,7 @@ test('production P3 uses the background lane and only host generateRaw is foregr
     );
     assert.match(model, /const backgroundLane = runUntilCancelled/u);
     assert.match(model, /mvuadUsesHostGenerateRaw/u);
-    assert.match(model, /!\['direct', 'story-oracle'\]\.includes\(profile\.provider\)/u);
+    assert.match(model, /profile\.provider !== 'direct'/u);
     assert.match(model, /:background/u);
     const lifecycle = sourceSection('function bindEvents()', 'async function initialize()');
     assert.match(lifecycle, /await preemptHostBackgroundModelControllersForForegroundGeneration\(\)/u);
@@ -2527,15 +2527,12 @@ test('manual retirement fresh-reads then runs exactly one local Recall and one A
             getContext: () => ({ chatId: current.chatId, chat }),
             stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: ledger, noActorPermit: true }),
             deepClone: (value) => structuredClone(value),
-            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
             continuityBase: () => ({ turn: 1, threads: [], world: {} }),
-            mergeMarkerRecords: (value) => value,
             collectContinuityWorldContext: async () => ({ hasSetting: true, entries: [] }),
             currentCharacter: () => ({}),
             continuityFeatureActive: () => true,
             advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
             scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
-            detectContinuityDirector: () => 'balanced',
             pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
             scheduleActorTurns: () => ({ selected: [] }),
             stage3LocalRecallPacket: () => {
@@ -3321,15 +3318,12 @@ test('a fully committed prior generation becomes history only for a strictly new
                 ok: true, actorLedger: ledger, noActorPermit: true,
             }),
             deepClone: (value) => structuredClone(value),
-            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
             continuityBase: () => ({ turn: 1, threads: [], world: {} }),
-            mergeMarkerRecords: (value) => value,
             collectContinuityWorldContext: async () => ({ hasSetting: true }),
             currentCharacter: () => ({}),
             continuityFeatureActive: () => true,
             advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
             scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
-            detectContinuityDirector: () => 'balanced',
             pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
             scheduleActorTurns: () => ({ selected: [] }),
             stage3LocalRecallPacket: () => {
@@ -3403,15 +3397,12 @@ test('a fully committed prior generation becomes history only for a strictly new
             getContext: () => ({ chatId: rerolled.chatId, chat: rerollChat }),
             stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: ledger }),
             deepClone: (value) => structuredClone(value),
-            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
             continuityBase: () => structuredClone(checkpoint.state),
-            mergeMarkerRecords: (value) => value,
             collectContinuityWorldContext: async () => ({ hasSetting: true }),
             currentCharacter: () => ({}),
             continuityFeatureActive: () => true,
             advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
             scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
-            detectContinuityDirector: () => 'balanced',
             pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
             scheduleActorTurns: () => ({ selected: [] }),
             stage3LocalRecallPacket: () => {
@@ -3481,15 +3472,12 @@ test('a fully committed prior generation becomes history only for a strictly new
             }),
             stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: ledger }),
             deepClone: (value) => structuredClone(value),
-            extractContinuityMarkers: () => ({ hasPresetParallel: false, records: [] }),
             continuityBase: () => structuredClone(checkpoint.state),
-            mergeMarkerRecords: (value) => value,
             collectContinuityWorldContext: async () => ({ hasSetting: true }),
             currentCharacter: () => ({}),
             continuityFeatureActive: () => true,
             advanceContinuityClocks: (value) => ({ state: structuredClone(value) }),
             scheduleWorldLanes: () => ({ candidates: [], selected: [] }),
-            detectContinuityDirector: () => 'balanced',
             pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
             scheduleActorTurns: () => ({ selected: [] }),
             stage3LocalRecallPacket: () => ({ digest: 'identical-regenerate-recall' }),
@@ -6021,7 +6009,7 @@ test('P3 normal path writes nothing before Recall, Advance, parse, and full in-m
     assert.doesNotMatch(source, /collectActorShardProposals/u);
 });
 
-test('production Phase2 consumes validated scheduledBase and reaches committed readback', async () => {
+test('production Phase2 zero-model recovery neutralizes a legacy prepared director and reaches committed readback', async () => {
     const producerTarget = {
         chatId: 'chat-phase2', index: 2, messageId: 'message-2', swipeId: 0,
         generationSerial: 2, generationId: 'generation-2', generationType: 'normal',
@@ -6034,7 +6022,7 @@ test('production Phase2 consumes validated scheduledBase and reaches committed r
         stage3Phase: 'world_candidate_prepared',
         preparedWorld: {
             scheduledState: structuredClone(scheduledBase), continuityState: {}, world: {},
-            actionAdjudications: [], nextTurn: 2, director: 'standalone', checkpointState: {},
+            actionAdjudications: [], nextTurn: 2, director: 'stitches', checkpointState: {},
             phase1WriteMode: 'checkpoint_only',
         },
     };
@@ -6047,6 +6035,7 @@ test('production Phase2 consumes validated scheduledBase and reaches committed r
     let written = null;
     let phase2Writes = 0;
     let packageValidationOptions = null;
+    let injectionOptions = null;
     const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
     const sandbox = {
         Date,
@@ -6069,7 +6058,10 @@ test('production Phase2 consumes validated scheduledBase and reaches committed r
         stage3CanonicalSettlementProof: () => ({ orderedResults: [] }),
         stage3AcceptedTarget: () => structuredClone(producerTarget),
         stage3ContinuityDigestWithoutInjection: () => 'continuity-digest',
-        buildContinuityInjection: () => '',
+        buildContinuityInjection: (_state, options) => {
+            injectionOptions = structuredClone(options);
+            return '';
+        },
         deepClone: (value) => structuredClone(value),
         stage3TaskOwnsCurrent: () => true,
         stage3TargetIsCurrent: () => ({ ok: true }),
@@ -6117,11 +6109,16 @@ test('production Phase2 consumes validated scheduledBase and reaches committed r
     });
     assert.deepEqual(attachedFrom, scheduledBase);
     assert.equal(written.continuityCheckpoint.stage3Phase, 'world_committed');
+    assert.equal(written.continuityDirector, 'doctor');
     assert.equal(written.actorLedger.actors[0].profileV6.status, 'complete');
+    assert.equal(injectionOptions.director, 'doctor');
     assert.equal(packageValidationOptions.allowUnrelatedLedgerEvolution, true);
     assert.equal(phase2Writes, 2, 'Phase2 locally rebases one P1-only CAS drift');
     assert.equal(result.status, 'applied');
     assert.equal(result.worldFinalPhase, 'world_committed');
+    assert.equal(result.worldModelCalls, 0);
+    assert.equal(result.recovered, true);
+    assert.equal(result.director, 'doctor');
 
     phase2Writes = 0;
     written = null;

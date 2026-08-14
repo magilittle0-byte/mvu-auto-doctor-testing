@@ -427,6 +427,7 @@ export function createPrivacySafeDiagnosticProjection({
     userPrompts = {},
     sovereignty = {},
     runtimePresentation = {},
+    variableRepair = {},
     customInstruction = {},
 } = {}) {
     const statusKinds = Object.fromEntries(
@@ -537,6 +538,15 @@ export function createPrivacySafeDiagnosticProjection({
                 totalComments: Math.max(0, Number(chat?.forum?.totalComments) || 0),
             },
             modelCalls: cloneModelCallStats(chat?.modelCalls),
+        },
+        variableRepair: {
+            capsuleCount: Math.max(0, Number(variableRepair?.capsuleCount) || 0),
+            lastStatus: cleanRuntimeCode(variableRepair?.lastStatus),
+            lastOutcomeCode: cleanRuntimeCode(variableRepair?.lastOutcomeCode),
+            lastTargetIndex: Number.isInteger(Number(variableRepair?.lastTargetIndex))
+                ? Number(variableRepair.lastTargetIndex) : -1,
+            lastDurationMs: Math.max(0, Number(variableRepair?.lastDurationMs) || 0),
+            lastReadbackVerified: variableRepair?.lastReadbackVerified === true,
         },
         actorScheduling: {
             status: String(actorShards?.status || 'disabled'),

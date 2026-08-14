@@ -815,6 +815,7 @@ test('prompt context and ticket normalizer implementations change generation and
         'actorProfileBatchSemanticFingerprint',
         'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
+        'variableRepairCenterSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
@@ -825,6 +826,7 @@ test('prompt context and ticket normalizer implementations change generation and
         () => 'batch-fingerprint',
         () => authorityFingerprint,
         () => 'continuity-fingerprint',
+        () => 'variable-repair-fingerprint',
         ...helperNames.map((name) => Function(`return function ${name}(){}`)()),
     )();
     const baselineGeneration = actorProfileGenerationCriticalFingerprint();
@@ -888,6 +890,7 @@ test('runtime fingerprint changes with the production profile route planner and 
         'actorProfileBatchSemanticFingerprint',
         'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
+        'variableRepairCenterSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
@@ -898,6 +901,7 @@ test('runtime fingerprint changes with the production profile route planner and 
         () => 'batch-fingerprint',
         () => 'authority-fingerprint',
         () => 'continuity-fingerprint',
+        () => 'variable-repair-fingerprint',
         ...helperNames.map((name) => overrides[name]
             || Function(`return function ${name}(){}`)()),
     )();
@@ -940,6 +944,7 @@ test('continuity recovery normalizer mutations change semantic and runtime finge
         'actorProfileBatchSemanticFingerprint',
         'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
+        'variableRepairCenterSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
@@ -950,6 +955,7 @@ test('continuity recovery normalizer mutations change semantic and runtime finge
         () => 'batch-fingerprint',
         () => 'authority-fingerprint',
         () => continuityFingerprint,
+        () => 'variable-repair-fingerprint',
         ...helperNames.map((name) => helperOverrides[name]
             || Function(`return function ${name}(){}`)()),
     )();
@@ -1051,6 +1057,7 @@ test('resolver closure and group failure attribution helpers change batch and ru
         'actorProfileBatchSemanticFingerprint',
         'actorAuthorityAdjudicationSemanticFingerprint',
         'continuityCoreSemanticFingerprint',
+        'variableRepairCenterSemanticFingerprint',
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
@@ -1061,6 +1068,7 @@ test('resolver closure and group failure attribution helpers change batch and ru
         () => batchFingerprint,
         () => 'authority-fingerprint',
         () => 'continuity-fingerprint',
+        () => 'variable-repair-fingerprint',
         ...helperNames.map((name) => Function(`return function ${name}(){}`)()),
     )();
     const baselineBatch = actorProfileBatchSemanticFingerprint();

@@ -1946,12 +1946,11 @@ body:has(#rm_extensions_block.openDrawer) #mvuad-floating-orb {
 }
 
 .mvuad-forum-controls .mvuad-forum-toolbar { padding: 8px 8px 2px; }
-.mvuad-forum-controls .mvuad-forum-source-note { margin-inline: 8px; }
 .mvuad-forum-controls .mvuad-forum-status { margin-inline: 8px; }
 .mvuad-forum-controls .mvuad-forum-summary { padding-inline: 9px; }
 .mvuad-forum-controls .mvuad-forum-utility { padding-inline: 8px; }
 
-.mvuad-forum-provider {
+.mvuad-forum-setting {
     display: grid;
     gap: 4px;
     min-width: min(230px, 100%);
@@ -1959,12 +1958,12 @@ body:has(#rm_extensions_block.openDrawer) #mvuad-floating-orb {
     opacity: 0.9;
 }
 
-.mvuad-forum-provider select {
+.mvuad-forum-setting select {
     width: 100%;
     min-height: 30px;
 }
 
-.mvuad-forum-provider input {
+.mvuad-forum-setting input {
     width: 100%;
     min-height: 30px;
 }
@@ -1976,23 +1975,6 @@ body:has(#rm_extensions_block.openDrawer) #mvuad-floating-orb {
 .mvuad-forum-interval-field.mvuad-disabled {
     opacity: 0.48;
 }
-
-.mvuad-forum-source-note {
-    margin: 6px 12px 2px;
-    padding: 7px 10px;
-    border: 1px solid color-mix(in srgb, #f1c75b 38%, var(--mvuad-forum-border));
-    border-radius: 10px;
-    background: color-mix(in srgb, #f1c75b 6%, transparent);
-    font-size: 0.76em;
-    line-height: 1.55;
-}
-
-.mvuad-forum-source-note[data-kind="error"] {
-    border-color: color-mix(in srgb, #ff8e8e 60%, var(--mvuad-forum-border));
-    background: color-mix(in srgb, #ff8e8e 10%, transparent);
-}
-
-.mvuad-forum-source-note[hidden] { display: none; }
 
 .mvuad-forum-status,
 .mvuad-forum-summary {
@@ -2444,8 +2426,8 @@ body:has(#rm_extensions_block.openDrawer) #mvuad-floating-orb {
 
     .mvuad-forum-header { padding-top: max(12px, env(safe-area-inset-top)); }
     .mvuad-forum-toolbar { display: grid; grid-template-columns: 1fr 1fr; }
-    .mvuad-forum-provider { grid-column: 1 / -1; }
-    .mvuad-forum-provider > span { display: none; }
+    .mvuad-forum-setting { grid-column: 1 / -1; }
+    .mvuad-forum-setting > span { display: none; }
     .mvuad-forum-controls { margin-top: 6px; }
     .mvuad-forum-controls > summary { min-height: 38px; }
     .mvuad-forum-summary { gap: 5px; }

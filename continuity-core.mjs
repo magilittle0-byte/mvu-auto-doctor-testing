@@ -2708,64 +2708,10 @@ export function parseContinuityOutput(output, options = {}) {
     };
 }
 
-function stageFromChinese(value) {
-    const source = String(value || '');
-    if (/已回收|已完成|已解决/u.test(source)) return 'resolved';
-    if (/已显现|已爆发|已触发/u.test(source)) return 'manifested';
-    if (/推进中|进行中|活跃/u.test(source)) return 'advancing';
-    if (/搁置|沉寂|暂停/u.test(source)) return 'dormant';
-    return 'seeded';
-}
-
-export function extractContinuityMarkers(text) {
-    const source = String(text || '');
-    const records = [];
-    const recordPattern = /<parallel_event_record\b[^>]*>([\s\S]*?)<\/parallel_event_record>/giu;
-    let match;
-    while ((match = recordPattern.exec(source)) !== null) {
-        const body = match[1].trim();
-        const fields = {};
-        for (const item of body.matchAll(/\[([^\]|]{1,30})\|([^\]]*)\]/gu)) {
-            fields[item[1].trim()] = item[2].trim();
-        }
-        const id = cleanText(fields['事件ID'] || fields.ID || body.match(/PE-[\p{L}\p{N}_.:\-]+/u)?.[0], 90);
-        if (!id) continue;
-        const stateText = fields['状态'] || body;
-        records.push({
-            id,
-            title: cleanText(fields['标题'] || id, 120),
-            kind: 'parallel',
-            origin: 'main_derivative',
-            relation: 'linked',
-            stage: stageFromChinese(stateText),
-            summary: cleanText(fields['新增变化'] || fields['当前状态'] || body, 700),
-            offscreenBeat: cleanText(fields['新增变化'] || '', 500),
-            nextBeat: cleanText(fields['主线接口'] || fields['下一步'] || '', 500),
-            trigger: cleanText(fields['触发条件'] || '', 350),
-            intersection: '已由正文或预设平行事件记录接入主线',
-            seedBasis: '正文/预设平行事件记录',
-            actors: cleanList((fields['角色'] || '').split(/[、,，;；]/u)),
-            locations: cleanList((fields['时间地点'] || fields['地点'] || '').split(/[、,，;；]/u)),
-            knowledge: /已显现|已回收/u.test(stateText) ? 'observed' : 'hidden',
-            urgency: /紧急|迫近|立即/u.test(body) ? 3 : 1,
-        });
-    }
-    const taggedSections = [];
-    for (const tag of ['dm_story', 'npc_track', 'current_event']) {
-        const pattern = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'giu');
-        for (const item of source.matchAll(pattern)) {
-            taggedSections.push({ tag, content: cleanText(item[1], 5000) });
-        }
-    }
+export function extractContinuityMarkers() {
     return {
-        records,
-        taggedSections,
-        hasPresetParallel: records.length > 0
-            || /<parallel_event_record\b/iu.test(source)
-            || taggedSections.some((item) => (
-                item.tag === 'current_event' && /支线|SQ\./iu.test(item.content)
-            )),
-        hasStitches: /<dm_story\b|<npc_track\b/iu.test(source),
+        records: [],
+        taggedSections: [],
     };
 }
 
@@ -2834,10 +2780,20 @@ export function mergeMarkerRecords(state, records, {
     }, { chatId, maxThreads });
 }
 
+function legacyContinuityDirectorText(director) {
+    if (director === 'stitches') return '缝合怪负责场景与剧情提案；本账本只约束连续性。';
+    if (director === 'world') return '世界引擎负责世界推演提案；本账本只补足因果连续性并避免重复推进。';
+    if (director === 'world_preset') return '世界引擎与当前预设负责世界/平行事件提案；本账本只做去重、接续与回收。';
+    if (director === 'preset') return '当前预设负责平行事件写作；本账本只约束连续性。';
+    if (director === 'mixed') return '预设、缝合怪或世界引擎负责剧情与世界提案；本账本只做去重、接续与回收。';
+    return '当前没有检测到外部剧情推进器；可按账本低频推进世界支线。';
+}
+
 export function buildContinuityInjection(state, {
-    director = 'standalone',
+    director = 'doctor',
     maxVisible = 2,
     selectedThreadIds = null,
+    renderLegacyDirector = false,
 } = {}) {
     const normalized = normalizeContinuityState(state, { maxThreads: 12 });
     const selectedThreads = Array.isArray(selectedThreadIds)
@@ -2943,17 +2899,9 @@ export function buildContinuityInjection(state, {
         && tickThread.knowledge !== 'hidden'
         ? normalized.lastTick.reason || '未登记'
         : '幕后条件变化已记录（细节已折叠）';
-    const directorText = director === 'stitches'
-        ? '缝合怪负责场景与剧情提案；本账本只约束连续性。'
-        : director === 'world'
-            ? '世界引擎负责世界推演提案；本账本只补足因果连续性并避免重复推进。'
-            : director === 'world_preset'
-                ? '世界引擎与当前预设负责世界/平行事件提案；本账本只做去重、接续与回收。'
-                : director === 'preset'
-                    ? '当前预设负责平行事件写作；本账本只约束连续性。'
-                    : director === 'mixed'
-                        ? '预设、缝合怪或世界引擎负责剧情与世界提案；本账本只做去重、接续与回收。'
-                        : '当前没有检测到外部剧情推进器；可按账本低频推进世界支线。';
+    const directorText = renderLegacyDirector
+        ? legacyContinuityDirectorText(director)
+        : '世界连续性由医生独立调度；只使用已接受正文、通用世界书与自有账本。';
     const requestedVisible = Number(maxVisible);
     const visibleLimit = Math.min(
         4,
@@ -3029,10 +2977,10 @@ export function buildContinuityInjection(state, {
             ? `最近世界调度=${CONTINUITY_TICK_LABELS[normalized.lastTick.action] || normalized.lastTick.action}；对象=${normalized.lastTick.threadId || '全局'}；依据=${tickReason}`
             : '最近世界调度=尚未运行。',
         '以下只包含已经接入主线或具备真实汇流证据的“小型主线接口”，不是完整后台账本；未列出的复杂支线仍会在幕后独立演化。',
-        `本回合可自然采用0—${visibleLimit}条接口；没有合适叙事位置时必须采用0条，禁止为了证明世界引擎存在而生硬插入。`,
+        `本回合可自然采用0—${visibleLimit}条接口；没有合适叙事位置时必须采用0条，禁止为了证明后台调度存在而生硬插入。`,
         '多个触发条件在同一时点分别成熟，或事件共享同一时间、地点、人物、势力、资源或直接因果簇时，可以在同一回合共同爆发；上限不是要求凑数，也不得把互不相关、尚未成熟的事件强行拼成一场。',
         '只可推动NPC、势力、环境、约定与敌方行动；禁止替玩家角色决定、说话、移动、消费资源或追加检定。',
-        '外部预设、缝合怪或世界引擎安排的未来桥段都只是条件式导演提案：成功路线只在真实成功后启用，失败路线也必须保留，不得把计划目标当成已发生事实。',
+        '未来计划都只是条件式提案：成功路线只在真实成功后启用，失败路线也必须保留，不得把计划目标当成已发生事实。',
         hasScenarioPlan
             ? '副本/场景规划是“当前有效、允许因果修订”的幕后结构，不是要求照演的剧本。玩家仍可自由选路、绕行、谈判、失败或制造意外；主回复不得自行改写规划，只有后续世界调度通过证据门槛并登记新版本后，新的目标、完成条件、终局威胁、路线、时限或赌注才生效。'
             : '',
@@ -3110,11 +3058,36 @@ export function buildContinuityConsumerPayload(state, packet) {
     ) return { ok: false, reason: 'legacy_packet_invalid' };
 
     const candidates = new Map();
+    for (const rawMaxVisible of LEGACY_CONSUMER_RAW_MAX_VISIBLE) {
+        const currentText = buildContinuityInjection(normalizedState, {
+            director: 'doctor',
+            maxVisible: rawMaxVisible,
+        });
+        const fullCanonicalCurrentText = cleanText(
+            currentText,
+            Number.MAX_SAFE_INTEGER,
+        );
+        const canonicalCurrentText = cleanText(currentText, 12000);
+        const visibleProjection = exactLegacyVisibleProjection(
+            normalizedState,
+            rawMaxVisible,
+        );
+        const key = JSON.stringify([canonicalCurrentText, visibleProjection]);
+        candidates.set(key, {
+            director: 'doctor',
+            rawMaxVisible,
+            legacyText: currentText,
+            canonicalLegacyText: canonicalCurrentText,
+            truncated: fullCanonicalCurrentText !== canonicalCurrentText,
+            visibleProjection,
+        });
+    }
     for (const director of LEGACY_CONSUMER_DIRECTORS) {
         for (const rawMaxVisible of LEGACY_CONSUMER_RAW_MAX_VISIBLE) {
             const legacyText = buildContinuityInjection(normalizedState, {
                 director,
                 maxVisible: rawMaxVisible,
+                renderLegacyDirector: true,
             });
             const fullCanonicalLegacyText = cleanText(
                 legacyText,

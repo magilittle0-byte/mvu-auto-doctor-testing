@@ -4,21 +4,17 @@
 
 P4 在每个合法 generation 的 placement 前，仅以宿主 `setExtensionPrompt` 清空本插件的旧 `mvu-auto-doctor-continuity`、`mvu-auto-doctor-social-contract`、`mvu-auto-doctor-serendipity-license` 三个固定槽（同为 in-chat/depth-1/system）；不调用旧业务注入器、不写 namespace，且不会触及其他插件 key。
 
-显式 provider 注册必须同时给出 `precompose` 与幂等 `cleanup`。医生在 callback 前确定稳定 `leaseToken` 并写入 provider lease/既有 `consumerLease`；cleanup 的每个路径都使用该 token 与同一 session context。callback throw、坏 receipt、stop、chat/swipe/新 generation、刷新后旧 lease、accepted-final 成功或不匹配都先确认 cleanup；未明确确认时保留 active/ticket/lease，将既有 lease 标为 `cleanup_failed`，不写 released/consume proof、不做后台重试、也不允许任何后续 provider 或 fallback placement。
+当前不提供外部 consumer 注册、优先级或 callback。Doctor 在 P3 package 严格验证后写入自有 `consumerLease`，再通过唯一 `setExtensionPrompt` slot 放置 world+ticket 负载。
 
 `normalizeNextTurnInjectionLease` 将 `cleanup_failed` 作为显式合法 `consumerLease.state` 原样读回；`nextTurnLeaseCleanupBlocked` 专门识别该状态，而 fresh `precomposeNextTurnConsumer` 读到它就只保留 blocked 诊断并立即返回。本阶段没有自动 release、自动 cleanup retry 或解除该状态的入口。
 
-`cleanup_failed` 不属于可 release 的 session match：`GENERATION_STARTED` 在创建新 session 前发现它即停止 P4 placement，`releaseNextTurnConsumer` 也不会再调用 provider cleanup。成功 cleanup 会先把 `cleanupConfirmed=true` 写入 active 与既有 lease；随后 final/CAS/readback 失败仅终结 lease/ticket，不会以同一 token 再调 cleanup。
-
-迟到的 provider receipt 不直接调用 cleanup：它先检查 `cleanup_failed`、`cleanupConfirmed` 或已 released 状态；只有仍可释放的原 session 才调用统一 `releaseNextTurnConsumer('provider_receipt_stale')`。provider cleanup 以 generation 的稳定 `leaseToken` 为键使用纯内存 singleflight：首次 release 在调用 callback 前同步登记 Promise；STOPPED、下一次 STARTED、迟到 receipt、accepted-final 的后续入口只等待该 Promise 或读取其持久终态，绝不第二次调用同一 token 的 cleanup。成功先持久 `cleanupConfirmed`，失败先持久 `cleanup_failed` 并永久 blocked；失败的后续入口不能改写为 released。`persistedNextTurnConsumerCleanup` 在刷新/active 丢失后原样恢复 lease 的 cleanup token 与 `cleanupConfirmed`；匹配的 reserved+confirmed lease 被直接视为已清，只安全终结 lease 或等待受既有 final target/proof guards 约束的后续 consume，不建新 latch、也不重试 provider cleanup。latch 随 active lease token 清除，刷新只依赖已持久的 confirmed/failed 状态，绝不自动重试。
-
-通用 provider 的前提是已有、有效且可写入 `consumerLease` 的 P3 package；这不是按 Beast/数据库硬编码，而是任何注册 provider 的持久 lease 安全要求。无 P3 package、world 无效或 world-CAS 退化后的 ticket-only payload 只使用唯一 SillyTavern fallback，绝不交给外部 provider。
+`cleanup_failed` 不属于可 release 的 session match：`GENERATION_STARTED` 在创建新 session 前发现它即停止 P4 placement。成功清除 Doctor slot 后先持久 `cleanupConfirmed=true`；失败则保持 fail-closed，不写 released/consume proof。旧外部 provider lease 只能解码为兼容数据，Doctor 不调用、不清理、不恢复其 callback。
 
 P3 package 只在 producer target scope 与当前 frozen scope 相同、`stage3PersistedPackageForTarget(..., {allowUnrelatedLedgerEvolution:true})` 复验 packet producer、continuity digest、settlement proof、旧 target 的 attempt/result/ActorRef 与无 pending、且严格 legacy projection 成功时进入 world 段。P3 同 target 恢复仍使用默认整本 ActorLedger digest 严格模式；只有跨回合 P4 消费允许变量/P1 对无关人物档案的合法演化，旧 target 删除或篡改仍拒绝。package 已消费、被占用、proof/digest/scope/projection 失效时只释放其旧 world lease，世界段留空；当前 generation 仍独立准备原样 P5 ticket，允许 ticket-only 单槽 placement。
 
-world lease 的 CAS/readback 并发失败也只重新读取、释放或丢弃 world 段；只要没有 `cleanup_failed` 阻断，当前 generation 已生成的 ticket batch 保留并以 ticket-only payload 继续唯一 placement。只有实际 slot cleanup/provider callback/provider receipt/fallback 失败才会使整 payload fail-closed。
+world lease 的 CAS/readback 并发失败也只重新读取、释放或丢弃 world 段；只要没有 `cleanup_failed` 阻断，当前 generation 已生成的 ticket batch 保留并以 ticket-only payload 继续唯一 placement。只有实际 Doctor slot 放置或清除失败才会使整 payload fail-closed。
 
-accepted-final 在 `ensureAcceptedFinalTargetIdentity` 冻结并传递 index/messageId/swipeId/contentFingerprint/scopeDigest/session epoch；`commitNextTurnConsumer` 在提交前、durable write precondition 与 readback validator 都重新读取并比较同一组字段。它也先撤除并确认当前 single slot，才写 consume proof。任一 early exit、target/scope/epoch 不匹配、cleanup 或 readback 失败均以原 session fail-closed，零 consume proof。
+accepted-final 在 `ensureAcceptedFinalTargetIdentity` 冻结并传递 index/messageId/swipeId/contentFingerprint/scopeDigest/session epoch；`commitNextTurnConsumer` 在提交前、durable write precondition 与 readback validator 都重新读取并比较同一组字段。它先撤除并确认 Doctor single slot，才写 consume proof。任一 early exit、target/scope/epoch 不匹配、cleanup 或 readback 失败均以原 session fail-closed，零 consume proof。
 
 本阶段只做静态调用图与差异检查；未运行测试、语法/JSON、真实 API、宿主、浏览器、构建、CI 或发布流程。
 
@@ -46,8 +42,7 @@ world package 与 ticket 不属于同一 producer：前者来自上一 accepted 
 | 无桥投影 | `continuity-core.mjs:buildContinuityConsumerPayload` | 必要新胶水 | 原样复用 `normalizeNextTurnInjection` 已使用的 `cleanText(..., 12000)` canonical 形态，对 director x rawMaxVisible 的原 renderer 输出与独立 visible projection 做严格验证；不使用新 parser、正则或 HTML 清洗 |
 | 人物票据文本 | `index.js:npcDesignTicketPrompt(batch)` | 原样复用 | 禁止另造人格池、票据提示词或二次掷骰 |
 | P5 预设读取 | `fair-director-preset-core.mjs:CHARACTER_DIVERSITY_CONTRACT` | 原样复用 | 读取 `<Original_NPC_Dice_Tickets>`，票据仅在 P2 注册/readback 后逐人消费 |
-| 单一宿主回退 | SillyTavern `setExtensionPrompt` | 最小适配 | 唯一 key `mvu-auto-doctor-next-turn-consumer`，IN_CHAT/depth 1/system；无 verified provider 时才使用 |
-| 通用 provider | `window.MvuAutoDoctorAPI.registerNextTurnConsumerProvider` | 必要新胶水 | 显式注册的单-slot precompose callback；provider 自己拥有既有 final directive 合并 |
+| Doctor 自有宿主 slot | SillyTavern `setExtensionPrompt` | 最小适配 | 唯一 key `mvu-auto-doctor-next-turn-consumer`，IN_CHAT/depth 1/system；不接受外部 provider 注册、优先级或 callback |
 
 ## 严格 P3 legacy-to-consumer 投影
 
@@ -57,7 +52,7 @@ P3 当时的真实调用是：
 buildContinuityInjection(next, { director, maxVisible })
 ```
 
-没有 `selectedThreadIds`。P4 枚举 `director` 与 `rawMaxVisible=0..4`，以同一 `state`、同一调用签名重演旧 renderer，并独立计算：
+新包固定使用 Doctor 中性 renderer。P4 对新包按 `rawMaxVisible=0..4` 严格复演；仅在读取旧已持久包时枚举旧 `director` 文本，旧名不参与新生成、分支或 UI。可见投影独立计算：
 
 ```js
 threads
