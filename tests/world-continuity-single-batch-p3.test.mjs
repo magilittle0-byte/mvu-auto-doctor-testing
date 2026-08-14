@@ -17,6 +17,7 @@ import {
     normalizeActorLedger,
 } from '../actor-ledger-core.mjs';
 import { validateWorldAdjudicationBatch } from '../actor-authority-core.mjs';
+import { parseActorShardProposal } from '../actor-shard-core.mjs';
 import {
     extractFirstBalancedJsonObject,
     sovereigntySourceKey,
@@ -673,7 +674,7 @@ function loadWorldGenerator(callModel) {
         'async function persistActorRegistryForTurn(captured, {',
     );
     const repairHelpers = sourceSection(
-        'function stage3WorldValidationExpectedShape(validationCode)',
+        'function stage3WorldValidationExpectedShape(validationCode, repairContext = null)',
         'async function commitPreparedWorldCandidate(captured, {',
     );
     const sandbox = {
@@ -1356,6 +1357,191 @@ test('targeted repair patch accepts only the exact field family named by its cod
     assert.equal(calls, 2);
 });
 
+test('proposal repair replaces only invalid ActorId rows with the production parser minimal shape', async () => {
+    const candidate = (actorId, name) => ({
+        id: actorId,
+        name,
+        narrativeProfile: true,
+        goals: ['核验本回合新出现的具体线索'],
+        knowledgeBasis: ['knowledge-bound'],
+        sourceThreads: ['thread-bound'],
+        evidence: ['evidence-bound'],
+        causalChain: ['cause-bound'],
+        knownInteractionTargets: [],
+        stimuli: [],
+        actorState: {
+            location: { name: 'current-location' }, resources: [], capabilities: [],
+            actionHistory: [], stateFacts: [], plan: null, lastAction: null,
+        },
+    });
+    const repairedRow = {
+        actorId: 'actor-b',
+        intent: 'execute',
+        candidateAction: '检查本回合新出现的门锁划痕并记录其方向',
+        stateChanges: [{ kind: 'plan', summary: '形成一条核验门锁划痕来源的新计划' }],
+    };
+    assert.ok(
+        parseActorShardProposal(JSON.stringify(repairedRow), {
+            candidate: candidate('actor-b', 'Actor B'),
+        }).proposal,
+        'the exact repair shape is completed only from parser-owned safe authority defaults',
+    );
+    const original = JSON.parse(validWorldOutput(7));
+    original.actionProposals = [{
+        actorId: 'actor-a', intent: 'execute', candidateAction: 'keep-valid-row',
+        stateChanges: [{ kind: 'plan', summary: 'keep-valid-change' }],
+        marker: 'must-survive-byte-for-byte',
+    }, {
+        actorId: 'actor-b', intent: 'execute', candidateAction: 'invalid-old-row',
+        stateChanges: [], capabilityUsed: 'invented-capability',
+    }];
+    let calls = 0;
+    const callMessages = [];
+    const generate = loadWorldGenerator(async (messages) => {
+        calls += 1;
+        callMessages.push(messages);
+        return calls === 1
+            ? JSON.stringify(original)
+            : JSON.stringify({
+                repairPatch: {
+                    actionProposals: [{
+                        ...original.actionProposals[0],
+                        marker: 'must-not-overwrite-valid-row',
+                    }, repairedRow],
+                    actionAdjudications: [{ actorId: 'actor-b', status: 'success' }],
+                },
+                turn: 999,
+            });
+    });
+    const output = await generate([], {
+        captured,
+        settings: generatorSettings,
+        scheduledActorIds: ['actor-a', 'actor-b'],
+        validateCandidateInMemory: (candidateOutput) => {
+            const rows = parseContinuityOutput(candidateOutput).raw?.actionProposals || [];
+            const repaired = rows.find((row) => row.actorId === 'actor-b');
+            return repaired?.candidateAction === repairedRow.candidateAction
+                && rows.find((row) => row.actorId === 'actor-a')?.marker
+                === 'must-survive-byte-for-byte'
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : {
+                    ok: false,
+                    validationCode: 'world.actor.proposal_invalid',
+                    repairContext: {
+                        family: 'proposal',
+                        allowedActorIds: ['actor-a', 'actor-b'],
+                        targetActorIds: ['actor-b'],
+                        targets: [{
+                            actorId: 'actor-b',
+                            validationCode: 'actor_shard.capability_invalid',
+                        }],
+                    },
+                };
+        },
+    });
+    const finalRows = parseContinuityOutput(output).raw.actionProposals;
+    assert.equal(calls, 2);
+    assert.deepEqual(finalRows[0], original.actionProposals[0]);
+    assert.deepEqual(finalRows[1], repairedRow);
+    assert.match(callMessages[1][0].content, /actor_shard\.capability_invalid/u);
+    assert.match(callMessages[1][0].content, /仅修复这些ActorId行/u);
+    assert.doesNotMatch(callMessages[1][0].content, /actor-a/u);
+    assert.equal(parseContinuityOutput(output).raw.turn, 7);
+    assert.equal(parseContinuityOutput(output).raw.actionAdjudications, undefined);
+});
+
+test('production draft validator exposes only fixed invalid proposal ActorId subcodes to repair', () => {
+    const code = sourceSection(
+        'function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, parsed, {',
+        'function stage3WorldAdjudicationValidationFailure(errors = []) {',
+    );
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        actorActionTargetOf: (value) => structuredClone(value),
+        parseActorShardProposal,
+    };
+    vm.runInNewContext(`${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
+    const baseCandidate = (id, name) => ({
+        id, name, narrativeProfile: true,
+        goals: ['核验当前新线索'], knowledgeBasis: ['knowledge'],
+        sourceThreads: ['thread'], evidence: ['evidence'], causalChain: ['cause'],
+        knownInteractionTargets: [], stimuli: [],
+        actorState: {
+            location: { name: 'current-location' }, resources: [],
+            capabilities: ['known-capability'], actionHistory: [], stateFacts: [],
+        },
+    });
+    const validRow = (actorId) => ({
+        actorId, intent: 'execute',
+        candidateAction: `检查${actorId}对应的新痕迹并记录方向`,
+        stateChanges: [{ kind: 'plan', summary: `建立${actorId}的新核验计划` }],
+    });
+    const candidates = new Map([
+        ['actor-a', baseCandidate('actor-a', 'Actor A')],
+        ['actor-b', baseCandidate('actor-b', 'Actor B')],
+    ]);
+    const invalid = validRow('actor-b');
+    invalid.capabilityUsed = 'invented-capability';
+    const result = sandbox.validateDraft(
+        captured,
+        generatorSettings,
+        {},
+        {
+            state: { turn: 1 },
+            raw: { actionProposals: [validRow('actor-a'), invalid] },
+        },
+        {
+            scheduledActorIds: ['actor-a', 'actor-b'],
+            proposalValidationCandidates: candidates,
+            scheduledState: { turn: 0 }, nextTurn: 1,
+        },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.validationCode, 'world.actor.proposal_invalid');
+    assert.deepEqual(Array.from(result.repairContext.targetActorIds), ['actor-b']);
+    assert.deepEqual(Array.from(result.repairContext.allowedActorIds), ['actor-a', 'actor-b']);
+    assert.equal(result.repairContext.targets[0].validationCode, 'actor_shard.capability_invalid');
+    assert.equal(JSON.stringify(result.repairContext).includes('Actor B'), false);
+});
+
+test('proposal repair rejects missing duplicate or unknown target rows without a third call', async () => {
+    for (const repairRows of [
+        [],
+        [
+            { actorId: 'actor-b', intent: 'wait', candidateAction: '等待证据', stateChanges: [] },
+            { actorId: 'actor-b', intent: 'wait', candidateAction: '重复行', stateChanges: [] },
+        ],
+        [{ actorId: 'actor-unknown', intent: 'wait', candidateAction: '未知行', stateChanges: [] }],
+    ]) {
+        let calls = 0;
+        const original = JSON.parse(validWorldOutput(7));
+        original.actionProposals = [{ actorId: 'actor-b', intent: 'execute' }];
+        const generate = loadWorldGenerator(async () => {
+            calls += 1;
+            return calls === 1
+                ? JSON.stringify(original)
+                : JSON.stringify({ repairPatch: { actionProposals: repairRows } });
+        });
+        await assert.rejects(generate([], {
+            captured,
+            settings: generatorSettings,
+            scheduledActorIds: ['actor-b'],
+            validateCandidateInMemory: () => ({
+                ok: false,
+                validationCode: 'world.actor.proposal_invalid',
+                repairContext: {
+                    family: 'proposal', allowedActorIds: ['actor-b'], targetActorIds: ['actor-b'],
+                    targets: [{ actorId: 'actor-b', validationCode: 'actor_shard.proposal_invalid' }],
+                },
+            }),
+        }), (error) => (
+            error?.validationReason === 'world.targeted_repair.patch_invalid'
+            && error?.initialValidationCode === 'world.actor.proposal_invalid'
+        ));
+        assert.equal(calls, 2);
+    }
+});
+
 test('targeted repair mechanically extracts explicit wrappers aliases and array roots', async () => {
     const shapes = [
         JSON.stringify({
@@ -1542,6 +1728,44 @@ test('P3 timing metrics count each model call without charging local validation 
     assert.ok(metricEvents.some((entry) => Object.hasOwn(entry, 'validationMs')));
 });
 
+test('targeted repair reuses the responsive Advance slot while preserving transport-only backup', async () => {
+    const seenOptions = [];
+    let calls = 0;
+    const generate = loadWorldGenerator(async (_messages, options) => {
+        calls += 1;
+        seenOptions.push({
+            routeSlotIndex: options.routeSlotIndex,
+            failover: options.failover,
+            maxFailovers: options.maxFailovers,
+            transportFailoverOnly: options.transportFailoverOnly,
+        });
+        if (calls === 1) options.timingSink({
+            queueWaitMs: 0, modelMs: 2, routeSlotIndex: 1, transportStatus: 'failed',
+        });
+        options.timingSink({
+            queueWaitMs: 0, modelMs: 5, routeSlotIndex: 2, transportStatus: 'succeeded',
+        });
+        return calls === 1
+            ? validWorldOutput(1)
+            : JSON.stringify({ world: { digest: 'bounded repaired delta' } });
+    });
+    await generate([], {
+        captured,
+        settings: generatorSettings,
+        validateCandidateInMemory: (candidateOutput) => (
+            parseContinuityOutput(candidateOutput).raw?.world?.digest
+                ? { ok: true, validationCode: 'world.candidate.valid' }
+                : { ok: false, validationCode: 'world.semantic_progress_missing' }
+        ),
+    });
+    assert.equal(calls, 2);
+    assert.equal(seenOptions[0].routeSlotIndex, undefined);
+    assert.equal(seenOptions[1].routeSlotIndex, 2);
+    assert.equal(seenOptions[1].failover, true);
+    assert.equal(seenOptions[1].maxFailovers, 1);
+    assert.equal(seenOptions[1].transportFailoverOnly, true);
+});
+
 test('the production authority validator rejects success with empty applied state before Phase1', () => {
     const attempt = {
         id: 'ATT-P3-PREFLIGHT', actorId: 'actor-ready', intent: 'execute',
@@ -1576,7 +1800,10 @@ test('the production authority validator rejects success with empty applied stat
         'async function generateWorldContinuitySingleBatch(',
         'async function persistActorRegistryForTurn(',
     );
-    assert.match(generator, /stage3WorldValidationExpectedShape\(validationCode\)/u);
+    assert.match(
+        generator,
+        /stage3WorldValidationExpectedShape\(\s*validationCode,\s*repairContext/u,
+    );
     assert.match(generator, /最小期望形状/u);
 });
 

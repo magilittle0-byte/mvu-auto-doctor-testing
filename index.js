@@ -9627,11 +9627,14 @@ async function callModel(messages, options = {}) {
         try {
             return await modelConnectionScheduler.enqueue(connectionKey, async () => {
             const callStartedAt = Date.now();
-            const reportTiming = () => {
+            const reportTiming = (transportStatus) => {
                 try {
                     options.timingSink?.({
                         queueWaitMs: Math.max(0, callStartedAt - queuedAt),
                         modelMs: Math.max(0, Date.now() - callStartedAt),
+                        routeSlotIndex: slotIndex,
+                        transportStatus: transportStatus === 'succeeded'
+                            ? 'succeeded' : 'failed',
                     });
                 } catch {
                     // Read-only telemetry cannot affect transport settlement.
@@ -9680,7 +9683,7 @@ async function callModel(messages, options = {}) {
                     fieldCount: options.routeDiagnosticContext?.fieldCount,
                     ...normalizedProviderUsage(providerUsage),
                 });
-                reportTiming();
+                reportTiming('succeeded');
                 return validatedOutput;
             };
             try {
@@ -9858,7 +9861,7 @@ async function callModel(messages, options = {}) {
                         ? structuredOutputShape(error.invalidOutput)
                         : {}),
                 });
-                reportTiming();
+                reportTiming('failed');
                 throw error;
             }
         }, {
@@ -13821,7 +13824,15 @@ async function generateWorldContinuitySingleBatch(messages, {
         signal,
         parallelLane: 'world-agent',
     };
+    let advanceRouteSlotIndex = null;
     callOptions.timingSink = (metrics) => {
+        const observedSlot = Number(metrics?.routeSlotIndex);
+        if (
+            advanceRouteSlotIndex == null
+            && metrics?.transportStatus === 'succeeded'
+            && Number.isInteger(observedSlot)
+            && observedSlot >= 0
+        ) advanceRouteSlotIndex = observedSlot;
         if (typeof onMetrics === 'function') onMetrics(metrics);
     };
     if (typeof onModelCall === 'function') onModelCall('advance');
@@ -13831,7 +13842,27 @@ async function generateWorldContinuitySingleBatch(messages, {
         : { ok: true, validationCode: 'world.candidate.valid' };
     if (!initialValidation?.ok) {
         const validationCode = fixedValidationCode(initialValidation?.validationCode);
-        const expectedShape = stage3WorldValidationExpectedShape(validationCode);
+        const repairContext = initialValidation?.repairContext?.family === 'proposal'
+            ? {
+                family: 'proposal',
+                allowedActorIds: [...new Set((initialValidation.repairContext.allowedActorIds || [])
+                    .map((actorId) => String(actorId || ''))
+                    .filter(Boolean))],
+                targetActorIds: [...new Set((initialValidation.repairContext.targetActorIds || [])
+                    .map((actorId) => String(actorId || ''))
+                    .filter(Boolean))],
+                targets: (initialValidation.repairContext.targets || []).map((entry) => ({
+                    actorId: String(entry?.actorId || ''),
+                    validationCode: /^actor_shard\.[a-z0-9_]+$/u.test(
+                        String(entry?.validationCode || ''),
+                    ) ? String(entry.validationCode) : 'actor_shard.proposal_invalid',
+                })).filter((entry) => entry.actorId),
+            }
+            : null;
+        const expectedShape = stage3WorldValidationExpectedShape(
+            validationCode,
+            repairContext,
+        );
         const initialParseStartedAt = Date.now();
         const initialParsed = parseContinuityOutput(output, {
             chatId: captured.chatId,
@@ -13867,6 +13898,10 @@ async function generateWorldContinuitySingleBatch(messages, {
                     : 'Return exactly one JSON repair object as {"repairPatch":{...}} with no validationCode, reason, explanation, turn, or unrelated sibling fields.',
                 '你只修复一个世界连续性JSON候选，不重做整轮推演。',
                 `固定校验码=${validationCode}。只补该缺项或纠正对应字段；不得新增无证据事实。`,
+                ...(repairContext?.targets?.length ? [
+                    `仅修复这些ActorId行=${JSON.stringify(repairContext.targets)}。actionProposals是按actorId局部替换，不得返回其他人物。`,
+                    '每行只需actorId、intent、candidateAction、stateChanges；其余身份、位置、证据、资源、能力、刺激与目标引用由本地权威材料绑定。wait必须使用空stateChanges；execute/replan必须给非空且具体的新stateChanges。',
+                ] : []),
                 `最小期望形状=${expectedShape}`,
                 'success/partial必须有非空appliedStateChanges；没有真实增量就改为delayed/blocked，lastTick必须held并与具体未满足条件一致。',
                 '保持原人物ID、已有ATT字段、玩家自主权和其余有效内容；只返回最小期望形状允许的顶层补丁对象。',
@@ -13879,6 +13914,9 @@ async function generateWorldContinuitySingleBatch(messages, {
         const repairOutput = await callModel(repairMessages, {
             ...callOptions,
             task: '活世界定向补缺',
+            ...(advanceRouteSlotIndex == null
+                ? {}
+                : { routeSlotIndex: advanceRouteSlotIndex }),
         });
         const repairParseStartedAt = Date.now();
         const repairedParsed = validationCode === 'world.output.parse_invalid'
@@ -13907,6 +13945,7 @@ async function generateWorldContinuitySingleBatch(messages, {
                 initialParsed.raw,
                 explicitRepairPatch,
                 validationCode,
+                repairContext,
             );
         if (typeof onMetrics === 'function') {
             onMetrics({ validationMs: Date.now() - patchValidationStartedAt });
@@ -17104,8 +17143,18 @@ async function runContinuityTarget(captured, {
             return finishWorldResult({ status: 'stale', reason: String(error.message || error) });
         }
         const failureKind = String(error?.failureKind || '');
+        const safeValidationReason = /^world\.[a-z0-9_.:-]+$/u.test(
+            String(error?.validationReason || ''),
+        ) ? String(error.validationReason) : '';
         const selected = scheduledActorIds.length || pendingActions.attempts.length;
-        if (selected) markActorSchedulingFailure('actor_scheduling.advance_transport_failed', {
+        const schedulingFailureCode = failureKind === 'validation-error'
+            ? safeValidationReason === 'world.actor.proposal_invalid'
+                ? 'actor_scheduling.advance_proposal_invalid'
+                : 'actor_scheduling.advance_validation_failed'
+            : failureKind === 'foreground_preempted'
+                ? 'actor_scheduling.advance_foreground_preempted'
+                : 'actor_scheduling.advance_transport_failed';
+        if (selected) markActorSchedulingFailure(schedulingFailureCode, {
             selected,
             pendingRecovery: pendingActions.attempts.length > 0,
         });
@@ -17115,8 +17164,8 @@ async function runContinuityTarget(captured, {
                 ? 'foreground_preempted'
                 : String(error?.message || error),
             module: 'world',
-            validationCode: /^world\.[a-z0-9_.:-]+$/u.test(String(error?.validationReason || ''))
-                ? String(error.validationReason)
+            validationCode: safeValidationReason
+                ? safeValidationReason
                 : failureKind === 'validation-error'
                     ? 'world.candidate.invalid'
                     : failureKind === 'foreground_preempted'
@@ -18050,6 +18099,7 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
         ) return { ok: false, validationCode: 'world.actor.proposals_incomplete' };
 
         const validatedProposals = [];
+        const proposalRepairTargets = [];
         for (const proposal of proposals) {
             const actorId = String(proposal?.actorId || '');
             const candidate = proposalValidationCandidates.get(actorId);
@@ -18068,9 +18118,25 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
                     : Math.max(1, requestedTravelTurns),
             }), { candidate });
             if (!checked.proposal) {
-                return { ok: false, validationCode: 'world.actor.proposal_invalid' };
+                const parserCode = /^actor_shard\.[a-z0-9_]+$/u.test(
+                    String(checked.error || ''),
+                ) ? String(checked.error) : 'actor_shard.proposal_invalid';
+                proposalRepairTargets.push({ actorId, validationCode: parserCode });
+                continue;
             }
             validatedProposals.push(checked.proposal);
+        }
+        if (proposalRepairTargets.length) {
+            return {
+                ok: false,
+                validationCode: 'world.actor.proposal_invalid',
+                repairContext: {
+                    family: 'proposal',
+                    allowedActorIds: [...scheduledActorIds],
+                    targetActorIds: proposalRepairTargets.map((entry) => entry.actorId),
+                    targets: proposalRepairTargets,
+                },
+            };
         }
         const candidates = actorActionCandidatesFromShard(actionLedger, validatedProposals, {
             turn: nextTurn,
@@ -18177,13 +18243,23 @@ function stage3WorldAdjudicationValidationFailure(errors = []) {
     };
 }
 
-function stage3WorldValidationExpectedShape(validationCode) {
+function stage3WorldValidationExpectedShape(validationCode, repairContext = null) {
     const code = String(validationCode || '');
     if (code === 'world.output.parse_invalid') {
         return '{turn,lastTick,threads,scenarioPlan,world}';
     }
     if (code.includes('proposal')) {
-        return '{"repairPatch":{"actionProposals":[exactly one object per scheduled actorId]}}';
+        const targetActorIds = [...new Set((repairContext?.targetActorIds || [])
+            .map((actorId) => String(actorId || ''))
+            .filter(Boolean))];
+        const rows = (targetActorIds.length ? targetActorIds : ['exact scheduled actorId'])
+            .map((actorId) => ({
+                actorId,
+                intent: 'execute|replan|wait',
+                candidateAction: 'one concrete NPC attempt',
+                stateChanges: [{ kind: 'plan', summary: 'one concrete novel plan change' }],
+            }));
+        return JSON.stringify({ repairPatch: { actionProposals: rows } });
     }
     if (code.includes('adjudication') || code.includes('settlement')) {
         return '{"repairPatch":{"actionAdjudications":[one object per scheduled actorId with status,risk,costs,actualResourceCosts,durationTurns,resultSummary,visibility,observerActorIds,observableConsequence,revealPath,appliedStateChanges]}}';
@@ -18202,11 +18278,8 @@ function stage3WorldTargetedRepairPatchKeys(validationCode) {
     if (code.includes('adjudication') || code.includes('settlement')) {
         return new Set(['actionAdjudications', 'lastTick']);
     }
-    if (
-        code.includes('proposal')
-        || code.includes('attempt_prepare')
-        || code.includes('attempt_record')
-    ) {
+    if (code.includes('proposal')) return new Set(['actionProposals']);
+    if (code.includes('attempt_prepare') || code.includes('attempt_record')) {
         return new Set(['actionProposals', 'actionAdjudications', 'lastTick']);
     }
     return null;
@@ -18263,7 +18336,12 @@ function stage3ParseWorldTargetedRepairOutput(output, validationCode) {
     return Object.keys(patch).length ? patch : null;
 }
 
-function stage3ApplyWorldTargetedRepairPatch(originalRaw, repairRaw, validationCode) {
+function stage3ApplyWorldTargetedRepairPatch(
+    originalRaw,
+    repairRaw,
+    validationCode,
+    repairContext = null,
+) {
     if (
         !originalRaw || typeof originalRaw !== 'object' || Array.isArray(originalRaw)
         || !repairRaw || typeof repairRaw !== 'object' || Array.isArray(repairRaw)
@@ -18272,7 +18350,56 @@ function stage3ApplyWorldTargetedRepairPatch(originalRaw, repairRaw, validationC
     const patchKeys = Object.keys(repairRaw).filter((key) => allowedKeys?.has(key));
     if (!allowedKeys || !patchKeys.length) return null;
     const next = deepClone(originalRaw);
-    for (const key of patchKeys) next[key] = deepClone(repairRaw[key]);
+    for (const key of patchKeys) {
+        if (
+            key === 'actionProposals'
+            && String(validationCode || '').includes('proposal')
+            && Array.isArray(repairRaw[key])
+            && Array.isArray(originalRaw.actionProposals)
+            && Array.isArray(repairContext?.targetActorIds)
+            && repairContext.targetActorIds.length
+        ) {
+            const targetActorIds = [...new Set(repairContext.targetActorIds
+                .map((actorId) => String(actorId || ''))
+                .filter(Boolean))];
+            const allowedActorIds = new Set([
+                ...targetActorIds,
+                ...(Array.isArray(repairContext.allowedActorIds)
+                    ? repairContext.allowedActorIds
+                    : []),
+            ].map((actorId) => String(actorId || '')).filter(Boolean));
+            const repairedByActor = new Map();
+            for (const row of repairRaw[key]) {
+                const actorId = String(row?.actorId || '');
+                if (actorId && allowedActorIds.has(actorId) && !targetActorIds.includes(actorId)) {
+                    // Some models redundantly echo already-valid scheduled rows. They are
+                    // mechanically ignored so they cannot overwrite authority-validated work.
+                    continue;
+                }
+                if (
+                    !actorId
+                    || !targetActorIds.includes(actorId)
+                    || repairedByActor.has(actorId)
+                    || !row || typeof row !== 'object' || Array.isArray(row)
+                ) return null;
+                repairedByActor.set(actorId, deepClone(row));
+            }
+            if (
+                repairedByActor.size !== targetActorIds.length
+                || targetActorIds.some((actorId) => !repairedByActor.has(actorId))
+            ) return null;
+            const originalIds = originalRaw.actionProposals
+                .map((row) => String(row?.actorId || ''));
+            if (targetActorIds.some((actorId) => !originalIds.includes(actorId))) return null;
+            next.actionProposals = originalRaw.actionProposals.map((row) => (
+                repairedByActor.has(String(row?.actorId || ''))
+                    ? deepClone(repairedByActor.get(String(row.actorId)))
+                    : deepClone(row)
+            ));
+            continue;
+        }
+        next[key] = deepClone(repairRaw[key]);
+    }
     return next;
 }
 

@@ -1287,7 +1287,7 @@ test('production actor scheduling diagnostics records schedule and pending ATT r
     );
     assert.match(run, /if \(pendingActions\.attempts\.length\) \{[\s\S]*?status: 'attempts_prepared'/u);
     assert.match(run, /status: scheduledActorIds\.length \? 'scheduled' : 'idle'/u);
-    assert.match(run, /catch \(error\) \{[\s\S]*?markActorSchedulingFailure\('actor_scheduling\.advance_transport_failed'[^]*?return finishWorldResult\(\{\s*status: 'failed'/u);
+    assert.match(run, /failureKind === 'validation-error'[\s\S]*?actor_scheduling\.advance_proposal_invalid[\s\S]*?actor_scheduling\.advance_transport_failed[\s\S]*?markActorSchedulingFailure\(schedulingFailureCode[^]*?return finishWorldResult\(\{\s*status: 'failed'/u);
     assert.match(run, /if \(!parsed\.state\) \{[\s\S]*?actor_scheduling\.advance_parse_failed[^]*?continuity_output_invalid/u);
     assert.match(run, /stage3PersistPreparedActorAttemptsOnFreshLedger[^]*?if \(!rebased\.ok\) \{[^]*?actor_scheduling\.phase1_persistence_failed[^]*?return finishWorldResult\(\{/u);
     assert.match(run, /actor_scheduling\.phase1_attempt_readback_incomplete/u);
