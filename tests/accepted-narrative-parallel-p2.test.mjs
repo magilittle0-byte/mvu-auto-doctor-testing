@@ -7,6 +7,28 @@ const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const lifecycleVmStubs = `
 let generationLifecycleTrace = [];
 let foregroundGenerationStarting = null;
+let pendingAcceptedFinalSession = null;
+let acceptedFinalDispatchInFlight = null;
+let acceptedFinalDispatchChain = Promise.resolve();
+const acceptedFinalDispatchPromises = new Map();
+const acceptedFinalLaunchPromises = new Map();
+function acceptedFinalDispatchKey(generation) {
+    return generation ? [generation.chatId, generation.id, generation.epoch, generation.serial]
+        .map((value) => String(value ?? '')).join(':') : '';
+}
+function acceptedFinalLaunchPromise(generation) {
+    const key = acceptedFinalDispatchKey(generation);
+    return key ? acceptedFinalLaunchPromises.get(key) || null : null;
+}
+function acceptedFinalSessionIsCurrent(generation) {
+    const context = getContext();
+    return !!generation
+        && Number(generation.epoch) === Number(currentGenerationEpoch)
+        && Number(generation.operationEpoch) === Number(operationEpoch)
+        && String(context?.chatId || '') === String(generation.chatId || '')
+        && String(lastGeneration?.id || '') === String(generation.id || '');
+}
+async function flushAcceptedFinalBeforeForegroundStart() {}
 function fixedGenerationLifecycleReason(value) { return String(value || 'other'); }
 function recordGenerationLifecycleTrace() {}
 function runtimeGenerationSerialFloor() { return -1; }
@@ -14,6 +36,7 @@ function recordNextTurnConsumerInspection() {}
 function preemptHostBackgroundModelControllersForForegroundGeneration() { return 0; }
 function recordModelDiagnostic(entry) { globalThis.__doctorDiagnostics?.push(entry); }
 function hydrateVariableRepairCenterStatus() {}
+function hydrateDoctorRepairCenterStatus() {}
 `;
 
 function sourceSection(start, end) {
@@ -24,6 +47,11 @@ function sourceSection(start, end) {
     return source.slice(from, to);
 }
 
+const acceptedFinalFlushSource = sourceSection(
+    'async function flushAcceptedFinalBeforeForegroundStart()',
+    'function bindEvents()',
+);
+
 function deferred() {
     let resolve;
     let reject;
@@ -32,6 +60,27 @@ function deferred() {
         reject = rej;
     });
     return { promise, resolve, reject };
+}
+
+function acceptedFinalQueueSandboxState() {
+    const queue = {
+        acceptedFinalDispatchInFlight: null,
+        acceptedFinalDispatchChain: Promise.resolve(),
+        acceptedFinalDispatchPromises: new Map(),
+        acceptedFinalLaunchPromises: new Map(),
+        pendingAcceptedFinalSession: null,
+        foregroundGenerationStarting: null,
+    };
+    queue.acceptedFinalDispatchKey = (generation) => generation
+        ? [generation.chatId, generation.id, generation.epoch, generation.serial]
+            .map((value) => String(value ?? '')).join(':')
+        : '';
+    queue.acceptedFinalLaunchPromise = (generation) => {
+        const key = queue.acceptedFinalDispatchKey(generation);
+        return key ? queue.acceptedFinalLaunchPromises.get(key) || null : null;
+    };
+    queue.flushAcceptedFinalBeforeForegroundStart = async () => undefined;
+    return queue;
 }
 
 function loadActorProfileRecoveryOutcomeFinalizer() {
@@ -302,6 +351,7 @@ function loadAcceptedFinalRuntimeHarness({
     currentOperationEpoch = 11,
     chatId = 'chat-a',
     narrativeEligible = true,
+    dispatchGate = null,
 } = {}) {
     const identity = sourceSection(
         'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
@@ -317,11 +367,15 @@ function loadAcceptedFinalRuntimeHarness({
     );
     const state = {
         scope: { chatId, cardId: 'character:card-a', runtimeVersion: 'rc14' },
+        currentChatId: chatId,
         identitySaves: 0,
         dispatches: [],
         releases: [],
         statuses: [],
         operationWrites: 0,
+        committed: false,
+        commitCalls: 0,
+        dispatchEntered: false,
     };
     const message = {
         mes: '<content>真实自然正文：林舟把钥匙放在桌上，转身等候答复。</content>',
@@ -345,12 +399,14 @@ function loadAcceptedFinalRuntimeHarness({
         currentGenerationEpoch: currentEpoch,
         operationEpoch: currentOperationEpoch,
         lastGeneration: generation,
-        getContext: () => ({ chatId, chat: [message] }),
+        getContext: () => ({ chatId: state.currentChatId, chat: [message] }),
         document: { body: { dataset: {} } },
         currentFinalAssistant: () => ({ index: 0, message }),
         sovereigntyNarrativeEligible: () => narrativeEligible,
         acceptedContentFingerprint: () => 'after',
-        resolveCurrentActorSovereigntyScope: async () => ({ resolved: true, scope: state.scope }),
+        resolveCurrentActorSovereigntyScope: async () => {
+            return { resolved: true, scope: state.scope };
+        },
         currentActorSovereigntyScope: () => state.scope,
         actorSovereigntyScopeDigest: (scope) => `${scope.chatId}|${scope.cardId}|${scope.runtimeVersion}`,
         actorSovereigntyScopesMatch: (left, right) => (
@@ -365,6 +421,8 @@ function loadAcceptedFinalRuntimeHarness({
             && !Array.isArray(value),
         scheduleSafeChatSave: () => { state.identitySaves += 1; },
         commitNextTurnConsumer: async () => {
+            state.commitCalls += 1;
+            state.committed = true;
             if (scopeChangesAfterCommit) {
                 state.scope = { ...state.scope, runtimeVersion: 'rc14-changed' };
             }
@@ -374,11 +432,15 @@ function loadAcceptedFinalRuntimeHarness({
             state.releases.push({ reason, options });
             return true;
         },
-        dispatchAcceptedFinal: (envelope) => state.dispatches.push(envelope),
+        dispatchAcceptedFinal: async (envelope) => {
+            state.dispatchEntered = true;
+            if (dispatchGate) await dispatchGate.promise;
+            state.dispatches.push(envelope);
+        },
         setStatus: (text, kind, options) => state.statuses.push({ text, kind, options }),
         recordOperation: () => { state.operationWrites += 1; },
     };
-    vm.runInNewContext(`${lifecycleVmStubs}\n${identity}\n${support}\n${accept}\nthis.acceptFinalGeneration = acceptFinalGeneration;`, sandbox);
+    vm.runInNewContext(`${lifecycleVmStubs}\n${identity}\n${support}\n${accept}\nthis.acceptFinalGeneration = acceptFinalGeneration;\nthis.getAcceptedFinalDispatchInFlight = () => acceptedFinalDispatchInFlight;`, sandbox);
     return { state, generation, accept: sandbox.acceptFinalGeneration, sandbox };
 }
 
@@ -472,6 +534,7 @@ function loadAcceptedFinalFullDispatchHarness({
             state.continuityCalls.push({
                 target: options.expectedTarget,
                 noActorPermit: options.noActorPermit || null,
+                startBarrier: options.startBarrier || null,
             });
             if (state.worldLaunched) return Promise.resolve({ status: 'duplicate' });
             state.worldLaunched = true;
@@ -545,9 +608,193 @@ test('actual accepted-final path freezes scope before identity and dispatches on
     assert.equal(p4Stale.state.dispatches.length, 0);
 
     const scopeChanged = loadAcceptedFinalRuntimeHarness({ scopeChangesAfterCommit: true });
-    assert.equal(await scopeChanged.accept(scopeChanged.generation), false);
+    assert.equal(await scopeChanged.accept(scopeChanged.generation), true);
     assert.equal(scopeChanged.state.identitySaves, 1);
-    assert.equal(scopeChanged.state.dispatches.length, 0);
+    assert.equal(scopeChanged.state.dispatches.length, 1);
+});
+
+test('accepted-final keeps its management exclusion through the post-P4 scope gap until P1/P3 dispatch', async () => {
+    const gate = deferred();
+    const runtime = loadAcceptedFinalRuntimeHarness({ dispatchGate: gate });
+    const accepting = runtime.accept(runtime.generation);
+    for (let attempt = 0; attempt < 20 && !runtime.state.dispatchEntered; attempt += 1) {
+        await Promise.resolve();
+    }
+    assert.equal(runtime.state.dispatchEntered, true, 'accepted-final must reach its module launch barrier');
+    const inFlight = runtime.sandbox.getAcceptedFinalDispatchInFlight();
+    assert.equal(inFlight?.chatId, 'chat-a');
+    assert.equal(inFlight?.generationId, 'generation-a');
+    assert.equal(runtime.state.dispatches.length, 0, 'dispatch is still waiting on the fresh scope');
+    gate.resolve();
+    assert.equal(await accepting, true);
+    assert.equal(runtime.state.dispatches.length, 1);
+    assert.equal(runtime.sandbox.getAcceptedFinalDispatchInFlight(), null);
+});
+
+test('accepted-final serializes a new chat behind a stale in-flight session without dropping it', async () => {
+    const gate = deferred();
+    const runtime = loadAcceptedFinalRuntimeHarness({ dispatchGate: gate });
+    const acceptingA = runtime.accept(runtime.generation);
+    for (let attempt = 0; attempt < 20 && !runtime.state.dispatchEntered; attempt += 1) {
+        await Promise.resolve();
+    }
+    assert.equal(runtime.state.dispatchEntered, true);
+
+    const generationB = {
+        ...runtime.generation,
+        id: 'generation-b',
+        serial: 4,
+        epoch: 8,
+        operationEpoch: 12,
+        chatId: 'chat-b',
+        acceptedFinalEligible: true,
+    };
+    runtime.state.currentChatId = 'chat-b';
+    runtime.state.scope = {
+        chatId: 'chat-b',
+        cardId: 'character:card-b',
+        runtimeVersion: 'rc14',
+    };
+    runtime.sandbox.currentGenerationEpoch = generationB.epoch;
+    runtime.sandbox.operationEpoch = generationB.operationEpoch;
+    runtime.sandbox.lastGeneration = generationB;
+    const acceptingB = runtime.accept(generationB);
+
+    let bSettled = false;
+    void acceptingB.finally(() => { bSettled = true; });
+    await Promise.resolve();
+    assert.equal(bSettled, false, 'the new chat must queue instead of being dropped');
+    gate.resolve();
+
+    assert.equal(await acceptingA, true, 'the already-launched old dispatch settles before the queue advances');
+    assert.equal(await acceptingB, true, 'the queued current chat is revalidated and dispatched');
+    assert.equal(runtime.state.commitCalls, 2);
+    assert.deepEqual(
+        runtime.state.dispatches.map((entry) => entry.generationId),
+        ['generation-a', 'generation-b'],
+    );
+});
+
+test('accepted-final serializes the next same-chat generation and dispatches it once', async () => {
+    const gate = deferred();
+    const runtime = loadAcceptedFinalRuntimeHarness({ dispatchGate: gate });
+    const acceptingA = runtime.accept(runtime.generation);
+    for (let attempt = 0; attempt < 20 && !runtime.state.dispatchEntered; attempt += 1) {
+        await Promise.resolve();
+    }
+    assert.equal(runtime.state.dispatchEntered, true);
+
+    const generationB = {
+        ...runtime.generation,
+        id: 'generation-a-next',
+        serial: 4,
+        epoch: 8,
+        operationEpoch: 12,
+        acceptedFinalEligible: true,
+    };
+    runtime.sandbox.currentGenerationEpoch = generationB.epoch;
+    runtime.sandbox.operationEpoch = generationB.operationEpoch;
+    runtime.sandbox.lastGeneration = generationB;
+    const acceptingB = runtime.accept(generationB);
+    gate.resolve();
+
+    assert.equal(await acceptingA, true);
+    assert.equal(await acceptingB, true);
+    assert.equal(runtime.state.commitCalls, 2);
+    assert.deepEqual(
+        runtime.state.dispatches.map((entry) => entry.generationId),
+        ['generation-a', 'generation-a-next'],
+    );
+});
+
+test('accepted-final joins duplicate delivery of the same generation', async () => {
+    const gate = deferred();
+    const runtime = loadAcceptedFinalRuntimeHarness({ dispatchGate: gate });
+    const first = runtime.accept(runtime.generation);
+    const duplicate = runtime.accept(runtime.generation);
+    for (let attempt = 0; attempt < 20 && !runtime.state.dispatchEntered; attempt += 1) {
+        await Promise.resolve();
+    }
+    assert.equal(runtime.state.dispatchEntered, true);
+    gate.resolve();
+
+    assert.equal(await first, true);
+    assert.equal(await duplicate, true);
+    assert.equal(runtime.state.commitCalls, 1);
+    assert.equal(runtime.state.dispatches.length, 1);
+});
+
+test('runtime fingerprint binds accepted-final keying, foreground flush, and unlocked authority gates', () => {
+    const runtimeSource = sourceSection(
+        'function doctorRuntimeCriticalFingerprint()',
+        'function diagnosticPayload()',
+    );
+    const critical = [
+        'acceptedFinalDispatchKey',
+        'acceptedFinalLaunchPromise',
+        'flushAcceptedFinalBeforeForegroundStart',
+        'acceptFinalGenerationUnlocked',
+        'stage3AwaitAcceptedFinalP4Barrier',
+    ];
+    for (const helper of critical) {
+        assert.match(runtimeSource, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
+    }
+    const helperNames = [...new Set([
+        ...runtimeSource.matchAll(/\b([A-Za-z_$][\w$]*)\.toString\(\)/gu),
+    ].map((match) => match[1]))];
+    const digest = (value) => {
+        let hash = 2166136261;
+        for (const char of String(value)) {
+            hash ^= char.codePointAt(0);
+            hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(16);
+    };
+    const runtimeFor = (overrides = {}) => Function(
+        'VERSION',
+        'fingerprint',
+        'actorProfileRecoveryCriticalFingerprint',
+        'actorProfileGenerationCriticalFingerprint',
+        'actorProfileBatchSemanticFingerprint',
+        'actorAuthorityAdjudicationSemanticFingerprint',
+        'continuityCoreSemanticFingerprint',
+        'variableRepairCenterSemanticFingerprint',
+        'doctorRepairCenterSemanticFingerprint',
+        ...helperNames,
+        `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
+    )(
+        'test-version', digest,
+        () => 'recovery', () => 'generation', () => 'batch', () => 'authority',
+        () => 'continuity', () => 'variable-repair', () => 'doctor-repair',
+        ...helperNames.map((name) => overrides[name]
+            || Function(`return function ${name}(){}`)()),
+    )();
+    const baseline = runtimeFor();
+    for (const helper of critical) {
+        assert.notEqual(runtimeFor({
+            [helper]: Function(`return function ${helper}Changed(){ return 'changed'; }`)(),
+        }), baseline, helper);
+    }
+});
+
+test('P3 production start barrier waits for accepted-final P4 settlement before world work can run', async () => {
+    const barrierSource = sourceSection(
+        'async function stage3AwaitAcceptedFinalP4Barrier(startBarrier)',
+        'async function enqueueContinuity(targetId, {',
+    );
+    const sandbox = {};
+    vm.runInNewContext(
+        `${barrierSource}\nthis.waitForP4 = stage3AwaitAcceptedFinalP4Barrier;`,
+        sandbox,
+    );
+    const gate = deferred();
+    let passed = false;
+    const waiting = sandbox.waitForP4(gate.promise).then(() => { passed = true; });
+    await Promise.resolve();
+    assert.equal(passed, false);
+    gate.resolve(false);
+    await waiting;
+    assert.equal(passed, true, 'P3 proceeds after either P4 success or isolated P4 failure settles');
 });
 
 test('provider error placeholders release P4 and never become accepted narrative', async () => {
@@ -585,6 +832,11 @@ test('accepted-final dispatch gives variables, P3, and P1 the same frozen target
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(runtime.state.dispatchedTargets.length, 3);
     assert.equal(runtime.state.continuityCalls.length, 1);
+    assert.equal(
+        typeof runtime.state.continuityCalls[0].startBarrier?.then,
+        'function',
+        'P3 is attached immediately but receives the exact P4 settlement barrier',
+    );
     for (const target of runtime.state.dispatchedTargets) {
         assert.equal(target.scopeDigest, 'chat-a|character:card-a|rc14');
         assert.deepEqual(
@@ -1071,6 +1323,91 @@ test('production P4 commit keeps Doctor-owned cleanup_failed fail-closed', async
     assert.equal(runtime.state.namespace.continuity.nextTurnInjection.consumeProof, undefined);
 });
 
+test('a completed old P4 commit cannot clear the newly precomposed active consumer', async () => {
+    const leaseChecks = sourceSection(
+        'function nextTurnLeaseMatches(lease, session)',
+        'async function writeNextTurnConsumerLease(session, scopeDigest, payload)',
+    );
+    const leaseOwnership = sourceSection(
+        'function doctorOwnsNextTurnConsumerLease(lease)',
+        'async function markNextTurnConsumerCleanupFailed(session, lease, reason)',
+    );
+    const commitSource = sourceSection(
+        'async function commitNextTurnConsumer(session, envelope)',
+        'function continuityStateForInjection(namespace, { isReroll = false } = {})',
+    );
+    const makeSession = (id, serial) => ({
+        id, serial, type: 'normal', chatId: 'chat-a', frozenScopeDigest: 'scope-a',
+    });
+    const makeEnvelope = (session) => ({
+        chatId: 'chat-a', index: serialToIndex(session.serial),
+        messageId: `message-${session.id}`, swipeId: 0,
+        scopeDigest: 'scope-a', contentFingerprint: `content-${session.id}`,
+    });
+    const serialToIndex = (serial) => Number(serial);
+    const makeLease = (session) => ({
+        state: 'reserved', chatId: session.chatId, generationId: session.id,
+        generationSerial: session.serial, generationType: session.type,
+        scopeDigest: session.frozenScopeDigest, expectedScopeDigest: session.frozenScopeDigest,
+        providerId: 'doctor-extension-prompt', slotId: 'mvu-auto-doctor-next-turn-consumer',
+    });
+    const oldSession = makeSession('generation-old', 1);
+    const newSession = makeSession('generation-new', 2);
+    const oldActive = {
+        generationId: oldSession.id, digest: 'digest-old',
+        providerId: 'doctor-extension-prompt', slotId: 'mvu-auto-doctor-next-turn-consumer',
+    };
+    const newActive = {
+        generationId: newSession.id, digest: 'digest-new',
+        providerId: 'doctor-extension-prompt', slotId: 'mvu-auto-doctor-next-turn-consumer',
+    };
+    const state = {
+        writes: 0,
+        namespace: {
+            continuity: {
+                nextTurnInjection: {
+                    consumerLease: makeLease(oldSession),
+                    producerTarget: { scopeDigest: 'scope-a' },
+                },
+            },
+        },
+    };
+    const sandbox = {
+        activeNextTurnConsumer: oldActive,
+        DOCTOR_NEXT_TURN_PROVIDER_ID: 'doctor-extension-prompt',
+        NEXT_TURN_CONSUMER_INJECTION_NAME: 'mvu-auto-doctor-next-turn-consumer',
+        getContext: () => ({ chatId: 'chat-a' }),
+        ensureNextTurnConsumerSlotCleaned: async () => true,
+        acceptedFinalEnvelopeMatchesContext: () => true,
+        resolveCurrentActorSovereigntyScope: async () => ({ resolved: true, scope: { digest: 'scope-a' } }),
+        actorSovereigntyScopeDigest: (scope) => scope.digest,
+        readChatNamespace: () => state.namespace,
+        releaseNextTurnConsumer: async () => true,
+        deepClone: (value) => structuredClone(value),
+        Date,
+        writeChatNamespace: async (candidate) => {
+            state.writes += 1;
+            state.namespace = structuredClone(candidate);
+            if (state.writes === 1) sandbox.activeNextTurnConsumer = newActive;
+            return true;
+        },
+    };
+    vm.runInNewContext(
+        `${leaseChecks}\n${leaseOwnership}\n${commitSource}\nthis.commit = commitNextTurnConsumer;`,
+        sandbox,
+    );
+    assert.equal(await sandbox.commit(oldSession, makeEnvelope(oldSession)), true);
+    assert.equal(sandbox.activeNextTurnConsumer, newActive);
+
+    state.namespace.continuity.nextTurnInjection = {
+        consumerLease: makeLease(newSession),
+        producerTarget: { scopeDigest: 'scope-a' },
+    };
+    assert.equal(await sandbox.commit(newSession, makeEnvelope(newSession)), true);
+    assert.equal(sandbox.activeNextTurnConsumer, null);
+    assert.equal(state.writes, 2);
+});
+
 test('production P4 release ignores a fully current external cleanup_failed packet after clearing only the Doctor slot', async () => {
     const leaseChecks = sourceSection(
         'function nextTurnLeaseMatches(lease, session)',
@@ -1198,6 +1535,7 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
     const message = { mes: '<content>Natural final text.</content>', swipe_id: 1 };
     const scope = { chatId: 'chat-a', cardId: 'character:card-a', runtimeVersion: 'rc14' };
     const sandbox = {
+        ...acceptedFinalQueueSandboxState(),
         currentGenerationEpoch: 4,
         generationSerial: 8,
         operationEpoch: 12,
@@ -1611,6 +1949,7 @@ test('actual chat-change handler clears the old Doctor slot so the new chat can 
 });
 
 test('event lifecycle runs real current-chat precompose and accept after clearing an old Doctor slot', async () => {
+    const commitGate = deferred();
     const identity = sourceSection(
         'function ensureAcceptedFinalTargetIdentity(context, message, index, generation, {',
         'function acceptedFinalEnvelopeMatchesContext(context, envelope, session)',
@@ -1642,7 +1981,7 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
     const state = {
         chatId: 'chat-b', callbacks: new Map(), timers: [], precomposed: 0,
         dispatches: [], identitySaves: 0, writes: 0, providerCleanup: 0,
-        fallbackText: '', statuses: [],
+        fallbackText: '', statuses: [], commitCalls: 0, releases: [],
     };
     const messages = {
         'chat-a': { mes: '<content>A 的自然正文</content>', swipe_id: 0 },
@@ -1695,7 +2034,10 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
             actorSovereigntyScope: { ...(frozenScope || scope()) }, epoch: 11,
         }),
         commitNextTurnConsumer: async () => true,
-        releaseNextTurnConsumer: async () => { throw new Error('no release is expected'); },
+        releaseNextTurnConsumer: async (_session, reason) => {
+            state.releases.push(reason);
+            return true;
+        },
         clearLegacyNextTurnSlots: () => true,
         readChatNamespace: () => ({}),
         prepareNpcDesignTicketBatch: () => { state.precomposed += 1; return { tickets: [] }; },
@@ -1725,9 +2067,15 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
         setTimeout: (callback) => { state.timers.push(callback); return state.timers.length; },
     };
     vm.runInNewContext(
-        `${lifecycleVmStubs}\n${identity}\n${support}\n${dispatch}\n${accept}\n${ownership}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents;`,
+        `${lifecycleVmStubs}\n${acceptedFinalFlushSource}\n${identity}\n${support}\n${dispatch}\n${accept}\n${ownership}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents;`,
         sandbox,
     );
+    const realCommitNextTurnConsumer = sandbox.commitNextTurnConsumer;
+    sandbox.commitNextTurnConsumer = async (...args) => {
+        state.commitCalls += 1;
+        await commitGate.promise;
+        return realCommitNextTurnConsumer(...args);
+    };
     sandbox.bindEvents();
     await state.callbacks.get('chat_changed')();
     assert.equal(sandbox.activeNextTurnConsumer, null);
@@ -1739,13 +2087,42 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
     assert.equal(state.fallbackText, 'ticket');
     const bSession = sandbox.lastGeneration;
     state.callbacks.get('generation_ended')();
-    state.timers.at(-1)();
-    await new Promise((resolve) => setImmediate(resolve));
+    const oldTimer = state.timers.at(-1);
+    sandbox.document.body.dataset.generating = '';
+    await state.callbacks.get('generation_started')('normal', {}, false);
+    delete sandbox.document.body.dataset.generating;
+    const nextBSession = sandbox.lastGeneration;
+    assert.notEqual(nextBSession.id, bSession.id);
+    assert.equal(state.precomposed, 2, 'the next generation starts after the old dispatch hand-off');
     assert.equal(state.identitySaves, 1);
     assert.equal(messages['chat-b'].extra.mvu_auto_doctor_generation_id, bSession.id);
     assert.equal(state.dispatches.length, 3);
+    assert.equal(state.commitCalls, 1);
     assert.deepEqual(state.dispatches.map((entry) => entry.kind).sort(), ['p1', 'p3', 'variable']);
     assert.ok(state.dispatches.every((entry) => entry.target.scopeDigest === 'scope-chat-b'));
+    commitGate.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    oldTimer();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(state.dispatches.length, 3, 'the cancelled old timer joins/no-ops instead of dispatching twice');
+    assert.equal(state.commitCalls, 1);
+
+    state.callbacks.get('generation_ended')();
+    state.timers.at(-1)();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(state.identitySaves, 2);
+    assert.equal(messages['chat-b'].extra.mvu_auto_doctor_generation_id, nextBSession.id);
+    assert.equal(state.dispatches.length, 6, 'the new generation accepts normally after the flush');
+    assert.equal(state.commitCalls, 2);
+
+    await state.callbacks.get('generation_started')('normal', {}, false);
+    state.callbacks.get('generation_ended')();
+    sandbox.document.body.dataset.generating = '';
+    state.timers.at(-1)();
+    await new Promise((resolve) => setImmediate(resolve));
+    delete sandbox.document.body.dataset.generating;
+    assert.equal(state.dispatches.length, 6, 'an ordinary ENDED timer cannot bypass a still-generating host');
+    assert.equal(state.commitCalls, 2);
 
     state.chatId = 'chat-a';
     sandbox.lastGeneration = {
@@ -1803,6 +2180,7 @@ test('P4 reads the prior producer without rewriting identity and three accepted 
     };
     const scope = { id: 'scope-sequence' };
     const sandbox = {
+        ...acceptedFinalQueueSandboxState(),
         currentGenerationEpoch: 0, operationEpoch: 3, generationSerial: 0,
         activeGenerationSession: null, activeNextTurnConsumer: null,
         foregroundGenerationStarting: null,
@@ -2017,7 +2395,7 @@ test('fresh accepted scope is authoritative when P4 did not place a slot', () =>
     );
     assert.match(accept, /generation\.frozenScopeDigest = scopeDigest/u);
     assert.match(accept, /return reject\(scopeDecision\.reason\)/u);
-    assert.match(accept, /dispatchAcceptedFinal\(envelope\)/u);
+    assert.match(accept, /dispatchAcceptedFinal\(envelope,\s*\{/u);
     const precompose = sourceSection(
         'async function precomposeNextTurnConsumer(session)',
         'async function commitNextTurnConsumer(session, envelope)',
@@ -2068,8 +2446,9 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
     };
     const sandbox = {
         operationEpoch: 7,
+        actorWorldManagementWrite: null,
         continuityChain: Promise.resolve(),
-        continuityPendingKeys: new Set(),
+        continuityPendingKeys: new Map(),
         continuityCompletedKeys: new Set(),
         continuityProfileRetrySignals: new Map(),
         console,

@@ -428,6 +428,7 @@ export function createPrivacySafeDiagnosticProjection({
     sovereignty = {},
     runtimePresentation = {},
     variableRepair = {},
+    doctorRepair = {},
     customInstruction = {},
 } = {}) {
     const statusKinds = Object.fromEntries(
@@ -547,6 +548,35 @@ export function createPrivacySafeDiagnosticProjection({
                 ? Number(variableRepair.lastTargetIndex) : -1,
             lastDurationMs: Math.max(0, Number(variableRepair?.lastDurationMs) || 0),
             lastReadbackVerified: variableRepair?.lastReadbackVerified === true,
+        },
+        doctorRepair: {
+            capsuleCount: Math.min(25, Math.max(0, Number(doctorRepair?.capsuleCount) || 0)),
+            lastModule: ['variable', 'profile', 'world'].includes(doctorRepair?.lastModule)
+                ? doctorRepair.lastModule : '',
+            lastStatus: cleanRuntimeCode(doctorRepair?.lastStatus),
+            lastOutcomeCode: cleanRuntimeCode(doctorRepair?.lastOutcomeCode),
+            lastTargetIndex: Number.isInteger(Number(doctorRepair?.lastTargetIndex))
+                ? Number(doctorRepair.lastTargetIndex) : -1,
+            lastDurationMs: Math.max(0, Number(doctorRepair?.lastDurationMs) || 0),
+            lastReadbackVerified: doctorRepair?.lastReadbackVerified === true,
+            history: (Array.isArray(doctorRepair?.history) ? doctorRepair.history : [])
+                .slice(-25)
+                .map((entry) => ({
+                    module: ['variable', 'profile', 'world'].includes(entry?.module)
+                        ? entry.module : '',
+                    status: cleanRuntimeCode(entry?.status),
+                    outcomeCode: cleanRuntimeCode(entry?.outcomeCode),
+                    durationMs: Math.max(0, Number(entry?.durationMs) || 0),
+                    modelCallCount: Math.max(0, Number(entry?.modelCallCount) || 0),
+                    writeCount: Math.max(0, Number(entry?.writeCount) || 0),
+                    readbackVerified: entry?.readbackVerified === true,
+                    zeroWrite: entry?.zeroWrite === true,
+                    runtimeFingerprint: cleanRuntimeCode(entry?.runtimeFingerprint),
+                    targetDigest: cleanRuntimeCode(entry?.targetDigest),
+                    targetIndex: Number.isInteger(Number(entry?.targetIndex))
+                        ? Number(entry.targetIndex) : -1,
+                    createdAt: Math.max(0, Number(entry?.createdAt) || 0),
+                })),
         },
         actorScheduling: {
             status: String(actorShards?.status || 'disabled'),
@@ -727,9 +757,11 @@ export function createPrivacySafeDiagnosticProjection({
                 targetIndex: Number.isInteger(Number(entry?.targetIndex))
                     ? Number(entry.targetIndex)
                     : -1,
+                targetDigest: /^[a-f0-9]{8,64}$/u.test(String(entry?.targetDigest || ''))
+                    ? String(entry.targetDigest) : '',
                 failureKind: String(entry?.failureKind || ''),
                 rootType: String(entry?.rootType || ''),
-                ...(/^world\.[a-z0-9_.:-]{1,160}$/u.test(
+                ...(/^(?:world|variable\.final)\.[a-z0-9_.:-]{1,160}$/u.test(
                     String(entry?.validationCode || ''),
                 ) ? { validationCode: String(entry.validationCode) } : {}),
                 ...(['read_error', 'namespace_missing', 'revision_behind', 'selected_conflict',

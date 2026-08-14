@@ -382,6 +382,7 @@ function loadProductionCallModel(callDirectModel, {
         updateFloatingOrb: () => {},
         recordOperation: () => {},
         fingerprint: (value) => `test:${String(value).length}`,
+        doctorRepairTargetIdentityDigest: () => 'synthetic-target-digest',
     };
     const withTimeoutSource = sourceSection(
         'async function withTimeout(promise, milliseconds, label, {',
@@ -541,6 +542,17 @@ function loadStage3LegacyManualReconciliationRunner(state) {
         stage3AcceptedTargetIsStrictlyNewer: () => false,
         stage3PersistedPackageDecision: () => ({ ok: false, code: 'proof_invalid', packet: null }),
         stage3WorldFailureValidationCode: () => 'world.operation.failed',
+        stage3ExistingCommittedPackageReadback: async () => ({
+            ok: true,
+            packet: structuredClone(state.namespace?.continuity?.nextTurnInjection || {}),
+        }),
+        stage3ActorLedgerAfterProfileOnlyEvolution: ({ freshLedger }) => ({
+            ok: true,
+            ledger: structuredClone(freshLedger || {}),
+        }),
+        capturedTargetKey: () => 'world-test-target',
+        actorProfilePendingKeys: new Map(),
+        actorProfileChain: Promise.resolve(),
         ...state.spies,
     };
     sandbox.stage3PersistAttemptlessPreparedWorldCandidate = async (captured, args) => {
@@ -785,14 +797,22 @@ function loadAttemptlessPhase1RebaseHarness({
         'function stage3Phase1ReadbackValidationCode(persisted) {',
         'async function runContinuityTarget(captured, {',
     );
+    const profileEvolutionCode = sourceSection(
+        'function stage3WorldOwnedActorProjection(actor) {',
+        'function stage3FieldState(namespace, field) {',
+    );
     const target = { chatId: 'chat-rebase', index: 2, scopeDigest: 'scope-rebase' };
     const actionTarget = { chatId: 'chat-rebase', index: 2, generationId: 'generation-2' };
     let actorRevision = 2;
     let persistCalls = 0;
     const latestLedger = () => ({
+        chatId: target.chatId,
+        actorRegistry: { scopeDigest: target.scopeDigest, registered: {} },
         actors: [{ id: 'actor-new-ready', profileV6: { status: 'complete' } }],
         actionAttempts: structuredClone(freshActionAttempts),
         actionReceipts: structuredClone(freshActionReceipts),
+        actionAttemptBacklog: [],
+        observationReceipts: [],
         profileRevision: actorRevision,
     });
     const namespace = () => ({
@@ -812,6 +832,12 @@ function loadAttemptlessPhase1RebaseHarness({
         actorLedgerDigest: (value) => JSON.stringify(value),
         normalizeActorLedger: (value) => normalizeActorLedger(value),
         stage3TaskOwnsCurrent: () => true,
+        capturedTargetKey: () => 'attemptless-world-target',
+        actorProfilePendingKeys: new Map(),
+        actorProfileChain: Promise.resolve(),
+        actorProfileReadinessInLedger: (ledger, actorId) => ({
+            ready: ledger?.actors?.find((actor) => actor.id === actorId)?.profileV6?.status === 'complete',
+        }),
         getContext: () => ({ chatId: target.chatId }),
         readChatNamespace: () => namespace(),
         stage3FieldState: (value, field) => ({
@@ -850,12 +876,21 @@ function loadAttemptlessPhase1RebaseHarness({
         stage3PreparedWorldCheckpointMatches: () => true,
     };
     vm.runInNewContext(
-        `${unchangedGate}\n${readbackCode}\n${code}\nthis.rebase = stage3PersistAttemptlessPreparedWorldCandidate;`,
+        `${unchangedGate}\n${readbackCode}\n${profileEvolutionCode}\n${code}\n`
+        + 'this.rebase = stage3PersistAttemptlessPreparedWorldCandidate;',
         sandbox,
     );
     return {
         run: () => sandbox.rebase(target, {
-            token: {}, settings: {}, actionLedger: { actionAttempts: [] },
+            token: {}, settings: {}, actionLedger: {
+                chatId: target.chatId,
+                actorRegistry: { scopeDigest: target.scopeDigest, registered: {} },
+                actors: [],
+                actionAttempts: [],
+                actionReceipts: [],
+                actionAttemptBacklog: [],
+                observationReceipts: [],
+            },
             parsed: { state: { turn: 2 }, raw: { world: {} } },
             checkpointBase: { turn: 1 }, scheduledBase: { turn: 2 },
             director: 'standalone', nextTurn: 2, actionTarget,
@@ -883,17 +918,26 @@ function loadScheduledPhase1RebaseHarness() {
         'function stage3Phase1ReadbackValidationCode(persisted) {',
         'async function runContinuityTarget(captured, {',
     );
+    const profileEvolutionCode = sourceSection(
+        'function stage3WorldOwnedActorProjection(actor) {',
+        'function stage3FieldState(namespace, field) {',
+    );
     const target = { chatId: 'chat-scheduled-rebase', index: 2, scopeDigest: 'scope-scheduled' };
     const actionTarget = { chatId: target.chatId, index: 2, generationId: 'generation-2' };
     const scheduledRef = { actorId: 'actor-old', identityHash: 'stable-ref' };
     let actorRevision = 2;
     let persistCalls = 0;
     const freshLedger = () => ({
+        chatId: target.chatId,
+        actorRegistry: { scopeDigest: target.scopeDigest, registered: {} },
         actors: [
             { id: 'actor-old', actorRef: scheduledRef, profileV6: { status: 'complete' } },
             { id: 'actor-new-ready', actorRef: { actorId: 'actor-new-ready' }, profileV6: { status: 'complete' } },
         ],
         actionAttempts: [],
+        actionReceipts: [],
+        actionAttemptBacklog: [],
+        observationReceipts: [],
         profileRevision: actorRevision,
     });
     const namespace = () => ({
@@ -909,6 +953,12 @@ function loadScheduledPhase1RebaseHarness() {
             attempts: structuredClone(ledger.actionAttempts || []), receipts: [],
         }),
         stage3TaskOwnsCurrent: () => true,
+        capturedTargetKey: () => 'scheduled-world-target',
+        actorProfilePendingKeys: new Map(),
+        actorProfileChain: Promise.resolve(),
+        actorProfileReadinessInLedger: (ledger, actorId) => ({
+            ready: ledger?.actors?.find((actor) => actor.id === actorId)?.profileV6?.status === 'complete',
+        }),
         getContext: () => ({ chatId: target.chatId }),
         readChatNamespace: () => namespace(),
         stage3FieldState: (value, field) => ({
@@ -959,15 +1009,21 @@ function loadScheduledPhase1RebaseHarness() {
         stage3PreparedWorldCheckpointMatches: () => true,
     };
     vm.runInNewContext(
-        `${unchangedGate}\n${readbackCode}\n${code}\nthis.rebase = stage3PersistPreparedActorAttemptsOnFreshLedger;`,
+        `${unchangedGate}\n${readbackCode}\n${profileEvolutionCode}\n${code}\n`
+        + 'this.rebase = stage3PersistPreparedActorAttemptsOnFreshLedger;',
         sandbox,
     );
     return {
         run: () => sandbox.rebase(target, {
             token: {}, settings: {},
             actionLedger: {
+                chatId: target.chatId,
+                actorRegistry: { scopeDigest: target.scopeDigest, registered: {} },
                 actors: [{ id: 'actor-old', actorRef: scheduledRef, profileV6: { status: 'complete' } }],
                 actionAttempts: [],
+                actionReceipts: [],
+                actionAttemptBacklog: [],
+                observationReceipts: [],
             },
             parsed: {
                 state: { turn: 2 },
@@ -2439,6 +2495,291 @@ test('a foreground-preempted P3 target is resumed from the existing serial chain
     );
 });
 
+test('explicit invalidation detaches an unresponsive P3 owner while foreground preemption keeps its chain', async () => {
+    const queueSource = sourceSection(
+        'async function stage3AwaitAcceptedFinalP4Barrier(startBarrier)',
+        'function stage3AttemptProjection(ledger, target)',
+    );
+    const invalidateSource = sourceSection(
+        'function invalidateContinuityQueue()',
+        'function worldCallReservedForUserCancellation(namespace, captured)',
+    );
+    const state = {
+        current: { chatId: 'chat-a', index: 4, epoch: 1, key: 'same-target' },
+        calls: 0,
+        terminalWrites: 0,
+        statusWrites: 0,
+        releases: [],
+    };
+    const sandbox = {
+        operationEpoch: 1,
+        actorWorldManagementWrite: null,
+        continuityPendingKeys: new Map(),
+        continuityCompletedKeys: new Set(),
+        continuityChain: Promise.resolve(),
+        getContext: () => ({ chatId: 'chat-a' }),
+        latestAiMessage: () => ({ index: 4 }),
+        captureTarget: () => structuredClone(state.current),
+        stage3AcceptedTargetKey: (target) => target.key,
+        stage3AcceptedTarget: (target) => target,
+        stage3AcceptedTargetsMatch: (left, right) => left?.key === right?.key,
+        stage3AcceptedTargetIsStrictlyNewer: () => false,
+        runContinuityTarget: async () => {
+            state.calls += 1;
+            return new Promise((resolve) => state.releases.push(resolve));
+        },
+        recordStage3WorldFinalDiagnostic: async () => { state.terminalWrites += 1; },
+        setContinuityStatus: () => { state.statusWrites += 1; },
+        renderSovereigntyHealth: () => undefined,
+        syncTaskCancelButtons: () => undefined,
+        safeDiagnosticReason: (value) => String(value || ''),
+        deepClone: (value) => structuredClone(value),
+    };
+    vm.runInNewContext(
+        `${queueSource}\n${invalidateSource}\n`
+        + 'this.enqueue = enqueueContinuity; this.invalidateWorld = invalidateContinuityQueue;',
+        sandbox,
+    );
+
+    const oldTarget = structuredClone(state.current);
+    const oldTask = sandbox.enqueue(4, { force: true, expectedTarget: oldTarget });
+    while (state.calls < 1) await new Promise((resolve) => setImmediate(resolve));
+
+    sandbox.operationEpoch = 2;
+    state.current = { ...state.current, epoch: 2 };
+    sandbox.invalidateWorld();
+    const newTask = sandbox.enqueue(4, {
+        force: true, manualRecovery: true, expectedTarget: structuredClone(state.current),
+    });
+    while (state.calls < 2) await new Promise((resolve) => setImmediate(resolve));
+    const newOwner = sandbox.continuityPendingKeys.get('same-target');
+    assert.ok(newOwner, 'the replacement owner must start before the old provider settles');
+
+    state.releases[0]({ status: 'applied', readbackVerified: true });
+    await oldTask;
+    assert.equal(sandbox.continuityPendingKeys.get('same-target'), newOwner);
+    assert.equal(state.terminalWrites, 0, 'the stale owner must not append a terminal receipt');
+    assert.equal(state.statusWrites, 0, 'the stale owner must not update current UI authority');
+
+    state.releases[1]({ status: 'applied', readbackVerified: true });
+    assert.equal((await newTask).status, 'applied');
+    assert.equal(state.terminalWrites, 1);
+    assert.equal(sandbox.continuityPendingKeys.has('same-target'), false);
+
+    state.current = { ...state.current, key: 'foreground-target' };
+    const preemptedTask = sandbox.enqueue(4, {
+        force: true, expectedTarget: structuredClone(state.current),
+    });
+    while (state.calls < 3) await new Promise((resolve) => setImmediate(resolve));
+    const joined = sandbox.enqueue(4, {
+        force: true, afterPending: true, expectedTarget: structuredClone(state.current),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(state.calls, 3, 'foreground preemption must not detach or duplicate the owner');
+    state.releases[2]({ status: 'stale', reason: 'foreground_preempted' });
+    assert.equal((await preemptedTask).reason, 'foreground_preempted');
+    assert.equal((await joined).reason, 'foreground_preempted');
+});
+
+test('a detached P3 owner cannot enter the model after prior-chain or start-barrier release', async () => {
+    const queueSource = sourceSection(
+        'async function stage3AwaitAcceptedFinalP4Barrier(startBarrier)',
+        'function stage3AttemptProjection(ledger, target)',
+    );
+    const invalidateSource = sourceSection(
+        'function invalidateContinuityQueue()',
+        'function worldCallReservedForUserCancellation(namespace, captured)',
+    );
+    const exercise = async (blockedOn) => {
+        let releasePrior;
+        let releaseBarrier;
+        let releaseNew;
+        const prior = new Promise((resolve) => { releasePrior = resolve; });
+        const barrier = new Promise((resolve) => { releaseBarrier = resolve; });
+        const state = {
+            current: { chatId: 'chat-a', index: 4, epoch: 1, key: 'same-target' },
+            oldModelCalls: 0,
+            oldWrites: 0,
+            newModelCalls: 0,
+            terminalWrites: 0,
+            statusWrites: 0,
+        };
+        const sandbox = {
+            operationEpoch: 1,
+            actorWorldManagementWrite: null,
+            continuityPendingKeys: new Map(),
+            continuityCompletedKeys: new Set(),
+            continuityChain: blockedOn === 'prior' ? prior : Promise.resolve(),
+            getContext: () => ({ chatId: 'chat-a' }),
+            latestAiMessage: () => ({ index: 4 }),
+            captureTarget: () => structuredClone(state.current),
+            stage3AcceptedTargetKey: (target) => target.key,
+            stage3AcceptedTarget: (target) => target,
+            stage3AcceptedTargetsMatch: (left, right) => left?.key === right?.key,
+            stage3AcceptedTargetIsStrictlyNewer: () => false,
+            runContinuityTarget: async (target) => {
+                if (target.epoch === 1) {
+                    state.oldModelCalls += 1;
+                    state.oldWrites += 1;
+                    return { status: 'applied', readbackVerified: true };
+                }
+                state.newModelCalls += 1;
+                return new Promise((resolve) => { releaseNew = resolve; });
+            },
+            recordStage3WorldFinalDiagnostic: async () => { state.terminalWrites += 1; },
+            setContinuityStatus: () => { state.statusWrites += 1; },
+            renderSovereigntyHealth: () => undefined,
+            syncTaskCancelButtons: () => undefined,
+            safeDiagnosticReason: (value) => String(value || ''),
+            deepClone: (value) => structuredClone(value),
+        };
+        vm.runInNewContext(
+            `${queueSource}\n${invalidateSource}\n`
+            + 'this.enqueue = enqueueContinuity; this.invalidateWorld = invalidateContinuityQueue;',
+            sandbox,
+        );
+
+        const oldTask = sandbox.enqueue(4, {
+            force: true,
+            expectedTarget: structuredClone(state.current),
+            startBarrier: blockedOn === 'barrier' ? barrier : null,
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(state.oldModelCalls, 0);
+
+        sandbox.operationEpoch = 2;
+        state.current = { ...state.current, epoch: 2 };
+        sandbox.invalidateWorld();
+        const newTask = sandbox.enqueue(4, {
+            force: true,
+            manualRecovery: true,
+            expectedTarget: structuredClone(state.current),
+        });
+        while (state.newModelCalls < 1) await new Promise((resolve) => setImmediate(resolve));
+        const newOwner = sandbox.continuityPendingKeys.get('same-target');
+        assert.ok(newOwner);
+
+        if (blockedOn === 'prior') releasePrior();
+        else releaseBarrier();
+        const oldResult = await oldTask;
+        assert.equal(oldResult.status, 'stale');
+        assert.equal(oldResult.reason, 'world_task_owner_changed');
+        assert.equal(state.oldModelCalls, 0, `${blockedOn}: detached owner must not call the model`);
+        assert.equal(state.oldWrites, 0, `${blockedOn}: detached owner must not write world state`);
+        assert.equal(state.terminalWrites, 0, `${blockedOn}: detached owner must not write diagnostics`);
+        assert.equal(state.statusWrites, 0, `${blockedOn}: detached owner must not update UI`);
+        assert.equal(sandbox.continuityPendingKeys.get('same-target'), newOwner);
+
+        releaseNew({ status: 'applied', readbackVerified: true });
+        assert.equal((await newTask).status, 'applied');
+    };
+
+    await exercise('prior');
+    await exercise('barrier');
+});
+
+test('a P3 owner lost during terminal diagnostic await cannot touch completed cache or UI', async () => {
+    const queueSource = sourceSection(
+        'async function stage3AwaitAcceptedFinalP4Barrier(startBarrier)',
+        'function stage3AttemptProjection(ledger, target)',
+    );
+    const invalidateSource = sourceSection(
+        'function invalidateContinuityQueue()',
+        'function worldCallReservedForUserCancellation(namespace, captured)',
+    );
+    const exercise = async ({ mode, transition }) => {
+        let releaseDiagnostic;
+        let signalDiagnostic;
+        let releaseNew;
+        const diagnosticEntered = new Promise((resolve) => { signalDiagnostic = resolve; });
+        const diagnosticWait = new Promise((resolve) => { releaseDiagnostic = resolve; });
+        const state = {
+            chatId: 'chat-a',
+            current: { chatId: 'chat-a', index: 4, epoch: 1, key: 'same-target' },
+            diagnosticCalls: 0,
+            statusWrites: 0,
+            renders: 0,
+            newModelCalls: 0,
+        };
+        const sandbox = {
+            operationEpoch: 1,
+            actorWorldManagementWrite: null,
+            continuityPendingKeys: new Map(),
+            continuityCompletedKeys: new Set(),
+            continuityChain: Promise.resolve(),
+            getContext: () => ({ chatId: state.chatId }),
+            latestAiMessage: () => ({ index: 4 }),
+            captureTarget: () => structuredClone(state.current),
+            stage3AcceptedTargetKey: (target) => target.key,
+            stage3AcceptedTarget: (target) => target,
+            stage3AcceptedTargetsMatch: (left, right) => left?.key === right?.key,
+            stage3AcceptedTargetIsStrictlyNewer: () => false,
+            runContinuityTarget: async (target) => {
+                if (target.epoch === 1) {
+                    if (mode === 'catch') throw new Error('controlled world failure');
+                    return { status: 'applied', readbackVerified: true };
+                }
+                state.newModelCalls += 1;
+                return new Promise((resolve) => { releaseNew = resolve; });
+            },
+            recordStage3WorldFinalDiagnostic: async (target) => {
+                state.diagnosticCalls += 1;
+                if (target.epoch === 1) {
+                    signalDiagnostic();
+                    await diagnosticWait;
+                }
+            },
+            setContinuityStatus: () => { state.statusWrites += 1; },
+            renderSovereigntyHealth: () => { state.renders += 1; },
+            syncTaskCancelButtons: () => undefined,
+            safeDiagnosticReason: (value) => String(value || ''),
+            deepClone: (value) => structuredClone(value),
+        };
+        vm.runInNewContext(
+            `${queueSource}\n${invalidateSource}\n`
+            + 'this.enqueue = enqueueContinuity; this.invalidateWorld = invalidateContinuityQueue;',
+            sandbox,
+        );
+
+        const oldTask = sandbox.enqueue(4, {
+            force: true, expectedTarget: structuredClone(state.current),
+        });
+        await diagnosticEntered;
+
+        sandbox.operationEpoch = 2;
+        sandbox.invalidateWorld();
+        let newTask = null;
+        let newOwner = null;
+        if (transition === 'replace') {
+            state.current = { ...state.current, epoch: 2 };
+            newTask = sandbox.enqueue(4, {
+                force: true, manualRecovery: true,
+                expectedTarget: structuredClone(state.current),
+            });
+            while (state.newModelCalls < 1) await new Promise((resolve) => setImmediate(resolve));
+            newOwner = sandbox.continuityPendingKeys.get('same-target');
+            assert.ok(newOwner);
+        } else {
+            state.chatId = 'chat-b';
+        }
+
+        releaseDiagnostic();
+        await oldTask;
+        assert.equal(sandbox.continuityCompletedKeys.has('same-target'), false);
+        assert.equal(state.statusWrites, 0);
+        assert.equal(state.renders, 0);
+        if (transition === 'replace') {
+            assert.equal(sandbox.continuityPendingKeys.get('same-target'), newOwner);
+            releaseNew({ status: 'applied', readbackVerified: true });
+            await newTask;
+        }
+    };
+
+    await exercise({ mode: 'normal', transition: 'replace' });
+    await exercise({ mode: 'normal', transition: 'chat' });
+    await exercise({ mode: 'catch', transition: 'replace' });
+});
+
 test('every post-model P3 failure carries measured world timings', () => {
     const run = sourceSection(
         'async function runContinuityTarget(captured, {',
@@ -3393,8 +3734,8 @@ test('an exact committed world target skips recovery generation and world-domain
     );
     assert.match(
         run,
-        /if \(existingPacket\) \{[\s\S]*?status: 'applied',[\s\S]*?recovered: true,[\s\S]*?worldModelCalls: 0,[\s\S]*?worldWrites: 0,[\s\S]*?nextTurnInjection: deepClone\(existingPacket\)/u,
-        'an exact persisted package recovers without a second world call or write',
+        /if \(existingPacket\) \{[\s\S]*?await stage3ExistingCommittedPackageReadback\([\s\S]*?status: 'applied',[\s\S]*?recovered: true,[\s\S]*?readbackVerified: true,[\s\S]*?worldModelCalls: 0,[\s\S]*?worldWrites: 0,[\s\S]*?nextTurnInjection: deepClone\(durablePacket\)/u,
+        'an exact persisted package recovers only after durable proof and without a second model call or write',
     );
     assert.doesNotMatch(run, /worldTaskAlreadyCommitted|applyContinuityInjection|maxAttempts/u);
 });
@@ -3506,6 +3847,64 @@ test('committed checkpoint authority cannot be bypassed by an exact persisted wo
         assert.equal(rejected.modelCalls, 0);
         assert.equal(rejected.writes, 0);
     }
+});
+
+test('same-target committed recovery tolerates profile-only ledger evolution but not ATT authority drift', () => {
+    const persisted = loadStage3PersistedPackageValidator({ ledgerDigest: actorLedgerDigest });
+    const current = {
+        chatId: 'chat-profile-evolution', index: 2, messageId: 'message-2', swipeId: 0,
+        generationSerial: 2, generationId: 'generation-2', generationType: 'normal',
+        scopeDigest: 'scope-profile-evolution', contentFingerprint: 'content-2',
+    };
+    const committedLedger = emptyActorLedger(current.chatId);
+    committedLedger.actors.push({
+        id: 'NPC-PROFILE', name: 'NPC-PROFILE', status: 'active',
+        profileStatus: 'ready', profileVersion: 1,
+    });
+    const proof = persisted.stage3CanonicalSettlementProof(committedLedger, [], current);
+    const continuity = {
+        chatId: current.chatId,
+        turn: 2,
+        lastSource: structuredClone(current),
+        nextTurnInjection: {
+            status: 'pending',
+            producerTarget: structuredClone(current),
+            sourceContinuityDigest: '',
+            settlementProof: proof,
+        },
+    };
+    continuity.nextTurnInjection.sourceContinuityDigest =
+        persisted.stage3ContinuityDigestWithoutInjection(continuity);
+    const profileEvolved = structuredClone(committedLedger);
+    profileEvolved.actors[0].evidence = ['new durable profile evidence'];
+    assert.notEqual(actorLedgerDigest(profileEvolved), actorLedgerDigest(committedLedger));
+    assert.equal(
+        persisted.stage3PersistedPackageForTarget(continuity, profileEvolved, current),
+        null,
+    );
+    assert.ok(persisted.stage3PersistedPackageForTarget(
+        continuity,
+        profileEvolved,
+        current,
+        { allowUnrelatedLedgerEvolution: true },
+    ));
+
+    const authorityDrift = structuredClone(profileEvolved);
+    authorityDrift.actionAttempts.push({
+        id: 'unexpected-attempt',
+        target: structuredClone(current),
+        worldAdjudicationResult: null,
+    });
+    assert.equal(
+        persisted.stage3PersistedPackageForTarget(
+            continuity,
+            authorityDrift,
+            current,
+            { allowUnrelatedLedgerEvolution: true },
+        ),
+        null,
+        'same-target ATT drift remains fail-closed',
+    );
 });
 
 test('a fully committed prior generation becomes history only for a strictly newer accepted turn', async () => {
@@ -4362,14 +4761,19 @@ test('P3 current guard, permit gate, old package reconciliation, and settlement 
                 ...result,
                 id: 'receipt-tampered',
             } }],
-        }, current),
+        }, current, { allowUnrelatedLedgerEvolution: true }),
         null,
-        'a receipt/settlement mismatch cannot pass a persisted package readback',
+        'a receipt/settlement mismatch cannot pass even the profile-only evolution path',
     );
     const proofAttemptTampered = structuredClone(continuity);
     proofAttemptTampered.nextTurnInjection.settlementProof.orderedResults[0].attemptId = 'attempt-tampered';
     assert.equal(
-        persisted.stage3PersistedPackageForTarget(proofAttemptTampered, ledger, current),
+        persisted.stage3PersistedPackageForTarget(
+            proofAttemptTampered,
+            ledger,
+            current,
+            { allowUnrelatedLedgerEvolution: true },
+        ),
         null,
         'a proof attempt ID mismatch cannot pass readback',
     );
@@ -6339,12 +6743,12 @@ test('P3 normal path writes nothing before Recall, Advance, parse, and full in-m
     assert.doesNotMatch(run, /buildContinuityRepairMessages/u);
     const recallAt = run.indexOf('stage3LocalRecallPacket({');
     const reserveAt = run.indexOf("stage3Phase: 'world_call_reserved'");
-    const snapshotAt = run.indexOf("const phase1Namespace = readChatNamespace", recallAt);
-    const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', snapshotAt);
+    const snapshotAt = run.indexOf('let phase1Namespace = readChatNamespace');
+    const worldAt = run.indexOf('await generateWorldContinuitySingleBatch', recallAt);
     const draftValidatorAt = run.indexOf('stage3ValidateWorldDraftInMemory', worldAt);
     const proposalAt = run.indexOf('stage3PersistPreparedActorAttemptsOnFreshLedger', worldAt);
     const preparedAt = run.indexOf("stage3Phase: 'world_candidate_prepared'");
-    assert.ok(recallAt >= 0 && snapshotAt > recallAt && worldAt > snapshotAt);
+    assert.ok(snapshotAt >= 0 && recallAt > snapshotAt && worldAt > recallAt);
     assert.equal(reserveAt, -1, 'normal execution never persists world_call_reserved');
     assert.ok(draftValidatorAt > worldAt && proposalAt > draftValidatorAt);
     const scheduledRebase = sourceSection(
@@ -6440,6 +6844,13 @@ test('production Phase2 zero-model recovery neutralizes a legacy prepared direct
         stage3TargetIsCurrent: () => ({ ok: true }),
         actorActionTargetMatches: exact,
         stage3AcceptedTargetsMatch: exact,
+        stage3ActorLedgerAfterProfileOnlyEvolution: ({ freshLedger }) => ({
+            ok: true,
+            ledger: structuredClone(freshLedger || {}),
+        }),
+        capturedTargetKey: () => 'phase2-world-target',
+        actorProfilePendingKeys: new Map(),
+        actorProfileChain: Promise.resolve(),
         readChatNamespace: () => structuredClone(freshNamespace),
         getContext: () => ({ chatId: producerTarget.chatId }),
         normalizeActorLedger: (value) => structuredClone(value),
@@ -6601,7 +7012,10 @@ test('P3 source retains every scheduled ActorRef without a Doctor-owned prompt c
     assert.doesNotMatch(recall, /recallBudget/u);
     assert.doesNotMatch(recall, /callModel\(|cropText\(/u);
     const runner = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
-    assert.match(runner, /actorSchedule\.selected\.map\(\(actor\) => actor\.actorId\)/u);
+    assert.match(
+        runner,
+        /scheduledActors = actorSchedule\.selected;[\s\S]*?scheduledActorIds = scheduledActors\.map\(\(actor\) => actor\.actorId\)\.filter\(Boolean\)/u,
+    );
     assert.doesNotMatch(runner, /actor_schedule_empty/u);
 });
 

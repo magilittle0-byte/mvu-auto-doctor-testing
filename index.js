@@ -231,6 +231,14 @@ import {
     variableRepairCapsuleProjection,
     variableRepairCenterSemanticFingerprint,
 } from './v2/repair/variable-repair-center.mjs';
+import {
+    buildDoctorRepairPlan,
+    createDoctorRepairCapsules,
+    doctorRepairCapsuleProjection,
+    doctorRepairCenterSemanticFingerprint,
+    doctorRepairModulesFromSignals,
+    executeDoctorRepairPlan,
+} from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
 const VERSION = '2.0.0-rc.14';
@@ -370,6 +378,10 @@ let runChain = Promise.resolve();
 let mvuWriteChain = Promise.resolve();
 let actorProfileChain = Promise.resolve();
 let forumChain = Promise.resolve();
+let doctorRepairCenterChain = Promise.resolve();
+const doctorRepairCenterRequests = new Map();
+const doctorRepairCenterModuleRequests = new Map();
+let doctorRepairCenterQueueGeneration = 0;
 const chatNamespaceWriteChains = new Map();
 const actorSovereigntyMigrationPromises = new Map();
 let lastChatNamespaceWriteFailureCode = '';
@@ -930,7 +942,40 @@ const actorProfilePendingKeys = new Map();
 const actorProfileCompletedKeys = new Set();
 const userCancelledActorProfileKeys = new Set();
 let actorProfileReadShadow = null;
-const continuityPendingKeys = new Set();
+function createContinuityPendingOwnerMap() {
+    return new Map();
+}
+const continuityPendingKeys = createContinuityPendingOwnerMap();
+function continuityPendingOwnerRegistryFingerprint(
+    registry = continuityPendingKeys,
+    factory = createContinuityPendingOwnerMap,
+) {
+    const mapSemantics = registry instanceof Map
+        && typeof registry.get === 'function'
+        && typeof registry.set === 'function'
+        && typeof registry.delete === 'function';
+    let identityRoundTrip = false;
+    if (mapSemantics) {
+        const probeKey = Symbol('continuity-owner-registry-probe');
+        const probeOwner = Object.freeze({ probe: true });
+        try {
+            registry.set(probeKey, probeOwner);
+            identityRoundTrip = registry.get(probeKey) === probeOwner;
+        } finally {
+            registry.delete(probeKey);
+        }
+    }
+    const factoryRegistry = factory();
+    return fingerprint([
+        factory.toString(),
+        registry?.constructor?.name || '',
+        mapSemantics,
+        identityRoundTrip,
+        factoryRegistry instanceof Map,
+        typeof factoryRegistry?.get,
+        typeof factoryRegistry?.set,
+    ]);
+}
 const continuityCompletedKeys = new Set();
 let continuityChain = Promise.resolve();
 const forumPendingKeys = new Set();
@@ -941,6 +986,8 @@ let latestStatus = '等待新的 AI 回复';
 let latestStatusKind = '';
 let latestVariableRepairCenterStatus = '变量修复中心：等待手动检查';
 let latestVariableRepairCenterKind = '';
+let latestDoctorRepairCenterStatus = '医生修复中心：等待检查';
+let latestDoctorRepairCenterKind = '';
 let latestSocialStatus = '人物关系：等待检查';
 let latestSocialKind = '';
 let latestSocialAudit = null;
@@ -952,9 +999,13 @@ let latestActorProfileDiagnostic = {
     status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false,
 };
 
-function hydratedActorProfileDiagnostic(namespace = readChatNamespace()) {
+function hydratedActorProfileDiagnostic(
+    namespace = readChatNamespace(),
+    { currentTarget = null } = {},
+) {
     const latest = latestAiMessage(getContext());
-    const current = latest.index >= 0 ? captureTarget(getContext(), latest.index) : null;
+    const current = currentTarget
+        || (latest.index >= 0 ? captureTarget(getContext(), latest.index) : null);
     const currentSourceRef = sourceRefOf(current);
     const project = (value) => ({
         status: String(value?.status || 'waiting'),
@@ -1196,6 +1247,7 @@ let lastFocusedBeforeFloatingPanel = null;
 let lastFocusedBeforeForumPanel = null;
 let ui = { ledgerSurfaces: [] };
 let operationEpoch = 0;
+let actorWorldManagementWrite = null;
 let generationSerial = 0;
 let lastGeneration = {
     serial: 0,
@@ -1207,6 +1259,11 @@ let currentGenerationEpoch = 0;
 let activeGenerationSession = null;
 let foregroundGenerationStarting = null;
 let pendingAcceptedFinalTimer = null;
+let pendingAcceptedFinalSession = null;
+let acceptedFinalDispatchInFlight = null;
+let acceptedFinalDispatchChain = Promise.resolve();
+const acceptedFinalDispatchPromises = new Map();
+const acceptedFinalLaunchPromises = new Map();
 const GENERATION_LIFECYCLE_TRACE_LIMIT = 12;
 let generationLifecycleTrace = [];
 
@@ -2068,6 +2125,8 @@ function normalizedModelDiagnostics(value) {
             targetIndex: Number.isInteger(Number(entry.targetIndex))
                 ? Number(entry.targetIndex)
                 : -1,
+            targetDigest: /^[a-f0-9]{8,64}$/u.test(String(entry.targetDigest || ''))
+                ? String(entry.targetDigest) : '',
             failureKind: String(entry.failureKind || '').slice(0, 80),
             validationCode: /^[a-z0-9_.:-]{1,160}$/iu.test(
                 String(entry.validationCode || ''),
@@ -2159,16 +2218,76 @@ function structuredOutputShape(output) {
     };
 }
 
-function recordModelDiagnostic(entry) {
+function recordModelDiagnostic(entry, { schedule = true } = {}) {
     const currentChatScope = fingerprint(String(getContext()?.chatId || ''));
-    if (entry?.chatScope && entry.chatScope !== currentChatScope) return;
-    modelDiagnostics.unshift(normalizedModelDiagnostics([{
+    if (entry?.chatScope && entry.chatScope !== currentChatScope) return null;
+    const normalized = normalizedModelDiagnostics([{
         at: Date.now(),
         chatScope: currentChatScope,
         ...entry,
-    }])[0]);
+    }])[0];
+    modelDiagnostics.unshift(normalized);
     modelDiagnostics.splice(80);
-    scheduleOperationLogSave();
+    if (schedule) scheduleOperationLogSave();
+    return normalized;
+}
+
+function terminalModelDiagnosticKey(entry) {
+    return fingerprint(safeJson([
+        Number(entry?.at) || 0,
+        String(entry?.chatScope || ''),
+        String(entry?.task || ''),
+        String(entry?.status || ''),
+        Number(entry?.targetIndex) || 0,
+        String(entry?.targetDigest || ''),
+        String(entry?.validationCode || ''),
+        String(entry?.worldFinalPhase || ''),
+    ], 0));
+}
+
+function mergeTerminalModelDiagnostic(existing, receipt) {
+    const normalizedReceipt = normalizedModelDiagnostics([receipt])[0];
+    if (!normalizedReceipt) return normalizedModelDiagnostics(existing).slice(0, 80);
+    const receiptKey = terminalModelDiagnosticKey(normalizedReceipt);
+    return [
+        normalizedReceipt,
+        ...normalizedModelDiagnostics(existing).filter(
+            (entry) => terminalModelDiagnosticKey(entry) !== receiptKey,
+        ),
+    ].slice(0, 80);
+}
+
+async function persistTerminalModelDiagnostic(captured, receipt) {
+    if (!captured || !receipt || !doctorTerminalDiagnosticTargetIsCurrent(captured)) return false;
+    const expectedChatId = String(captured.chatId || '');
+    const receiptKey = terminalModelDiagnosticKey(receipt);
+    if (!expectedChatId || !receiptKey) return false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!doctorTerminalDiagnosticTargetIsCurrent(captured)) return false;
+        const namespace = readChatNamespace(getContext());
+        const merged = mergeTerminalModelDiagnostic(namespace.modelDiagnostics, receipt);
+        const candidate = deepClone(namespace);
+        candidate.modelDiagnostics = merged;
+        const successSink = {};
+        const saved = await writeChatNamespace(candidate, expectedChatId, {
+            fields: ['modelDiagnostics'],
+            durable: true,
+            force: true,
+            requireReadback: true,
+            readbackAttempts: 3,
+            successSink,
+            expectedFieldStates: {
+                modelDiagnostics: stage3FieldState(namespace, 'modelDiagnostics'),
+            },
+            precondition: () => doctorTerminalDiagnosticTargetIsCurrent(captured),
+            contentValidator: (persisted) => (
+                normalizedModelDiagnostics(persisted?.modelDiagnostics)
+                    .some((entry) => terminalModelDiagnosticKey(entry) === receiptKey)
+            ),
+        });
+        if (saved && successSink.readbackNamespace) return true;
+    }
+    return false;
 }
 
 function modelCallTaskKey(task) {
@@ -2598,11 +2717,87 @@ async function retrySovereigntyNow() {
     });
 }
 
+function selectedFieldStatesFromNamespace(namespace, fields = []) {
+    return Object.fromEntries([...new Set(fields.map(String).filter(Boolean))].map((field) => [
+        field,
+        {
+            revision: Math.max(0, Number(namespace?.fieldRevisions?.[field]) || 0),
+            digest: field === 'actorLedger'
+                ? actorLedgerDigest(namespace?.actorLedger)
+                : fingerprint(safeJson(namespace?.[field], 0)),
+        },
+    ]));
+}
+
+function actorWorldManagementBlockedByForeground() {
+    return Boolean(
+        foregroundGenerationStarting
+        || activeGenerationSession
+        || activeNextTurnConsumer
+        || pendingAcceptedFinalTimer
+        || pendingAcceptedFinalSession
+        || acceptedFinalDispatchInFlight
+        || acceptedFinalDispatchPromises.size > 0
+    );
+}
+
+async function quiesceActorWorldWritersForManagement(chatId, reason) {
+    const expectedChatId = String(chatId || '');
+    if (!expectedChatId || String(getContext()?.chatId || '') !== expectedChatId) {
+        return { ok: false, reason: 'chat_context_changed' };
+    }
+    if (actorWorldManagementBlockedByForeground()) {
+        return { ok: false, reason: 'foreground_or_p4_active' };
+    }
+    if (actorWorldManagementWrite) {
+        return { ok: false, reason: 'management_write_pending' };
+    }
+    const managementToken = Object.freeze({
+        chatId: expectedChatId,
+        id: `${Date.now()}:${Math.random().toString(36).slice(2, 10)}`,
+    });
+    actorWorldManagementWrite = managementToken;
+    // Capture the old tails before invalidation detaches the next operation.
+    // Their epoch/current guards make every late model result read-only; waiting
+    // here closes the final in-memory/CAS window before an administrative write.
+    const priorProfileChain = actorProfileChain;
+    const priorContinuityChain = continuityChain;
+    invalidateOperations(reason || 'management_write', { persistProgress: false });
+    const managementEpoch = operationEpoch;
+    await Promise.allSettled([priorProfileChain, priorContinuityChain]);
+    if (
+        operationEpoch !== managementEpoch
+        || String(getContext()?.chatId || '') !== expectedChatId
+        || actorWorldManagementBlockedByForeground()
+    ) {
+        if (actorWorldManagementWrite === managementToken) actorWorldManagementWrite = null;
+        return { ok: false, reason: 'management_target_stale' };
+    }
+    return { ok: true, operationEpoch: managementEpoch, managementToken };
+}
+
+function releaseActorWorldManagementWrite(token) {
+    if (token && actorWorldManagementWrite === token) actorWorldManagementWrite = null;
+}
+
 async function restoreLatestSovereigntyCheckpoint() {
-    const context = getContext();
-    const chatId = context?.chatId || '';
+    let context = getContext();
+    const chatId = String(context?.chatId || '');
     if (!chatId) return { status: 'blocked' };
-    const migration = await ensureActorSovereigntyMigrationPersisted(context);
+    // A no-op restore must not cancel healthy P1/P3 work merely to discover
+    // that there is no checkpoint. Recompute after quiescing before any write.
+    const preflight = restoreSovereigntyCheckpoint(
+        sovereigntyRuntimeFromNamespace(readChatNamespace(context)),
+    );
+    if (!preflight.restored) return { status: 'nochange', reason: preflight.reason || '' };
+    const quiesced = await quiesceActorWorldWritersForManagement(
+        chatId,
+        'restore_sovereignty_checkpoint',
+    );
+    if (!quiesced.ok) return { status: 'blocked', reason: quiesced.reason };
+    try {
+        context = getContext();
+        const migration = await ensureActorSovereigntyMigrationPersisted(context);
     if (!migration.ok) {
         toast('warning', '迁移尚未完成；旧检查点保持只读隔离。');
         return { status: 'blocked', reason: migration.reason };
@@ -2620,22 +2815,136 @@ async function restoreLatestSovereigntyCheckpoint() {
         toast('info', '当前没有可恢复的稳定检查点。');
         return { status: 'nochange' };
     }
-    namespace.sovereigntyRuntime = restored.runtime;
-    for (const field of ['continuity', 'actorLedger', 'worldPressure']) {
-        if (restored.payload?.[field]) namespace[field] = restored.payload[field];
+    if (actorWorldManagementBlockedByForeground()) {
+        return { status: 'blocked', reason: 'foreground_or_p4_active' };
     }
+    const liveBeforeWrite = readChatNamespace(getContext());
+    namespace = deepClone(liveBeforeWrite);
+    namespace.sovereigntyRuntime = restored.runtime;
+    const restoredPayload = restored.payload && typeof restored.payload === 'object'
+        ? restored.payload : {};
+    const restoresContinuity = Object.hasOwn(restoredPayload, 'continuity');
+    const restoresActorLedger = Object.hasOwn(restoredPayload, 'actorLedger');
+    const restoresWorldPressure = Object.hasOwn(restoredPayload, 'worldPressure');
+    const invalidatesStage3Package = restoresContinuity || restoresActorLedger;
+    const fields = ['sovereigntyRuntime'];
+    if (restoresContinuity) {
+        namespace.continuity = deepClone(restoredPayload.continuity);
+    }
+    if (restoresActorLedger) {
+        namespace.actorLedger = deepClone(restoredPayload.actorLedger);
+    }
+    if (restoresWorldPressure) {
+        namespace.worldPressure = deepClone(restoredPayload.worldPressure);
+        fields.push('worldPressure');
+    }
+    if (invalidatesStage3Package) {
+        namespace.continuity = deepClone(namespace.continuity || liveBeforeWrite.continuity);
+        namespace.continuity.nextTurnInjection = null;
+        namespace.continuityCheckpoint = null;
+        namespace.continuityWorldLaneReceipts = [];
+        namespace.continuityInjectionQueue = [];
+        namespace.continuityInjectionBatches = [];
+        namespace.continuityDirector = 'doctor';
+        namespace.continuityDetected = false;
+        fields.push(
+            'continuity',
+            'continuityCheckpoint',
+            'continuityWorldLaneReceipts',
+            'continuityInjectionQueue',
+            'continuityInjectionBatches',
+            'continuityDirector',
+            'continuityDetected',
+        );
+    }
+    const checkpointSource = restored.checkpoint?.sourceRef || null;
+    if (restoresActorLedger) {
+        namespace.actorLedgerCheckpoint = null;
+        namespace.actorLedgerCheckpointBlobs = {};
+        namespace.characterCreationTicketBatches = (liveBeforeWrite.characterCreationTicketBatches || [])
+            .filter((entry) => actorProfileRecoverySourceMatches(
+                entry?.acceptedTarget,
+                checkpointSource,
+            ));
+        namespace.actorProfileRetryReceipt = actorProfileRecoverySourceMatches(
+            liveBeforeWrite.actorProfileRetryReceipt?.sourceRef,
+            checkpointSource,
+        ) ? deepClone(liveBeforeWrite.actorProfileRetryReceipt) : null;
+        namespace.actorProfileNoCandidatesTerminalProof = actorProfileNoCandidatesTerminalProofMatches(
+            liveBeforeWrite.actorProfileNoCandidatesTerminalProof,
+            { currentSourceRef: checkpointSource },
+        ) ? deepClone(liveBeforeWrite.actorProfileNoCandidatesTerminalProof) : null;
+        fields.push(
+            'actorLedger',
+            'actorLedgerCheckpoint',
+            'actorLedgerCheckpointBlobs',
+            'characterCreationTicketBatches',
+            'actorProfileRetryReceipt',
+            'actorProfileNoCandidatesTerminalProof',
+        );
+    }
+    const successSink = {};
     const saved = await writeChatNamespace(namespace, chatId, {
-        fields: ['sovereigntyRuntime', 'continuity', 'actorLedger', 'worldPressure'],
+        fields,
         durable: true,
+        force: true,
+        requireReadback: true,
+        readbackAttempts: 5,
+        recoverSelectedTransaction: true,
+        successSink,
+        expectedFieldStates: selectedFieldStatesFromNamespace(liveBeforeWrite, fields),
+        precondition: () => (
+            actorWorldManagementWrite === quiesced.managementToken
+            && operationEpoch === quiesced.operationEpoch
+            && String(getContext()?.chatId || '') === chatId
+            && !actorWorldManagementBlockedByForeground()
+        ),
+        contentValidator: (persisted) => selectedChatNamespaceFieldsMatch(
+            namespace,
+            persisted,
+            fields,
+        ),
     });
-    renderSovereigntyHealth(namespace.sovereigntyRuntime);
+    const renderedNamespace = saved
+        ? (successSink.readbackNamespace || readChatNamespace(getContext()))
+        : readChatNamespace(getContext());
+    renderSovereigntyHealth(renderedNamespace.sovereigntyRuntime);
     if (saved) {
-        renderContinuityLedger();
+        if (restoresActorLedger) {
+            actorProfileCompletedKeys.clear();
+            clearActorProfileReadShadow();
+            for (const [generationId, batch] of npcDesignTicketBatches) {
+                if (
+                    String(batch?.chatId || '') === chatId
+                    && !actorProfileRecoverySourceMatches(
+                        batch?.acceptedTarget || batch?.sourceRef || batch?.target,
+                        checkpointSource,
+                    )
+                ) npcDesignTicketBatches.delete(generationId);
+            }
+            if (
+                String(pendingNpcDesignTicketBatch?.chatId || '') === chatId
+                && !actorProfileRecoverySourceMatches(
+                    pendingNpcDesignTicketBatch?.acceptedTarget
+                        || pendingNpcDesignTicketBatch?.sourceRef
+                        || pendingNpcDesignTicketBatch?.target,
+                    checkpointSource,
+                )
+            ) pendingNpcDesignTicketBatch = null;
+            renderActorProfiles(renderedNamespace);
+        }
+        if (invalidatesStage3Package || restoresWorldPressure) {
+            continuityCompletedKeys.clear();
+        }
+        if (invalidatesStage3Package) renderContinuityLedger();
     }
     toast(saved ? 'success' : 'warning', saved
         ? `已恢复检查点 ${restored.checkpoint.id}。`
         : '检查点恢复未能耐久保存。');
-    return { status: saved ? 'completed' : 'failed' };
+        return { status: saved ? 'completed' : 'failed' };
+    } finally {
+        releaseActorWorldManagementWrite(quiesced.managementToken);
+    }
 }
 
 function resetCurrentModelCallStats(type = 'normal') {
@@ -2929,25 +3238,78 @@ function variableRepairEvidenceDelta(before = {}, after = {}) {
     };
 }
 
-async function persistVariableRepairBugCapsule(capsule, expectedChatId) {
-    let namespace = readChatNamespace();
-    namespace = appendRepairJournal(namespace, capsule, {
-        maxEntries: 64,
-        maxSnapshotChars: 0,
-    });
-    namespace.repairJournal = compactRepairJournalWithVariableCapsules(
-        namespace.repairJournal,
-    );
-    return writeRepairJournal(namespace.repairJournal, expectedChatId);
+function mergeDoctorRepairCapsules(repairJournal, capsules) {
+    const ids = new Set((capsules || []).map((entry) => String(entry?.id || '')).filter(Boolean));
+    return compactRepairJournalWithVariableCapsules([
+        ...(Array.isArray(repairJournal) ? repairJournal : []).filter(
+            (entry) => !ids.has(String(entry?.id || '')),
+        ),
+        ...deepClone(capsules || []),
+    ]);
 }
 
-async function runVariableSafeRepair() {
+async function persistDoctorRepairCapsuleBatch(
+    capsules,
+    expectedChatId,
+    canContinue,
+) {
+    if (!Array.isArray(capsules) || !capsules.length || typeof canContinue !== 'function') {
+        return false;
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!canContinue()) return false;
+        const namespace = readChatNamespace(getContext());
+        const merged = mergeDoctorRepairCapsules(namespace.repairJournal, capsules);
+        const failureSink = {};
+        const successSink = {};
+        const saved = await writeRepairJournal(merged, expectedChatId, {
+            force: true,
+            precondition: canContinue,
+            expectedFieldStates: {
+                repairJournal: stage3FieldState(namespace, 'repairJournal'),
+            },
+            failureSink,
+            successSink,
+        });
+        if (saved && successSink.readbackNamespace) return true;
+    }
+    return false;
+}
+
+async function persistVariableRepairBugCapsule(
+    capsule,
+    expectedChatId,
+    expectedTarget,
+    continuationGuard = null,
+) {
+    const canContinue = () => (
+        doctorRepairCenterTargetIsCurrent(expectedTarget)
+        && (typeof continuationGuard !== 'function' || continuationGuard() === true)
+    );
+    return persistDoctorRepairCapsuleBatch([capsule], expectedChatId, canContinue);
+}
+
+async function runVariableSafeRepair({
+    expectedTarget = null,
+    continuationGuard = null,
+} = {}) {
     const context = getContext();
     const latest = latestAiMessage(context);
-    const captured = captureTarget(context, latest.index);
+    const captured = expectedTarget || captureTarget(context, latest.index);
+    const capturedTargetDigest = doctorRepairTargetIdentityDigest(captured);
+    const externalGuard = () => (
+        typeof continuationGuard !== 'function' || continuationGuard() === true
+    );
+    const capturedStillCurrent = () => (
+        !!capturedTargetDigest
+        && externalGuard()
+        && doctorRepairCenterTargetIsCurrent(captured)
+        && doctorRepairTargetIdentityDigest(captured) === capturedTargetDigest
+    );
     const plan = buildVariableRepairPlan({
         hasTarget: Boolean(captured),
-        foregroundActive: variableRepairForegroundActive(),
+        foregroundActive: variableRepairForegroundActive()
+            || (Boolean(captured) && !capturedStillCurrent()),
         openingResourceEnabled: getSettings().normalizeOpeningResources === true,
         targetIndex: captured?.index ?? -1,
     });
@@ -2964,12 +3326,9 @@ async function runVariableSafeRepair() {
     const expectedChatId = String(captured.chatId || '');
     let repairTarget = captured;
     const repairStillCurrent = () => (
-        !variableRepairForegroundActive()
+        capturedStillCurrent()
         && String(getContext()?.chatId || '') === expectedChatId
-        && targetIsCurrent(
-            repairTarget,
-            operationToken(repairTarget),
-        ).ok
+        && doctorRepairTargetIdentityDigest(repairTarget) === capturedTargetDigest
     );
     const evidenceBefore = variableRepairEvidenceForTarget(plan.targetIndex);
     setVariableRepairCenterStatus(
@@ -3002,11 +3361,13 @@ async function runVariableSafeRepair() {
             });
         },
     });
-    if (String(getContext()?.chatId || '') !== expectedChatId) {
+    if (!repairStillCurrent()) {
         return {
             ...outcome,
             status: 'cancelled',
-            code: 'variable.repair.chat_changed',
+            code: String(getContext()?.chatId || '') !== expectedChatId
+                ? 'variable.repair.chat_changed'
+                : 'variable.repair.target_changed',
             journalPersisted: false,
         };
     }
@@ -3022,20 +3383,27 @@ async function runVariableSafeRepair() {
         id: `variable_bug_${completedAt.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
         runtimeFingerprint: doctorRuntimeCriticalFingerprint(),
         chatScopeDigest: fingerprint(expectedChatId),
-        plan,
+        plan: {
+            ...plan,
+            targetDigest: capturedTargetDigest,
+        },
         outcome: { ...outcome, completedAt },
         evidence,
     });
     const journalPersisted = await persistVariableRepairBugCapsule(
         capsule,
         expectedChatId,
+        captured,
+        continuationGuard,
     );
-    if (String(getContext()?.chatId || '') !== expectedChatId) {
+    if (!repairStillCurrent()) {
         return {
             ...outcome,
             status: 'cancelled',
-            code: 'variable.repair.chat_changed',
-            journalPersisted,
+            code: String(getContext()?.chatId || '') !== expectedChatId
+                ? 'variable.repair.chat_changed'
+                : 'variable.repair.target_changed',
+            journalPersisted: false,
         };
     }
     const repaired = outcome.status === 'completed';
@@ -3062,8 +3430,639 @@ async function runVariableSafeRepair() {
     };
 }
 
-
 function renderSocialAudit() {
+    return renderSocialAuditImpl();
+}
+
+function setDoctorRepairCenterStatus(text, kind = '', { record = true } = {}) {
+    latestDoctorRepairCenterStatus = String(text || '').trim() || '医生修复中心：等待检查';
+    latestDoctorRepairCenterKind = kind;
+    if (record) recordOperation('医生修复中心', latestDoctorRepairCenterStatus, kind);
+    for (const node of [ui?.doctorRepairCenterStatus, ui?.floatingDoctorRepairCenterStatus]) {
+        if (!node) continue;
+        node.textContent = latestDoctorRepairCenterStatus;
+        node.dataset.kind = kind;
+    }
+    updateFloatingOrb();
+}
+
+function hydrateDoctorRepairCenterStatus(namespace = readChatNamespace()) {
+    const projection = doctorRepairCapsuleProjection(namespace?.repairJournal);
+    if (!projection.capsuleCount) {
+        setDoctorRepairCenterStatus(
+            '医生修复中心：当前聊天还没有统一修复记录。',
+            '',
+            { record: false },
+        );
+        return projection;
+    }
+    const repaired = projection.lastStatus === 'repair_completed';
+    const moduleLabels = { variable: '变量', profile: '人物', world: '世界' };
+    setDoctorRepairCenterStatus(
+        repaired
+            ? `医生修复中心：已保存 ${projection.capsuleCount} 条脱敏记录；最近的${moduleLabels[projection.lastModule] || '模块'}修复已完成。`
+            : `医生修复中心：已保存 ${projection.capsuleCount} 条脱敏记录；最近的${moduleLabels[projection.lastModule] || '模块'}修复仍需处理。`,
+        repaired ? 'ok' : 'error',
+        { record: false },
+    );
+    return projection;
+}
+
+function doctorRepairTargetIdentityDigest(captured) {
+    if (!captured) return '';
+    return fingerprint(safeJson({
+        chatId: String(captured.chatId || ''),
+        messageId: String(captured.messageId || ''),
+        index: Number(captured.index),
+        swipeId: Number(captured.swipeId) || 0,
+        generationSerial: Number(captured.generationSerial) || 0,
+        generationId: String(captured.generationId || ''),
+        generationType: String(captured.generationType || ''),
+        contentFingerprint: String(captured.contentFingerprint || ''),
+        scopeDigest: String(captured.scopeDigest || ''),
+    }, 0));
+}
+
+function doctorRepairCenterForegroundActive() {
+    return Boolean(actorWorldManagementWrite || actorWorldManagementBlockedByForeground());
+}
+
+function doctorTerminalDiagnosticTargetIsCurrent(captured) {
+    if (!captured) return false;
+    if (Number(captured.epoch) !== Number(operationEpoch)) return false;
+    const context = getContext();
+    if (String(context?.chatId || '') !== String(captured.chatId || '')) return false;
+    const liveScope = currentActorSovereigntyScope(context);
+    const liveScopeDigest = actorSovereigntyScopeDigest(liveScope);
+    if (liveScopeDigest !== String(captured.scopeDigest || '')) return false;
+    const fresh = captureDoctorRepairTargetReadOnly(context, captured.index, {
+        frozenScope: liveScope,
+        unscoped: !liveScopeDigest,
+    });
+    return sameAcceptedNarrativeTarget(captured, fresh)
+        && doctorRepairTargetIdentityDigest(captured) === doctorRepairTargetIdentityDigest(fresh);
+}
+
+function doctorRepairCenterTargetIsCurrent(captured) {
+    return !doctorRepairCenterForegroundActive()
+        && doctorTerminalDiagnosticTargetIsCurrent(captured);
+}
+
+function doctorRepairDiagnosticCounters(module, targetIndex) {
+    const moduleMatches = (entry) => {
+        const task = String(entry?.task || '').toLowerCase();
+        const request = String(entry?.requestKind || '').toLowerCase();
+        if (module === 'variable') return /变量|mvu|variable/iu.test(task) || request.includes('variable');
+        if (module === 'profile') return /人物|档案|actor|profile/iu.test(task) || request.includes('actor_profile');
+        return /世界|连续|world|continuity/iu.test(task) || request.includes('world');
+    };
+    return modelDiagnosticsForChat(modelDiagnostics)
+        .filter((entry) => Number(entry?.targetIndex) === Number(targetIndex) && moduleMatches(entry))
+        .reduce((total, entry) => ({
+            modelCallCount: total.modelCallCount + (Number(entry?.modelMs) > 0 ? 1 : 0),
+            writeCount: total.writeCount + (Number(entry?.persistMs) > 0 ? 1 : 0),
+        }), { modelCallCount: 0, writeCount: 0 });
+}
+
+function doctorRepairDiagnosticModule(entry) {
+    const task = String(entry?.task || '').toLowerCase();
+    const request = String(entry?.requestKind || '').toLowerCase();
+    if (/变量|mvu|variable/iu.test(task) || request.includes('variable')) return 'variable';
+    if (/人物|档案|actor|profile/iu.test(task) || request.includes('actor_profile')) return 'profile';
+    if (/世界|连续|world|continuity/iu.test(task) || request.includes('world')) return 'world';
+    return '';
+}
+
+function doctorRepairLatestTerminalDiagnostic(module, targetDigest) {
+    return modelDiagnosticsForChat(modelDiagnostics)
+        .filter((entry) => (
+            String(entry?.targetDigest || '') === String(targetDigest || '')
+            && doctorRepairDiagnosticModule(entry) === module
+            && ['failed', 'succeeded', 'recovered'].includes(String(entry?.status || ''))
+        ))
+        .sort((left, right) => (Number(right?.at) || 0) - (Number(left?.at) || 0))[0]
+        || null;
+}
+
+function doctorRepairDiagnosticNeedsModule(module, targetDigest) {
+    const latestTerminal = doctorRepairLatestTerminalDiagnostic(module, targetDigest);
+    if (!latestTerminal || latestTerminal.status !== 'failed') return false;
+    return !['foreground_preempted', 'cancelled'].includes(
+        String(latestTerminal.cancelReason || latestTerminal.failureKind || ''),
+    );
+}
+
+function doctorRepairProfileRecoveryUnavailable(captured, namespace = readChatNamespace()) {
+    const targetDigest = doctorRepairTargetIdentityDigest(captured);
+    const latestTerminal = doctorRepairLatestTerminalDiagnostic('profile', targetDigest);
+    const failureKind = String(
+        latestTerminal?.cancelReason || latestTerminal?.failureKind || '',
+    );
+    if (latestTerminal?.status !== 'failed' || failureKind !== 'recovery_unavailable') {
+        return false;
+    }
+    const profile = hydratedActorProfileDiagnostic(namespace, { currentTarget: captured });
+    return profile.canRetry !== true;
+}
+
+function doctorRepairCounterDelta(before, after) {
+    return {
+        modelCallCount: Math.max(0, Number(after?.modelCallCount || 0) - Number(before?.modelCallCount || 0)),
+        writeCount: Math.max(0, Number(after?.writeCount || 0) - Number(before?.writeCount || 0)),
+    };
+}
+
+function doctorRepairResultZeroWrite(result) {
+    if (result?.zeroWrite === true) return true;
+    if (result?.zeroWrite === false) return false;
+    return Object.hasOwn(result || {}, 'writeCount')
+        && Number.isFinite(Number(result?.writeCount))
+        && Number(result.writeCount) === 0;
+}
+
+function doctorRepairCapsuleNeedsModule(namespace, module, targetDigest) {
+    const current = (Array.isArray(namespace?.repairJournal) ? namespace.repairJournal : [])
+        .filter((entry) => (
+            String(entry?.targetDigest || '') === String(targetDigest || '')
+            && (
+                (entry?.repairKind === 'doctor-variable-repair-center' && module === 'variable')
+                || (entry?.repairKind === 'doctor-unified-repair-center' && entry?.module === module)
+            )
+        ))
+        .at(-1);
+    return ['needs_update', 'repair_cancelled'].includes(String(current?.status || ''));
+}
+
+function doctorRepairLatestCapsule(namespace, module, targetDigest) {
+    return (Array.isArray(namespace?.repairJournal) ? namespace.repairJournal : [])
+        .filter((entry) => (
+            String(entry?.targetDigest || '') === String(targetDigest || '')
+            && (
+                (entry?.repairKind === 'doctor-variable-repair-center' && module === 'variable')
+                || (entry?.repairKind === 'doctor-unified-repair-center' && entry?.module === module)
+            )
+        ))
+        .sort((left, right) => (
+            (Number(right?.createdAt) || 0) - (Number(left?.createdAt) || 0)
+        ))[0] || null;
+}
+
+function doctorRepairLatestModuleEvent(namespace, module, targetDigest) {
+    const capsule = doctorRepairLatestCapsule(namespace, module, targetDigest);
+    const terminal = doctorRepairLatestTerminalDiagnostic(module, targetDigest);
+    const capsuleAt = Math.max(0, Number(capsule?.createdAt) || 0);
+    const terminalAt = Math.max(0, Number(terminal?.at) || 0);
+    if (terminal && (!capsule || terminalAt >= capsuleAt)) {
+        return {
+            kind: 'terminal',
+            needsRepair: doctorRepairDiagnosticNeedsModule(module, targetDigest),
+        };
+    }
+    return {
+        kind: capsule ? 'capsule' : 'none',
+        needsRepair: !!capsule && ['needs_update', 'repair_cancelled']
+            .includes(String(capsule.status || '')),
+    };
+}
+
+function doctorRepairModuleEventNeedsRepair(namespace, module, targetDigest) {
+    return doctorRepairLatestModuleEvent(namespace, module, targetDigest).needsRepair;
+}
+
+function doctorRepairModulesNeedingRepair(captured, namespace = readChatNamespace()) {
+    const targetDigest = doctorRepairTargetIdentityDigest(captured);
+    const profile = hydratedActorProfileDiagnostic(namespace, { currentTarget: captured });
+    const checkpoint = namespace?.continuityCheckpoint;
+    const currentWorldCheckpoint = !!(
+        checkpoint
+        && checkpointLogicalReplyMatches(checkpoint, captured)
+        && (
+            ['world_call_reserved', 'world_candidate_prepared']
+                .includes(String(checkpoint?.stage3Phase || ''))
+            || /failed|manual|prepared/iu.test(String(
+                checkpoint?.failureCode || checkpoint?.reason || checkpoint?.status || '',
+            ))
+        )
+    );
+    const profileFailed = profile.canRetry === true
+        || ['not_completed', 'failed'].includes(profile.status);
+    const profileSucceeded = ['atomic_readback', 'no_candidates', 'completed', 'ready']
+        .includes(profile.status) && profile.canRetry !== true;
+    const profileEvent = doctorRepairLatestModuleEvent(namespace, 'profile', targetDigest);
+    return doctorRepairModulesFromSignals({
+        variable: doctorRepairModuleEventNeedsRepair(
+            namespace, 'variable', targetDigest,
+        ),
+        profile: profileFailed
+            || (profileEvent.kind === 'terminal' && profileEvent.needsRepair)
+            || (!profileSucceeded && profileEvent.needsRepair),
+        world: currentWorldCheckpoint
+            || doctorRepairModuleEventNeedsRepair(namespace, 'world', targetDigest),
+    });
+}
+
+async function runDoctorRepairModule(module, captured) {
+    const before = doctorRepairDiagnosticCounters(module, captured.index);
+    let result;
+    if (module === 'variable') {
+        const variableKey = capturedTargetKey(captured);
+        const pendingAtClick = !!(variableKey && automaticPendingKeys.has(variableKey));
+        const joined = pendingAtClick
+            ? await runChain.catch(() => undefined) : null;
+        const joinedSucceeded = ['applied', 'nochange'].includes(joined?.status)
+            && (joined.status === 'nochange' || joined?.readbackVerified === true);
+        if (pendingAtClick && joinedSucceeded) {
+            result = {
+                status: joined.status,
+                code: 'doctor.repair.variable.joined',
+                readbackVerified: joined.status === 'nochange' || joined?.readbackVerified === true,
+                zeroWrite: joined.status === 'nochange',
+            };
+        } else if (pendingAtClick && !doctorRepairCenterTargetIsCurrent(captured)) {
+            result = {
+                status: 'cancelled',
+                code: 'doctor.repair.variable.target_changed_after_join',
+                readbackVerified: false,
+                zeroWrite: true,
+            };
+        } else {
+            const repaired = await runVariableSafeRepair({
+                expectedTarget: captured,
+                continuationGuard: () => doctorRepairCenterTargetIsCurrent(captured),
+            });
+            const audit = (repaired?.actions || []).find((entry) => entry?.actionId === 'variable_audit');
+            const completed = repaired?.status === 'completed';
+            result = {
+                status: completed ? (audit?.status === 'nochange' ? 'nochange' : 'applied') : 'failed',
+                code: completed ? 'doctor.repair.variable.completed'
+                    : safeDiagnosticReason(repaired?.code || 'doctor.repair.variable.failed'),
+                readbackVerified: completed && (audit?.status === 'nochange' || audit?.readbackVerified === true),
+                zeroWrite: (repaired?.actions || []).every((entry) => entry?.zeroWrite === true),
+            };
+        }
+    } else if (module === 'profile') {
+        if (doctorRepairProfileRecoveryUnavailable(captured)) {
+            result = {
+                status: 'blocked',
+                code: 'doctor.repair.profile.recovery_unavailable',
+                readbackVerified: false,
+                zeroWrite: true,
+            };
+        } else {
+            const profileKey = capturedTargetKey(captured);
+            const joined = profileKey && actorProfilePendingKeys.has(profileKey)
+                ? await actorProfileChain.catch(() => undefined) : null;
+            const repaired = actorProfileCompletedKeys.has(profileKey)
+                && ['atomic_readback', 'no_candidates'].includes(joined?.status)
+                ? joined
+                : await enqueueActorProfiles(captured.index, {
+                    force: true,
+                    includeMaintenance: getSettings().actorProfileCompletionMode === 'full_adult',
+                    expectedTarget: captured,
+                });
+            const applied = repaired?.status === 'atomic_readback';
+            const nochange = repaired?.status === 'no_candidates';
+            result = {
+                status: applied ? 'applied' : nochange ? 'nochange' : 'failed',
+                code: applied ? 'doctor.repair.profile.completed'
+                    : nochange ? 'doctor.repair.profile.nochange'
+                        : compactActorProfileFailureCode(repaired?.reason || 'actor_profile.not_completed'),
+                readbackVerified: applied
+                    ? repaired?.profileBatch?.readbackVerified === true
+                    : nochange,
+                zeroWrite: doctorRepairResultZeroWrite(repaired),
+            };
+        }
+    } else if (module === 'world') {
+        const worldKey = stage3AcceptedTargetKey(captured);
+        const pendingAtClick = !!(worldKey && continuityPendingKeys.has(worldKey));
+        let repaired = pendingAtClick
+            ? await enqueueContinuity(captured.index, {
+                force: true,
+                manualRecovery: true,
+                expectedTarget: captured,
+                afterPending: true,
+            })
+            : null;
+        const joinedSucceeded = repaired?.status === 'applied'
+            && repaired?.readbackVerified === true;
+        if (!pendingAtClick || (!joinedSucceeded && doctorRepairCenterTargetIsCurrent(captured))) {
+            repaired = await enqueueContinuity(captured.index, {
+                force: true,
+                manualRecovery: true,
+                expectedTarget: captured,
+                afterPending: false,
+            });
+        } else if (!joinedSucceeded) {
+            repaired = {
+                status: 'stale',
+                reason: 'doctor_repair_target_changed_after_world_join',
+                readbackVerified: false,
+            };
+        }
+        const applied = repaired?.status === 'applied';
+        result = {
+            status: applied ? 'applied' : 'failed',
+            code: applied ? 'doctor.repair.world.completed'
+                : fixedValidationCode(repaired?.validationCode || repaired?.reason)
+                    || (repaired?.status === 'duplicate' || repaired?.status === 'busy'
+                        ? `doctor.repair.world.${repaired.status}`
+                        : 'doctor.repair.world.not_completed'),
+            readbackVerified: applied && repaired?.readbackVerified === true,
+            zeroWrite: doctorRepairResultZeroWrite(repaired),
+        };
+    } else {
+        result = { status: 'blocked', code: 'doctor.repair.module_unknown', zeroWrite: true };
+    }
+    return {
+        ...result,
+        ...doctorRepairCounterDelta(
+            before,
+            doctorRepairDiagnosticCounters(module, captured.index),
+        ),
+    };
+}
+
+function doctorRepairCenterModuleKey(module, targetDigest) {
+    return ['variable', 'profile', 'world'].includes(module) && targetDigest
+        ? `${targetDigest}:${module}` : '';
+}
+
+function doctorRepairCenterPrepareModuleRequests(modules, targetDigest, owner) {
+    for (const module of modules || []) {
+        const key = doctorRepairCenterModuleKey(module, targetDigest);
+        if (!key || doctorRepairCenterModuleRequests.has(key)) continue;
+        let resolve;
+        const promise = new Promise((settle) => { resolve = settle; });
+        doctorRepairCenterModuleRequests.set(key, {
+            owner,
+            promise,
+            resolve,
+            started: false,
+        });
+    }
+}
+
+async function runDoctorRepairModuleRequest(module, captured, targetDigest, owner) {
+    const key = doctorRepairCenterModuleKey(module, targetDigest);
+    const slot = key ? doctorRepairCenterModuleRequests.get(key) : null;
+    if (!slot || slot.owner !== owner) return runDoctorRepairModule(module, captured);
+    if (slot.started) return slot.promise;
+    slot.started = true;
+    let result;
+    try {
+        result = await runDoctorRepairModule(module, captured);
+    } catch {
+        result = {
+            status: 'failed',
+            code: `doctor.repair.${module}.adapter_failed`,
+            readbackVerified: false,
+            zeroWrite: false,
+        };
+    }
+    slot.resolve(result);
+    return result;
+}
+
+function releaseDoctorRepairModuleRequests(owner, fallbackCode = 'doctor.repair.cancelled') {
+    for (const [key, slot] of doctorRepairCenterModuleRequests.entries()) {
+        if (slot?.owner !== owner) continue;
+        if (!slot.started) {
+            slot.resolve({
+                status: 'cancelled',
+                code: fallbackCode,
+                readbackVerified: false,
+                zeroWrite: true,
+            });
+        }
+        if (doctorRepairCenterModuleRequests.get(key) === slot) {
+            doctorRepairCenterModuleRequests.delete(key);
+        }
+    }
+    syncTaskCancelButtons();
+}
+
+function doctorRepairJoinedModuleOutcome(module, captured, targetDigest, result) {
+    const verified = ['applied', 'nochange'].includes(result?.status)
+        && (result.status === 'nochange' || result?.readbackVerified === true);
+    return {
+        status: verified ? 'completed' : 'partial',
+        code: verified ? 'doctor.repair.joined' : 'doctor.repair.joined_not_completed',
+        targetIndex: Number(captured?.index) || 0,
+        targetDigest,
+        durationMs: 0,
+        actions: [{ module, ...deepClone(result || {}) }],
+        joined: true,
+        journalPersisted: false,
+        capsules: [],
+    };
+}
+
+async function persistDoctorRepairCapsules(capsules, expectedChatId, expectedTarget) {
+    const targetDigest = doctorRepairTargetIdentityDigest(expectedTarget);
+    if (
+        !capsules.length
+        || !targetDigest
+        || capsules.some((capsule) => String(capsule?.targetDigest || '') !== targetDigest)
+        || String(getContext()?.chatId || '') !== expectedChatId
+        || !doctorRepairCenterTargetIsCurrent(expectedTarget)
+    ) return false;
+    return persistDoctorRepairCapsuleBatch(capsules, expectedChatId, () => (
+            doctorRepairCenterTargetIsCurrent(expectedTarget)
+            && doctorRepairTargetIdentityDigest(expectedTarget) === targetDigest
+        ));
+}
+
+async function runDoctorRepairCenterUnlocked(requested, captured, targetDigest, requestOwner = null) {
+    const context = getContext();
+    if (
+        captured
+        && !doctorRepairCenterForegroundActive()
+        && !doctorRepairCenterTargetIsCurrent(captured)
+    ) {
+        return {
+            status: 'cancelled', code: 'doctor.repair.target_changed',
+            targetIndex: captured.index, targetDigest, actions: [], zeroWrite: true,
+        };
+    }
+    const enabledModules = requested === 'all' && captured
+        ? doctorRepairModulesNeedingRepair(captured, readChatNamespace(context))
+        : ['variable', 'profile', 'world'];
+    const plan = buildDoctorRepairPlan({
+        requested,
+        hasTarget: Boolean(captured),
+        foregroundActive: doctorRepairCenterForegroundActive(),
+        targetIndex: captured?.index ?? -1,
+        targetDigest,
+        enabledModules,
+    });
+    if (plan.status === 'nochange') {
+        setDoctorRepairCenterStatus(
+            '医生修复中心：当前三个模块都没有发现需要修复的问题；未调用模型，也未写入数据。',
+            'ok',
+            { record: false },
+        );
+        return {
+            ...plan,
+            durationMs: 0,
+            actions: [],
+            modelCallCount: 0,
+            writeCount: 0,
+            zeroWrite: true,
+            journalPersisted: false,
+            capsules: [],
+        };
+    }
+    if (plan.status !== 'ready') {
+        setDoctorRepairCenterStatus(
+            plan.code === 'doctor.repair.foreground_active'
+                ? '医生修复中心：正文正在生成，未启动修复。'
+                : '医生修复中心：当前没有可安全修复的最终回复。',
+            plan.code === 'doctor.repair.foreground_active' ? 'busy' : 'error',
+        );
+        return plan;
+    }
+    const expectedChatId = String(captured.chatId || '');
+    const canContinue = () => doctorRepairCenterTargetIsCurrent(captured);
+    const moduleOwner = requestOwner || Object.freeze({
+        generation: doctorRepairCenterQueueGeneration,
+        targetDigest,
+        requested,
+    });
+    doctorRepairCenterPrepareModuleRequests(plan.modules, targetDigest, moduleOwner);
+    setDoctorRepairCenterStatus(
+        `医生修复中心：正在独立检查 ${plan.modules.length} 个模块；失败模块不会阻止其他模块。`,
+        'busy',
+    );
+    const outcome = await executeDoctorRepairPlan(plan, {
+        canContinue,
+        runModule: (module) => runDoctorRepairModuleRequest(
+            module,
+            captured,
+            targetDigest,
+            moduleOwner,
+        ),
+    });
+    if (
+        String(getContext()?.chatId || '') !== expectedChatId
+        || !canContinue()
+    ) {
+        return {
+            ...outcome,
+            status: 'cancelled',
+            code: String(getContext()?.chatId || '') !== expectedChatId
+                ? 'doctor.repair.chat_changed'
+                : 'doctor.repair.target_changed',
+            journalPersisted: false,
+            capsules: [],
+        };
+    }
+    const capsules = createDoctorRepairCapsules({
+        runtimeFingerprint: doctorRuntimeCriticalFingerprint(),
+        chatScopeDigest: fingerprint(expectedChatId),
+        plan,
+        outcome,
+    });
+    const journalPersisted = canContinue()
+        ? await persistDoctorRepairCapsules(capsules, expectedChatId, captured)
+        : false;
+    if (
+        String(getContext()?.chatId || '') !== expectedChatId
+        || !canContinue()
+    ) {
+        return {
+            ...outcome,
+            status: 'cancelled',
+            code: String(getContext()?.chatId || '') !== expectedChatId
+                ? 'doctor.repair.chat_changed'
+                : 'doctor.repair.target_changed',
+            journalPersisted: false,
+            capsules: [],
+        };
+    }
+    const succeeded = outcome.actions.filter((entry) => ['applied', 'nochange'].includes(entry.status)).length;
+    const failed = outcome.actions.length - succeeded;
+    setDoctorRepairCenterStatus(
+        `医生修复中心：${succeeded} 个模块完成，${failed} 个模块仍需后续更新；${journalPersisted ? '脱敏记录已保存。' : '记录未能保存。'}`,
+        failed || !journalPersisted ? 'error' : 'ok',
+    );
+    return { ...outcome, journalPersisted, capsules: journalPersisted ? deepClone(capsules) : [] };
+}
+
+function doctorRepairCenterRequestKey(requested, targetDigest) {
+    const module = ['variable', 'profile', 'world', 'all'].includes(requested)
+        ? requested : 'invalid';
+    return targetDigest ? `${targetDigest}:${module}` : '';
+}
+
+function runDoctorRepairCenter(requested = 'all') {
+    const context = getContext();
+    const latest = latestAiMessage(context);
+    const captured = captureDoctorRepairTargetReadOnly(context, latest.index);
+    const targetDigest = doctorRepairTargetIdentityDigest(captured);
+    const requestKey = doctorRepairCenterRequestKey(requested, targetDigest);
+    if (!requestKey) {
+        return runDoctorRepairCenterUnlocked(requested, captured, targetDigest);
+    }
+    if (['variable', 'profile', 'world'].includes(requested)) {
+        const moduleKey = doctorRepairCenterModuleKey(requested, targetDigest);
+        const moduleRequest = doctorRepairCenterModuleRequests.get(moduleKey);
+        if (moduleRequest) {
+            return moduleRequest.promise.then((result) => doctorRepairJoinedModuleOutcome(
+                requested,
+                captured,
+                targetDigest,
+                result,
+            ));
+        }
+    }
+    const existing = doctorRepairCenterRequests.get(requestKey);
+    if (existing) return existing;
+    const queueGeneration = doctorRepairCenterQueueGeneration;
+    const requestOwner = Object.freeze({ queueGeneration, requestKey });
+    const task = doctorRepairCenterChain
+        .catch(() => undefined)
+        .then(() => (
+            queueGeneration === doctorRepairCenterQueueGeneration
+                ? runDoctorRepairCenterUnlocked(
+                    requested,
+                    captured,
+                    targetDigest,
+                    requestOwner,
+                )
+                : {
+                    status: 'cancelled',
+                    code: 'doctor.repair.queue_invalidated',
+                    targetIndex: Number(captured?.index) || 0,
+                    targetDigest,
+                    actions: [],
+                    zeroWrite: true,
+                }
+        ));
+    doctorRepairCenterRequests.set(requestKey, task);
+    syncTaskCancelButtons();
+    doctorRepairCenterChain = task.catch(() => undefined);
+    void task.then(
+        () => {
+            releaseDoctorRepairModuleRequests(requestOwner);
+            if (doctorRepairCenterRequests.get(requestKey) === task) {
+                doctorRepairCenterRequests.delete(requestKey);
+            }
+            syncTaskCancelButtons();
+        },
+        () => {
+            releaseDoctorRepairModuleRequests(requestOwner, 'doctor.repair.adapter_failed');
+            if (doctorRepairCenterRequests.get(requestKey) === task) {
+                doctorRepairCenterRequests.delete(requestKey);
+            }
+            syncTaskCancelButtons();
+        },
+    );
+    return task;
+}
+
+
+function renderSocialAuditImpl() {
     const root = ui?.socialAuditList;
     if (!root) return;
     root.replaceChildren();
@@ -3194,7 +4193,10 @@ function syncTaskCancelButtons() {
         || automaticPendingKeys.size > 0
         || openingSyncPendingKeys.size > 0
         || actorProfilePendingKeys.size > 0
+        || continuityPendingKeys.size > 0
         || forumPendingKeys.size > 0
+        || doctorRepairCenterRequests.size > 0
+        || doctorRepairCenterModuleRequests.size > 0
         || hasCancellableSovereigntyTasks();
     for (const button of [ui?.cancelTask, ui?.floatingCancelTask]) {
         if (!button) continue;
@@ -3249,8 +4251,39 @@ function finishTaskProgress(id) {
     scheduleOperationLogSave();
 }
 
+function invalidateDoctorRepairCenterRequests() {
+    const wasBusy = doctorRepairCenterRequests.size > 0
+        || doctorRepairCenterModuleRequests.size > 0
+        || latestDoctorRepairCenterKind === 'busy';
+    doctorRepairCenterQueueGeneration += 1;
+    doctorRepairCenterChain = Promise.resolve();
+    doctorRepairCenterRequests.clear();
+    for (const slot of doctorRepairCenterModuleRequests.values()) {
+        slot?.resolve?.({
+            status: 'cancelled',
+            code: 'doctor.repair.queue_invalidated',
+            readbackVerified: false,
+            zeroWrite: true,
+        });
+    }
+    doctorRepairCenterModuleRequests.clear();
+    if (wasBusy) {
+        setDoctorRepairCenterStatus(
+            '医生修复中心：本次修复已取消。',
+            'cancelled',
+            { record: false },
+        );
+    }
+}
+
+function invalidateContinuityQueue() {
+    continuityPendingKeys.clear();
+    continuityChain = Promise.resolve();
+}
+
 function invalidateOperations(reason = '', { persistProgress = true } = {}) {
     operationEpoch += 1;
+    invalidateDoctorRepairCenterRequests();
     for (const controller of activeModelControllers) {
         try {
             controller.abort(reason || '任务已失效');
@@ -3278,7 +4311,9 @@ function invalidateOperations(reason = '', { persistProgress = true } = {}) {
     runChain = Promise.resolve();
     actorProfilePendingKeys.clear();
     actorProfileChain = Promise.resolve();
+    invalidateContinuityQueue();
     forumChain = Promise.resolve();
+    syncTaskCancelButtons();
     if (reason) console.info('[MVU Auto Doctor] 旧任务已失效：', reason);
 }
 
@@ -3456,7 +4491,10 @@ function cancelCurrentOperations() {
         && !automaticPendingKeys.size
         && !openingSyncPendingKeys.size
         && !actorProfilePendingKeys.size
+        && !continuityPendingKeys.size
         && !forumPendingKeys.size
+        && !doctorRepairCenterRequests.size
+        && !doctorRepairCenterModuleRequests.size
         && !hasCancellableSovereigntyTasks()
     ) {
         toast('info', '当前没有正在执行的模型任务。');
@@ -3860,6 +4898,9 @@ function doctorRuntimeCriticalFingerprint() {
         actorAuthorityAdjudicationSemanticFingerprint(),
         continuityCoreSemanticFingerprint(),
         variableRepairCenterSemanticFingerprint(),
+        buildDoctorRepairPlan.toString(),
+        executeDoctorRepairPlan.toString(),
+        createDoctorRepairCapsules.toString(),
         hydratedActorProfileDiagnostic.toString(),
         classifyActorRegistryTargetName.toString(),
         acceptedModelProfileDiscoveryFacts.toString(),
@@ -3878,17 +4919,63 @@ function doctorRuntimeCriticalFingerprint() {
         commitCandidateUnlocked.toString(),
         commitCandidate.toString(),
         runTarget.toString(),
+        recordVariableFinalDiagnostic.toString(),
+        recordActorProfileFinalDiagnostic.toString(),
         enqueue.toString(),
         runOpeningResourceSync.toString(),
+        writeRepairJournal.toString(),
+        mergeDoctorRepairCapsules.toString(),
+        persistDoctorRepairCapsuleBatch.toString(),
         persistVariableRepairBugCapsule.toString(),
         variableRepairEvidenceForTarget.toString(),
         variableRepairEvidenceDelta.toString(),
         runVariableSafeRepair.toString(),
+        doctorRepairCenterSemanticFingerprint(),
+        hydrateDoctorRepairCenterStatus.toString(),
+        doctorRepairTargetIdentityDigest.toString(),
+        doctorRepairCenterForegroundActive.toString(),
+        doctorTerminalDiagnosticTargetIsCurrent.toString(),
+        doctorRepairCenterTargetIsCurrent.toString(),
+        doctorRepairDiagnosticCounters.toString(),
+        doctorRepairDiagnosticModule.toString(),
+        doctorRepairLatestTerminalDiagnostic.toString(),
+        doctorRepairDiagnosticNeedsModule.toString(),
+        doctorRepairProfileRecoveryUnavailable.toString(),
+        doctorRepairCounterDelta.toString(),
+        doctorRepairResultZeroWrite.toString(),
+        doctorRepairCapsuleNeedsModule.toString(),
+        doctorRepairLatestCapsule.toString(),
+        doctorRepairLatestModuleEvent.toString(),
+        doctorRepairModuleEventNeedsRepair.toString(),
+        doctorRepairModulesNeedingRepair.toString(),
+        runDoctorRepairModule.toString(),
+        doctorRepairCenterModuleKey.toString(),
+        doctorRepairCenterPrepareModuleRequests.toString(),
+        runDoctorRepairModuleRequest.toString(),
+        releaseDoctorRepairModuleRequests.toString(),
+        doctorRepairJoinedModuleOutcome.toString(),
+        persistDoctorRepairCapsules.toString(),
+        runDoctorRepairCenterUnlocked.toString(),
+        doctorRepairCenterRequestKey.toString(),
+        runDoctorRepairCenter.toString(),
+        invalidateDoctorRepairCenterRequests.toString(),
+        createContinuityPendingOwnerMap.toString(),
+        continuityPendingOwnerRegistryFingerprint.toString(),
+        continuityPendingOwnerRegistryFingerprint(),
+        invalidateContinuityQueue.toString(),
+        invalidateOperations.toString(),
+        syncTaskCancelButtons.toString(),
+        doctorRepairCapsuleProjection.toString(),
         worldCallReservedForUserCancellation.toString(),
         clearWorldCallReservationWithReadback.toString(),
         clearUserCancelledWorldCallReservation.toString(),
         markUserCancelledActorProfileControllers.toString(),
         cancelCurrentOperations.toString(),
+        actorWorldManagementBlockedByForeground.toString(),
+        quiesceActorWorldWritersForManagement.toString(),
+        releaseActorWorldManagementWrite.toString(),
+        selectedFieldStatesFromNamespace.toString(),
+        restoreLatestSovereigntyCheckpoint.toString(),
         persistedNamespaceMatches.toString(),
         selectedChatNamespaceFieldsMatch.toString(),
         persistedNamespaceReadbackEvidence.toString(),
@@ -3901,7 +4988,9 @@ function doctorRuntimeCriticalFingerprint() {
         writeChatNamespace.toString(),
         rebaseActorSovereigntyFieldWriteAfterMigration.toString(),
         persistNpcDesignTicketBatch.toString(),
+        actorProfileWorldOnlyLedgerDrift.toString(),
         actorProfileRebaseOnWorldOnlyLedgerDrift.toString(),
+        actorProfileResolutionBaseAfterWorldOnlyDrift.toString(),
         actorProfileActorLedgerCasCanRebase.toString(),
         persistActorRegistryForTurn.toString(),
         persistActorProfilePhaseWithWorldRebase.toString(),
@@ -3917,6 +5006,8 @@ function doctorRuntimeCriticalFingerprint() {
         completeActorProfilesForTurn.toString(),
         runActorProfileTarget.toString(),
         enqueueActorProfiles.toString(),
+        mutateActorProfileV6.toString(),
+        mutateActorProfileV6Unlocked.toString(),
         assistantTargetHasPriorRealPlayerInput.toString(),
         runtimeGenerationSerialFloor.toString(),
         runtimeGenerationSerialForMessage.toString(),
@@ -3924,8 +5015,29 @@ function doctorRuntimeCriticalFingerprint() {
         markActorSchedulingNotReachedByProfile.toString(),
         createPrivacySafeDiagnosticProjection.toString(),
         normalizedModelDiagnostics.toString(),
+        modelDiagnosticsForChat.toString(),
+        recordModelDiagnostic.toString(),
+        terminalModelDiagnosticKey.toString(),
+        mergeTerminalModelDiagnostic.toString(),
+        persistTerminalModelDiagnostic.toString(),
+        scheduleOperationLogSave.toString(),
+        scheduleSafeChatSave.toString(),
+        ensureMessageStableId.toString(),
+        readOnlyMessageStableId.toString(),
+        currentSwipeInfo.toString(),
+        ensureRuntimeTargetIdentity.toString(),
+        captureDoctorRepairTargetReadOnly.toString(),
         sovereigntyNarrativeEligible.toString(),
+        acceptedFinalDispatchKey.toString(),
+        acceptedFinalLaunchPromise.toString(),
+        flushAcceptedFinalBeforeForegroundStart.toString(),
+        acceptedFinalScopeDecision.toString(),
+        acceptedFinalSessionIsCurrent.toString(),
+        acceptedFinalSessionTargetIsCurrent.toString(),
+        acceptedFinalEnvelopeScopeIsCurrent.toString(),
+        moduleTargetForAcceptedFinal.toString(),
         acceptFinalGeneration.toString(),
+        acceptFinalGenerationUnlocked.toString(),
         dispatchAcceptedFinal.toString(),
         stage3NoActorPermitMatches.toString(),
         markActorSchedulingSettled.toString(),
@@ -3935,6 +5047,9 @@ function doctorRuntimeCriticalFingerprint() {
         retirePriorReservedWorldCallForManualRecovery.toString(),
         actorActionTargetOf.toString(),
         persistActorActionAttemptsForTurn.toString(),
+        stage3WorldOwnedActorProjection.toString(),
+        stage3ActorLedgerAfterProfileOnlyEvolution.toString(),
+        stage3FieldState.toString(),
         stage3FieldStateCanRebaseUnchanged.toString(),
         stage3PreparedWorldCheckpoint.toString(),
         stage3PersistPreparedActorAttemptsOnFreshLedger.toString(),
@@ -3943,6 +5058,7 @@ function doctorRuntimeCriticalFingerprint() {
         stage3Phase2ReadbackValidationCode.toString(),
         stage3PreparedWorldCheckpointMatches.toString(),
         stage3PreparedPhase1StatesMatch.toString(),
+        clearContinuityState.toString(),
         stage3ValidateWorldCandidateInMemory.toString(),
         stage3ValidateWorldDraftInMemory.toString(),
         stage3WorldAdjudicationRepairFields.toString(),
@@ -3975,8 +5091,10 @@ function doctorRuntimeCriticalFingerprint() {
         stage3SettlementProofMatchesTarget.toString(),
         stage3PersistedPackageDecision.toString(),
         stage3PersistedPackageForTarget.toString(),
+        stage3ExistingCommittedPackageReadback.toString(),
         stage3CommittedCheckpointIsPriorTerminal.toString(),
         runContinuityTarget.toString(),
+        stage3AwaitAcceptedFinalP4Barrier.toString(),
         enqueueContinuity.toString(),
         commitPreparedWorldCandidate.toString(),
         buildContinuityInjection.toString(),
@@ -4036,6 +5154,7 @@ function diagnosticPayload() {
                 { scheduler: sovereignty },
             ),
             variableRepair: variableRepairCapsuleProjection(namespace.repairJournal),
+            doctorRepair: doctorRepairCapsuleProjection(namespace.repairJournal),
             customInstruction: customInstructionDiagnosticProjection({
                 enabled: settings.globalModelInstructionEnabled,
                 text: settings.globalModelInstruction,
@@ -4198,6 +5317,25 @@ function ensureMessageStableId(context, message, index) {
     }
     if (changed) scheduleSafeChatSave(context, context?.chatId);
     return id;
+}
+
+function readOnlyMessageStableId(context, message, index) {
+    if (!message) return '';
+    const swipeId = Number(message.swipe_id) || 0;
+    const swipeInfo = currentSwipeInfo(message);
+    const hintedId = continuationIdentityHint
+        && continuationIdentityHint.chatId === context?.chatId
+        && continuationIdentityHint.index === Number(index)
+        && continuationIdentityHint.swipeId === swipeId
+        ? continuationIdentityHint.messageId
+        : '';
+    const existing = message.extra?.mvu_auto_doctor_source_id
+        || swipeInfo?.extra?.mvu_auto_doctor_source_id
+        || message.mesId
+        || message.message_id
+        || hintedId;
+    if (existing != null && String(existing).trim()) return String(existing);
+    return message.send_date != null ? String(message.send_date).trim() : '';
 }
 
 function currentSwipeInfo(message) {
@@ -5311,7 +6449,13 @@ async function enqueueChatNamespaceWrite(next, expectedChatId, options = {}) {
     return task;
 }
 
-async function writeRepairJournal(repairJournal, expectedChatId, { force = false } = {}) {
+async function writeRepairJournal(repairJournal, expectedChatId, {
+    force = false,
+    precondition = null,
+    expectedFieldStates = null,
+    failureSink = null,
+    successSink = null,
+} = {}) {
     const chatId = String(expectedChatId || '');
     const context = getContext();
     if (!chatId || !context || String(context.chatId || '') !== chatId) return false;
@@ -5327,6 +6471,10 @@ async function writeRepairJournal(repairJournal, expectedChatId, { force = false
         durable: true,
         force,
         requireReadback: true,
+        precondition,
+        expectedFieldStates,
+        failureSink,
+        successSink,
         contentValidator: (persisted) => (
             Array.isArray(persisted?.repairJournal)
             && fingerprint(safeJson(persisted.repairJournal, 0)) === expectedDigest
@@ -6530,27 +7678,52 @@ async function moduleTargetForAcceptedFinal(envelope) {
 }
 
 function dispatchAcceptedFinal(envelope) {
+    const { continuityStartBarrier = null } = arguments[1] || {};
     const acceptedAt = Math.max(0, Number(envelope?.acceptedFinalAt) || Date.now());
     const moduleTasks = [];
+    const launchBarriers = [];
+    const trackedLaunch = (runner) => {
+        let markLaunched;
+        let marked = false;
+        launchBarriers.push(new Promise((resolve) => { markLaunched = resolve; }));
+        const mark = () => {
+            if (!marked) {
+                marked = true;
+                markLaunched();
+            }
+        };
+        const task = Promise.resolve().then(() => runner(mark));
+        void task.catch(mark);
+        return task;
+    };
     const launchVariable = () => {
-        return Promise.resolve().then(async () => {
+        return trackedLaunch(async (markLaunched) => {
             const target = await moduleTargetForAcceptedFinal(envelope);
-            if (!target) return { status: 'stale', reason: 'accepted_final_target_changed' };
-            return enqueue(envelope.index, {
+            if (!target) {
+                markLaunched();
+                return { status: 'stale', reason: 'accepted_final_target_changed' };
+            }
+            const task = enqueue(envelope.index, {
                 queuedTarget: target,
                 skipDelay: true,
                 skipStabilityWait: true,
             });
+            markLaunched();
+            return task;
         }).catch((error) => {
             recordOperation('变量医生', safeDiagnosticReason(error?.message || error), 'error');
         });
     };
     const launchScoped = (label, handler) => {
-        const task = Promise.resolve()
-            .then(async () => {
+        const task = trackedLaunch(async (markLaunched) => {
                 const target = await moduleTargetForAcceptedFinal(envelope);
-                if (!target) return { status: 'stale', reason: 'accepted_final_target_changed' };
-                return handler(target);
+                if (!target) {
+                    markLaunched();
+                    return { status: 'stale', reason: 'accepted_final_target_changed' };
+                }
+                const launched = handler(target);
+                markLaunched();
+                return launched;
             })
             .catch((error) => {
                 recordOperation(label, safeDiagnosticReason(error?.message || error), 'error');
@@ -6565,6 +7738,7 @@ function dispatchAcceptedFinal(envelope) {
     // successful readback, but that wake is only an idempotent retry signal.
     launchScoped('世界连续性', (target) => enqueueContinuity(envelope.index, {
         expectedTarget: target,
+        startBarrier: continuityStartBarrier,
     }));
     launchScoped('人物档案', (target) => {
         const profileTask = enqueueActorProfiles(envelope.index, {
@@ -6604,10 +7778,69 @@ function dispatchAcceptedFinal(envelope) {
             reason: failed ? 'doctor_modules_not_settled' : '',
         });
     });
+    return Promise.allSettled(launchBarriers);
+}
+
+function acceptedFinalDispatchKey(generation) {
+    return generation ? [
+        generation.chatId,
+        generation.id,
+        generation.epoch,
+        generation.serial,
+    ].map((value) => String(value ?? '')).join(':') : '';
+}
+
+function acceptedFinalLaunchPromise(generation) {
+    const key = acceptedFinalDispatchKey(generation);
+    return key ? acceptedFinalLaunchPromises.get(key) || null : null;
 }
 
 async function acceptFinalGeneration(generation) {
+    const { allowHostGenerating = false } = arguments[1] || {};
+    const key = acceptedFinalDispatchKey(generation);
+    if (key && acceptedFinalDispatchPromises.has(key)) {
+        return acceptedFinalDispatchPromises.get(key);
+    }
+    let launchSettled = false;
+    let resolveLaunch;
+    const launchPromise = new Promise((resolve) => { resolveLaunch = resolve; });
+    const settleLaunch = (launched) => {
+        if (launchSettled) return;
+        launchSettled = true;
+        resolveLaunch(launched === true);
+    };
+    if (key) acceptedFinalLaunchPromises.set(key, launchPromise);
+    const task = acceptedFinalDispatchChain
+        .catch(() => undefined)
+        .then(() => acceptFinalGenerationUnlocked(generation, {
+            allowHostGenerating,
+            settleLaunch,
+        }));
+    if (key) acceptedFinalDispatchPromises.set(key, task);
+    acceptedFinalDispatchChain = task.catch(() => undefined);
+    void task.finally(() => {
+        settleLaunch(false);
+        if (key && acceptedFinalDispatchPromises.get(key) === task) {
+            acceptedFinalDispatchPromises.delete(key);
+        }
+        if (key && acceptedFinalLaunchPromises.get(key) === launchPromise) {
+            acceptedFinalLaunchPromises.delete(key);
+        }
+    }).catch(() => undefined);
+    return task;
+}
+
+async function acceptFinalGenerationUnlocked(generation) {
+    const { allowHostGenerating = false, settleLaunch = () => undefined } = arguments[1] || {};
+    const dispatchOwner = Symbol('accepted-final-dispatch');
+    acceptedFinalDispatchInFlight = {
+        owner: dispatchOwner,
+        chatId: String(generation?.chatId || ''),
+        generationId: String(generation?.id || ''),
+    };
+    try {
     const reject = async (reason) => {
+        settleLaunch(false);
         if (generation) generation.acceptedFinalOutcome = fixedGenerationLifecycleReason(reason);
         recordAcceptedFinalRejection(generation, reason);
         if (acceptedFinalSessionTargetIsCurrent(generation)) {
@@ -6629,6 +7862,8 @@ async function acceptFinalGeneration(generation) {
         return reject('chat');
     }
     if (
+        !allowHostGenerating
+        &&
         document.body?.dataset
         && Object.prototype.hasOwnProperty.call(document.body.dataset, 'generating')
     ) return reject('generating');
@@ -6686,28 +7921,6 @@ async function acceptFinalGeneration(generation) {
         operation: generation.operationEpoch,
         serial: generation.serial,
     });
-    let committed = false;
-    try {
-        committed = await commitNextTurnConsumer(generation, envelope);
-    } catch {
-        committed = false;
-    }
-    if (!committed) {
-        if (acceptedFinalSessionTargetIsCurrent(generation)) {
-            await releaseNextTurnConsumer(generation, 'acceptance_consume_failed', {
-                requireCurrentSession: true,
-            });
-        }
-        // P4 owns only its next-turn consumer slot. Cleanup/consume failure is
-        // isolated to that slot and must never veto this accepted narrative's
-        // variable, profile, or world dispatch.
-        recordGenerationLifecycleTrace('p4_cleanup_failed', {
-            chatId: generation.chatId,
-            epoch,
-            operation: generation.operationEpoch,
-            serial: generation.serial,
-        });
-    }
     if (
         !acceptedFinalSessionIsCurrent(generation)
         || !await acceptedFinalEnvelopeScopeIsCurrent(context, envelope)
@@ -6719,7 +7932,17 @@ async function acceptFinalGeneration(generation) {
         }
         return false;
     }
-    dispatchAcceptedFinal(envelope);
+    // Start P4 settlement and synchronously attach every accepted-final module
+    // to its existing queue. P3 carries the P4 promise as a start barrier, so
+    // it cannot race the consume-proof write on continuity. A following host
+    // STARTED waits only for these launch barriers, never for durable P4 I/O.
+    const p4SettleTask = Promise.resolve()
+        .then(() => commitNextTurnConsumer(generation, envelope))
+        .then((value) => value === true, () => false);
+    await dispatchAcceptedFinal(envelope, {
+        continuityStartBarrier: p4SettleTask,
+    });
+    settleLaunch(true);
     generation.acceptedFinalOutcome = 'accepted';
     recordGenerationLifecycleTrace('dispatch', {
         chatId: generation.chatId,
@@ -6728,7 +7951,29 @@ async function acceptFinalGeneration(generation) {
         serial: generation.serial,
         reason: 'accepted',
     });
+    const committed = await p4SettleTask;
+    if (!committed) {
+        if (acceptedFinalSessionTargetIsCurrent(generation)) {
+            await releaseNextTurnConsumer(generation, 'acceptance_consume_failed', {
+                requireCurrentSession: true,
+            });
+        }
+        // P4 owns only its next-turn consumer slot. Cleanup/consume failure is
+        // isolated to that slot and must never veto the already-launched
+        // variable, profile, or world tasks.
+        recordGenerationLifecycleTrace('p4_cleanup_failed', {
+            chatId: generation.chatId,
+            epoch,
+            operation: generation.operationEpoch,
+            serial: generation.serial,
+        });
+    }
     return true;
+    } finally {
+        if (acceptedFinalDispatchInFlight?.owner === dispatchOwner) {
+            acceptedFinalDispatchInFlight = null;
+        }
+    }
 }
 
 function frozenIdentityScopeId(scope) {
@@ -9531,6 +10776,11 @@ function assertUsableModelOutput(output, options = {}) {
 async function callModel(messages, options = {}) {
     const settings = getSettings();
     const diagnosticChatScope = fingerprint(String(getContext()?.chatId || ''));
+    const diagnosticTarget = options.diagnosticTarget
+        || options.actorProfileTarget
+        || options.worldReservationTarget
+        || null;
+    const diagnosticTargetDigest = doctorRepairTargetIdentityDigest(diagnosticTarget);
     const task = String(options.task || '模型任务');
     const channel = options.channel === 'fast' ? 'fast' : 'strict';
     const selectedConnection = selectChannelConnectionProfile(
@@ -9730,6 +10980,7 @@ async function callModel(messages, options = {}) {
                     model: profile.model,
                     status: 'succeeded',
                     targetIndex: diagnosticTargetIndex,
+                    targetDigest: diagnosticTargetDigest,
                     durationMs: Date.now() - callStartedAt,
                     queueWaitMs: callStartedAt - queuedAt,
                     inputChars: messageCopies.reduce(
@@ -9874,6 +11125,7 @@ async function callModel(messages, options = {}) {
                     model: profile.model,
                     status: 'failed',
                     targetIndex: diagnosticTargetIndex,
+                    targetDigest: diagnosticTargetDigest,
                     durationMs: Date.now() - callStartedAt,
                     queueWaitMs: callStartedAt - queuedAt,
                     inputChars: messageCopies.reduce(
@@ -11195,6 +12447,42 @@ async function commitCandidateUnlocked(
     };
 }
 
+function captureDoctorRepairTargetReadOnly(context, index, {
+    frozenScope = null,
+    unscoped = false,
+    allowOpening = false,
+} = {}) {
+    const message = context?.chat?.[index];
+    if (!message || message.is_user || message.is_system || !message.mes?.trim()) return null;
+    if (!allowOpening && !assistantTargetHasPriorRealPlayerInput(context, index)) return null;
+    const messageId = readOnlyMessageStableId(context, message, index);
+    if (!messageId) return null;
+    const runtimeIdentity = ensureRuntimeTargetIdentity(context, message, index, messageId);
+    const actorSovereigntyScope = unscoped
+        ? null
+        : createActorSovereigntyScope(frozenScope || currentActorSovereigntyScope(context));
+    const scopeDigest = actorSovereigntyScope
+        ? actorSovereigntyScopeDigest(actorSovereigntyScope)
+        : '';
+    return {
+        chatId: context.chatId,
+        actorSovereigntyScope,
+        scopeDigest,
+        identityScopeId: actorSovereigntyScope
+            ? frozenIdentityScopeId(actorSovereigntyScope)
+            : actorIdentityScopeId(context),
+        index,
+        messageId,
+        swipeId: Number(message.swipe_id) || 0,
+        fingerprint: fingerprint(message.mes),
+        contentFingerprint: acceptedContentFingerprint(message.mes),
+        generationId: runtimeIdentity.generationId,
+        epoch: operationEpoch,
+        generationSerial: runtimeIdentity.generationSerial,
+        generationType: runtimeIdentity.generationType,
+    };
+}
+
 function commitCandidate(
     Mvu,
     candidate,
@@ -11395,6 +12683,7 @@ async function runTarget(targetId, {
                 maxTokens: built.maxTokens,
                 task: '变量诊断',
                 targetIndex: resolved,
+                diagnosticTarget: captured,
                 instructionModule: 'variable',
                 runUntilCancelled: true,
                 noTimeout: true,
@@ -11430,6 +12719,7 @@ async function runTarget(targetId, {
                     status: candidate.status === 'failed' ? 'failed' : 'recovered',
                     attempt: attempt + 1,
                     targetIndex: resolved,
+                    targetDigest: doctorRepairTargetIdentityDigest(captured),
                     failureKind: candidate.failureKind,
                     reason: candidate.reason,
                     outputChars: String(output || '').length,
@@ -11590,6 +12880,93 @@ function capturedForumKey(captured) {
     ].join(':');
 }
 
+async function recordVariableFinalDiagnostic(captured, result) {
+    if (!doctorTerminalDiagnosticTargetIsCurrent(captured)) return false;
+    const chatScope = fingerprint(String(captured.chatId || ''));
+    const targetDigest = doctorRepairTargetIdentityDigest(captured);
+    if (!targetDigest) return false;
+    const resultStatus = String(result?.status || 'failed').toLowerCase();
+    const foregroundCancelled = String(result?.failureCode || '')
+        === 'variable.repair.foreground_preempted';
+    const cancelled = foregroundCancelled
+        || ['stale', 'cancelled', 'disabled', 'duplicate'].includes(resultStatus);
+    const verified = resultStatus === 'nochange' || (
+        resultStatus === 'applied'
+        && result?.readbackVerified === true
+        && result?.frontendSynced !== false
+    );
+    let validationCode = 'variable.final.failed';
+    if (verified) validationCode = `variable.final.${resultStatus}`;
+    else if (foregroundCancelled) validationCode = 'variable.final.foreground_preempted';
+    else if (resultStatus === 'stale') validationCode = 'variable.final.stale';
+    else if (resultStatus === 'cancelled') validationCode = 'variable.final.cancelled';
+    else if (resultStatus === 'disabled') validationCode = 'variable.final.disabled';
+    else if (resultStatus === 'duplicate') validationCode = 'variable.final.duplicate';
+    else if (resultStatus === 'applied' && result?.readbackVerified !== true) {
+        validationCode = 'variable.final.readback_unverified';
+    } else if (resultStatus === 'applied' && result?.frontendSynced === false) {
+        validationCode = 'variable.final.frontend_sync_failed';
+    } else if (/^[a-z0-9_.:-]{1,128}$/u.test(String(result?.failureCode || ''))) {
+        validationCode = `variable.final.${String(result.failureCode).slice(0, 112)}`;
+    } else if (/^[a-z0-9_.:-]{1,128}$/u.test(resultStatus)) {
+        validationCode = `variable.final.${resultStatus}`;
+    }
+    const receipt = recordModelDiagnostic({
+        at: Date.now(),
+        chatScope,
+        phase: 'validation',
+        task: 'variable_final',
+        status: verified ? 'succeeded' : 'failed',
+        targetIndex: Number(captured?.index) || 0,
+        targetDigest,
+        failureKind: verified ? '' : cancelled ? 'cancelled' : 'variable-terminal-failure',
+        validationCode,
+        cancelReason: foregroundCancelled ? 'foreground_preempted' : cancelled ? 'cancelled' : '',
+        reason: '',
+    }, { schedule: false });
+    return receipt ? persistTerminalModelDiagnostic(captured, receipt) : false;
+}
+
+async function recordActorProfileFinalDiagnostic(captured, result, {
+    recoverySaved = false,
+} = {}) {
+    if (!doctorTerminalDiagnosticTargetIsCurrent(captured)) return false;
+    const targetDigest = doctorRepairTargetIdentityDigest(captured);
+    if (!targetDigest) return false;
+    const resultStatus = String(result?.status || 'not_completed');
+    const readbackVerified = result?.profileBatch?.readbackVerified === true;
+    const succeeded = ['atomic_readback', 'no_candidates'].includes(resultStatus)
+        && readbackVerified;
+    const retryable = resultStatus === 'not_completed' && recoverySaved === true;
+    const cancelled = ['stale', 'cancelled', 'disabled', 'duplicate'].includes(resultStatus);
+    let validationCode = 'actor_profile.final.not_completed';
+    if (succeeded) validationCode = `actor_profile.final.${resultStatus}`;
+    else if (cancelled) validationCode = `actor_profile.final.${resultStatus}`;
+    else if (!recoverySaved) validationCode = 'actor_profile.final.recovery_unavailable';
+    const receipt = recordModelDiagnostic({
+        at: Date.now(),
+        chatScope: fingerprint(String(captured.chatId || '')),
+        phase: 'validation',
+        task: 'actor_profile_final',
+        requestKind: 'actor_profile_batch',
+        status: succeeded ? 'succeeded' : 'failed',
+        targetIndex: Number(captured.index) || 0,
+        targetDigest,
+        failureKind: succeeded
+            ? ''
+            : retryable
+                ? 'actor_profile_terminal_failure'
+                : cancelled
+                    ? 'cancelled'
+                    : 'recovery_unavailable',
+        validationCode,
+        cancelReason: cancelled ? 'cancelled' : '',
+        readbackEvidence: [],
+        reason: '',
+    }, { schedule: false });
+    return receipt ? persistTerminalModelDiagnostic(captured, receipt) : false;
+}
+
 async function waitForTargetSettled(targetIndex, _options = {}) {
     const context = getContext();
     return {
@@ -11643,7 +13020,12 @@ function enqueue(targetId, options = {}) {
             ?? undefined
         ))
         .then(() => runTarget(targetId, queuedOptions))
-        .then((result) => {
+        .then(async (result) => {
+            const terminalDiagnosticPersisted = await recordVariableFinalDiagnostic(
+                queuedTarget,
+                result,
+            );
+            result = { ...result, terminalDiagnosticPersisted };
             if (
                 result?.status === 'stale'
                 && queuedTarget?.epoch === operationEpoch
@@ -11664,17 +13046,22 @@ function enqueue(targetId, options = {}) {
             }
             return settleEndedBusyStatus(result, latestStatusKind, setStatus, '变量检查');
         })
-        .catch((error) => {
+        .catch(async (error) => {
             console.error('[MVU Auto Doctor] 自动处理异常：', error);
             const reason = `变量任务运行异常，未进入安全写入：${safeDiagnosticReason(error?.message || error)}。怎么解决：查看变量操作记录与严格模型连通测试，修正后直接检查当前回合；不要重 roll 正文。`;
             setStatus(reason, 'error');
             toast('warning', reason);
-            return {
+            const result = {
                 status: 'failed',
                 reason,
                 resolution: '查看变量操作记录和模型连通测试后直接重新检查。',
                 zeroWrite: true,
             };
+            const terminalDiagnosticPersisted = await recordVariableFinalDiagnostic(
+                queuedTarget,
+                result,
+            );
+            return { ...result, terminalDiagnosticPersisted };
         })
         .finally(() => {
             if (dedupeKey) automaticPendingKeys.delete(dedupeKey);
@@ -12663,7 +14050,7 @@ async function commitNextTurnConsumer(session, envelope) {
     const namespace = readChatNamespace(context);
     const lease = namespace?.continuity?.nextTurnInjection?.consumerLease;
     if (!lease || !doctorOwnsNextTurnConsumerLease(lease)) {
-        activeNextTurnConsumer = null;
+        if (activeNextTurnConsumer === active) activeNextTurnConsumer = null;
         return true;
     }
     if (
@@ -12728,7 +14115,7 @@ async function commitNextTurnConsumer(session, envelope) {
         await releaseNextTurnConsumer(session, 'consume_readback_failed');
         return false;
     }
-    activeNextTurnConsumer = null;
+    if (activeNextTurnConsumer === active) activeNextTurnConsumer = null;
     return true;
 }
 
@@ -14170,31 +15557,22 @@ async function persistActorActionAttemptsForTurn(captured, {
     };
 }
 
-function actorProfileRebaseOnWorldOnlyLedgerDrift({
+function actorProfileWorldOnlyLedgerDrift({
     baseLedger,
-    desiredLedger,
     freshLedger,
-    expectedCommits = [],
-    targetActorIds = [],
-    sourceRef = null,
     chatId = '',
     scopeDigest = '',
 } = {}) {
     const base = normalizeActorLedger(baseLedger, { chatId, scopeDigest });
-    const desired = normalizeActorLedger(desiredLedger, { chatId, scopeDigest });
     const fresh = normalizeActorLedger(freshLedger, { chatId, scopeDigest });
     const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-    if (!chatId || base.chatId !== chatId || desired.chatId !== chatId || fresh.chatId !== chatId) {
+    if (!chatId || base.chatId !== chatId || fresh.chatId !== chatId) {
         return { ok: false, reason: 'actor_profile.rebase_chat_mismatch' };
     }
     const expectedScope = String(scopeDigest || '').trim();
-    if (!expectedScope || [base, desired, fresh].some((ledger) => (
+    if (!expectedScope || [base, fresh].some((ledger) => (
         String(ledger.actorRegistry?.scopeDigest || '').trim() !== expectedScope
     ))) return { ok: false, reason: 'actor_profile.rebase_scope_mismatch' };
-    if (expectedCommits.length && expectedCommits.some((entry) => (
-        !actorProfileRecoverySourceMatches(entry?.sourceRef, sourceRef)
-        || String(entry?.scopeDigest || entry?.sourceRef?.scopeDigest || '').trim() !== expectedScope
-    ))) return { ok: false, reason: 'actor_profile.rebase_source_mismatch' };
     if (
         !same(base.actorRegistry, fresh.actorRegistry)
         || !same(base.identityQuarantine, fresh.identityQuarantine)
@@ -14215,12 +15593,45 @@ function actorProfileRebaseOnWorldOnlyLedgerDrift({
             || !same(freshActor.pendingProfile, baseActor.pendingProfile)
         ) return { ok: false, reason: 'actor_profile.rebase_profile_or_identity_drift' };
     }
+    return { ok: true, base, fresh };
+}
+
+function actorProfileRebaseOnWorldOnlyLedgerDrift({
+    baseLedger,
+    desiredLedger,
+    freshLedger,
+    expectedCommits = [],
+    targetActorIds = [],
+    sourceRef = null,
+    chatId = '',
+    scopeDigest = '',
+    verifiedCurrentSourceActorIds = [],
+} = {}) {
+    const worldOnly = actorProfileWorldOnlyLedgerDrift({
+        baseLedger, freshLedger, chatId, scopeDigest,
+    });
+    if (!worldOnly.ok) return worldOnly;
+    const { base, fresh } = worldOnly;
+    const desired = normalizeActorLedger(desiredLedger, { chatId, scopeDigest });
+    const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const expectedScope = String(scopeDigest || '').trim();
+    if (desired.chatId !== chatId) {
+        return { ok: false, reason: 'actor_profile.rebase_chat_mismatch' };
+    }
+    if (String(desired.actorRegistry?.scopeDigest || '').trim() !== expectedScope) {
+        return { ok: false, reason: 'actor_profile.rebase_scope_mismatch' };
+    }
+    if (expectedCommits.length && expectedCommits.some((entry) => (
+        !actorProfileRecoverySourceMatches(entry?.sourceRef, sourceRef)
+        || String(entry?.scopeDigest || entry?.sourceRef?.scopeDigest || '').trim() !== expectedScope
+    ))) return { ok: false, reason: 'actor_profile.rebase_source_mismatch' };
     const targetIds = new Set([
         ...expectedCommits.map((entry) => entry?.actorRef?.actorId || entry?.actorId),
         ...targetActorIds,
     ].map((value) => String(value || '')).filter(Boolean));
     if (!targetIds.size) return { ok: false, reason: 'actor_profile.rebase_target_missing' };
     const desiredById = new Map(desired.actors.map((actor) => [actor.id, actor]));
+    const baseById = new Map(base.actors.map((actor) => [actor.id, actor]));
     if ([...targetIds].some((actorId) => !desiredById.has(actorId))) {
         return { ok: false, reason: 'actor_profile.rebase_target_missing' };
     }
@@ -14316,7 +15727,9 @@ function actorProfileRebaseOnWorldOnlyLedgerDrift({
     }
     if (!expectedCommits.length) {
         const registered = Object.values(desired.actorRegistry?.registered || {});
+        const verifiedIds = new Set(verifiedCurrentSourceActorIds.map(String).filter(Boolean));
         if ([...targetIds].some((actorId) => {
+            if (verifiedIds.has(actorId)) return false;
             const entry = registered.find((value) => value?.actorRef?.actorId === actorId);
             return !entry || !(entry.sourceRefs || []).some((ref) => (
                 actorProfileRecoverySourceMatches(ref, sourceRef)
@@ -14335,6 +15748,41 @@ function actorProfileRebaseOnWorldOnlyLedgerDrift({
         ok: true,
         ledger: normalizeActorLedger(rebased, { chatId, scopeDigest }),
     };
+}
+
+function actorProfileResolutionBaseAfterWorldOnlyDrift({
+    baseLedger,
+    baseSnapshot,
+    liveNamespace,
+    sourceRef,
+    chatId = '',
+    scopeDigest = '',
+} = {}) {
+    const base = normalizeActorLedger(baseLedger, { chatId, scopeDigest });
+    const fresh = normalizeActorLedger(liveNamespace?.actorLedger, { chatId, scopeDigest });
+    const liveSnapshot = {
+        fieldRevision: Math.max(0, Number(liveNamespace?.fieldRevisions?.actorLedger) || 0),
+        digest: actorLedgerDigest(liveNamespace?.actorLedger),
+    };
+    if (
+        liveSnapshot.fieldRevision === Math.max(0, Number(baseSnapshot?.fieldRevision) || 0)
+        && liveSnapshot.digest === String(baseSnapshot?.digest || '')
+    ) return { ok: true, ledger: base, snapshot: deepClone(baseSnapshot) };
+    const worldOnly = actorProfileWorldOnlyLedgerDrift({
+        baseLedger: base,
+        freshLedger: fresh,
+        chatId,
+        scopeDigest,
+    });
+    return worldOnly.ok
+        ? { ok: true, ledger: worldOnly.fresh, snapshot: liveSnapshot }
+        : {
+            ok: false,
+            ledger: fresh,
+            snapshot: liveSnapshot,
+            reason: 'actor_profile.target_stale',
+            rebaseReason: worldOnly.reason,
+        };
 }
 
 function actorProfileActorLedgerCasCanRebase(failureSink) {
@@ -14412,7 +15860,7 @@ async function persistActorProfilePhaseWithWorldRebase(captured, {
         if (attempt > 0 || !actorProfileActorLedgerCasCanRebase(failureSink)) {
             return { ok: false, reason: failureSink.code || 'host_save_rejected' };
         }
-        const freshNamespace = readChatNamespace(getContext());
+        let freshNamespace = readChatNamespace(getContext());
         let rebased = actorProfileRebaseOnWorldOnlyLedgerDrift({
             baseLedger,
             desiredLedger: candidateLedger,
@@ -14422,18 +15870,31 @@ async function persistActorProfilePhaseWithWorldRebase(captured, {
             chatId: captured.chatId,
             scopeDigest: captured.scopeDigest,
         });
-        let rebaseNamespace = freshNamespace;
-        if (rebased.reason === 'actor_profile.rebase_world_settlement_pending') {
-            // P3 Phase 1 bound its ATT to the still-anonymous ActorRef. Let
-            // that already-running local Phase 2 settle first; changing the
-            // ActorRef meanwhile would make strict settlement skip the ATT.
-            // No model call or new queue/store is introduced here.
+        const continuityKey = stage3AcceptedTargetKey(captured);
+        const continuityOwnsCurrentDrift = !!continuityKey
+            && continuityPendingKeys.has(continuityKey)
+            && (
+                rebased.ok
+                || rebased.reason === 'actor_profile.rebase_world_settlement_pending'
+            );
+        if (!rebased.ok && !continuityOwnsCurrentDrift) {
+            return { ok: false, reason: rebased.reason };
+        }
+        if (continuityOwnsCurrentDrift) {
+            // Ownership is classified from the fresh ledger before waiting.
+            // A manual/clear/foreign writer therefore cannot make P1 and P3
+            // wait on each other. One current P3 tail is enough to absorb its
+            // prepared->committed double write without another model call.
             await continuityChain.catch(() => undefined);
-            rebaseNamespace = readChatNamespace(getContext());
+            const afterWorldScope = await freshFrozenScopeGuard(captured);
+            if (!afterWorldScope.ok || (token && !continuityTargetIsCurrent(captured, token).ok)) {
+                return { ok: false, reason: afterWorldScope.reason || 'actor_profile.target_stale' };
+            }
+            freshNamespace = readChatNamespace(getContext());
             rebased = actorProfileRebaseOnWorldOnlyLedgerDrift({
                 baseLedger,
                 desiredLedger: candidateLedger,
-                freshLedger: rebaseNamespace.actorLedger,
+                freshLedger: freshNamespace.actorLedger,
                 expectedCommits,
                 sourceRef: sourceRefOf(captured),
                 chatId: captured.chatId,
@@ -14442,13 +15903,13 @@ async function persistActorProfilePhaseWithWorldRebase(captured, {
         }
         if (!rebased.ok) return { ok: false, reason: rebased.reason };
         candidateLedger = rebased.ledger;
-        baseLedger = normalizeActorLedger(rebaseNamespace.actorLedger, {
+        baseLedger = normalizeActorLedger(freshNamespace.actorLedger, {
             chatId: captured.chatId,
             scopeDigest: captured.scopeDigest,
         });
         candidateState = {
-            fieldRevision: Math.max(0, Number(rebaseNamespace.fieldRevisions?.actorLedger) || 0),
-            digest: actorLedgerDigest(rebaseNamespace.actorLedger),
+            fieldRevision: Math.max(0, Number(freshNamespace.fieldRevisions?.actorLedger) || 0),
+            digest: actorLedgerDigest(freshNamespace.actorLedger),
         };
     }
     return { ok: false, reason: 'actor_profile.rebase_retry_exhausted' };
@@ -14614,10 +16075,12 @@ async function completeActorProfilesForTurn(captured, {
             }
             return output;
         },
-        persistPendingBatch: async ({ ledger, expectedCommits, expectedState }) => {
+        persistPendingBatch: async ({
+            ledger, persistenceBaseLedger: resolvedBaseLedger, expectedCommits, expectedState,
+        }) => {
             return persistActorProfilePhaseWithWorldRebase(captured, {
                 ledger,
-                baseLedger: persistenceBaseLedger,
+                baseLedger: resolvedBaseLedger || persistenceBaseLedger,
                 expectedCommits,
                 expectedState,
                 phase: 'pending',
@@ -15486,18 +16949,24 @@ async function runActorProfileTarget(captured, {
             ),
             digest: actorLedgerDigest(liveNamespace.actorLedger),
         };
-        if (
-            liveSnapshot.fieldRevision !== s0Snapshot.fieldRevision
-            || liveSnapshot.digest !== s0Snapshot.digest
-        ) {
-            return { ok: false, ledger: liveLedger, reason: 'actor_profile.target_stale' };
+        let resolutionBase = actorProfileResolutionBaseAfterWorldOnlyDrift({
+            baseLedger: s0Ledger,
+            baseSnapshot: s0Snapshot,
+            liveNamespace,
+            sourceRef,
+            chatId: captured.chatId,
+            scopeDigest: captured.scopeDigest,
+        });
+        if (!resolutionBase.ok) {
+            return { ok: false, ledger: liveLedger, reason: resolutionBase.reason };
         }
+        let resolutionSnapshot = resolutionBase.snapshot || liveSnapshot;
         const revealResolution = applyIdentityRevealRoutes(s0Ledger, identityReveals);
         if (revealResolution.failures.length) {
             return {
                 ok: true,
-                ledger: s0Ledger,
-                snapshot: s0Snapshot,
+                ledger: resolutionBase.ledger,
+                snapshot: resolutionSnapshot,
                 candidates: [],
                 entries: [],
                 failures: revealResolution.failures,
@@ -15512,6 +16981,71 @@ async function runActorProfileTarget(captured, {
                     ticketProducer: 'stage4_required',
                 },
             };
+        }
+        if (revealResolution.accepted.length) {
+            const revealedActorIds = revealResolution.accepted.map((entry) => entry.actorId);
+            let rebasedReveal = actorProfileRebaseOnWorldOnlyLedgerDrift({
+                baseLedger: s0Ledger,
+                desiredLedger: revealResolution.ledger,
+                freshLedger: resolutionBase.ledger,
+                targetActorIds: revealedActorIds,
+                sourceRef,
+                chatId: captured.chatId,
+                scopeDigest: captured.scopeDigest,
+                verifiedCurrentSourceActorIds: revealedActorIds,
+            });
+            if (rebasedReveal.reason === 'actor_profile.rebase_world_settlement_pending') {
+                const continuityKey = stage3AcceptedTargetKey(captured);
+                if (!continuityKey || !continuityPendingKeys.has(continuityKey)) {
+                    return {
+                        ok: false,
+                        ledger: resolutionBase.ledger,
+                        reason: 'actor_profile.target_stale',
+                    };
+                }
+                await continuityChain.catch(() => undefined);
+                const afterWorldScope = await freshFrozenScopeGuard(captured);
+                if (!afterWorldScope.ok || !continuityTargetIsCurrent(captured, token).ok) {
+                    return {
+                        ok: false,
+                        ledger: resolutionBase.ledger,
+                        reason: afterWorldScope.reason || 'actor_profile.target_stale',
+                    };
+                }
+                const settledNamespace = readChatNamespace(getContext());
+                resolutionBase = actorProfileResolutionBaseAfterWorldOnlyDrift({
+                    baseLedger: s0Ledger,
+                    baseSnapshot: s0Snapshot,
+                    liveNamespace: settledNamespace,
+                    sourceRef,
+                    chatId: captured.chatId,
+                    scopeDigest: captured.scopeDigest,
+                });
+                if (!resolutionBase.ok) {
+                    return { ok: false, ledger: resolutionBase.ledger, reason: resolutionBase.reason };
+                }
+                resolutionSnapshot = resolutionBase.snapshot;
+                rebasedReveal = actorProfileRebaseOnWorldOnlyLedgerDrift({
+                    baseLedger: s0Ledger,
+                    desiredLedger: revealResolution.ledger,
+                    freshLedger: resolutionBase.ledger,
+                    targetActorIds: revealedActorIds,
+                    sourceRef,
+                    chatId: captured.chatId,
+                    scopeDigest: captured.scopeDigest,
+                    verifiedCurrentSourceActorIds: revealedActorIds,
+                });
+            }
+            if (!rebasedReveal.ok) {
+                return {
+                    ok: false,
+                    ledger: resolutionBase.ledger,
+                    reason: 'actor_profile.target_stale',
+                };
+            }
+            revealResolution.ledger = rebasedReveal.ledger;
+        } else {
+            revealResolution.ledger = resolutionBase.ledger;
         }
         const resolutionBaseLedger = revealResolution.ledger;
         const revealCandidateSource = new Map(registeredProfileCandidates.map((candidate) => [
@@ -15566,7 +17100,8 @@ async function runActorProfileTarget(captured, {
             return {
                 ok: true,
                 ledger: resolutionBaseLedger,
-                snapshot: s0Snapshot,
+                snapshot: resolutionSnapshot,
+                persistenceBaseLedger: resolutionBase.ledger,
                 candidates: revealCandidates,
                 entries: [],
                 failures: localFailures,
@@ -15691,12 +17226,13 @@ async function runActorProfileTarget(captured, {
         return {
             ok: true,
             ledger: s1Ledger,
-            snapshot: s0Snapshot,
+            snapshot: resolutionSnapshot,
+            persistenceBaseLedger: resolutionBase.ledger,
             candidates: [...revealCandidates, ...discoveryCandidates],
             entries,
             failures: localFailures,
             registry: {
-                mutated: actorLedgerDigest(s1Ledger) !== s0Snapshot.digest,
+                mutated: actorLedgerDigest(s1Ledger) !== resolutionSnapshot.digest,
                 readback: false,
                 promotedActorIds,
                 identityRevealedActorIds: revealResolution.accepted
@@ -15773,6 +17309,7 @@ async function runActorProfileTarget(captured, {
         status: ['atomic_readback', 'no_candidates'].includes(profileCompletion.persistenceStatus)
             ? 'succeeded' : 'failed',
         targetIndex: captured.index,
+        targetDigest: doctorRepairTargetIdentityDigest(captured),
         durationMs: profileCompletion.timings?.totalMs,
         modelMs: profileCompletion.timings?.modelMs,
         parseMs: profileCompletion.timings?.parseMs,
@@ -15806,6 +17343,7 @@ async function runActorProfileTarget(captured, {
             model: String(routeDiagnostic.model || ''),
             status: 'failed',
             targetIndex: captured.index,
+            targetDigest: doctorRepairTargetIdentityDigest(captured),
             httpStatus: Math.max(0, Number(routeDiagnostic.httpStatus) || 0),
             routeSlotIndex: Math.max(0, Number(routeDiagnostic.slot) || 0),
             failover: routeDiagnostic.failover === true,
@@ -16281,6 +17819,67 @@ function stage3PersistedPackageForTarget(state, ledger, captured, options = {}) 
     return stage3PersistedPackageDecision(state, ledger, captured, options).packet;
 }
 
+async function stage3ExistingCommittedPackageReadback(context, captured, namespace) {
+    if (
+        !context
+        || !captured
+        || String(context.chatId || '') !== String(captured.chatId || '')
+    ) return { ok: false, failureCode: 'chat_context_changed' };
+    const checkpointMatches = (persisted) => (
+        persisted?.continuityCheckpoint?.stage3Phase === 'world_committed'
+        && actorActionTargetMatches(
+            persisted.continuityCheckpoint.target,
+            actorActionTargetOf(captured),
+        )
+        && stage3AcceptedTargetsMatch(
+            persisted.continuityCheckpoint.stage3ProducerTarget,
+            stage3AcceptedTarget(captured),
+        )
+    );
+    const packageFrom = (persisted) => {
+        if (!checkpointMatches(persisted)) return null;
+        const ledger = normalizeActorLedger(persisted?.actorLedger, {
+            chatId: captured.chatId,
+            identityScopeId: captured.identityScopeId,
+            scopeDigest: captured.scopeDigest,
+        });
+        return stage3PersistedPackageForTarget(
+            persisted?.continuity,
+            ledger,
+            captured,
+            { allowUnrelatedLedgerEvolution: true },
+        );
+    };
+    const readback = await verifyPersistedChatNamespace(
+        context,
+        captured.chatId,
+        namespace,
+        ['continuity', 'continuityCheckpoint'],
+        {
+            requireReadback: true,
+            maxAttempts: 3,
+            allowUnselectedFieldEvolution: true,
+            contentValidator: (persisted) => !!packageFrom(persisted),
+        },
+    );
+    const packet = readback?.verified === true && readback?.namespace
+        ? packageFrom(readback.namespace)
+        : null;
+    return packet
+        ? {
+            ok: true,
+            packet: deepClone(packet),
+            readbackNamespace: deepClone(readback.namespace),
+        }
+        : {
+            ok: false,
+            failureCode: String(
+                readback?.failureCode || 'host_save_readback_unverified',
+            ),
+            readbackEvidence: deepClone(readback?.readbackEvidence || null),
+        };
+}
+
 function stage3CommittedCheckpointIsPriorTerminal(checkpoint, state, ledger, captured) {
     const current = stage3AcceptedTarget(captured);
     const producer = stage3AcceptedTarget(checkpoint?.stage3ProducerTarget);
@@ -16409,23 +18008,31 @@ function stage3LedgerReadbackGate(captured, noActorPermit = null) {
     };
 }
 
-function recordStage3WorldFinalDiagnostic(captured, result) {
+async function recordStage3WorldFinalDiagnostic(captured, result) {
+    if (!doctorTerminalDiagnosticTargetIsCurrent(captured)) return false;
     const timings = result?.timings || {};
     const recallStats = result?.recallStats || {};
-    const status = result?.status === 'applied'
+    const verifiedApplied = result?.status === 'applied'
+        && result?.readbackVerified === true;
+    const cancellationClass = result?.reason === 'foreground_preempted'
+        || ['disabled', 'stale', 'duplicate'].includes(String(result?.status || ''));
+    const status = verifiedApplied
         ? (result?.recovered === true ? 'recovered' : 'succeeded')
         : 'failed';
     const phase = result?.worldFinalPhase
         || (result?.reason === 'foreground_preempted'
             ? 'foreground_preempted'
-            : ['stale', 'blocked', 'disabled'].includes(result?.status)
+            : ['stale', 'blocked', 'disabled', 'duplicate'].includes(result?.status)
                 ? result.status
                 : 'failed');
-    recordModelDiagnostic({
+    const receipt = recordModelDiagnostic({
+        at: Date.now(),
+        chatScope: fingerprint(String(captured?.chatId || '')),
         phase: 'validation',
         task: 'world_continuity',
         status,
         targetIndex: Number(captured?.index) || 0,
+        targetDigest: doctorRepairTargetIdentityDigest(captured),
         groupKey: 'world_recall',
         targetCount: Math.max(0, Number(recallStats.selectedWorldbookCount) || 0),
         inputChars: Math.max(0, Number(recallStats.scanTextChars) || 0),
@@ -16436,12 +18043,21 @@ function recordStage3WorldFinalDiagnostic(captured, result) {
         validationMs: Math.max(0, Number(timings.validationMs) || 0),
         persistMs: Math.max(0, Number(timings.persistMs) || 0),
         cancelReason: result?.reason === 'foreground_preempted'
-            ? 'foreground_preempted' : '',
-        failureKind: result?.status === 'applied' ? '' : `world_${phase}`,
-        validationCode: /^world\.[a-z0-9_.:-]+$/u.test(String(result?.validationCode || ''))
-            ? String(result.validationCode)
+            ? 'foreground_preempted' : cancellationClass ? 'cancelled' : '',
+        failureKind: verifiedApplied
+            ? ''
+            : cancellationClass
+                ? 'cancelled'
             : result?.status === 'applied'
-                ? 'world.committed'
+                ? 'world_readback_unverified'
+                : `world_${phase}`,
+        validationCode: verifiedApplied
+            ? (/^world\.[a-z0-9_.:-]+$/u.test(String(result?.validationCode || ''))
+                ? String(result.validationCode) : 'world.committed')
+            : result?.status === 'applied'
+                ? 'world.committed.readback_unverified'
+                : /^world\.[a-z0-9_.:-]+$/u.test(String(result?.validationCode || ''))
+                    ? String(result.validationCode)
                 : result?.reason === 'foreground_preempted'
                     ? 'world.foreground_preempted'
                     : `world.${String(phase || 'failed').replace(/[^a-z0-9_.:-]/giu, '') || 'failed'}`,
@@ -16455,7 +18071,14 @@ function recordStage3WorldFinalDiagnostic(captured, result) {
         reason: '',
         worldFinalPhase: phase,
         recovered: result?.recovered === true,
-    });
+    }, { schedule: false });
+    const persisted = receipt
+        ? await persistTerminalModelDiagnostic(captured, receipt)
+        : false;
+    if (result && typeof result === 'object') {
+        result.terminalDiagnosticPersisted = persisted;
+    }
+    return persisted;
 }
 
 function stage3WorldFailureValidationCode(reason) {
@@ -16478,6 +18101,7 @@ function stage3WorldFailureValidationCode(reason) {
         world_call_reserved_manual_reconciliation: 'world.checkpoint.reserved_conflict',
         world_candidate_manual_reconciliation: 'world.checkpoint.prepared_conflict',
         world_committed_manual_reconciliation: 'world.checkpoint.committed_conflict',
+        world_committed_readback_unverified: 'world.committed.readback_unverified',
         stale_namespace_revision: 'world.phase1.stale_namespace_revision',
         host_save_readback_mismatch: 'world.phase1.host_save_readback_mismatch',
         write_precondition_failed: 'world.phase1.write_precondition_failed',
@@ -16725,6 +18349,7 @@ async function runContinuityTarget(captured, {
         namespace?.continuity,
         profileGate.actorLedger,
         captured,
+        { allowUnrelatedLedgerEvolution: true },
     );
     if (existingPacket) {
         if (
@@ -16744,16 +18369,35 @@ async function runContinuityTarget(captured, {
                 module: 'world',
             });
         }
-        markActorSchedulingSettled(existingPacket?.settlementProof?.orderedResults || [], {
+        const committedReadback = await stage3ExistingCommittedPackageReadback(
+            context,
+            captured,
+            namespace,
+        );
+        guard = stage3TargetIsCurrent(captured, token);
+        if (!guard.ok) return { status: 'stale', reason: guard.reason };
+        if (!committedReadback.ok) {
+            return finishWorldResult({
+                status: 'failed',
+                reason: 'world_committed_readback_unverified',
+                validationCode: 'world.committed.readback_unverified',
+                readbackFailureKind: committedReadback.failureCode,
+                readbackEvidence: committedReadback.readbackEvidence || null,
+                module: 'world',
+            });
+        }
+        const durablePacket = committedReadback.packet;
+        markActorSchedulingSettled(durablePacket?.settlementProof?.orderedResults || [], {
             recovered: true,
         });
         return {
             status: 'applied',
             recovered: true,
+            readbackVerified: true,
             worldModelCalls: 0,
             worldWrites: 0,
             worldFinalPhase: 'world_committed',
-            nextTurnInjection: deepClone(existingPacket),
+            nextTurnInjection: deepClone(durablePacket),
         };
     }
     if (committedCheckpoint?.stage3Phase === 'world_committed') {
@@ -16803,6 +18447,7 @@ async function runContinuityTarget(captured, {
     let actionLedger = profileGate.actorLedger;
     let pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
     let scheduledActorIds = [];
+    let scheduledActors = [];
     const proposalValidationCandidates = new Map();
     if (pendingActions.attempts.length) {
         latestActorShardDiagnostics = {
@@ -16826,33 +18471,104 @@ async function runContinuityTarget(captured, {
         // its world adjudication.  There is no separate actor-shard model or
         // agent layer.  We still persist/verify the locally admitted attempts
         // before any returned outcome is applied below.
-        scheduledActorIds = actorSchedule.selected.map((actor) => actor.actorId).filter(Boolean);
-        const registeredInteractionTargets = (actionLedger?.actors || []).map((entry) => ({
-            actorId: String(entry?.id || ''),
-            actorName: String(entry?.name || ''),
-        })).filter((entry) => entry.actorId && entry.actorName);
-        for (const scheduled of actorSchedule.selected) {
-            const candidate = selectActorShardCandidates({
-                continuity: scheduledBase,
-                actorLedger: actionLedger,
-                schedule: { selected: [scheduled] },
-                presentText: messageText,
-                maxWorkers: 1,
-                excludedActorNames: currentPlayerActorNames(context),
-            })[0];
-            if (!candidate || candidate.id !== scheduled.actorId) continue;
-            proposalValidationCandidates.set(candidate.id, {
-                ...candidate,
-                knownInteractionTargets: registeredInteractionTargets
-                    .filter((target) => target.actorId !== candidate.id),
-            });
-        }
+        scheduledActors = actorSchedule.selected;
+        scheduledActorIds = scheduledActors.map((actor) => actor.actorId).filter(Boolean);
         latestActorShardDiagnostics = {
             status: scheduledActorIds.length ? 'scheduled' : 'idle',
             selected: scheduledActorIds.length, completed: 0, succeeded: 0, failed: 0,
             semanticActions: 0, heldActions: 0, scheduledWithoutSemanticAction: 0,
             failureCodes: [],
         };
+    }
+    // The actor set is frozen from the original ready snapshot. A concurrent
+    // P1 completion may refresh those rows or add newly ready actors, but new
+    // rows do not join this accepted target's autonomous schedule.
+    let phase1Namespace = readChatNamespace(getContext());
+    let phase1Ledger = normalizeActorLedger(phase1Namespace.actorLedger, {
+        chatId: captured.chatId, identityScopeId: captured.identityScopeId, scopeDigest: captured.scopeDigest,
+    });
+    let profileEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+        baseLedger: actionLedger,
+        freshLedger: phase1Ledger,
+        actionTarget,
+        chatId: captured.chatId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const frozenProfilePending = scheduledActorIds.some((actorId) => (
+        phase1Ledger.actors.find((actor) => actor.id === actorId)?.pendingProfile
+    ));
+    const actorProfileKey = capturedTargetKey(captured);
+    if (
+        profileEvolution.ok
+        && frozenProfilePending
+        && actorProfileKey
+        && actorProfilePendingKeys.has(actorProfileKey)
+    ) {
+        await actorProfileChain.catch(() => undefined);
+        const afterProfileScope = await freshFrozenScopeGuard(captured);
+        guard = stage3TargetIsCurrent(captured, token);
+        if (!afterProfileScope.ok || !guard.ok) {
+            return { status: 'stale', reason: afterProfileScope.reason || guard.reason, module: 'world' };
+        }
+        phase1Namespace = readChatNamespace(getContext());
+        phase1Ledger = normalizeActorLedger(phase1Namespace.actorLedger, {
+            chatId: captured.chatId,
+            identityScopeId: captured.identityScopeId,
+            scopeDigest: captured.scopeDigest,
+        });
+        profileEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+            baseLedger: actionLedger,
+            freshLedger: phase1Ledger,
+            actionTarget,
+            chatId: captured.chatId,
+            scopeDigest: captured.scopeDigest,
+        });
+    }
+    if (!profileEvolution.ok) {
+        return { status: 'stale', reason: profileEvolution.reason, module: 'world' };
+    }
+    const phase1Expected = {
+        actorLedger: stage3FieldState(phase1Namespace, 'actorLedger'),
+        continuity: stage3FieldState(phase1Namespace, 'continuity'),
+        continuityCheckpoint: stage3FieldState(phase1Namespace, 'continuityCheckpoint'),
+    };
+    actionLedger = profileEvolution.ledger;
+    pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
+    if (!pendingActions.attempts.length) {
+        scheduledActors = scheduledActors.filter((scheduled) => (
+            actorProfileReadinessInLedger(actionLedger, scheduled.actorId).ready === true
+        ));
+        scheduledActorIds = scheduledActors.map((scheduled) => scheduled.actorId).filter(Boolean);
+        latestActorShardDiagnostics = {
+            ...latestActorShardDiagnostics,
+            status: scheduledActorIds.length ? 'scheduled' : 'idle',
+            selected: scheduledActorIds.length,
+        };
+    }
+    const actorNameById = new Map(actionLedger.actors.map((actor) => [actor.id, actor.name]));
+    scheduledActors = scheduledActors.map((scheduled) => ({
+        ...scheduled,
+        actorName: actorNameById.get(scheduled.actorId) || scheduled.actorName,
+    }));
+    const registeredInteractionTargets = (actionLedger?.actors || []).map((entry) => ({
+        actorId: String(entry?.id || ''),
+        actorName: String(entry?.name || ''),
+    })).filter((entry) => entry.actorId && entry.actorName);
+    for (const scheduled of scheduledActors) {
+        const candidate = selectActorShardCandidates({
+            continuity: scheduledBase,
+            actorLedger: actionLedger,
+            schedule: { selected: [scheduled] },
+            presentText: messageText,
+            maxWorkers: 1,
+            excludedActorNames: currentPlayerActorNames(context),
+        })[0];
+        if (!candidate || candidate.id !== scheduled.actorId) continue;
+        proposalValidationCandidates.set(candidate.id, {
+            ...candidate,
+            knownInteractionTargets: registeredInteractionTargets
+                .filter((target) => target.actorId !== candidate.id),
+        });
     }
     // The structured ledgers already provide stable row keys and due schedules.
     // Build the read-only recall packet locally, preserving every mustInclude
@@ -16899,22 +18615,8 @@ async function runContinuityTarget(captured, {
     }
     guard = stage3TargetIsCurrent(captured, token);
     if (!guard.ok) return { status: 'stale', reason: guard.reason };
-    // Normal P3 performs no durable write before the model output has been
-    // parsed and semantically validated. Capture S0 now; Phase1 can replace
-    // actorLedger+checkpoint only if every selected field still matches this
-    // snapshot. Legacy world_call_reserved remains read-only compatibility.
-    const phase1Namespace = readChatNamespace(getContext());
-    const phase1Expected = {
-        actorLedger: stage3FieldState(phase1Namespace, 'actorLedger'),
-        continuity: stage3FieldState(phase1Namespace, 'continuity'),
-        continuityCheckpoint: stage3FieldState(phase1Namespace, 'continuityCheckpoint'),
-    };
-    const phase1Ledger = normalizeActorLedger(phase1Namespace.actorLedger, {
-        chatId: captured.chatId, identityScopeId: captured.identityScopeId, scopeDigest: captured.scopeDigest,
-    });
-    if (actorLedgerDigest(phase1Ledger) !== actorLedgerDigest(actionLedger)) {
-        return { status: 'stale', reason: 'world_phase1_actor_ledger_changed', module: 'world' };
-    }
+    // No durable write occurred before model validation. Phase1 remains bound
+    // to the fresh, profile-compatible snapshot captured above.
     setContinuityStatus('世界连续性：正在整理本回合因果…', 'busy');
     let output = '';
     let worldModelCalls = 0;
@@ -17260,23 +18962,33 @@ function continuityTargetIsCurrent(captured, token) {
         : strict;
 }
 
+async function stage3AwaitAcceptedFinalP4Barrier(startBarrier) {
+    if (!startBarrier) return;
+    await Promise.resolve(startBarrier).catch(() => undefined);
+}
+
 async function enqueueContinuity(targetId, {
     force = false,
     manualRecovery = false,
     expectedTarget = null,
     noActorPermit = null,
     afterPending = false,
+    startBarrier = null,
 } = {}) {
     const context = getContext();
+    if (actorWorldManagementWrite?.chatId === String(context?.chatId || '')) {
+        return { status: 'stale', reason: 'management_write_pending', module: 'world' };
+    }
     const latest = latestAiMessage(context);
     const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
     const expected = expectedTarget || captureTarget(context, resolved);
     if (!expected) return { status: 'stale', reason: 'current_source_unavailable' };
     const dedupeKey = stage3AcceptedTargetKey(expected);
     if (!dedupeKey) return { status: 'stale', reason: 'current_source_key_missing' };
-    if (continuityPendingKeys.has(dedupeKey)) {
+    const pendingOwner = continuityPendingKeys.get(dedupeKey) || null;
+    if (pendingOwner) {
         if (afterPending) {
-            return continuityChain
+            return (pendingOwner.task || continuityChain)
                 .catch(() => undefined)
                 .then((priorResult) => {
                     if (priorResult?.reason === 'foreground_preempted') {
@@ -17290,13 +19002,37 @@ async function enqueueContinuity(targetId, {
     if (!force && continuityCompletedKeys.has(dedupeKey)) {
         return { status: 'duplicate', reason: 'world_target_completed' };
     }
-    continuityPendingKeys.add(dedupeKey);
+    if (actorWorldManagementWrite?.chatId === String(getContext()?.chatId || '')) {
+        return { status: 'stale', reason: 'management_write_pending', module: 'world' };
+    }
     const taskEpoch = expected.epoch;
     const taskChatId = expected.chatId;
     const effectiveNoActorPermit = noActorPermit || null;
-    const task = continuityChain
+    const taskOwner = {
+        epoch: taskEpoch,
+        chatId: taskChatId,
+        key: dedupeKey,
+        task: null,
+    };
+    const taskOwnerIsCurrent = () => (
+        taskEpoch === operationEpoch
+        && taskChatId === getContext()?.chatId
+        && continuityPendingKeys.get(dedupeKey) === taskOwner
+    );
+    continuityPendingKeys.set(dedupeKey, taskOwner);
+    syncTaskCancelButtons();
+    const priorContinuityChain = continuityChain;
+    const task = priorContinuityChain
         .catch(() => undefined)
         .then(async (priorResult) => {
+            await stage3AwaitAcceptedFinalP4Barrier(startBarrier);
+            if (!taskOwnerIsCurrent()) {
+                return {
+                    status: 'stale',
+                    reason: 'world_task_owner_changed',
+                    zeroWrite: true,
+                };
+            }
             // The existing serialized continuity chain carries the exact
             // accepted target that a foreground generation preempted. Resume
             // that older target first after the new accepted-final arrives;
@@ -17323,7 +19059,21 @@ async function enqueueContinuity(targetId, {
                     noActorPermit: null,
                     manualRecovery: false,
                 });
-                recordStage3WorldFinalDiagnostic(recoveryTarget, recovered);
+                if (!taskOwnerIsCurrent()) {
+                    return {
+                        status: 'stale',
+                        reason: 'world_task_owner_changed',
+                        zeroWrite: true,
+                    };
+                }
+                await recordStage3WorldFinalDiagnostic(recoveryTarget, recovered);
+                if (!taskOwnerIsCurrent()) {
+                    return {
+                        status: 'stale',
+                        reason: 'world_task_owner_changed',
+                        zeroWrite: true,
+                    };
+                }
                 if (recovered?.status !== 'applied') {
                     return recovered?.reason === 'foreground_preempted'
                         ? { ...recovered, stage3RecoveryTarget: deepClone(recoveryExpected) }
@@ -17348,11 +19098,8 @@ async function enqueueContinuity(targetId, {
                 manualRecovery,
             });
         })
-        .then((result) => {
-            const ownsCurrentTask = (
-                taskEpoch === operationEpoch
-                && taskChatId === getContext()?.chatId
-            );
+        .then(async (result) => {
+            const ownsCurrentTask = taskOwnerIsCurrent();
             if (!ownsCurrentTask) return result;
             if (result?.reason === 'foreground_preempted') {
                 result = {
@@ -17362,7 +19109,8 @@ async function enqueueContinuity(targetId, {
                     ),
                 };
             }
-            recordStage3WorldFinalDiagnostic(expected, result);
+            await recordStage3WorldFinalDiagnostic(expected, result);
+            if (!taskOwnerIsCurrent()) return result;
             const recoverableCheckpointConflict = result?.status === 'failed'
                 && [
                     'world_call_reserved_manual_reconciliation',
@@ -17392,7 +19140,7 @@ async function enqueueContinuity(targetId, {
             }
             return result;
         })
-        .catch((error) => {
+        .catch(async (error) => {
             const result = {
                 status: 'failed',
                 reason: String(error?.message || error),
@@ -17400,26 +19148,80 @@ async function enqueueContinuity(targetId, {
                     ? String(error.validationReason)
                     : 'world.unexpected_failure',
             };
-            if (taskEpoch === operationEpoch && taskChatId === getContext()?.chatId) {
+            if (taskOwnerIsCurrent()) {
+                await recordStage3WorldFinalDiagnostic(expected, result);
+                if (!taskOwnerIsCurrent()) return result;
                 continuityCompletedKeys.add(dedupeKey);
-                recordStage3WorldFinalDiagnostic(expected, result);
                 setContinuityStatus(`世界连续性未完成：${safeDiagnosticReason(result.reason)}`, 'error');
             }
             return result;
         })
         .finally(() => {
-            continuityPendingKeys.delete(dedupeKey);
+            if (continuityPendingKeys.get(dedupeKey) === taskOwner) {
+                continuityPendingKeys.delete(dedupeKey);
+            }
             if (taskEpoch === operationEpoch && taskChatId === getContext()?.chatId) {
                 renderSovereigntyHealth();
                 syncTaskCancelButtons();
             }
         });
+    taskOwner.task = task;
     continuityChain = task.catch(() => undefined);
     return task;
 }
 
 function stage3AttemptProjection(ledger, target) {
     return stage3TargetActionAuthorityProjection(ledger, target)?.attempts || [];
+}
+
+function stage3WorldOwnedActorProjection(actor) {
+    const projected = deepClone(actor || {});
+    for (const field of [
+        'name', 'identity', 'profileV6', 'pendingProfile', 'evidence', 'version', 'updatedTurn',
+    ]) delete projected[field];
+    return projected;
+}
+
+function stage3ActorLedgerAfterProfileOnlyEvolution({
+    baseLedger,
+    freshLedger,
+    actionTarget,
+    chatId = '',
+    scopeDigest = '',
+} = {}) {
+    const base = normalizeActorLedger(baseLedger, { chatId, scopeDigest });
+    const fresh = normalizeActorLedger(freshLedger, { chatId, scopeDigest });
+    const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    if (!chatId || base.chatId !== chatId || fresh.chatId !== chatId) {
+        return { ok: false, reason: 'world_phase1_actor_ledger_changed' };
+    }
+    const expectedScope = String(scopeDigest || '').trim();
+    if (!expectedScope || [base, fresh].some((ledger) => (
+        String(ledger.actorRegistry?.scopeDigest || '').trim() !== expectedScope
+    ))) return { ok: false, reason: 'world_phase1_actor_ledger_changed' };
+    if (!same(
+        stage3TargetActionAuthorityProjection(base, actionTarget),
+        stage3TargetActionAuthorityProjection(fresh, actionTarget),
+    )) return { ok: false, reason: 'world_phase1_target_authority_changed' };
+    for (const field of [
+        'actionAttempts', 'actionAttemptBacklog', 'actionReceipts', 'observationReceipts',
+    ]) {
+        if (!same(base[field], fresh[field])) {
+            return { ok: false, reason: 'world_phase1_actor_authority_changed' };
+        }
+    }
+    const freshById = new Map(fresh.actors.map((actor) => [actor.id, actor]));
+    for (const baseActor of base.actors) {
+        const freshActor = freshById.get(baseActor.id);
+        if (
+            !freshActor
+            || !same(
+                stage3WorldOwnedActorProjection(baseActor),
+                stage3WorldOwnedActorProjection(freshActor),
+            )
+        ) return { ok: false, reason: 'world_phase1_actor_authority_changed' };
+    }
+    return { ok: true, ledger: fresh };
 }
 
 function stage3FieldState(namespace, field) {
@@ -17521,9 +19323,6 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
     playerNames = [],
 } = {}) {
     const frozenIds = [...new Set(scheduledActorIds.map(String).filter(Boolean))].sort();
-    const frozenRefs = new Map((actionLedger?.actors || [])
-        .filter((actor) => frozenIds.includes(String(actor?.id || '')))
-        .map((actor) => [String(actor.id), fingerprint(safeJson(actor?.actorRef || null, 0))]));
     const originalAttemptDigest = fingerprint(JSON.stringify(
         stage3TargetActionAuthorityProjection(actionLedger, actionTarget),
     ));
@@ -17531,9 +19330,9 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
         if (!stage3TaskOwnsCurrent(captured, token)) {
             return { ok: false, reason: 'action_attempt.target_stale' };
         }
-        const freshNamespace = readChatNamespace(getContext(), captured.chatId);
-        const freshContinuity = stage3FieldState(freshNamespace, 'continuity');
-        const freshCheckpoint = stage3FieldState(freshNamespace, 'continuityCheckpoint');
+        let freshNamespace = readChatNamespace(getContext(), captured.chatId);
+        let freshContinuity = stage3FieldState(freshNamespace, 'continuity');
+        let freshCheckpoint = stage3FieldState(freshNamespace, 'continuityCheckpoint');
         if (
             !stage3FieldStateCanRebaseUnchanged(
                 phase1Expected?.continuity,
@@ -17544,11 +19343,67 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
                 freshCheckpoint,
             )
         ) return { ok: false, reason: 'world_candidate_readback_mismatch' };
-        const freshLedger = normalizeActorLedger(freshNamespace.actorLedger, {
+        let freshLedger = normalizeActorLedger(freshNamespace.actorLedger, {
             chatId: captured.chatId,
             identityScopeId: captured.identityScopeId,
             scopeDigest: captured.scopeDigest,
         });
+        let profileEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+            baseLedger: actionLedger,
+            freshLedger,
+            actionTarget,
+            chatId: captured.chatId,
+            scopeDigest: captured.scopeDigest,
+        });
+        if (!profileEvolution.ok) {
+            return { ok: false, reason: profileEvolution.reason };
+        }
+        const actorProfileKey = capturedTargetKey(captured);
+        if (
+            frozenIds.some((actorId) => (
+                freshLedger.actors.find((actor) => actor.id === actorId)?.pendingProfile
+            ))
+            && actorProfileKey
+            && actorProfilePendingKeys.has(actorProfileKey)
+        ) {
+            await actorProfileChain.catch(() => undefined);
+            const afterProfileScope = await freshFrozenScopeGuard(captured);
+            if (!afterProfileScope.ok || !stage3TaskOwnsCurrent(captured, token)) {
+                return { ok: false, reason: 'action_attempt.target_stale' };
+            }
+            freshNamespace = readChatNamespace(getContext(), captured.chatId);
+            freshContinuity = stage3FieldState(freshNamespace, 'continuity');
+            freshCheckpoint = stage3FieldState(freshNamespace, 'continuityCheckpoint');
+            freshLedger = normalizeActorLedger(freshNamespace.actorLedger, {
+                chatId: captured.chatId,
+                identityScopeId: captured.identityScopeId,
+                scopeDigest: captured.scopeDigest,
+            });
+            profileEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+                baseLedger: actionLedger,
+                freshLedger,
+                actionTarget,
+                chatId: captured.chatId,
+                scopeDigest: captured.scopeDigest,
+            });
+            if (!profileEvolution.ok) {
+                return { ok: false, reason: profileEvolution.reason };
+            }
+        }
+        freshLedger = profileEvolution.ledger;
+        if (frozenIds.some((actorId) => (
+            actorProfileReadinessInLedger(freshLedger, actorId).ready !== true
+        ))) {
+            // The returned continuity/world candidate is not partitioned by
+            // actor. If its frozen autonomous schedule shrank while the model
+            // was running, retaining state/world while dropping only proposal
+            // rows would smuggle effects with no ATT authority. Phase 1 stays
+            // completely unwritten and a later accepted target may retry.
+            return { ok: false, reason: 'world_actor_schedule_changed_after_model' };
+        }
+        const activeFrozenIds = frozenIds;
+        const activeFrozenIdSet = new Set(frozenIds);
+        const activeProposals = validatedProposals;
         if (
             fingerprint(JSON.stringify(stage3TargetActionAuthorityProjection(
                 freshLedger,
@@ -17556,15 +19411,10 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
             )))
             !== originalAttemptDigest
         ) return { ok: false, reason: 'action_attempt.concurrent_change' };
-        const actorRefsUnchanged = frozenIds.every((actorId) => {
-            const actor = (freshLedger.actors || []).find((entry) => String(entry?.id || '') === actorId);
-            return actor && frozenRefs.has(actorId)
-                && fingerprint(safeJson(actor?.actorRef || null, 0)) === frozenRefs.get(actorId);
-        });
-        if (!actorRefsUnchanged) {
+        if (frozenIds.some((actorId) => !freshLedger.actors.some((actor) => actor.id === actorId))) {
             return { ok: false, reason: 'action_attempt.actor_ref_mismatch' };
         }
-        const candidates = actorActionCandidatesFromShard(freshLedger, validatedProposals, {
+        const candidates = actorActionCandidatesFromShard(freshLedger, activeProposals, {
             turn: nextTurn,
         });
         const preparedAttempts = prepareActorActionAttempts(freshLedger, candidates, {
@@ -17575,7 +19425,7 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
         });
         if (
             preparedAttempts.rejected.length
-            || preparedAttempts.attempts.length !== frozenIds.length
+            || preparedAttempts.attempts.length !== activeFrozenIds.length
         ) return { ok: false, reason: 'actor_attempt_prepare_incomplete' };
         const recorded = recordActorActionAttempts(
             preparedAttempts.ledger,
@@ -17587,7 +19437,9 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
             || recorded.recorded.length !== preparedAttempts.attempts.length
         ) return { ok: false, reason: 'actor_attempt_record_incomplete' };
         const rawAdjudications = Array.isArray(parsed.raw?.actionAdjudications)
-            ? parsed.raw.actionAdjudications
+            ? parsed.raw.actionAdjudications.filter((entry) => (
+                activeFrozenIdSet.has(String(entry?.actorId || ''))
+            ))
             : [];
         const recordedByActor = new Map(recorded.recorded.map(
             (attempt) => [String(attempt.actorId), attempt],
@@ -17609,7 +19461,14 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
         });
         const parsedForCommit = {
             ...parsed,
-            raw: { ...parsed.raw, actionAdjudications: adjudications },
+            raw: {
+                ...parsed.raw,
+                actionProposals: (Array.isArray(parsed.raw?.actionProposals)
+                    ? parsed.raw.actionProposals : []).filter((entry) => (
+                    activeFrozenIdSet.has(String(entry?.actorId || ''))
+                )),
+                actionAdjudications: adjudications,
+            },
         };
         const candidate = stage3ValidateWorldCandidateInMemory(
             captured,
@@ -17669,6 +19528,28 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
                 readbackFailureKind: persisted?.readbackFailureKind || '',
                 readbackEvidence: deepClone(persisted?.readbackEvidence || []),
             };
+        }
+        const collisionNamespace = readChatNamespace(getContext(), captured.chatId);
+        const collisionEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+            baseLedger: freshLedger,
+            freshLedger: collisionNamespace.actorLedger,
+            actionTarget,
+            chatId: captured.chatId,
+            scopeDigest: captured.scopeDigest,
+        });
+        if (!collisionEvolution.ok) {
+            return { ok: false, reason: collisionEvolution.reason };
+        }
+        const collisionActorProfileKey = capturedTargetKey(captured);
+        if (
+            collisionActorProfileKey
+            && actorProfilePendingKeys.has(collisionActorProfileKey)
+        ) {
+            await actorProfileChain.catch(() => undefined);
+            const afterProfileScope = await freshFrozenScopeGuard(captured);
+            if (!afterProfileScope.ok || !stage3TaskOwnsCurrent(captured, token)) {
+                return { ok: false, reason: 'action_attempt.target_stale' };
+            }
         }
     }
     return { ok: false, reason: 'action_attempt.commit_rejected' };
@@ -17786,6 +19667,25 @@ async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {
                 readbackFailureKind: persisted?.readbackFailureKind || '',
                 readbackEvidence: deepClone(persisted?.readbackEvidence || []),
             };
+        }
+        const collisionNamespace = readChatNamespace(getContext(), captured.chatId);
+        const collisionEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+            baseLedger: freshLedger,
+            freshLedger: collisionNamespace.actorLedger,
+            actionTarget,
+            chatId: captured.chatId,
+            scopeDigest: captured.scopeDigest,
+        });
+        if (!collisionEvolution.ok) {
+            return { ok: false, reason: collisionEvolution.reason };
+        }
+        const actorProfileKey = capturedTargetKey(captured);
+        if (actorProfileKey && actorProfilePendingKeys.has(actorProfileKey)) {
+            await actorProfileChain.catch(() => undefined);
+            const afterProfileScope = await freshFrozenScopeGuard(captured);
+            if (!afterProfileScope.ok || !stage3TaskOwnsCurrent(captured, token)) {
+                return { ok: false, reason: 'action_attempt.target_stale' };
+            }
         }
     }
     return { ok: false, reason: 'action_attempt.commit_rejected' };
@@ -18697,16 +20597,59 @@ async function commitPreparedWorldCandidate(captured, {
             && concurrentFields.length === 1
             && concurrentFields[0] === 'actorLedger';
         if (actorOnlyCasDrift && phase2LocalAttempt < 1) {
-            const freshNamespace = readChatNamespace(getContext(), captured.chatId);
-            const freshLedger = normalizeActorLedger(freshNamespace.actorLedger, {
+            let freshNamespace = readChatNamespace(getContext(), captured.chatId);
+            let freshLedger = normalizeActorLedger(freshNamespace.actorLedger, {
                 chatId: captured.chatId,
                 identityScopeId: captured.identityScopeId,
                 scopeDigest: captured.scopeDigest,
             });
-            if (stage3PreparedPhase1StatesMatch(
+            let profileEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+                baseLedger: ledger,
+                freshLedger,
+                actionTarget,
+                chatId: captured.chatId,
+                scopeDigest: captured.scopeDigest,
+            });
+            if (!profileEvolution.ok) {
+                return {
+                    status: 'failed',
+                    reason: profileEvolution.reason,
+                    validationCode: 'world.phase2.concurrent_actor_ledger_changed',
+                    worldModelCalls,
+                    timings: finalTimings(),
+                };
+            }
+            const actorProfileKey = capturedTargetKey(captured);
+            if (actorProfileKey && actorProfilePendingKeys.has(actorProfileKey)) {
+                await actorProfileChain.catch(() => undefined);
+                const afterProfileScope = await freshFrozenScopeGuard(captured);
+                if (!afterProfileScope.ok || !stage3TaskOwnsCurrent(captured, token)) {
+                    return {
+                        status: 'failed',
+                        reason: 'action_attempt.target_stale',
+                        validationCode: 'world.phase2.target_stale',
+                        worldModelCalls,
+                        timings: finalTimings(),
+                    };
+                }
+                freshNamespace = readChatNamespace(getContext(), captured.chatId);
+                freshLedger = normalizeActorLedger(freshNamespace.actorLedger, {
+                    chatId: captured.chatId,
+                    identityScopeId: captured.identityScopeId,
+                    scopeDigest: captured.scopeDigest,
+                });
+                profileEvolution = stage3ActorLedgerAfterProfileOnlyEvolution({
+                    baseLedger: ledger,
+                    freshLedger,
+                    actionTarget,
+                    chatId: captured.chatId,
+                    scopeDigest: captured.scopeDigest,
+                });
+            }
+            if (profileEvolution.ok && stage3PreparedPhase1StatesMatch(
                 checkpoint,
                 freshNamespace,
-                freshLedger,
+                profileEvolution.ledger,
                 captured,
             )) {
                 return commitPreparedWorldCandidate(captured, {
@@ -18714,7 +20657,7 @@ async function commitPreparedWorldCandidate(captured, {
                     settings,
                     namespace: freshNamespace,
                     checkpoint,
-                    ledger: freshLedger,
+                    ledger: profileEvolution.ledger,
                     worldModelCalls,
                     timings: finalTimings(),
                     phase2LocalAttempt: phase2LocalAttempt + 1,
@@ -18760,6 +20703,9 @@ async function enqueueActorProfiles(targetId, {
     expectedTarget = null,
 } = {}) {
     const context = getContext();
+    if (actorWorldManagementWrite?.chatId === String(context?.chatId || '')) {
+        return actorProfileTransientResult('stale', { reason: 'management_write_pending' });
+    }
     const latest = latestAiMessage(context);
     const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
     const expected = expectedTarget || captureTarget(context, resolved);
@@ -18883,6 +20829,13 @@ async function enqueueActorProfiles(targetId, {
     const taskEpoch = expected.epoch;
     const taskChatId = expected.chatId;
     const owner = Symbol(dedupeKey);
+    const actorProfileOwnerIsCurrent = () => (
+        actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)
+        && actorProfilePendingKeys.get(dedupeKey) === owner
+    );
+    if (actorWorldManagementWrite?.chatId === String(getContext()?.chatId || '')) {
+        return actorProfileTransientResult('stale', { reason: 'management_write_pending' });
+    }
     actorProfilePendingKeys.set(dedupeKey, owner);
     if (actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
         setActorProfileStatus('人物档案：正在登记本回合人物并准备一次批量整档…', 'busy');
@@ -18924,20 +20877,17 @@ async function enqueueActorProfiles(targetId, {
             });
         })
         .then(async (result) => {
-            const currentOwner = actorProfileTargetStateIsCurrent(taskEpoch, taskChatId);
+            const currentOwner = actorProfileOwnerIsCurrent();
             const recovery = currentOwner
                 ? await finalizeActorProfileRecoveryOutcome(expected, result)
                 : await finalizeUserCancelledActorProfileCompletion(expected, result);
-            if (!currentOwner && recovery.handled !== true) return result;
             result = recovery.result;
+            if (!actorProfileOwnerIsCurrent()) return result;
             const recoverySaved = recovery.recoverySaved;
-            if (['atomic_readback', 'no_candidates'].includes(result?.status)) {
-                actorProfileCompletedKeys.add(dedupeKey);
-            }
             const validation = result?.profileBatch?.validationDiagnostic || {};
             const failed = Array.isArray(result?.profileBatch?.failed)
                 ? result.profileBatch.failed : [];
-            latestActorProfileDiagnostic = {
+            const nextActorProfileDiagnostic = {
                 status: String(result?.status || 'not_completed'),
                 sourceRef: sourceRefOf(expected),
                 failingModules: [...new Set([
@@ -18947,7 +20897,7 @@ async function enqueueActorProfiles(targetId, {
                 ].map((path) => String(path).split('.').at(-1)).filter(Boolean))].slice(0, 8),
                 lastFailureCodes: [...new Set(failed
                     .map((entry) => compactActorProfileFailureCode(entry.reason)).filter(Boolean))].slice(0, 8),
-                canRetry: result?.status === 'not_completed'
+                canRetry: (result?.status === 'not_completed' && recoverySaved === true)
                     || (result?.status === 'stale' && actorProfileRecoverySourceMatches(
                         sourceRefOf(expected),
                         sourceRefOf(captureTarget(getContext(), expected.index, {
@@ -18966,6 +20916,17 @@ async function enqueueActorProfiles(targetId, {
                     Number(result?.profileBatch?.recoveredFieldCount) || 0,
                 ),
             };
+            const terminalDiagnosticPersisted = await recordActorProfileFinalDiagnostic(
+                expected,
+                result,
+                { recoverySaved },
+            );
+            result = { ...result, terminalDiagnosticPersisted };
+            if (!actorProfileOwnerIsCurrent()) return result;
+            latestActorProfileDiagnostic = nextActorProfileDiagnostic;
+            if (['atomic_readback', 'no_candidates'].includes(result?.status)) {
+                actorProfileCompletedKeys.add(dedupeKey);
+            }
             if (!['atomic_readback', 'no_candidates'].includes(result?.status)) {
                 markActorSchedulingNotReachedByProfile(
                     latestActorProfileDiagnostic.lastFailureCodes[0] || result?.reason,
@@ -18997,15 +20958,21 @@ async function enqueueActorProfiles(targetId, {
             }
             return result;
         })
-        .catch((error) => {
+        .catch(async (error) => {
             console.error('[MVU Auto Doctor] 人物档案处理异常：', error);
-            const result = actorProfileTransientResult('not_completed', {
+            let result = actorProfileTransientResult('not_completed', {
                 reason: String(error.message || error),
             });
-            if (actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
+            const terminalDiagnosticPersisted = await recordActorProfileFinalDiagnostic(
+                expected,
+                result,
+                { recoverySaved: false },
+            );
+            result = { ...result, terminalDiagnosticPersisted };
+            if (actorProfileOwnerIsCurrent()) {
                 latestActorProfileDiagnostic = {
                     status: 'not_completed', failingModules: ['profile'],
-                    lastFailureCodes: ['actor_profile.unhandled_failure'], canRetry: true,
+                    lastFailureCodes: ['actor_profile.unhandled_failure'], canRetry: false,
                     sourceRef: sourceRefOf(expected),
                 };
                 markActorSchedulingNotReachedByProfile('actor_profile.unhandled_failure');
@@ -19014,11 +20981,12 @@ async function enqueueActorProfiles(targetId, {
             return result;
         })
         .finally(() => {
-            userCancelledActorProfileKeys.delete(dedupeKey);
-            if (actorProfilePendingKeys.get(dedupeKey) === owner) {
+            const ownsPendingKey = actorProfileOwnerIsCurrent();
+            if (ownsPendingKey) {
+                userCancelledActorProfileKeys.delete(dedupeKey);
                 actorProfilePendingKeys.delete(dedupeKey);
             }
-            if (actorProfileTargetStateIsCurrent(taskEpoch, taskChatId)) {
+            if (ownsPendingKey) {
                 renderSovereigntyHealth();
                 syncTaskCancelButtons();
             }
@@ -19067,39 +21035,91 @@ async function clearContinuityState() {
     )) {
         return false;
     }
-    const namespace = readChatNamespace(context);
-    namespace.continuity = emptyContinuityState(context.chatId);
+    const chatId = String(context.chatId);
+    const quiesced = await quiesceActorWorldWritersForManagement(
+        chatId,
+        'clear_continuity_state',
+    );
+    if (!quiesced.ok) return false;
+    try {
+    if (actorWorldManagementBlockedByForeground()) return false;
+    const freshContext = getContext();
+    const liveBeforeWrite = readChatNamespace(freshContext);
+    const empty = emptyChatNamespace(freshContext);
+    const namespace = deepClone(liveBeforeWrite);
+    namespace.continuity = empty.continuity;
     namespace.continuityCheckpoint = null;
-    namespace.actorLedger = emptyActorLedger(context.chatId);
+    namespace.actorLedger = empty.actorLedger;
     namespace.actorLedgerCheckpoint = null;
     namespace.actorLedgerCheckpointBlobs = {};
+    namespace.characterCreationTicketBatches = [];
+    namespace.actorProfileRetryReceipt = null;
+    namespace.actorProfileNoCandidatesTerminalProof = null;
     namespace.worldPressure = emptyWorldPressureState();
     namespace.continuityWorldLaneReceipts = [];
     namespace.continuityInjectionQueue = [];
     namespace.continuityInjectionBatches = [];
     namespace.continuityDirector = 'doctor';
-    const cleared = await writeChatNamespace(namespace, context.chatId, {
+    namespace.continuityDetected = false;
+    const fields = [
+        'continuity',
+        'continuityCheckpoint',
+        'actorLedger',
+        'actorLedgerCheckpoint',
+        'actorLedgerCheckpointBlobs',
+        'characterCreationTicketBatches',
+        'actorProfileRetryReceipt',
+        'actorProfileNoCandidatesTerminalProof',
+        'worldPressure',
+        'continuityWorldLaneReceipts',
+        'continuityInjectionQueue',
+        'continuityInjectionBatches',
+        'continuityDirector',
+        'continuityDetected',
+    ];
+    const successSink = {};
+    const cleared = await writeChatNamespace(namespace, chatId, {
         force: true,
-        fields: [
-            'continuity',
-            'continuityCheckpoint',
-            'actorLedger',
-            'actorLedgerCheckpoint',
-            'actorLedgerCheckpointBlobs',
-            'worldPressure',
-            'continuityWorldLaneReceipts',
-            'continuityInjectionQueue',
-            'continuityInjectionBatches',
-            'continuityDirector',
-            'continuityDetected',
-        ],
+        fields,
+        durable: true,
+        requireReadback: true,
+        readbackAttempts: 5,
+        recoverSelectedTransaction: true,
+        successSink,
+        expectedFieldStates: selectedFieldStatesFromNamespace(liveBeforeWrite, fields),
+        precondition: () => (
+            actorWorldManagementWrite === quiesced.managementToken
+            && operationEpoch === quiesced.operationEpoch
+            && String(getContext()?.chatId || '') === chatId
+            && !actorWorldManagementBlockedByForeground()
+        ),
+        contentValidator: (persisted) => selectedChatNamespaceFieldsMatch(
+            namespace,
+            persisted,
+            fields,
+        ),
     });
     if (!cleared) {
         setContinuityStatus('世界连续性：迁移或持久化尚未完成，未清空当前账本。', 'error');
         return false;
     }
     setContinuityStatus('世界连续性：当前聊天账本已清空');
+    actorProfileCompletedKeys.clear();
+    continuityCompletedKeys.clear();
+    clearActorProfileReadShadow();
+    for (const [generationId, batch] of npcDesignTicketBatches) {
+        if (String(batch?.chatId || '') === chatId) npcDesignTicketBatches.delete(generationId);
+    }
+    if (String(pendingNpcDesignTicketBatch?.chatId || '') === chatId) {
+        pendingNpcDesignTicketBatch = null;
+    }
+    const readbackNamespace = successSink.readbackNamespace || readChatNamespace(getContext());
+    renderActorProfiles(readbackNamespace);
+    renderContinuityLedger();
     return true;
+    } finally {
+        releaseActorWorldManagementWrite(quiesced.managementToken);
+    }
 }
 
 function forumBase(namespace, captured) {
@@ -21793,11 +23813,16 @@ function buildFloatingUi() {
                         <div class="mvuad-floating-sovereignty-health" role="status"></div>
                         <div class="mvuad-floating-repair-status" role="status"></div>
                         <div class="mvuad-floating-variable-repair-center-status" role="status"></div>
+                        <div class="mvuad-floating-doctor-repair-center-status" role="status"></div>
                         <div class="mvuad-floating-actor-profile-status" role="status"></div>
                         <div class="mvuad-floating-continuity-status" role="status"></div>
                         <div class="mvuad-floating-forum-status" role="status"></div>
                     </div>
                     <div class="mvuad-floating-actions">
+                        <button class="menu_button mvuad-floating-doctor-repair" data-repair-module="variable" type="button">修复变量</button>
+                        <button class="menu_button mvuad-floating-doctor-repair" data-repair-module="profile" type="button">修复人物档案</button>
+                        <button class="menu_button mvuad-floating-doctor-repair" data-repair-module="world" type="button">修复世界连续性</button>
+                        <button class="menu_button mvuad-floating-doctor-repair" data-repair-module="all" type="button">修复全部</button>
                         <button class="menu_button mvuad-floating-director" type="button">打开导演台</button>
                         <button class="menu_button mvuad-floating-repair" type="button">安全修复变量</button>
                     <button class="menu_button mvuad-floating-world" type="button">补全人物档案（含历史欠账）</button>
@@ -21857,6 +23882,9 @@ function buildFloatingUi() {
         floatingPages: [...panel.querySelectorAll('.mvuad-floating-page[data-page]')],
         floatingOperationLogList: panel.querySelector('.mvuad-floating-oplog-list'),
         floatingModelCallStats: panel.querySelector('.mvuad-floating-model-call-stats'),
+        floatingDoctorRepairCenterStatus: panel.querySelector(
+            '.mvuad-floating-doctor-repair-center-status',
+        ),
         floatingCancelTask: panel.querySelector('.mvuad-floating-cancel-task'),
         floatingSovereigntyRetry: panel.querySelector('.mvuad-floating-sovereignty-retry'),
         floatingSovereigntyRestore: panel.querySelector('.mvuad-floating-sovereignty-restore'),
@@ -21876,6 +23904,11 @@ function buildFloatingUi() {
         'click',
         runVariableSafeRepair,
     );
+    for (const button of panel.querySelectorAll('.mvuad-floating-doctor-repair')) {
+        button.addEventListener('click', () => runDoctorRepairCenter(
+            String(button.dataset.repairModule || 'all'),
+        ));
+    }
     panel.querySelector('.mvuad-floating-director').addEventListener('click', (event) => {
     });
     panel.querySelector('.mvuad-floating-world').addEventListener('click', () => {
@@ -21912,6 +23945,11 @@ function buildFloatingUi() {
     setVariableRepairCenterStatus(
         latestVariableRepairCenterStatus,
         latestVariableRepairCenterKind,
+        { record: false },
+    );
+    setDoctorRepairCenterStatus(
+        latestDoctorRepairCenterStatus,
+        latestDoctorRepairCenterKind,
         { record: false },
     );
     setActorProfileStatus(latestActorProfileStatus, latestActorProfileKind, { record: false });
@@ -22627,6 +24665,16 @@ function buildSettingsPanel() {
                                 <button class="menu_button mvuad-cancel-task" type="button" hidden>停止当前后台任务</button>
                             </div>
                             <div class="mvuad-variable-repair-center-status" role="status"></div>
+                            <div class="mvuad-description">
+                                医生修复中心只调度现有的变量、人物档案和世界连续性修复入口。每个模块独立提交并回读；“修复全部”中一个模块失败不会阻止其他模块。
+                            </div>
+                            <div class="mvuad-actions mvuad-doctor-repair-actions">
+                                <button class="menu_button mvuad-doctor-repair" data-repair-module="variable" type="button">修复变量</button>
+                                <button class="menu_button mvuad-doctor-repair" data-repair-module="profile" type="button">修复人物档案</button>
+                                <button class="menu_button mvuad-doctor-repair" data-repair-module="world" type="button">修复世界连续性</button>
+                                <button class="menu_button mvuad-doctor-repair" data-repair-module="all" type="button">修复全部</button>
+                            </div>
+                            <div class="mvuad-doctor-repair-center-status" role="status"></div>
                             <div class="mvuad-status" role="status"></div>
                         </div>
                     </details>
@@ -23066,6 +25114,11 @@ function buildSettingsPanel() {
         saveSettings();
     });
     wrapper.querySelector('.mvuad-run').addEventListener('click', runVariableSafeRepair);
+    for (const button of wrapper.querySelectorAll('.mvuad-doctor-repair')) {
+        button.addEventListener('click', () => runDoctorRepairCenter(
+            String(button.dataset.repairModule || 'all'),
+        ));
+    }
     wrapper.querySelector('.mvuad-undo').addEventListener('click', undoLast);
     wrapper.querySelector('.mvuad-cancel-task').addEventListener('click', cancelCurrentOperations);
     wrapper.querySelector('.mvuad-surface-open').addEventListener('click', (event) => {
@@ -23367,6 +25420,9 @@ function buildSettingsPanel() {
         variableRepairCenterStatus: wrapper.querySelector(
             '.mvuad-variable-repair-center-status',
         ),
+        doctorRepairCenterStatus: wrapper.querySelector(
+            '.mvuad-doctor-repair-center-status',
+        ),
         socialAuditList: wrapper.querySelector('.mvuad-social-audit-list'),
         continuityStatus: wrapper.querySelector('.mvuad-continuity-status'),
         actorProfileStatus: wrapper.querySelector('.mvuad-actor-profile-status'),
@@ -23420,6 +25476,11 @@ function buildSettingsPanel() {
     setVariableRepairCenterStatus(
         latestVariableRepairCenterStatus,
         latestVariableRepairCenterKind,
+        { record: false },
+    );
+    setDoctorRepairCenterStatus(
+        latestDoctorRepairCenterStatus,
+        latestDoctorRepairCenterKind,
         { record: false },
     );
     setSocialStatus(latestSocialStatus, latestSocialKind, { record: false });
@@ -23522,6 +25583,31 @@ async function restoreBranchCheckpointsForSwipe(value, { force = false } = {}) {
     return true;
 }
 
+async function flushAcceptedFinalBeforeForegroundStart() {
+    const endedSession = pendingAcceptedFinalSession;
+    if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
+    pendingAcceptedFinalTimer = null;
+    pendingAcceptedFinalSession = null;
+
+    const waits = [];
+    if (
+        endedSession
+        && endedSession.stopped !== true
+        && endedSession.acceptedFinalEligible === true
+        && acceptedFinalSessionIsCurrent(endedSession)
+    ) {
+        void acceptFinalGeneration(endedSession, { allowHostGenerating: true })
+            .catch(() => undefined);
+        const pendingLaunch = acceptedFinalLaunchPromise(endedSession);
+        if (pendingLaunch) waits.push(pendingLaunch);
+    }
+    const alreadyLaunching = acceptedFinalLaunchPromise(lastGeneration);
+    if (alreadyLaunching && !waits.includes(alreadyLaunching)) {
+        waits.push(alreadyLaunching);
+    }
+    if (waits.length) await Promise.allSettled(waits);
+}
+
 function bindEvents() {
 async function beginForegroundGenerationSession(candidate, dryRun) {
     const starting = Object.freeze({
@@ -23536,12 +25622,19 @@ async function beginForegroundGenerationSession(candidate, dryRun) {
             foregroundGenerationStarting !== starting
             || String(current?.chatId || '') !== starting.chatId
         ) return null;
+        // A new user turn proves that the previous ENDED reply is final even
+        // when the host's 500 ms timer has not fired yet. Finish only the old
+        // accepted-final hand-off through the module launch barriers before
+        // advancing epochs; durable P4 I/O and long Doctor tasks stay async.
+        await flushAcceptedFinalBeforeForegroundStart();
+        if (
+            foregroundGenerationStarting !== starting
+            || String(getContext()?.chatId || '') !== starting.chatId
+        ) return null;
         // P0 owns the host generation lifecycle. A stale P4 lease or an old
         // provider cleanup failure may block only next-turn placement.
         currentGenerationEpoch += 1;
         const epoch = currentGenerationEpoch;
-        if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
-        pendingAcceptedFinalTimer = null;
         const generationType = candidate.generationType;
         const oldOperationEpoch = operationEpoch;
         if (['swipe', 'regenerate'].includes(generationType)) {
@@ -23716,6 +25809,7 @@ async function beginForegroundGenerationSession(candidate, dryRun) {
             }
             if (pendingAcceptedFinalTimer) clearTimeout(pendingAcceptedFinalTimer);
             pendingAcceptedFinalTimer = null;
+            pendingAcceptedFinalSession = null;
             currentGenerationEpoch += 1;
         },
     );
@@ -23753,10 +25847,14 @@ async function beginForegroundGenerationSession(candidate, dryRun) {
             });
             if (session.stopped || session.acceptedFinalEligible !== true) {
                 pendingAcceptedFinalTimer = null;
+                pendingAcceptedFinalSession = null;
                 return;
             }
+            pendingAcceptedFinalSession = session;
             pendingAcceptedFinalTimer = setTimeout(() => {
                 pendingAcceptedFinalTimer = null;
+                if (pendingAcceptedFinalSession !== session) return;
+                pendingAcceptedFinalSession = null;
                 if (rootEpoch === currentGenerationEpoch) {
                     void acceptFinalGeneration(session).then((accepted) => {
                         recordGenerationLifecycleTrace('timer', {
@@ -23783,6 +25881,7 @@ async function beginForegroundGenerationSession(candidate, dryRun) {
             pendingOperationLogSaveTimer = null;
             clearTimeout(pendingAcceptedFinalTimer);
             pendingAcceptedFinalTimer = null;
+            pendingAcceptedFinalSession = null;
             const previousGenerationSession = activeGenerationSession
                 || (activeNextTurnConsumer && lastGeneration?.id ? lastGeneration : null);
             activeGenerationSession = null;
@@ -23835,6 +25934,7 @@ async function beginForegroundGenerationSession(candidate, dryRun) {
             };
             setStatus('等待新的 AI 回复', '', { record: false });
             hydrateVariableRepairCenterStatus(readChatNamespace());
+            hydrateDoctorRepairCenterStatus(readChatNamespace());
             latestSocialAudit = null;
             setSocialStatus('人物关系：等待检查', '', { record: false });
             setActorProfileStatus('人物档案：等待新的最终正文', '', { record: false });
@@ -23856,9 +25956,47 @@ async function beginForegroundGenerationSession(candidate, dryRun) {
 }
 
 async function mutateActorProfileV6(actorId, mutate) {
+    const requestContext = getContext();
+    const chatId = String(requestContext?.chatId || '');
+    const frozenTarget = Object.freeze({
+        chatId,
+        operationEpoch,
+        scopeDigest: actorSovereigntyScopeDigest(currentActorSovereigntyScope(requestContext)),
+    });
+    if (!chatId || !frozenTarget.scopeDigest) {
+        return { applied: false, saved: false, reason: 'manual_target_unavailable' };
+    }
+    if (actorWorldManagementWrite?.chatId === chatId) {
+        return { applied: false, saved: false, reason: 'management_write_pending' };
+    }
+    const task = actorProfileChain
+        .catch(() => undefined)
+        .then(() => mutateActorProfileV6Unlocked(actorId, mutate, frozenTarget));
+    actorProfileChain = task.catch(() => undefined);
+    return task;
+}
+
+async function mutateActorProfileV6Unlocked(actorId, mutate, frozenTarget = null) {
     const context = getContext();
-    const chatId = context?.chatId || '';
+    const chatId = String(frozenTarget?.chatId || '');
+    const targetIsCurrent = () => {
+        const freshContext = getContext();
+        return !!(
+            frozenTarget
+            && chatId
+            && Number(frozenTarget.operationEpoch) === Number(operationEpoch)
+            && String(freshContext?.chatId || '') === chatId
+            && String(frozenTarget.scopeDigest || '')
+                === actorSovereigntyScopeDigest(currentActorSovereigntyScope(freshContext))
+        );
+    };
     if (!chatId || typeof mutate !== 'function') return { applied: false, reason: 'chat_missing' };
+    if (!targetIsCurrent()) {
+        return { applied: false, saved: false, reason: 'chat_context_changed' };
+    }
+    if (actorWorldManagementWrite?.chatId === String(chatId)) {
+        return { applied: false, saved: false, reason: 'management_write_pending' };
+    }
     // This preflight is deliberately read-only.  Migration may durably write
     // its namespace, so a sealed S2 row must be rejected before it runs.
     const preflightLedger = normalizeActorLedger(readChatNamespace(context).actorLedger, { chatId });
@@ -23882,7 +26020,10 @@ async function mutateActorProfileV6(actorId, mutate) {
     }
     const migration = await ensureActorSovereigntyMigrationPersisted(context);
     if (!migration.ok) return { applied: false, reason: migration.reason };
-    const namespace = migration.namespace || readChatNamespace(context);
+    if (!targetIsCurrent()) {
+        return { applied: false, saved: false, reason: 'chat_context_changed' };
+    }
+    let namespace = migration.namespace || readChatNamespace(context);
     const ledger = normalizeActorLedger(namespace.actorLedger, { chatId });
     const index = ledger.actors.findIndex((actor) => actor.id === String(actorId || ''));
     if (index < 0) return { applied: false, reason: 'actor_missing' };
@@ -23909,14 +26050,71 @@ async function mutateActorProfileV6(actorId, mutate) {
         };
     }
     if (!result?.profile) return { applied: false, reason: result?.reason || 'profile_invalid' };
-    ledger.actors[index] = { ...actor, profileV6: result.profile };
-    namespace.actorLedger = ledger;
-    const saved = await writeChatNamespace(namespace, chatId, {
-        fields: ['actorLedger'],
-        durable: true,
-    });
-    if (saved) renderActorProfiles(namespace);
-    return { ...result, applied: result.applied !== false && saved, saved };
+    const scopeDigest = String(
+        ledger.actorRegistry?.scopeDigest
+        || actorSovereigntyScopeDigest(namespace.actorSovereigntyScope)
+        || '',
+    );
+    let baseLedger = deepClone(ledger);
+    let candidateLedger = deepClone(ledger);
+    candidateLedger.actors[index] = { ...actor, profileV6: deepClone(result.profile) };
+    let candidateState = stage3FieldState(namespace, 'actorLedger');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        namespace = readChatNamespace(getContext());
+        if (!targetIsCurrent()) {
+            return { ...result, applied: false, saved: false, reason: 'chat_context_changed' };
+        }
+        namespace.actorLedger = candidateLedger;
+        const failureSink = {};
+        const successSink = {};
+        const saved = await writeChatNamespace(namespace, chatId, {
+            fields: ['actorLedger'],
+            durable: true,
+            force: true,
+            requireReadback: true,
+            readbackAttempts: 3,
+            failureSink,
+            successSink,
+            expectedFieldStates: { actorLedger: candidateState },
+            precondition: () => (
+                targetIsCurrent()
+                && !actorWorldManagementWrite
+            ),
+            contentValidator: (persisted) => (
+                actorLedgerDigest(persisted?.actorLedger) === actorLedgerDigest(candidateLedger)
+            ),
+        });
+        if (saved) {
+            const readbackNamespace = successSink.readbackNamespace || namespace;
+            renderActorProfiles(readbackNamespace);
+            return { ...result, applied: true, saved: true };
+        }
+        if (attempt > 0 || !actorProfileActorLedgerCasCanRebase(failureSink)) {
+            return {
+                ...result,
+                applied: false,
+                saved: false,
+                reason: failureSink.code || 'host_save_rejected',
+            };
+        }
+        let freshNamespace = readChatNamespace(getContext());
+        let rebased = actorProfileRebaseOnWorldOnlyLedgerDrift({
+            baseLedger,
+            desiredLedger: candidateLedger,
+            freshLedger: freshNamespace.actorLedger,
+            targetActorIds: [String(actorId || '')],
+            chatId: String(chatId),
+            scopeDigest,
+            verifiedCurrentSourceActorIds: [String(actorId || '')],
+        });
+        if (!rebased.ok) {
+            return { ...result, applied: false, saved: false, reason: rebased.reason };
+        }
+        baseLedger = normalizeActorLedger(freshNamespace.actorLedger, { chatId, scopeDigest });
+        candidateLedger = rebased.ledger;
+        candidateState = stage3FieldState(freshNamespace, 'actorLedger');
+    }
+    return { ...result, applied: false, saved: false, reason: 'host_save_rejected' };
 }
 
 async function initialize() {
@@ -23933,6 +26131,7 @@ async function initialize() {
     bindEvents();
     lastUndo = latestUndoRecord(readChatNamespace());
     hydrateVariableRepairCenterStatus(readChatNamespace());
+    hydrateDoctorRepairCenterStatus(readChatNamespace());
     window.MvuAutoDoctorAPI = Object.freeze({
         version: VERSION,
         apiVersion: 9,

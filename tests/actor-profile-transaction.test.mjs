@@ -125,8 +125,8 @@ test('profile commit is durable, content-verified, fail-closed, and accepted onl
     );
     assert.equal(
         (source.match(/chatScope: fingerprint\(String\(captured\.chatId \|\| ''\)\)/gu) || []).length,
-        2,
-        'both asynchronous P1 summary diagnostics must retain the captured chat scope',
+        3,
+        'all asynchronous P1 summary and terminal diagnostics must retain the captured chat scope',
     );
     const pendingWriteAt = batchSource.indexOf('pendingPersisted = await persistPendingBatch');
     const pendingReadbackAt = batchSource.indexOf('const pendingReadbackOk');
@@ -201,9 +201,9 @@ test('stale swipe checks precede materialization and scheduling follows persiste
     );
     const runtime = sourceBetween(
         'async function runContinuityTarget',
-        'async function confirmDangerousAction',
+        'async function enqueueContinuity(targetId',
     );
-    assert.doesNotMatch(runtime, /completeActorProfilesForTurn|discovery|upsert|promotion|actorRegistry|profile completion/u);
+    assert.doesNotMatch(runtime, /completeActorProfilesForTurn\(|enqueueActorProfiles\(/u);
 });
 
 test('continuity has no profile macro write entrance and rejects the retired root field', async () => {

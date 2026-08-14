@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 
 import {
     buildVariableRepairPlan,
@@ -142,21 +143,31 @@ test('journal keeps five undo records and twenty-five small bug capsules', () =>
             createdAt: index,
             snapshot: { value: index },
         })),
-        ...Array.from({ length: 31 }, (_, index) => ({
+        ...Array.from({ length: 16 }, (_, index) => ({
             id: `bug_${index}`,
             repairKind: 'doctor-variable-repair-center',
             status: 'needs_update',
             createdAt: 100 + index,
         })),
+        ...Array.from({ length: 15 }, (_, index) => ({
+            id: `unified_${index}`,
+            repairKind: 'doctor-unified-repair-center',
+            status: 'needs_update',
+            createdAt: 200 + index,
+        })),
     ];
     const compacted = compactRepairJournalWithVariableCapsules(journal);
     assert.equal(compacted.length, 30);
     assert.equal(compacted.filter((entry) => entry.repairKind === 'variable-audit').length, 5);
+    assert.equal(compacted.filter((entry) => [
+        'doctor-variable-repair-center',
+        'doctor-unified-repair-center',
+    ].includes(entry.repairKind)).length, 25);
     assert.equal(compacted.filter(
-        (entry) => entry.repairKind === 'doctor-variable-repair-center',
-    ).length, 25);
+        (entry) => entry.repairKind === 'doctor-unified-repair-center',
+    ).length, 15);
     assert.equal(compacted.some((entry) => entry.id === 'undo_8'), true);
-    assert.equal(compacted.some((entry) => entry.id === 'bug_30'), true);
+    assert.equal(compacted.some((entry) => entry.id === 'unified_14'), true);
 });
 
 test('projection exposes only counts, fixed codes, timing and readback proof', () => {
@@ -190,17 +201,25 @@ test('projection exposes only counts, fixed codes, timing and readback proof', (
 });
 
 test('production adapter stays independent from actor and world repair flows', () => {
-    const start = indexSource.indexOf('async function runVariableSafeRepair()');
+    const start = indexSource.indexOf('async function runVariableSafeRepair({');
     const end = indexSource.indexOf('function renderSocialAudit()', start);
     assert.ok(start >= 0 && end > start);
     const adapter = indexSource.slice(start, end);
     assert.match(adapter, /queuedTarget:\s*repairTarget/u);
     assert.match(adapter, /expectedTarget:\s*repairTarget/u);
     assert.match(adapter, /continuationGuard:\s*repairStillCurrent/u);
+    assert.match(adapter, /expectedTarget\s*=\s*null/u);
+    assert.match(adapter, /doctorRepairCenterTargetIsCurrent\(captured\)/u);
+    assert.match(adapter, /persistVariableRepairBugCapsule\([\s\S]*continuationGuard/u);
     assert.match(adapter, /variable\.repair\.chat_changed/u);
     assert.match(adapter, /enqueueOpeningResourceSync/u);
     assert.doesNotMatch(adapter, /enqueueActorProfiles|enqueueContinuity/u);
     assert.match(indexSource, /runVariableSafeRepair,/u);
+    const enqueueStart = indexSource.indexOf('function enqueue(targetId, options = {})');
+    const enqueueEnd = indexSource.indexOf('async function undoLastUnlocked()', enqueueStart);
+    const enqueueSource = indexSource.slice(enqueueStart, enqueueEnd);
+    assert.match(enqueueSource, /runTarget\(targetId, queuedOptions\)[\s\S]*recordVariableFinalDiagnostic\([\s\S]*queuedTarget,[\s\S]*result/u);
+    assert.match(indexSource, /recordVariableFinalDiagnostic\.toString\(\)/u);
     assert.match(indexSource, /安全修复变量/u);
     const commitStart = indexSource.indexOf('async function commitCandidateUnlocked(');
     const commitEnd = indexSource.indexOf('function commitCandidate(', commitStart);
@@ -228,4 +247,77 @@ test('production adapter stays independent from actor and world repair flows', (
         executeVariableRepairPlan: async function changedVariableRepairExecutor() {},
     }), semantic);
     assert.match(indexSource, /variableRepairCenterSemanticFingerprint\(\)/u);
+});
+
+test('production variable repair continuously guards outcome, journal precondition, and final UI', async () => {
+    const start = indexSource.indexOf('async function persistVariableRepairBugCapsule(');
+    const end = indexSource.indexOf('function renderSocialAudit()', start);
+    assert.ok(start >= 0 && end > start);
+    const production = indexSource.slice(start, end);
+    const exercise = async ({ loseAfterOutcome = false, loseInsideJournal = false, noArgs = false } = {}) => {
+        const state = { current: true, writes: 0, statuses: [], captures: 0 };
+        const captured = { chatId: 'chat-a', index: 4, digest: 'deadbeef' };
+        const sandbox = {
+            getContext: () => ({ chatId: 'chat-a' }),
+            latestAiMessage: () => ({ index: 4 }),
+            captureTarget: () => { state.captures += 1; return captured; },
+            doctorRepairTargetIdentityDigest: (target) => target?.digest || '',
+            doctorRepairCenterTargetIsCurrent: () => state.current,
+            variableRepairForegroundActive: () => false,
+            getSettings: () => ({ normalizeOpeningResources: false }),
+            buildVariableRepairPlan,
+            setVariableRepairCenterStatus: (...args) => state.statuses.push(args),
+            variableRepairEvidenceForTarget: () => ({ modelCallCount: 0 }),
+            variableRepairEvidenceDelta: () => ({ modelCallCount: 0 }),
+            executeVariableRepairPlan: async () => {
+                if (loseAfterOutcome) state.current = false;
+                return {
+                    status: 'completed', code: 'variable.repair.completed',
+                    completedAt: 10, actions: [],
+                };
+            },
+            createVariableRepairBugCapsule,
+            doctorRuntimeCriticalFingerprint: () => 'runtime-critical:1:abcd',
+            fingerprint: () => 'deadbeef',
+            readChatNamespace: () => ({ repairJournal: [] }),
+            appendRepairJournal: (namespace, capsule) => ({
+                ...namespace, repairJournal: [...namespace.repairJournal, capsule],
+            }),
+            compactRepairJournalWithVariableCapsules: (journal) => journal,
+            persistDoctorRepairCapsuleBatch: async (_capsules, _chatId, guard) => {
+                if (loseInsideJournal) state.current = false;
+                if (!guard()) return false;
+                state.writes += 1;
+                return true;
+            },
+            writeRepairJournal: async (_journal, _chatId, options) => {
+                if (loseInsideJournal) state.current = false;
+                if (!options.precondition()) return false;
+                state.writes += 1;
+                return true;
+            },
+            deepClone: (value) => structuredClone(value),
+        };
+        vm.runInNewContext(`${production}\nthis.run = runVariableSafeRepair;`, sandbox);
+        const result = noArgs
+            ? await sandbox.run()
+            : await sandbox.run({ expectedTarget: captured, continuationGuard: () => state.current });
+        return { result, state };
+    };
+
+    const outcomeLost = await exercise({ loseAfterOutcome: true });
+    assert.equal(outcomeLost.result.status, 'cancelled');
+    assert.equal(outcomeLost.state.writes, 0);
+    assert.equal(outcomeLost.state.statuses.length, 1);
+
+    const journalLost = await exercise({ loseInsideJournal: true });
+    assert.equal(journalLost.result.status, 'cancelled');
+    assert.equal(journalLost.state.writes, 0);
+    assert.equal(journalLost.state.statuses.length, 1);
+
+    const legacy = await exercise({ noArgs: true });
+    assert.equal(legacy.result.status, 'completed');
+    assert.equal(legacy.state.captures, 1);
+    assert.equal(legacy.state.writes, 1);
+    assert.equal(legacy.state.statuses.length, 2);
 });

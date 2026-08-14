@@ -178,6 +178,7 @@ export function createVariableRepairBugCapsule({
         chatScopeDigest: safeCode(chatScopeDigest),
         targetIndex: Number.isInteger(Number(plan?.targetIndex))
             ? Number(plan.targetIndex) : -1,
+        targetDigest: safeCode(plan?.targetDigest),
         trigger: 'manual_safe_repair',
         planCode: safeCode(plan?.code, 'variable.repair.plan_unknown'),
         outcomeCode: safeCode(outcome?.code, 'variable.repair.outcome_unknown'),
@@ -202,11 +203,15 @@ export function compactRepairJournalWithVariableCapsules(journal, {
     maxBugCapsules = 25,
 } = {}) {
     const source = Array.isArray(journal) ? journal : [];
+    const isDoctorBugCapsule = (entry) => [
+        'doctor-variable-repair-center',
+        'doctor-unified-repair-center',
+    ].includes(entry?.repairKind);
     const capsules = source.filter(
-        (entry) => entry?.repairKind === 'doctor-variable-repair-center',
+        isDoctorBugCapsule,
     ).slice(-Math.max(1, nonNegativeInteger(maxBugCapsules) || 25));
     const operational = source.filter(
-        (entry) => entry?.repairKind !== 'doctor-variable-repair-center',
+        (entry) => !isDoctorBugCapsule(entry),
     ).slice(-Math.max(1, nonNegativeInteger(maxUndoRecords) || 5));
     return [...operational, ...capsules].sort(
         (left, right) => nonNegativeInteger(left?.createdAt) - nonNegativeInteger(right?.createdAt),

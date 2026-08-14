@@ -3664,8 +3664,12 @@ test('real P1 pending and final writers rebase once over a P3 ATT win without lo
     let writes = 0;
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const helperSource = indexSource.slice(
-        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('function actorProfileWorldOnlyLedgerDrift'),
         indexSource.indexOf('async function completeActorProfilesForTurn'),
+    );
+    const targetKeySource = indexSource.slice(
+        indexSource.indexOf('function stage3AcceptedTarget(captured)'),
+        indexSource.indexOf('function stage3LegacyTargetNeedsManualReconciliation'),
     );
     const sandbox = {
         normalizeActorLedger,
@@ -3677,6 +3681,7 @@ test('real P1 pending and final writers rebase once over a P3 ATT win without lo
         sourceRefOf: () => structuredClone(fixture.ref),
         freshFrozenScopeGuard: async () => ({ ok: true }),
         continuityTargetIsCurrent: () => ({ ok: true }),
+        continuityPendingKeys: new Map(),
         getContext: () => ({ chatId: fixture.ref.chatId }),
         readChatNamespace: () => structuredClone(liveNamespace),
         writeChatNamespace: async (candidate, _chatId, options) => {
@@ -3699,7 +3704,9 @@ test('real P1 pending and final writers rebase once over a P3 ATT win without lo
         },
     };
     vm.runInNewContext(
-        `${helperSource}\nthis.persistProfile = persistActorProfilePhaseWithWorldRebase;`,
+        `${targetKeySource}\n${helperSource}\n`
+        + 'this.stage3TargetKey = stage3AcceptedTargetKey;\n'
+        + 'this.persistProfile = persistActorProfilePhaseWithWorldRebase;',
         sandbox,
     );
     const pending = await sandbox.persistProfile(captured, {
@@ -3855,8 +3862,12 @@ test('P1 reveal waits for current-target P3 ATT but preserves and ignores an old
     let writes = 0;
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const helperSource = indexSource.slice(
-        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('function actorProfileWorldOnlyLedgerDrift'),
         indexSource.indexOf('async function completeActorProfilesForTurn'),
+    );
+    const targetKeySource = indexSource.slice(
+        indexSource.indexOf('function stage3AcceptedTarget(captured)'),
+        indexSource.indexOf('function stage3LegacyTargetNeedsManualReconciliation'),
     );
     const captured = { ...fixture.ref, epoch: 1, fingerprint: fixture.ref.contentFingerprint };
     const sandbox = {
@@ -3883,6 +3894,7 @@ test('P1 reveal waits for current-target P3 ATT but preserves and ignores an old
         sourceRefOf: () => structuredClone(fixture.ref),
         freshFrozenScopeGuard: async () => ({ ok: true }),
         continuityTargetIsCurrent: () => ({ ok: true }),
+        continuityPendingKeys: new Map(),
         getContext: () => ({ chatId: fixture.ref.chatId }),
         readChatNamespace: () => structuredClone(liveNamespace),
         writeChatNamespace: async (candidate, _chatId, options) => {
@@ -3904,9 +3916,12 @@ test('P1 reveal waits for current-target P3 ATT but preserves and ignores an old
         },
     };
     vm.runInNewContext(
-        `${helperSource}\nthis.persistProfile = persistActorProfilePhaseWithWorldRebase;`,
+        `${targetKeySource}\n${helperSource}\n`
+        + 'this.stage3TargetKey = stage3AcceptedTargetKey;\n'
+        + 'this.persistProfile = persistActorProfilePhaseWithWorldRebase;',
         sandbox,
     );
+    sandbox.continuityPendingKeys.set(sandbox.stage3TargetKey(captured), Symbol('p3-owner'));
     const pending = await sandbox.persistProfile(captured, {
         ledger: pendingPayload.ledger,
         baseLedger,
@@ -3935,6 +3950,7 @@ test('P1 reveal waits for current-target P3 ATT but preserves and ignores an old
     assert.ok(actorProfileReadyForAction(actor));
     assert.equal(liveNamespace.continuityCheckpoint.stage3Phase, 'world_committed');
     assert.equal(final.ledger.actionReceipts.some((entry) => entry.status === 'pending_world'), false);
+    sandbox.continuityPendingKeys.clear();
 
     const oldTarget = {
         ...worldTarget,
@@ -4058,7 +4074,7 @@ test('real P1 registry writer rebases one new ActorRef over a P3 ATT win and pre
         indexSource.indexOf('async function persistActorActionAttemptsForTurn'),
     );
     const rebaseSource = indexSource.slice(
-        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('function actorProfileWorldOnlyLedgerDrift'),
         indexSource.indexOf('async function persistActorProfilePhaseWithWorldRebase'),
     );
     const captured = {
@@ -4138,8 +4154,12 @@ test('P1 writer rejects profile drift and bounds repeated actor CAS failure with
     const pendingPayload = preparedRun.persistencePayloads[0];
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const helperSource = indexSource.slice(
-        indexSource.indexOf('function actorProfileRebaseOnWorldOnlyLedgerDrift'),
+        indexSource.indexOf('function actorProfileWorldOnlyLedgerDrift'),
         indexSource.indexOf('async function completeActorProfilesForTurn'),
+    );
+    const targetKeySource = indexSource.slice(
+        indexSource.indexOf('function stage3AcceptedTarget(captured)'),
+        indexSource.indexOf('function stage3LegacyTargetNeedsManualReconciliation'),
     );
     const captured = { ...fixture.ref, epoch: 1, fingerprint: fixture.ref.contentFingerprint };
     const runCase = async (profileDrift) => {
@@ -4160,6 +4180,7 @@ test('P1 writer rejects profile drift and bounds repeated actor CAS failure with
             sourceRefOf: () => structuredClone(fixture.ref),
             freshFrozenScopeGuard: async () => ({ ok: true }),
             continuityTargetIsCurrent: () => ({ ok: true }),
+            continuityPendingKeys: new Map(),
             getContext: () => ({ chatId: fixture.ref.chatId }),
             readChatNamespace: () => structuredClone(liveNamespace),
             writeChatNamespace: async (_candidate, _chatId, options) => {
@@ -4170,7 +4191,9 @@ test('P1 writer rejects profile drift and bounds repeated actor CAS failure with
             },
         };
         vm.runInNewContext(
-            `${helperSource}\nthis.persistProfile = persistActorProfilePhaseWithWorldRebase;`,
+            `${targetKeySource}\n${helperSource}\n`
+            + 'this.stage3TargetKey = stage3AcceptedTargetKey;\n'
+            + 'this.persistProfile = persistActorProfilePhaseWithWorldRebase;',
             sandbox,
         );
         const result = await sandbox.persistProfile(captured, {
@@ -4778,8 +4801,33 @@ test('public narrative profile mutations are read-only before migration or names
         'ensureActorSovereigntyMigrationPersisted',
         'writeChatNamespace',
         'renderActorProfiles',
+        'actorSovereigntyScopeDigest',
+        'currentActorSovereigntyScope',
+        'operationEpoch',
+        'actorWorldManagementWrite',
+        'actorProfileChain',
+        'deepClone',
+        'stage3FieldState',
+        'actorProfileActorLedgerCasCanRebase',
+        'actorProfileRebaseOnWorldOnlyLedgerDrift',
+        'actorLedgerDigest',
         `${publicMutation}\nreturn mutateActorProfileV6;`,
     );
+    const mutationDependencies = (actorProfileChain = Promise.resolve()) => [
+        (scope) => String(scope?.digest || ''),
+        (context) => context?.scope || null,
+        7,
+        null,
+        actorProfileChain,
+        (value) => structuredClone(value),
+        (namespace) => ({
+            revision: Number(namespace?.fieldRevisions?.actorLedger) || 0,
+            digest: JSON.stringify(namespace?.actorLedger || null),
+        }),
+        () => false,
+        () => ({ ok: false, reason: 'unexpected_rebase' }),
+        (ledger) => JSON.stringify(ledger || null),
+    ];
     const publicProfileApi = source.slice(
         source.indexOf('setActorProfileV6Lock: (actorId, path, locked = true)'),
         source.indexOf('getActorActionReceipts:'),
@@ -4801,7 +4849,7 @@ test('public narrative profile mutations are read-only before migration or names
     let migrationCalls = 0;
     let namespaceWrites = 0;
     const mutateNarrative = buildMutation(
-        () => ({ chatId: 'chat-narrative' }),
+        () => ({ chatId: 'chat-narrative', scope: { digest: 'scope-narrative' } }),
         (ledger) => ledger,
         () => ({ actorLedger: narrativeLedger }),
         async () => {
@@ -4813,6 +4861,7 @@ test('public narrative profile mutations are read-only before migration or names
             return true;
         },
         () => assert.fail('read-only narrative mutation must not render a saved result'),
+        ...mutationDependencies(),
     );
     const unexpectedCoreMutation = () => assert.fail('narrative public API must not invoke its core mutation');
     const api = buildPublicProfileApi(
@@ -4840,7 +4889,7 @@ test('public narrative profile mutations are read-only before migration or names
     const legacyLedger = { actors: [{ id: 'actor-legacy', profileV6: { profileFormat: 'v6' } }] };
     let legacyWrites = 0;
     const mutateLegacy = buildMutation(
-        () => ({ chatId: 'chat-legacy' }),
+        () => ({ chatId: 'chat-legacy', scope: { digest: 'scope-legacy' } }),
         (ledger) => ledger,
         () => ({ actorLedger: legacyLedger }),
         async () => ({ ok: true, namespace: { actorLedger: legacyLedger } }),
@@ -4849,6 +4898,7 @@ test('public narrative profile mutations are read-only before migration or names
             return true;
         },
         () => {},
+        ...mutationDependencies(),
     );
     const legacyResult = await mutateLegacy('actor-legacy', () => ({
         profile: { profileFormat: 'v6', legacy: true },
@@ -4857,6 +4907,47 @@ test('public narrative profile mutations are read-only before migration or names
     assert.equal(legacyResult.applied, true);
     assert.equal(legacyResult.saved, true);
     assert.equal(legacyWrites, 1, 'legacy V6 mutation still reaches its existing writer');
+
+    for (const switchKind of ['chat', 'scope']) {
+        let releaseTail;
+        const priorTail = new Promise((resolve) => { releaseTail = resolve; });
+        let current = { chatId: 'chat-a', scope: { digest: 'scope-a' } };
+        const sharedLedger = {
+            actorRegistry: { scopeDigest: 'scope-a' },
+            actors: [{ id: 'shared-actor', profileV6: { profileFormat: 'v6' } }],
+        };
+        let crossTargetMigrations = 0;
+        let crossTargetWrites = 0;
+        const mutateQueued = buildMutation(
+            () => current,
+            (ledger) => ledger,
+            () => ({ actorLedger: sharedLedger }),
+            async () => {
+                crossTargetMigrations += 1;
+                return { ok: true, namespace: { actorLedger: sharedLedger } };
+            },
+            async () => {
+                crossTargetWrites += 1;
+                return true;
+            },
+            () => assert.fail('stale queued mutation must never render'),
+            ...mutationDependencies(priorTail),
+        );
+        const queued = mutateQueued('shared-actor', () => ({
+            profile: { profileFormat: 'v6', changed: true },
+            applied: true,
+        }));
+        current = switchKind === 'chat'
+            ? { chatId: 'chat-b', scope: { digest: 'scope-b' } }
+            : { chatId: 'chat-a', scope: { digest: 'scope-b' } };
+        releaseTail();
+        const stale = await queued;
+        assert.equal(stale.applied, false);
+        assert.equal(stale.saved, false);
+        assert.equal(stale.reason, 'chat_context_changed');
+        assert.equal(crossTargetMigrations, 0, `${switchKind} drift must stop before migration`);
+        assert.equal(crossTargetWrites, 0, `${switchKind} drift must write neither chat`);
+    }
 });
 
 test('production path keeps current-source profiles untruncated and commits through pending plus final readbacks', async () => {

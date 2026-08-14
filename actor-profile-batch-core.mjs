@@ -2124,6 +2124,7 @@ export async function completeActorProfileBatchTransaction({
     try {
         pendingPersisted = await persistPendingBatch({
             ledger: workingLedger,
+            persistenceBaseLedger: clone(resolved.persistenceBaseLedger || null),
             expectedCommits,
             expectedState: clone(resolved.snapshot || null),
             preparedLedgerDigest,
