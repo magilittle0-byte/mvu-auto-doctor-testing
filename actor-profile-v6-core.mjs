@@ -708,6 +708,12 @@ export function parseActorProfileModuleGroupOutput(output, group, {
     };
     const expectedCoverage = Array.isArray(group?.discoveryCoverage?.units)
         ? group.discoveryCoverage.units : [];
+    let coverageCursor = 0;
+    const coverageUnitOffsets = new Map(expectedCoverage.map((unit) => {
+        const entry = [unit.id, coverageCursor];
+        coverageCursor += String(unit?.text || '').length;
+        return entry;
+    }));
     const coverageTargetSources = new Map();
     const registeredById = new Map((Array.isArray(registeredActorIndex)
         ? registeredActorIndex : []).map((entry) => [
@@ -774,6 +780,7 @@ export function parseActorProfileModuleGroupOutput(output, group, {
                 if (actorId && name && !coverageTargetSources.has(targetKey)) {
                     coverageTargetSources.set(targetKey, {
                         coverageUnitId: unitId,
+                        sourceUnitOffset: coverageUnitOffsets.get(unitId) ?? -1,
                         sourceAnchor: expected.text,
                         evidenceSpan,
                     });
@@ -916,6 +923,7 @@ export function parseActorProfileModuleGroupOutput(output, group, {
                 identityReveal: true,
                 previousName: registered.displayName,
                 coverageUnitId: routeSource.coverageUnitId,
+                sourceUnitOffset: routeSource.sourceUnitOffset,
                 sourceAnchor: routeSource.sourceAnchor,
                 evidenceSpan: routeSource.evidenceSpan,
             });
@@ -926,6 +934,7 @@ export function parseActorProfileModuleGroupOutput(output, group, {
             name,
             modules,
             coverageUnitId: routeSource?.coverageUnitId || '',
+            sourceUnitOffset: routeSource?.sourceUnitOffset ?? -1,
             sourceAnchor: routeSource?.sourceAnchor || '',
         });
     }
@@ -4399,7 +4408,7 @@ function normalizeProfileInsertCandidate(raw, repairs = null) {
             candidateRef: String(rawCandidateRef.name || '').trim().slice(0, 160)
                 ? {
                     name: String(rawCandidateRef.name || '').trim().slice(0, 160),
-                    sourceAnchor: String(rawCandidateRef.sourceAnchor || '').trim().slice(0, 1200),
+                    sourceAnchor: String(rawCandidateRef.sourceAnchor || '').slice(0, 1200),
                 }
                 : null,
             // A loose-object transport can carry prose, never authority. The
@@ -4422,7 +4431,7 @@ function normalizeProfileInsertCandidate(raw, repairs = null) {
     );
     const sourceAnchor = String(
         rawCandidateRef.sourceAnchor || rawCandidateRef.source_anchor || '',
-    ).trim().slice(0, 1200);
+    ).slice(0, 1200);
     const identity = normalizeLooseProfileSection(normalizedRaw, 'identity');
     const personality = {
         ...normalizeLooseProfileSection(normalizedRaw, 'personality'),
@@ -5312,7 +5321,7 @@ export function isVagueActorProfileDiscoveryName(name) {
 
 export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative) {
     const name = String(candidateRef?.name || '').trim().slice(0, 160);
-    const sourceAnchor = String(candidateRef?.sourceAnchor || '').trim().slice(0, 1200);
+    const sourceAnchor = String(candidateRef?.sourceAnchor || '').slice(0, 1200);
     const narrative = String(acceptedNarrative || '');
     const failure = (reason) => ({
         ok: false,
@@ -5331,10 +5340,40 @@ export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrat
     if (narrative.indexOf(sourceAnchor) < 0) {
         return failure('actor_profile.discovery_anchor_not_in_narrative');
     }
-    // The dossier title supplies an explicit literal name.  That name may
-    // naturally recur in prose: use its first offset only for deterministic
-    // ordering/ticket binding, never as a uniqueness gate.
-    const offset = narrative.indexOf(name);
+    const explicitOffset = candidateRef?.sourceOffset;
+    let offset = -1;
+    if (Number.isInteger(explicitOffset) && explicitOffset >= 0) {
+        const explicitUnitOffset = candidateRef?.sourceUnitOffset;
+        const hasExplicitUnitOffset = Number.isInteger(explicitUnitOffset)
+            && explicitUnitOffset >= 0;
+        const anchorStarts = hasExplicitUnitOffset
+            ? (narrative.slice(explicitUnitOffset, explicitUnitOffset + sourceAnchor.length)
+                === sourceAnchor ? [explicitUnitOffset] : [])
+            : [];
+        if (!hasExplicitUnitOffset) {
+            let from = 0;
+            while (from <= narrative.length - sourceAnchor.length) {
+                const anchorStart = narrative.indexOf(sourceAnchor, from);
+                if (anchorStart < 0) break;
+                anchorStarts.push(anchorStart);
+                from = anchorStart + Math.max(1, sourceAnchor.length);
+            }
+        }
+        const insideTrustedAnchor = anchorStarts.some((anchorStart) => (
+            explicitOffset >= anchorStart
+            && explicitOffset + name.length <= anchorStart + sourceAnchor.length
+        ));
+        if (
+            narrative.slice(explicitOffset, explicitOffset + name.length) !== name
+            || !insideTrustedAnchor
+        ) return failure('actor_profile.discovery_source_offset_invalid');
+        offset = explicitOffset;
+    } else {
+        // Legacy callers without an authority-bound offset keep first-literal
+        // ordering. New identity batches provide the verified independent
+        // occurrence so a shorter key nested in a longer key cannot steal it.
+        offset = narrative.indexOf(name);
+    }
     if (offset < 0) return failure('actor_profile.discovery_anchor_not_in_narrative');
     return {
         ok: true,
@@ -5552,8 +5591,7 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
         }
         const actorId = cleanText(normalized?.actorRef?.actorId, 120);
         const candidateName = cleanText(normalized?.candidateRef?.name, 160);
-        const sourceAnchor = String(normalized?.candidateRef?.sourceAnchor || '')
-            .trim().slice(0, 1200);
+        const sourceAnchor = String(normalized?.candidateRef?.sourceAnchor || '').slice(0, 1200);
         if (actorId && (candidateName || sourceAnchor)) {
             unexpected.push({
                 actorId,

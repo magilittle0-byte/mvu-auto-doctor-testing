@@ -233,12 +233,136 @@ export function actorProfileFinalCandidateClosure({
     return { allCandidates, resolutionFailures, groupRowFailures };
 }
 
+export function actorProfileDiscoverySourceOrder(discoveries = [], acceptedNarrative = '') {
+    const narrative = String(acceptedNarrative || '');
+    const rows = (Array.isArray(discoveries) ? discoveries : []).map((entry, index) => ({
+        entry,
+        index,
+        name: cleanText(entry?.name, 160),
+        sourceAnchor: String(entry?.sourceAnchor || '').slice(0, 1200),
+        sourceUnitOffset: Number.isInteger(entry?.sourceUnitOffset)
+            ? entry.sourceUnitOffset : NaN,
+    }));
+    const occurrences = (name, start = 0, end = narrative.length) => {
+        const offsets = [];
+        if (!name) return offsets;
+        let from = Math.max(0, start);
+        const limit = Math.min(narrative.length, end);
+        while (from <= limit - name.length) {
+            const offset = narrative.indexOf(name, from);
+            if (offset < 0 || offset + name.length > limit) break;
+            offsets.push(offset);
+            from = offset + Math.max(1, name.length);
+        }
+        return offsets;
+    };
+    const unitStartsFor = (row) => {
+        const hasExplicitUnitOffset = Number.isInteger(row.sourceUnitOffset)
+            && row.sourceUnitOffset >= 0;
+        if (hasExplicitUnitOffset) {
+            return narrative.slice(
+                row.sourceUnitOffset,
+                row.sourceUnitOffset + row.sourceAnchor.length,
+            ) === row.sourceAnchor ? [row.sourceUnitOffset] : [];
+        }
+        const starts = [];
+        let from = 0;
+        while (row.sourceAnchor && from <= narrative.length - row.sourceAnchor.length) {
+            const offset = narrative.indexOf(row.sourceAnchor, from);
+            if (offset < 0) break;
+            starts.push(offset);
+            from = offset + Math.max(1, row.sourceAnchor.length);
+        }
+        return starts.length === 1 ? starts : [];
+    };
+    const rowOccurrences = new Map(rows.map((row) => [row.index,
+        unitStartsFor(row).flatMap((unitStart) => occurrences(
+            row.name,
+            unitStart,
+            unitStart + row.sourceAnchor.length,
+        ).map((offset) => ({
+            name: row.name,
+            offset,
+            end: offset + row.name.length,
+            unitStart,
+        }))),
+    ]));
+    const spans = [...rowOccurrences.values()].flat();
+    const ordered = [];
+    const failures = [];
+    for (const row of rows) {
+        const anchor = validateActorProfileDiscoveryAnchor({
+            name: row.name,
+            sourceAnchor: row.sourceAnchor,
+            sourceUnitOffset: Number.isInteger(row.sourceUnitOffset)
+                ? row.sourceUnitOffset : undefined,
+        }, narrative);
+        if (!anchor.ok) {
+            failures.push({
+                name: row.name,
+                reason: anchor.reason || 'actor_profile.discovery_anchor_invalid',
+                retryable: false,
+            });
+            continue;
+        }
+        const independentOccurrence = (rowOccurrences.get(row.index) || []).find((occurrence) => {
+            return !spans.some((span) => (
+                span.name !== row.name
+                && span.name.length > row.name.length
+                && span.unitStart === occurrence.unitStart
+                && span.offset <= occurrence.offset
+                && span.end >= occurrence.end
+            ));
+        });
+        if (!Number.isInteger(independentOccurrence?.offset)) {
+            failures.push({
+                name: row.name,
+                reason: 'actor_profile.discovery_source_offset_ambiguous',
+                retryable: false,
+            });
+            continue;
+        }
+        const sourceAnchor = row.sourceAnchor;
+        const sourceOrdinal = Number.isInteger(row.entry?.sourceOrdinal)
+            && row.entry.sourceOrdinal >= 0
+            ? row.entry.sourceOrdinal : row.index;
+        ordered.push({
+            entry: {
+                ...row.entry,
+                sourceAnchor,
+                sourceUnitOffset: independentOccurrence.unitStart,
+                sourceOffset: independentOccurrence.offset,
+                sourceOrdinal,
+            },
+            anchor: {
+                ...anchor,
+                offset: independentOccurrence.offset,
+                sourceAnchor,
+                sourceUnitOffset: independentOccurrence.unitStart,
+            },
+            sourceEnd: independentOccurrence.end,
+            inputIndex: row.index,
+            sourceOrdinal,
+        });
+    }
+    ordered.sort((left, right) => (
+        left.anchor.offset - right.anchor.offset
+        || left.sourceOrdinal - right.sourceOrdinal
+        || left.sourceEnd - right.sourceEnd
+        || left.inputIndex - right.inputIndex
+    ));
+    return { ordered, failures };
+}
+
 export function actorProfileBatchSemanticFingerprint(overrides = {}) {
     return `actor-profile-batch:${fingerprint(JSON.stringify({
         identityRetryGuidance: SAFE_IDENTITY_RETRY_GUIDANCE,
         profileRetryCodes: [...SAFE_PROFILE_RETRY_CODES].sort(),
         transportRows: ACTOR_PROFILE_GROUP_TRANSPORT_ROWS,
         groupChunks: String(actorProfileModuleGroupChunks),
+        discoverySourceOrder: String(
+            overrides?.discoverySourceOrder || actorProfileDiscoverySourceOrder,
+        ),
         ...(overrides || {}),
         transaction: String(
             overrides?.transaction || completeActorProfileBatchTransaction,
@@ -256,6 +380,10 @@ export function actorProfileBatchSemanticFingerprint(overrides = {}) {
             overrides?.workingSection || actorProfileWorkingSection,
         ),
         recoveryProgress: String(normalizeActorProfileRecoveryProgress),
+        legacyDuplicateOffsetRecoveryMigration: String(
+            overrides?.legacyDuplicateOffsetRecoveryMigration
+                || migrateActorProfileLegacyDuplicateOffsetRecoveryProgress,
+        ),
         recoveryDigest: String(actorProfileRecoveryProgressDigest),
     }))}`;
 }
@@ -289,7 +417,7 @@ export function normalizeActorProfileRecoveryProgress(value) {
     for (const raw of Array.isArray(value.rows) ? value.rows : []) {
         const actorId = cleanText(raw?.actorId, 120);
         const name = cleanText(raw?.name, 160);
-        const sourceAnchor = String(raw?.sourceAnchor || '').trim().slice(0, 1200);
+        const sourceAnchor = String(raw?.sourceAnchor || '').slice(0, 1200);
         const discovery = raw?.discovery === true;
         if (!actorId || !name || (discovery && !sourceAnchor)) continue;
         const key = `${actorId}\u0000${name}`;
@@ -305,6 +433,17 @@ export function normalizeActorProfileRecoveryProgress(value) {
             name,
             discovery,
             sourceAnchor: discovery ? sourceAnchor : '',
+            ...(discovery && cleanText(raw?.coverageUnitId, 80)
+                ? { coverageUnitId: cleanText(raw.coverageUnitId, 80) } : {}),
+            ...(discovery && Number.isInteger(raw?.sourceUnitOffset)
+                && raw.sourceUnitOffset >= 0
+                ? { sourceUnitOffset: raw.sourceUnitOffset } : {}),
+            ...(discovery && Number.isInteger(raw?.sourceOffset)
+                && raw.sourceOffset >= 0
+                ? { sourceOffset: raw.sourceOffset } : {}),
+            ...(discovery && Number.isInteger(raw?.sourceOrdinal)
+                && raw.sourceOrdinal >= 0
+                ? { sourceOrdinal: raw.sourceOrdinal } : {}),
             modules,
             ...(raw?.identityReveal && typeof raw.identityReveal === 'object'
                 ? { identityReveal: clone(raw.identityReveal) } : {}),
@@ -328,6 +467,25 @@ export function normalizeActorProfileRecoveryProgress(value) {
             0,
         ),
     };
+}
+
+export function migrateActorProfileLegacyDuplicateOffsetRecoveryProgress(
+    value,
+    failureCodes = [],
+) {
+    const progress = normalizeActorProfileRecoveryProgress(value);
+    if (!progress) return null;
+    const isLegacyDuplicateOffsetLock = (
+        progress.identityLocked === true
+        && progress.identityAttempted === true
+        && progress.rows.length === 0
+        && progress.verifiedFieldCount === 0
+        && Array.isArray(failureCodes)
+        && failureCodes.includes('actor_profile.discovery_source_offset_duplicate')
+    );
+    return isLegacyDuplicateOffsetLock
+        ? { ...progress, identityLocked: false, identityAttempted: false }
+        : progress;
 }
 
 export function actorProfileRecoveryProgressDigest(value, sourceDigest = '') {
@@ -588,6 +746,8 @@ export async function completeActorProfileBatchTransaction({
             const anchor = validateActorProfileDiscoveryAnchor({
                 name: row.name,
                 sourceAnchor: row.sourceAnchor,
+                sourceOffset: row.sourceOffset,
+                sourceUnitOffset: row.sourceUnitOffset,
             }, String(attemptDiscoveryContext?.acceptedNarrative || ''));
             if (!anchor.ok) continue;
             const completionMode = attemptDiscoveryContext?.completionMode
@@ -610,6 +770,11 @@ export async function completeActorProfileBatchTransaction({
                 characterCreationTicket: null,
                 __discoveryKey: `${row.name}\u0000${row.sourceAnchor}`,
                 __sourceOffset: anchor.offset,
+                __sourceOrdinal: Number.isInteger(row.sourceOrdinal)
+                    ? row.sourceOrdinal : 0,
+                __coverageUnitId: cleanText(row.coverageUnitId, 80),
+                __sourceUnitOffset: Number.isInteger(row.sourceUnitOffset)
+                    ? row.sourceUnitOffset : undefined,
             };
             profileById.set(actorId, {
                 candidate,
@@ -618,6 +783,12 @@ export async function completeActorProfileBatchTransaction({
             discoveries.set(candidate.__discoveryKey, {
                 name: row.name,
                 sourceAnchor: row.sourceAnchor,
+                coverageUnitId: cleanText(row.coverageUnitId, 80),
+                sourceUnitOffset: Number.isInteger(row.sourceUnitOffset)
+                    ? row.sourceUnitOffset : undefined,
+                sourceOffset: anchor.offset,
+                sourceOrdinal: Number.isInteger(row.sourceOrdinal)
+                    ? row.sourceOrdinal : 0,
                 sections: clone(row.modules || {}),
             });
             completedModulesByActor.set(actorId, new Set(Object.keys(row.modules || {})));
@@ -642,6 +813,14 @@ export async function completeActorProfileBatchTransaction({
                     name: candidateName(candidate),
                     discovery: Boolean(sourceAnchor),
                     sourceAnchor,
+                    ...(sourceAnchor && candidate?.__coverageUnitId
+                        ? { coverageUnitId: candidate.__coverageUnitId } : {}),
+                    ...(sourceAnchor && Number.isInteger(candidate?.__sourceUnitOffset)
+                        ? { sourceUnitOffset: candidate.__sourceUnitOffset } : {}),
+                    ...(sourceAnchor && Number.isInteger(candidate?.__sourceOffset)
+                        ? { sourceOffset: candidate.__sourceOffset } : {}),
+                    ...(sourceAnchor && Number.isInteger(candidate?.__sourceOrdinal)
+                        ? { sourceOrdinal: candidate.__sourceOrdinal } : {}),
                     modules,
                     ...(candidate?.__identityReveal
                         ? { identityReveal: clone(candidate.__identityReveal) } : {}),
@@ -903,15 +1082,24 @@ export async function completeActorProfileBatchTransaction({
                     if (!name) continue;
                     const narrative = String(attemptDiscoveryContext?.acceptedNarrative || '');
                     const offset = narrative.indexOf(name);
-                    const sourceAnchor = offset >= 0
+                    const parserSourceAnchor = String(entry.sourceAnchor || '').slice(0, 1200);
+                    const sourceAnchor = parserSourceAnchor || (offset >= 0
                         ? narrative.slice(Math.max(0, offset - 80), Math.min(narrative.length, offset + name.length + 120)).trim()
-                        : '';
+                        : '');
                     const key = `${name}\u0000${sourceAnchor}`;
                     if (discoveries.has(key)) {
                         failures.push({ name, reason: 'actor_profile.discovery_duplicate' });
                         continue;
                     }
-                    discoveryUpdates.push({ key, value: { name, sourceAnchor, sections: clone(entry.modules) } });
+                    discoveryUpdates.push({ key, value: {
+                        name,
+                        sourceAnchor,
+                        coverageUnitId: cleanText(entry.coverageUnitId, 80),
+                        sourceUnitOffset: Number.isInteger(entry.sourceUnitOffset)
+                            && entry.sourceUnitOffset >= 0
+                            ? entry.sourceUnitOffset : undefined,
+                        sections: clone(entry.modules),
+                    } });
                     continue;
                 }
                 if (group.key === 'identity_bootstrap' && !group.modules.length) {
@@ -948,7 +1136,7 @@ export async function completeActorProfileBatchTransaction({
                             previousName,
                             revealedName: nextName,
                             coverageUnitId: cleanText(entry.coverageUnitId, 80),
-                            sourceAnchor: String(entry.sourceAnchor || '').trim().slice(0, 1200),
+                            sourceAnchor: String(entry.sourceAnchor || '').slice(0, 1200),
                             evidenceSpan: String(entry.evidenceSpan || '').trim().slice(0, 240),
                         },
                     };
@@ -1079,10 +1267,30 @@ export async function completeActorProfileBatchTransaction({
                 allDiscoveriesDeterministicallyInvalid: false,
                 validCandidateCount: 0,
             };
-            const discoveryRows = (preparedApply?.discoveryUpdates || []).map(({ value }) => ({
+            const discoveryOrder = actorProfileDiscoverySourceOrder(
+                (preparedApply?.discoveryUpdates || []).map(({ value }) => value),
+                String(attemptDiscoveryContext?.acceptedNarrative || ''),
+            );
+            if (discoveryOrder.failures.length) return {
+                stale: false,
+                failures: discoveryOrder.failures.map((entry) => ({
+                    ...entry,
+                    reason: safePreflightReason(entry.reason),
+                    groupKey: group.key,
+                    moduleKey: 'person',
+                    missingFields: [],
+                })),
+                allDiscoveriesDeterministicallyInvalid: false,
+                validCandidateCount: 0,
+            };
+            const discoveryRows = discoveryOrder.ordered.map(({ entry }) => ({
                 candidateRef: {
-                    name: cleanText(value?.name, 160),
-                    sourceAnchor: String(value?.sourceAnchor || '').trim().slice(0, 1200),
+                    name: cleanText(entry?.name, 160),
+                    sourceAnchor: String(entry?.sourceAnchor || '').slice(0, 1200),
+                    sourceOffset: entry.sourceOffset,
+                    sourceOrdinal: entry.sourceOrdinal,
+                    coverageUnitId: cleanText(entry.coverageUnitId, 80),
+                    sourceUnitOffset: entry.sourceUnitOffset,
                 },
                 profileFormat: 'narrative-v1',
             }));
@@ -1208,34 +1416,12 @@ export async function completeActorProfileBatchTransaction({
             captureRecoveryProgress();
         }
         const acceptedNarrative = String(attemptDiscoveryContext?.acceptedNarrative || '');
-        const orderedDiscoveries = [...discoveries.values()].map((entry) => ({
-            entry,
-            anchor: validateActorProfileDiscoveryAnchor({
-                name: entry.name,
-                sourceAnchor: entry.sourceAnchor,
-            }, acceptedNarrative),
-        }));
-        const discoveryOrderFailures = orderedDiscoveries
-            .filter(({ anchor }) => anchor.ok !== true)
-            .map(({ entry, anchor }) => ({
-                name: entry.name,
-                reason: anchor.reason || 'actor_profile.discovery_anchor_invalid',
-                retryable: false,
-            }));
-        const offsetCounts = new Map();
-        for (const { anchor } of orderedDiscoveries) {
-            if (!anchor.ok) continue;
-            offsetCounts.set(anchor.offset, (offsetCounts.get(anchor.offset) || 0) + 1);
-        }
-        for (const { entry, anchor } of orderedDiscoveries) {
-            if (anchor.ok && (offsetCounts.get(anchor.offset) || 0) > 1) {
-                discoveryOrderFailures.push({
-                    name: entry.name,
-                    reason: 'actor_profile.discovery_source_offset_duplicate',
-                    retryable: false,
-                });
-            }
-        }
+        const discoveryOrder = actorProfileDiscoverySourceOrder(
+            [...discoveries.values()],
+            acceptedNarrative,
+        );
+        const orderedDiscoveries = discoveryOrder.ordered;
+        const discoveryOrderFailures = discoveryOrder.failures;
         if (discoveryOrderFailures.length) {
             return {
                 entries: [], discoveries: [], identityReveals: [], unresolved: discoveryOrderFailures,
@@ -1243,11 +1429,10 @@ export async function completeActorProfileBatchTransaction({
                 batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' },
             };
         }
-        orderedDiscoveries.sort((left, right) => left.anchor.offset - right.anchor.offset);
         const recoveredDiscoveryByKey = new Map([...profileById.values()]
             .map(({ candidate }) => [String(candidate?.__discoveryKey || ''), candidate])
             .filter(([key]) => key));
-        const discoveryCandidates = orderedDiscoveries.map(({ entry, anchor }, index) => {
+        const discoveryCandidates = orderedDiscoveries.map(({ entry, anchor, inputIndex }, index) => {
             const discoveryKey = `${entry.name}\u0000${entry.sourceAnchor}`;
             const recovered = recoveredDiscoveryByKey.get(discoveryKey);
             if (recovered) return {
@@ -1259,6 +1444,11 @@ export async function completeActorProfileBatchTransaction({
                 ),
                 __discoveryKey: discoveryKey,
                 __sourceOffset: anchor.offset,
+                __sourceOrdinal: Number.isInteger(entry.sourceOrdinal)
+                    ? entry.sourceOrdinal : inputIndex,
+                __coverageUnitId: cleanText(entry.coverageUnitId, 80),
+                __sourceUnitOffset: Number.isInteger(entry.sourceUnitOffset)
+                    ? entry.sourceUnitOffset : anchor.sourceUnitOffset,
             };
             const completionMode = attemptDiscoveryContext?.completionMode
                 || subset[0]?.completionMode || 'full';
@@ -1280,6 +1470,11 @@ export async function completeActorProfileBatchTransaction({
                 characterCreationTicket: clone(attemptDiscoveryContext?.characterCreationTickets?.[index] || null),
                 __discoveryKey: discoveryKey,
                 __sourceOffset: anchor.offset,
+                __sourceOrdinal: Number.isInteger(entry.sourceOrdinal)
+                    ? entry.sourceOrdinal : inputIndex,
+                __coverageUnitId: cleanText(entry.coverageUnitId, 80),
+                __sourceUnitOffset: Number.isInteger(entry.sourceUnitOffset)
+                    ? entry.sourceUnitOffset : anchor.sourceUnitOffset,
             };
         });
         for (const candidate of discoveryCandidates) profileById.set(candidateActorId(candidate), { candidate, sections: clone(candidate.previousProfile.narrativeSections) });
@@ -1384,7 +1579,19 @@ export async function completeActorProfileBatchTransaction({
                 failures.push(failureFor(candidate, validation.errorCode, { missingFields: validation.missingFields, retryable: false }));
             } else if (candidate.__discoveryKey) {
                 const [name, sourceAnchor] = candidate.__discoveryKey.split('\u0000');
-                discoveryRows.push({ candidateRef: { name, sourceAnchor }, candidate: validation.candidate, repairs: [], resolutions: [] });
+                discoveryRows.push({
+                    candidateRef: {
+                        name,
+                        sourceAnchor,
+                        sourceOffset: candidate.__sourceOffset,
+                        sourceOrdinal: candidate.__sourceOrdinal,
+                        coverageUnitId: candidate.__coverageUnitId,
+                        sourceUnitOffset: candidate.__sourceUnitOffset,
+                    },
+                    candidate: validation.candidate,
+                    repairs: [],
+                    resolutions: [],
+                });
             } else entries.push({ actorId: candidateActorId(candidate), name: candidateName(candidate), candidate: validation.candidate, repairs: [], resolutions: [] });
         }
         return { entries, discoveries: discoveryRows, identityReveals: [...identityReveals.values()].map(clone), unresolved: failures.filter((entry) => !entry.actorId), failures: failures.filter((entry) => entry.actorId), unexpected: [], explicitEmpty: false, batchMeta: { moduleGroups: groupDiagnostics, protocol: 'module-groups-v1' } };

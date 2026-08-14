@@ -67,6 +67,14 @@ export type ActorProfileBatchPersistenceCallback =
 export function actorProfileBatchSemanticFingerprint(overrides?: Record<string, unknown>): string;
 export const ACTOR_PROFILE_GROUP_TRANSPORT_ROWS: number;
 export function actorProfileModuleGroupChunks(group: object, rowLimit?: number): object[];
+export function actorProfileDiscoverySourceOrder(
+    discoveries?: object[],
+    acceptedNarrative?: string,
+): { ordered: object[]; failures: object[] };
+export function migrateActorProfileLegacyDuplicateOffsetRecoveryProgress(
+    value: unknown,
+    failureCodes?: string[],
+): object | null;
 export function actorProfileGroupFailureDiagnostic(
     group: object,
     attempt: number,

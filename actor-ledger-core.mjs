@@ -2580,7 +2580,7 @@ function structuredContentActorFacts(content) {
         .map(({ position: _position, ordinal: _ordinal, ...fact }) => fact);
 }
 
-function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = null) {
+export function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = null) {
     const source = String(content || '');
     const supplied = Array.isArray(discoveries) ? discoveries : [];
     const prepared = supplied.map((entry, inputIndex) => {
@@ -2589,10 +2589,19 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = nu
         const name = narrativeName
             ? String(entry?.candidateRef?.name || '').trim().slice(0, 160)
             : cleanText(entry?.candidateRef?.name, 160);
-        const sourceAnchor = String(entry?.candidateRef?.sourceAnchor || '')
-            .trim().slice(0, 1200);
+        const sourceAnchor = String(entry?.candidateRef?.sourceAnchor || '').slice(0, 1200);
+        const sourceOffset = entry?.candidateRef?.sourceOffset;
+        const sourceUnitOffset = entry?.candidateRef?.sourceUnitOffset;
+        const sourceOrdinal = entry?.candidateRef?.sourceOrdinal;
+        const coverageUnitId = cleanText(entry?.candidateRef?.coverageUnitId, 80);
         const anchorCheck = validateActorProfileDiscoveryAnchor(
-            { name, sourceAnchor },
+            {
+                name,
+                sourceAnchor,
+                sourceOffset: Number.isInteger(sourceOffset) ? sourceOffset : undefined,
+                sourceUnitOffset: Number.isInteger(sourceUnitOffset)
+                    ? sourceUnitOffset : undefined,
+            },
             source,
         );
         return {
@@ -2601,6 +2610,11 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = nu
             name,
             narrativeName,
             sourceAnchor,
+            coverageUnitId,
+            sourceUnitOffset: Number.isInteger(sourceUnitOffset)
+                ? sourceUnitOffset : undefined,
+            sourceOrdinal: Number.isInteger(sourceOrdinal) && sourceOrdinal >= 0
+                ? sourceOrdinal : inputIndex,
             sourceOffset: anchorCheck.offset,
             reason: anchorCheck.ok ? '' : anchorCheck.reason,
         };
@@ -2623,7 +2637,14 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = nu
             : '');
         if (reason) {
             unresolved.push({
-                candidateRef: { name: item.name, sourceAnchor: item.sourceAnchor },
+                candidateRef: {
+                    name: item.name,
+                    sourceAnchor: item.sourceAnchor,
+                    sourceOffset: item.sourceOffset,
+                    sourceOrdinal: item.sourceOrdinal,
+                    coverageUnitId: item.coverageUnitId,
+                    sourceUnitOffset: item.sourceUnitOffset,
+                },
                 reason,
                 inputIndex: item.inputIndex,
             });
@@ -2633,7 +2654,14 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = nu
         const safeEntry = clone(item.entry);
         accepted.push({
             ...safeEntry,
-            candidateRef: { name: item.name, sourceAnchor: item.sourceAnchor },
+            candidateRef: {
+                name: item.name,
+                sourceAnchor: item.sourceAnchor,
+                sourceOffset: item.sourceOffset,
+                sourceOrdinal: item.sourceOrdinal,
+                coverageUnitId: item.coverageUnitId,
+                sourceUnitOffset: item.sourceUnitOffset,
+            },
             sourceOffset: item.sourceOffset,
             inputIndex: item.inputIndex,
         });
@@ -2644,7 +2672,7 @@ function acceptedModelProfileDiscoveryFacts(content, discoveries, sourceRef = nu
             sourceKind: 'accepted_narrative',
             identityKey: `model-profile:${item.sourceOffset}:${item.name}`,
             position: item.sourceOffset,
-            ordinal: acceptedIndex,
+            ordinal: item.sourceOrdinal,
             modelProfileDiscoveryIndex: acceptedIndex,
             narrativeProfile: item.narrativeName === true,
         });
@@ -2770,7 +2798,11 @@ export function discoverActorsFromTurnSources(value, {
         touched: [],
         location: scene.location,
         modelProfileDiscoveries: acceptedProfiles
-            .sort((left, right) => left.sourceOffset - right.sourceOffset),
+            .sort((left, right) => (
+                left.sourceOffset - right.sourceOffset
+                || Number(left.candidateRef?.sourceOrdinal || 0)
+                    - Number(right.candidateRef?.sourceOrdinal || 0)
+            )),
         unresolved: [
             ...clone(modelDiscovery.unresolved),
             ...modelDiscovery.accepted

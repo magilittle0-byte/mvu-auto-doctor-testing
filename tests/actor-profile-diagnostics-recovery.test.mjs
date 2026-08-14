@@ -834,12 +834,17 @@ test('prompt context and ticket normalizer implementations change generation and
     const changedTicketNormalizer = actorProfileGenerationCriticalFingerprint({
         designRollNormalizer: 'function normalizeActorProfileDesignRolls(){return "changed";}',
     });
+    const changedDiscoveryAnchor = actorProfileGenerationCriticalFingerprint({
+        discoveryAnchor: 'function validateActorProfileDiscoveryAnchor(){return "changed";}',
+    });
     assert.notEqual(changedPromptContext, baselineGeneration);
     assert.notEqual(changedTicketNormalizer, baselineGeneration);
+    assert.notEqual(changedDiscoveryAnchor, baselineGeneration);
     const baselineRuntime = runtimeFor(baselineGeneration);
     assert.notEqual(runtimeFor(baselineGeneration, 'changed-authority'), baselineRuntime);
     assert.notEqual(runtimeFor(changedPromptContext), baselineRuntime);
     assert.notEqual(runtimeFor(changedTicketNormalizer), baselineRuntime);
+    assert.notEqual(runtimeFor(changedDiscoveryAnchor), baselineRuntime);
 });
 
 test('runtime fingerprint includes every P1 writer used for bounded world-only rebase', () => {
@@ -868,6 +873,8 @@ test('runtime fingerprint changes with the production profile route planner and 
         'modelConnectionKey',
         'actorProfileTransportRoutePlan',
         'completeActorProfilesForTurn',
+        'acceptedModelProfileDiscoveryFacts',
+        'actorProfileRecoveryProgressFromNamespace',
     ]) {
         assert.match(runtimeSource, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
     }
@@ -906,6 +913,14 @@ test('runtime fingerprint changes with the production profile route planner and 
     assert.notEqual(runtimeFor({
         completeActorProfilesForTurn:
             async function completeActorProfilesForTurnChanged() { return null; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        acceptedModelProfileDiscoveryFacts:
+            function acceptedModelProfileDiscoveryFactsChanged() { return null; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        actorProfileRecoveryProgressFromNamespace:
+            function actorProfileRecoveryProgressFromNamespaceChanged() { return null; },
     }), baseline);
 });
 
@@ -1064,6 +1079,13 @@ test('resolver closure and group failure attribution helpers change batch and ru
         }),
         actorProfileBatchSemanticFingerprint({
             transaction: function completeActorProfileBatchTransactionChanged() {},
+        }),
+        actorProfileBatchSemanticFingerprint({
+            discoverySourceOrder: function actorProfileDiscoverySourceOrderChanged() {},
+        }),
+        actorProfileBatchSemanticFingerprint({
+            legacyDuplicateOffsetRecoveryMigration:
+                function migrateActorProfileLegacyDuplicateOffsetRecoveryProgressChanged() {},
         }),
     ];
     const baselineRuntime = runtimeFor(baselineBatch);

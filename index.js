@@ -99,6 +99,7 @@ import {
     actorRegistryMatchesLedger,
     applyAcceptedContentObservations,
     classifyActorRegistryTargetName,
+    acceptedModelProfileDiscoveryFacts,
     discoverActorsFromTurnSources,
     emptyActorLedger,
     inferObserverActorIds,
@@ -174,6 +175,7 @@ import {
     actorProfileBatchSemanticFingerprint,
     actorProfileRecoveryProgressDigest,
     completeActorProfileBatchTransaction,
+    migrateActorProfileLegacyDuplicateOffsetRecoveryProgress,
     normalizeActorProfileRecoveryProgress,
 } from './actor-profile-batch-core.mjs';
 import {
@@ -3663,6 +3665,8 @@ function doctorRuntimeCriticalFingerprint() {
         continuityCoreSemanticFingerprint(),
         hydratedActorProfileDiagnostic.toString(),
         classifyActorRegistryTargetName.toString(),
+        acceptedModelProfileDiscoveryFacts.toString(),
+        actorProfileRecoveryProgressFromNamespace.toString(),
         mergeActorIdentityReveal.toString(),
         parseActorShardProposal.toString(),
         actorNarrativeShardBasis.toString(),
@@ -14941,7 +14945,11 @@ function actorProfileRecoveryProgressFromNamespace(namespace, currentSourceRef) 
     if (!actorProfileRetryReceiptMatches(receipt, { currentSourceRef, ticketBatch })) {
         return null;
     }
-    return actorProfileRecoveryProgressFromReceipt(receipt, currentSourceRef);
+    const progress = actorProfileRecoveryProgressFromReceipt(receipt, currentSourceRef);
+    return migrateActorProfileLegacyDuplicateOffsetRecoveryProgress(
+        progress,
+        receipt.failureCodes,
+    );
 }
 
 async function persistActorProfileRecoveryState(captured, result) {
@@ -15462,7 +15470,7 @@ async function runActorProfileTarget(captured, {
         for (const raw of Array.isArray(routes) ? routes : []) {
             const actorId = String(raw?.actorId || '').trim().slice(0, 120);
             const revealedName = String(raw?.revealedName || '').trim().slice(0, 160);
-            const sourceAnchor = String(raw?.sourceAnchor || '').trim().slice(0, 1200);
+            const sourceAnchor = String(raw?.sourceAnchor || '').slice(0, 1200);
             const evidenceSpan = String(raw?.evidenceSpan || '').trim().slice(0, 240);
             const registryEntry = Object.values(ledger.actorRegistry?.registered || {})
                 .find((entry) => entry.actorRef?.actorId === actorId);

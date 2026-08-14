@@ -369,6 +369,15 @@ export function actorProfilePendingTransactionForSource(
     actorIds?: string[];
     ledgerDigest?: string;
 };
+export function acceptedModelProfileDiscoveryFacts(
+    content: string,
+    discoveries: Array<Record<string, unknown>>,
+    sourceRef?: ActorLedgerSourceRef | null,
+): {
+    facts: Array<Record<string, unknown>>;
+    accepted: Array<Record<string, unknown>>;
+    unresolved: Array<Record<string, unknown>>;
+};
 export function discoverActorsFromTurnSources(
     value: unknown,
     options?: {

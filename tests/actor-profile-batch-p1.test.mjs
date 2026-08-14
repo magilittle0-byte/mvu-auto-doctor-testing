@@ -13,13 +13,19 @@ import {
     buildActorProfileCompletionMessages,
     issueCharacterCreationTicket,
     actorProfileRecoverySourceMatches,
+    actorProfileRetryReceiptMatches,
+    actorProfileTicketBatchPersistenceMatches,
+    createActorProfileRetryReceipt,
     parseActorProfileCompletionBatchOutput,
     prepareActorLedgerProfilesV6,
+    sealActorProfileTicketBatchForPersistence,
     selectActorProfileCompletionCandidates,
 } from '../actor-profile-v6-core.mjs';
 import {
+    actorProfileDiscoverySourceOrder,
     actorProfileRecoveryProgressDigest,
     completeActorProfileBatchTransaction,
+    migrateActorProfileLegacyDuplicateOffsetRecoveryProgress,
     normalizeActorProfileRecoveryProgress,
 } from '../actor-profile-batch-core.mjs';
 import {
@@ -75,6 +81,10 @@ test('P1 recovery progress seals only bounded ActorRef fields against the curren
             name: '合成人物',
             discovery: true,
             sourceAnchor: '合成正文中的合成人物首次出现。',
+            coverageUnitId: 'CU-002',
+            sourceUnitOffset: 420,
+            sourceOffset: 438,
+            sourceOrdinal: 1,
             modules: {
                 person: '这是已经通过本地解析与目标行校验的身份档案字段。',
                 personality: '这是已经通过本地解析与目标行校验的性格档案字段。',
@@ -85,6 +95,17 @@ test('P1 recovery progress seals only bounded ActorRef fields against the curren
     assert.equal(progress.identityLocked, true);
     assert.equal(progress.verifiedFieldCount, 2);
     assert.deepEqual(Object.keys(progress.rows[0].modules), ['person', 'personality']);
+    assert.deepEqual({
+        coverageUnitId: progress.rows[0].coverageUnitId,
+        sourceUnitOffset: progress.rows[0].sourceUnitOffset,
+        sourceOffset: progress.rows[0].sourceOffset,
+        sourceOrdinal: progress.rows[0].sourceOrdinal,
+    }, {
+        coverageUnitId: 'CU-002',
+        sourceUnitOffset: 420,
+        sourceOffset: 438,
+        sourceOrdinal: 1,
+    });
     const digest = actorProfileRecoveryProgressDigest(progress, 'profile-source:one');
     assert.match(digest, /^profile-recovery-progress:/u);
     assert.notEqual(
@@ -2135,6 +2156,132 @@ test('all seven controlled identity failures report locally without a second mod
     }
 });
 
+test('verified legacy duplicate-offset receipt unlocks identity once and completes three actors atomically', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-legacy-duplicate-offset-recovery' });
+    const currentSourceRef = narrativeDiscoverySourceRef(fixture.ref);
+    const batch = ticketBatch(fixture.ref, 3);
+    const sealedBatch = sealActorProfileTicketBatchForPersistence(batch, currentSourceRef);
+    assert.ok(sealedBatch);
+    const lockedEmpty = normalizeActorProfileRecoveryProgress({
+        identityLocked: true,
+        identityAttempted: true,
+        rows: [],
+    });
+    const oldReceipt = createActorProfileRetryReceipt({
+        sourceRef: currentSourceRef,
+        ticketBatch: sealedBatch,
+        outcomeStatus: 'not_completed',
+        failingModules: [],
+        failureCodes: ['actor_profile.discovery_source_offset_duplicate'],
+        updatedAt: 27,
+    });
+    oldReceipt.recoveryProgress = structuredClone(lockedEmpty);
+    oldReceipt.recoveryProgressDigest = actorProfileRecoveryProgressDigest(
+        lockedEmpty,
+        oldReceipt.sourceDigest,
+    );
+    const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const recoverySource = indexSource.slice(
+        indexSource.indexOf('function actorProfileRecoveryProgressFromReceipt'),
+        indexSource.indexOf('async function persistActorProfileRecoveryState'),
+    );
+    const fromNamespace = Function(
+        'actorProfileRecoverySourceMatches',
+        'normalizeActorProfileRecoveryProgress',
+        'actorProfileRecoveryProgressDigest',
+        'actorProfileRetryReceiptMatches',
+        'actorProfileTicketBatchPersistenceMatches',
+        'migrateActorProfileLegacyDuplicateOffsetRecoveryProgress',
+        `${recoverySource}; return actorProfileRecoveryProgressFromNamespace;`,
+    )(
+        actorProfileRecoverySourceMatches,
+        normalizeActorProfileRecoveryProgress,
+        actorProfileRecoveryProgressDigest,
+        actorProfileRetryReceiptMatches,
+        actorProfileTicketBatchPersistenceMatches,
+        migrateActorProfileLegacyDuplicateOffsetRecoveryProgress,
+    );
+    const namespace = {
+        characterCreationTicketBatches: [structuredClone(sealedBatch)],
+        actorProfileRetryReceipt: structuredClone(oldReceipt),
+    };
+    const recovered = fromNamespace(namespace, currentSourceRef);
+    assert.deepEqual({
+        identityLocked: recovered.identityLocked,
+        identityAttempted: recovered.identityAttempted,
+        rows: recovered.rows,
+    }, { identityLocked: false, identityAttempted: false, rows: [] });
+
+    assert.equal(fromNamespace(namespace, {
+        ...currentSourceRef,
+        contentFingerprint: 'different-content',
+        contentHash: 'different-content',
+    }), null, 'another accepted source must not consume the compatibility migration');
+    const damagedNamespace = structuredClone(namespace);
+    damagedNamespace.characterCreationTicketBatches[0].tickets[0].ticketId = 'damaged-ticket';
+    assert.equal(fromNamespace(damagedNamespace, currentSourceRef), null);
+    const otherReceipt = createActorProfileRetryReceipt({
+        sourceRef: currentSourceRef,
+        ticketBatch: sealedBatch,
+        outcomeStatus: 'not_completed',
+        failingModules: [],
+        failureCodes: ['actor_profile.module_missing'],
+        updatedAt: 28,
+    });
+    otherReceipt.recoveryProgress = structuredClone(lockedEmpty);
+    otherReceipt.recoveryProgressDigest = actorProfileRecoveryProgressDigest(
+        lockedEmpty,
+        otherReceipt.sourceDigest,
+    );
+    const genericLocked = fromNamespace({
+        characterCreationTicketBatches: [structuredClone(sealedBatch)],
+        actorProfileRetryReceipt: otherReceipt,
+    }, currentSourceRef);
+    assert.equal(genericLocked.identityLocked, true);
+    assert.equal(genericLocked.identityAttempted, true);
+
+    const names = ['\u7532\u660e', '\u4e59\u5b81', '\u4e19\u8861'];
+    const acceptedNarrative = names.map((name) => `${name}在本回合独立出现。`).join('');
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    let identityCalls = 0;
+    const moduleText = (key, name) => `${name} ${key}. ${'Complete natural dossier prose records stable facts constraints choices and usable action context. '.repeat(6)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        recoveryProgress: recovered,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: currentSourceRef,
+            characterCreationTickets: structuredClone(sealedBatch.tickets),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+            if (groupKey === 'identity_bootstrap') {
+                identityCalls += 1;
+                return coverage.units.map((unit) => [
+                    `<coverage-unit id="${unit.id}" digest="${unit.digest}">`,
+                    ...names.filter((name) => unit.text.includes(name))
+                        .map((name) => `<profile-target actor="new" name="${name}"></profile-target>`),
+                    '</coverage-unit>',
+                ].join('\n')).join('\n');
+            }
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(identityCalls, 1);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.readbackCount, 2);
+    assert.equal(run.result.accepted.length, 3);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+});
+
 test('module protocol sorts reversed discoveries by accepted first offset before provisional and final ticket binding', async () => {
     const fixture = prepareRegisteredBatch(0);
     const names = ['\u7532\u660e', '\u4e59\u5b81'];
@@ -2266,6 +2413,308 @@ test('module protocol sorts reversed discoveries by accepted first offset before
         { name: names[0], ticketId: ticketIds[0] },
         { name: names[1], ticketId: ticketIds[1] },
     ]);
+});
+
+test('nested short discovery uses its later independent offset through tickets and atomic readback', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-three-nested-discovery-offsets' });
+    const names = ['\u963f\u9752\u9e3e', '\u4e19\u8861', '\u963f\u9752'];
+    const acceptedNarrative = `${names[0]}先进入大厅。随后${names[1]}从侧门现身。最后${names[2]}独自抵达。`;
+    const source = narrativeDiscoverySourceRef(fixture.ref);
+    const sourceAnchor = acceptedNarrative;
+    const order = actorProfileDiscoverySourceOrder(names.map((name) => ({
+        name,
+        sourceAnchor,
+        sourceUnitOffset: 0,
+        sections: {},
+    })), acceptedNarrative);
+    assert.deepEqual(order.failures, []);
+    assert.deepEqual(order.ordered.map(({ entry }) => entry.name), names);
+    const expectedOffsets = names.map((name) => acceptedNarrative.lastIndexOf(name));
+    assert.deepEqual(order.ordered.map(({ anchor }) => anchor.offset), expectedOffsets);
+    assert.equal(new Set(order.ordered.map(({ anchor }) => anchor.offset)).size, 3);
+
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    const batch = ticketBatch(fixture.ref, names.length);
+    const ticketIds = batch.tickets.map((ticket) => ticket.ticketId);
+    const identityModelOrder = [names[2], names[0], names[1]];
+    const laterRows = [];
+    let identityCalls = 0;
+    let preflightChecked = false;
+    const runPreflight = registryPreflight(fixture, acceptedNarrative);
+    const moduleText = (key, name) => `${name} ${key}. ${'Complete natural dossier prose records stable facts constraints choices and usable action context. '.repeat(6)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        transportActorLimit: 1,
+        transportConcurrency: 2,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: source,
+            characterCreationTickets: structuredClone(batch.tickets),
+        },
+        preflightDiscoveries: async (args) => {
+            assert.deepEqual(args.discoveries.map((entry) => entry.candidateRef.name), names);
+            assert.deepEqual(
+                args.discoveries.map((entry) => entry.candidateRef.sourceOffset),
+                expectedOffsets,
+            );
+            preflightChecked = true;
+            return runPreflight(args);
+        },
+        resolveDiscoveries: async ({ discoveries }) => {
+            assert.deepEqual(discoveries.map((entry) => entry.candidateRef.name), names);
+            assert.deepEqual(
+                discoveries.map((entry) => entry.candidateRef.sourceOffset),
+                expectedOffsets,
+            );
+            assert.ok(discoveries.every((entry) => (
+                entry.candidateRef.coverageUnitId === coverage.units[0].id
+                && entry.candidateRef.sourceUnitOffset === 0
+            )));
+            const discovered = discoverActorsFromTurnSources(emptyActorLedger(fixture.ledger.chatId), {
+                acceptedContent: acceptedNarrative,
+                sourceRef: source,
+                turn: fixture.ref.generation,
+                modelProfileDiscoveries: structuredClone(discoveries),
+            });
+            assert.deepEqual(
+                discovered.modelProfileDiscoveries.map((entry) => entry.candidateRef.name),
+                names,
+            );
+            assert.deepEqual(
+                discovered.modelProfileDiscoveries.map((entry) => entry.sourceOffset),
+                expectedOffsets,
+            );
+            const upsert = runActorRegistryUpsert(discovered.ledger, discovered.candidates, {
+                chatId: fixture.ledger.chatId,
+                identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref,
+                turn: fixture.ref.generation,
+            });
+            const registration = promoteActorCandidatesToRegistry(upsert.ledger, discovered.candidates, {
+                chatId: fixture.ledger.chatId,
+                identityScopeId: fixture.ref.identityScopeId,
+                scopeDigest: fixture.ref.scopeDigest,
+                allowScopeDigestFill: true,
+                expectedSourceRef: fixture.ref,
+                turn: fixture.ref.generation,
+            });
+            const binding = bindCharacterCreationTicketsToRegisteredActors(registration.ledger, {
+                registration,
+                candidates: discovered.candidates,
+                batch,
+                target: fixture.ref,
+            });
+            assert.deepEqual(binding.bindings.map((entry) => entry.ticketId), ticketIds);
+            const prepared = prepareActorLedgerProfilesV6(binding.ledger, {
+                mode: 'full', turn: fixture.ref.generation,
+            }).ledger;
+            const promotedIds = registration.promoted.map((entry) => entry.actorRef.actorId);
+            const candidates = selectActorProfileCompletionCandidates(prepared, {
+                initialActorIds: promotedIds,
+                maintenanceMaxActors: 0,
+                turn: fixture.ref.generation,
+            });
+            const discoveryByName = new Map(discoveries.map((entry) => [entry.candidateRef.name, entry]));
+            return {
+                ok: true,
+                ledger: binding.ledger,
+                candidates,
+                entries: registration.promoted.map((promotion) => ({
+                    candidateId: promotion.candidateId,
+                    actorRef: {
+                        actorId: promotion.actorRef.actorId,
+                        name: promotion.actorRef.displayName,
+                    },
+                    candidate: discoveryByName.get(promotion.actorRef.displayName).candidate,
+                    repairs: [],
+                })),
+                failures: [],
+                rejected: [],
+                snapshot: { fieldRevision: 0 },
+                registry: {
+                    ...registration,
+                    ticketBound: true,
+                    ticketBindingCount: binding.bindings.length,
+                },
+            };
+        },
+        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+            if (groupKey === 'identity_bootstrap') {
+                identityCalls += 1;
+                return coverage.units.map((unit) => [
+                    `<coverage-unit id="${unit.id}" digest="${unit.digest}">`,
+                    ...identityModelOrder.filter((name) => unit.text.includes(name))
+                        .map((name) => `<profile-target actor="new" name="${name}"></profile-target>`),
+                    '</coverage-unit>',
+                ].join('\n')).join('\n');
+            }
+            laterRows.push(candidates.map((candidate) => ({
+                name: candidate.actorRef.name,
+                ticketId: candidate.characterCreationTicket?.ticketId,
+            })));
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(identityCalls, 1);
+    assert.equal(preflightChecked, true);
+    assert.equal(run.result.accepted.length, 3);
+    assert.ok(run.result.ledger.actors.every(actorProfileReadyForAction));
+    assert.equal(run.saveCount, 2);
+    assert.ok(laterRows.length >= 1);
+    assert.ok(laterRows.every((rows) => rows.every((row) => (
+        ticketIds[names.indexOf(row.name)] === row.ticketId
+    ))));
+    assert.deepEqual(run.result.ledger.actors.map((actor) => ({
+        name: actor.name,
+        ticketId: actor.profileV6?.designRolls?.ticketId,
+    })), names.map((name, index) => ({ name, ticketId: ticketIds[index] })));
+    const refreshed = normalizeActorLedger(structuredClone(run.result.ledger), {
+        chatId: fixture.ledger.chatId,
+    });
+    assert.ok(refreshed.actors.every(actorProfileReadyForAction));
+    assert.deepEqual(refreshed.actors.map((actor) => actor.profileV6?.designRolls?.ticketId), ticketIds);
+});
+
+test('later coverage unit preserves leading whitespace offsets across recovery and ledger readback', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-leading-whitespace-coverage-recovery' });
+    const names = ['\u963f\u9752\u9e3e', '\u4e19\u8861', '\u963f\u9752'];
+    const acceptedNarrative = `${'X'.repeat(420)}\n  ${names[0]}先进入大厅。${names[1]}随后出现。${names[2]}最后独自抵达。`;
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    assert.ok(coverage.units.length >= 2);
+    assert.equal(coverage.units[1].text.startsWith('\n  '), true);
+    const expectedUnitOffset = coverage.units[0].text.length;
+    const source = narrativeDiscoverySourceRef(fixture.ref);
+    const identityModelOrder = [names[2], names[0], names[1]];
+    let identityCalls = 0;
+    const identityOutput = () => coverage.units.map((unit) => {
+        const targets = identityModelOrder.filter((name) => unit.text.includes(name));
+        return [
+            `<coverage-unit id="${unit.id}" digest="${unit.digest}">`,
+            ...(targets.length
+                ? targets.map((name) => `<profile-target actor="new" name="${name}"></profile-target>`)
+                : ['<no-new/>']),
+            '</coverage-unit>',
+        ].join('\n');
+    }).join('\n');
+    const first = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        semanticRetry: false,
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: source,
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ groupKey }) => {
+            if (groupKey === 'identity_bootstrap') {
+                identityCalls += 1;
+                return identityOutput();
+            }
+            const error = new Error('foreground_preempted');
+            error.failureKind = 'foreground_preempted';
+            error.profileBatchFailureCategory = 'foreground_preempted';
+            throw error;
+        },
+    });
+    assert.equal(first.result.persistenceStatus, 'not_completed');
+    assert.equal(first.saveCount, 0);
+    assert.equal(first.result.recoveryProgress.identityLocked, true);
+    assert.equal(first.result.recoveryProgress.rows.length, 3);
+    assert.ok(first.result.recoveryProgress.rows.every((row) => (
+        row.coverageUnitId === coverage.units[1].id
+        && row.sourceUnitOffset === expectedUnitOffset
+        && row.sourceAnchor === coverage.units[1].text
+        && row.sourceAnchor.startsWith('\n  ')
+    )));
+    assert.deepEqual(
+        first.result.recoveryProgress.rows.map((row) => row.sourceOrdinal).sort((a, b) => a - b),
+        [0, 1, 2],
+    );
+
+    const moduleText = (key, name) => `${name} ${key}. ${'Complete natural dossier prose records stable facts constraints choices and usable action context. '.repeat(6)}`;
+    const resumed = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        semanticRetry: false,
+        allowDiscovery: true,
+        recoveryProgress: structuredClone(first.result.recoveryProgress),
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: source,
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+            assert.notEqual(groupKey, 'identity_bootstrap');
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(identityCalls, 1);
+    assert.equal(resumed.result.persistenceStatus, 'atomic_readback', JSON.stringify(resumed.result.failures));
+    assert.equal(resumed.saveCount, 2);
+    assert.equal(resumed.readbackCount, 2);
+    assert.equal(resumed.result.accepted.length, 3);
+    const refreshed = normalizeActorLedger(structuredClone(resumed.result.ledger), {
+        chatId: fixture.ledger.chatId,
+    });
+    assert.ok(refreshed.actors.every(actorProfileReadyForAction));
+});
+
+test('short discovery occurring only inside a longer key fails closed with no partial profile write', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-nested-only-discovery-ambiguous' });
+    const longName = '\u963f\u9752\u9e3e';
+    const shortName = '\u963f\u9752';
+    const acceptedNarrative = `${longName}独自进入大厅并清楚报上姓名。`;
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
+    let identityCalls = 0;
+    let fillCalls = 0;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ groupKey }) => {
+            if (groupKey === 'identity_bootstrap') {
+                identityCalls += 1;
+                return coverage.units.map((unit) => [
+                    `<coverage-unit id="${unit.id}" digest="${unit.digest}">`,
+                    `<profile-target actor="new" name="${longName}"></profile-target>`,
+                    `<profile-target actor="new" name="${shortName}"></profile-target>`,
+                    '</coverage-unit>',
+                ].join('\n')).join('\n');
+            }
+            fillCalls += 1;
+            return '';
+        },
+    });
+    assert.equal(identityCalls, 1);
+    assert.equal(fillCalls, 0);
+    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.saveCount, 0);
+    assert.equal(run.result.ledger.actors.length, 0);
+    assert.ok(run.result.failures.some((entry) => (
+        entry.reason === 'actor_profile.discovery_source_offset_ambiguous'
+    )), JSON.stringify(run.result.failures));
 });
 
 test('more than six discoveries map DISC completions to final ActorRefs across transport chunks', async () => {
