@@ -84,7 +84,7 @@ function loadStage3WorldCandidateValidator({
     settlement = null,
 } = {}) {
     const code = sourceSection(
-        'function stage3ValidateWorldCandidateInMemory(',
+        'function stage3NoSemanticDeltaHeldTerminal(',
         'function stage3ValidateWorldDraftInMemory(',
     );
     const sandbox = {
@@ -1481,6 +1481,23 @@ test('production P3 validator accepts WORLD-held only after all ATT are adjudica
     );
     assert.equal(unadjudicated.ok, false);
     assert.equal(unadjudicated.reason, 'world_candidate_settlement_failed');
+
+    const adjudicatedWithoutWorldDelta = loadStage3WorldCandidateValidator({
+        pendingAttempts: [pendingAttempt],
+        settlement: {
+            ledger: {}, pendingWorld: [],
+            results: [{ attemptId: pendingAttempt.id, status: 'held', worldAdjudicated: true, appliedStateChanges: [] }],
+            worldEvents: [],
+        },
+    })(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        args,
+    );
+    assert.equal(adjudicatedWithoutWorldDelta.ok, true);
+    assert.equal(adjudicatedWithoutWorldDelta.next.lastTick.action, 'held');
+    assert.equal(adjudicatedWithoutWorldDelta.next.lastTick.threadId, 'WORLD');
 
     const activeBefore = normalizeContinuityState({
         chatId: 'chat-world-hold',

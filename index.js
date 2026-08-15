@@ -5058,6 +5058,7 @@ function doctorRuntimeCriticalFingerprint() {
         stage3Phase2ReadbackValidationCode.toString(),
         stage3PreparedWorldCheckpointMatches.toString(),
         stage3PreparedPhase1StatesMatch.toString(),
+        stage3NoSemanticDeltaHeldTerminal.toString(),
         clearContinuityState.toString(),
         stage3ValidateWorldCandidateInMemory.toString(),
         stage3ValidateWorldDraftInMemory.toString(),
@@ -19756,6 +19757,47 @@ function stage3PreparedPhase1StatesMatch(checkpoint, namespace, ledger, captured
             || currentActor.digest === String(prepared.phase1ActorLedgerDigest || ''));
 }
 
+// A fully adjudicated actor attempt is allowed to end in a mechanical held
+// receipt when the accepted target produced no world/continuity delta. This
+// is a safe terminal, not fabricated progress: all ATT authority is already
+// settled, no unresolved thread is being hidden, and the world/scenario
+// projections remain byte-equivalent after policy normalization.
+function stage3NoSemanticDeltaHeldTerminal(scheduledBase, next, {
+    settlement = null,
+    actionAttemptsFullyAdjudicated = false,
+    nextTurn = 0,
+} = {}) {
+    if (!actionAttemptsFullyAdjudicated) return null;
+    const results = Array.isArray(settlement?.results) ? settlement.results : [];
+    const nonSemanticStatuses = new Set(['held', 'rejected', 'blocked']);
+    if (results.some((result) => (
+        !nonSemanticStatuses.has(String(result?.status || ''))
+        || result?.worldAdjudicated !== true
+        || (Array.isArray(result?.appliedStateChanges) && result.appliedStateChanges.length)
+    ))) return null;
+    if (Array.isArray(settlement?.worldEvents) && settlement.worldEvents.length) return null;
+    const before = normalizeContinuityState(scheduledBase, { maxThreads: 24, maxResolved: 24 });
+    const after = normalizeContinuityState(next, { maxThreads: 24, maxResolved: 24 });
+    if (before.threads.some((thread) => thread.stage !== 'resolved')) return null;
+    if (
+        after.turn !== before.turn
+        || continuityLifecycleStats(before, after).changedExisting !== 0
+        || continuityLifecycleStats(before, after).added !== 0
+        || continuityLifecycleStats(before, after).removed !== 0
+        || continuityWorldDigest(before) !== continuityWorldDigest(after)
+        || continuityScenarioDigest(before) !== continuityScenarioDigest(after)
+    ) return null;
+    const held = deepClone(after);
+    held.turn = before.turn;
+    held.lastTick = {
+        turn: Math.max(0, Math.floor(Number(nextTurn) || before.turn)),
+        action: 'held',
+        threadId: 'WORLD',
+        reason: '本回合没有足够权威依据形成可持久化的世界变化',
+    };
+    return held;
+}
+
 function stage3ValidateWorldCandidateInMemory(captured, settings, ledger, {
     scheduledState,
     continuityState,
@@ -19815,6 +19857,18 @@ function stage3ValidateWorldCandidateInMemory(captured, settings, ledger, {
         && settlement.pendingWorld.length === 0
         && settlement.results.length === pending.attempts.length
     );
+    const noSemanticDeltaTerminal = stage3NoSemanticDeltaHeldTerminal(
+        scheduledBase,
+        next,
+        {
+            settlement,
+            actionAttemptsFullyAdjudicated,
+            nextTurn,
+        },
+    );
+    if (noSemanticDeltaTerminal) {
+        next = noSemanticDeltaTerminal;
+    }
     const globalHoldTerminal = actionAttemptsFullyAdjudicated
         && continuityGlobalHoldIsVerifiable(scheduledBase, next);
     const activeThreadIds = new Set(scheduledBase.threads
