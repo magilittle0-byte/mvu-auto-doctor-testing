@@ -7,6 +7,7 @@ import {
     buildActorProfileModuleGroupMessages,
     materializeActorProfileBaseline,
     parseActorProfileModuleGroupOutput,
+    recoverActorProfileDiscoveryNameFromEvidence,
     validateActorProfileDiscoveryAnchor,
     validateActorProfileInsertCandidate,
 } from './actor-profile-v6-core.mjs';
@@ -363,6 +364,7 @@ export function actorProfileBatchSemanticFingerprint(overrides = {}) {
         discoverySourceOrder: String(
             overrides?.discoverySourceOrder || actorProfileDiscoverySourceOrder,
         ),
+        discoveryNameRecovery: String(recoverActorProfileDiscoveryNameFromEvidence),
         ...(overrides || {}),
         transaction: String(
             overrides?.transaction || completeActorProfileBatchTransaction,
@@ -1078,7 +1080,11 @@ export async function completeActorProfileBatchTransaction({
                         failures.push({ actorId: '', name: entry.name, reason: 'actor_profile.discovery_outside_bootstrap' });
                         continue;
                     }
-                    const name = cleanText(entry.name, 160);
+                    const rawName = cleanText(entry.name, 160);
+                    const name = recoverActorProfileDiscoveryNameFromEvidence(
+                        rawName,
+                        String(entry.sourceAnchor || '').slice(0, 1200),
+                    ) || rawName;
                     if (!name) continue;
                     const narrative = String(attemptDiscoveryContext?.acceptedNarrative || '');
                     const offset = narrative.indexOf(name);
@@ -1099,6 +1105,9 @@ export async function completeActorProfileBatchTransaction({
                             && entry.sourceUnitOffset >= 0
                             ? entry.sourceUnitOffset : undefined,
                         sections: clone(entry.modules),
+                        ...(name !== rawName
+                            ? { repairs: ['actor_profile.discovery_name_from_explicit_evidence'] }
+                            : {}),
                     } });
                     continue;
                 }

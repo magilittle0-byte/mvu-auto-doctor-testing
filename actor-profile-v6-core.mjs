@@ -2666,6 +2666,7 @@ export function actorProfileGenerationCriticalFingerprint(overrides = {}) {
         physiologyCoverageKeys: ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
         identityRevealRefreshModules: ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
         vagueDiscoveryTerms: [...DISCOVERY_NAME_VAGUE_TERMS].sort(),
+        discoveryNameRecovery: String(recoverActorProfileDiscoveryNameFromEvidence),
         completionGroupPlan: String(actorProfileCompletionGroupPlan),
         buildGroupMessages: String(buildActorProfileModuleGroupMessages),
         compactRelevantFragments: String(compactRelevantFragments),
@@ -5438,6 +5439,37 @@ export function isVagueActorProfileDiscoveryName(name) {
     return DISCOVERY_NAME_VAGUE_TERMS.has(compact);
 }
 
+// Recover a specific label only when the same evidence unit explicitly
+// supplies one. A bare role word remains invalid; this never invents a name
+// from an adjective, occupation, or otherwise free prose.
+export function recoverActorProfileDiscoveryNameFromEvidence(name, sourceAnchor) {
+    const original = String(name || '').trim().slice(0, 160);
+    if (!isVagueActorProfileDiscoveryName(original)) return '';
+    const anchor = String(sourceAnchor || '').slice(0, 1200);
+    if (!anchor) return '';
+    const candidates = new Set();
+    const add = (value) => {
+        const label = String(value || '').trim().replace(/[\s\u3000]+/gu, ' ');
+        if (!label || label.length > 80 || isVagueActorProfileDiscoveryName(label)) return;
+        if (/^[\p{P}\p{S}\d\s]+$/u.test(label)) return;
+        if (anchor.includes(label)) candidates.add(label);
+    };
+    for (const pattern of [
+        /"([^"\r\n]{2,80})"/gu,
+        /“([^”\r\n]{2,80})”/gu,
+        /「([^」\r\n]{2,80})」/gu,
+        /『([^』\r\n]{2,80})』/gu,
+        /《([^》\r\n]{2,80})》/gu,
+        /【([^】\r\n]{2,80})】/gu,
+    ]) {
+        for (const match of anchor.matchAll(pattern)) add(match[1]);
+    }
+    for (const match of anchor.matchAll(/(?:名为|名叫|叫作|叫做|称作|称为|自称)\s*[“"「『《【]?([^，。！？；：:\n]{2,80}?)[”"」』》】]?(?=[，。！？；：:\n]|$)/gu)) {
+        add(String(match[1]).split(/[”"」』》】]/u)[0].split(/的/u)[0]);
+    }
+    return candidates.size === 1 ? [...candidates][0] : '';
+}
+
 export function validateActorProfileDiscoveryAnchor(candidateRef, acceptedNarrative) {
     const name = String(candidateRef?.name || '').trim().slice(0, 160);
     const sourceAnchor = String(candidateRef?.sourceAnchor || '').slice(0, 1200);
@@ -5709,8 +5741,16 @@ export function parseActorProfileCompletionBatchOutput(output, options = {}) {
             continue;
         }
         const actorId = cleanText(normalized?.actorRef?.actorId, 120);
-        const candidateName = cleanText(normalized?.candidateRef?.name, 160);
+        const rawCandidateName = cleanText(normalized?.candidateRef?.name, 160);
         const sourceAnchor = String(normalized?.candidateRef?.sourceAnchor || '').slice(0, 1200);
+        const recoveredName = recoverActorProfileDiscoveryNameFromEvidence(
+            rawCandidateName,
+            sourceAnchor,
+        );
+        const candidateName = recoveredName || rawCandidateName;
+        if (recoveredName && Array.isArray(parsed.repairs)) {
+            parsed.repairs.push('actor_profile.discovery_name_from_explicit_evidence');
+        }
         if (actorId && (candidateName || sourceAnchor)) {
             unexpected.push({
                 actorId,

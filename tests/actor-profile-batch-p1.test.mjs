@@ -18,6 +18,7 @@ import {
     createActorProfileRetryReceipt,
     parseActorProfileCompletionBatchOutput,
     prepareActorLedgerProfilesV6,
+    recoverActorProfileDiscoveryNameFromEvidence,
     sealActorProfileTicketBatchForPersistence,
     selectActorProfileCompletionCandidates,
 } from '../actor-profile-v6-core.mjs';
@@ -112,6 +113,27 @@ test('P1 recovery progress seals only bounded ActorRef fields against the curren
         digest,
         actorProfileRecoveryProgressDigest(progress, 'profile-source:two'),
         'the same verified fields cannot be replayed under another SourceRef digest',
+    );
+});
+
+test('vague discovery labels recover only from one explicit in-unit name', () => {
+    const anchor = '一名自称“白鹭”的人物在门边停下，随后说明自己只为取回账册。';
+    assert.equal(
+        recoverActorProfileDiscoveryNameFromEvidence('人物', anchor),
+        '白鹭',
+    );
+    assert.equal(
+        recoverActorProfileDiscoveryNameFromEvidence('陌生人', '一名陌生人在门边停下。'),
+        '',
+        'a bare role without explicit naming evidence remains fail-closed',
+    );
+    assert.equal(
+        recoverActorProfileDiscoveryNameFromEvidence(
+            '人物',
+            '名为“白鹭”的人物与名为“青禾”的人物同时出现。',
+        ),
+        '',
+        'ambiguous explicit labels must not be guessed',
     );
 });
 
@@ -1248,6 +1270,36 @@ test('flat identity routes bind locally and complete Registry through atomic pen
     assert.equal(run.persistencePayloads[1].ledger.actors.filter((actor) => (
         actor.profileV6?.preparedForAction === true
     )).length, names.length);
+});
+
+test('a vague identity route uses one explicit evidence label without relaxing bare-role rejection', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-vague-evidence-route' });
+    const acceptedNarrative = '一名自称“白鹭”的人物在门边停下，随后说明自己只为取回账册。';
+    const moduleText = (key, name) => `${name}${key}：${'这是完整、自然且可长期使用的合成人物档案内容，包含稳定事实、现实限制、选择依据与后续发展空间。'.repeat(4)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys }) => {
+            if (groupKey === 'identity_bootstrap') return '<profile-target actor="new" name="人物"/>';
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(run.result.readbackVerified, true);
+    assert.equal(run.result.accepted.length, 1);
+    assert.equal(run.result.accepted[0].name, '白鹭');
+    assert.equal(run.saveCount, 2);
 });
 
 test('holdout invented discovery name fails once without resending accepted narrative', async () => {
