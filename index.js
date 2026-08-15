@@ -18177,6 +18177,27 @@ async function runContinuityTarget(captured, {
             },
         };
     };
+    const staleWorldResult = (reason, extra = {}) => {
+        const foregroundReplaced = Boolean(
+            captured?.generationId
+            && lastGeneration?.id
+            && String(lastGeneration.id) !== String(captured.generationId),
+        );
+        return foregroundReplaced
+            ? {
+                status: 'stale',
+                reason: 'foreground_preempted',
+                stage3RecoveryTarget: deepClone(captured),
+                module: 'world',
+                ...extra,
+            }
+            : {
+                status: 'stale',
+                reason: String(reason || 'world_target_stale'),
+                module: 'world',
+                ...extra,
+            };
+    };
     const acceptedTarget = stage3AcceptedTarget(captured);
     if (!acceptedTarget) {
         return {
@@ -18190,7 +18211,7 @@ async function runContinuityTarget(captured, {
         return { status: 'stale', reason: 'world_task_owner_changed' };
     }
     let guard = stage3TargetIsCurrent(captured, token);
-    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    if (!guard.ok) return staleWorldResult(guard.reason);
     if (!sovereigntyNarrativeEligible(getContext()?.chat?.[captured.index]?.mes || '')) {
         return { status: 'disabled', reason: 'mechanism_only_narrative' };
     }
@@ -18225,7 +18246,7 @@ async function runContinuityTarget(captured, {
             return { status: 'stale', reason: 'world_task_owner_changed' };
         }
         guard = stage3TargetIsCurrent(captured, token);
-        if (!guard.ok) return { status: 'stale', reason: guard.reason };
+        if (!guard.ok) return staleWorldResult(guard.reason);
         // Re-enter from a fresh namespace/profile read after the durable CAS
         // retirement. The ordinary path still owns the sole Recall/Advance.
         return runContinuityTarget(captured, {
@@ -18376,7 +18397,7 @@ async function runContinuityTarget(captured, {
             namespace,
         );
         guard = stage3TargetIsCurrent(captured, token);
-        if (!guard.ok) return { status: 'stale', reason: guard.reason };
+        if (!guard.ok) return staleWorldResult(guard.reason);
         if (!committedReadback.ok) {
             return finishWorldResult({
                 status: 'failed',
@@ -18415,7 +18436,7 @@ async function runContinuityTarget(captured, {
         currentCharacter(context),
     );
     guard = stage3TargetIsCurrent(captured, token);
-    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    if (!guard.ok) return staleWorldResult(guard.reason);
     if (!continuityFeatureActive(settings, force)) {
         return { status: 'disabled', reason: 'continuity_disabled' };
     }
@@ -18509,7 +18530,7 @@ async function runContinuityTarget(captured, {
         const afterProfileScope = await freshFrozenScopeGuard(captured);
         guard = stage3TargetIsCurrent(captured, token);
         if (!afterProfileScope.ok || !guard.ok) {
-            return { status: 'stale', reason: afterProfileScope.reason || guard.reason, module: 'world' };
+            return staleWorldResult(afterProfileScope.reason || guard.reason);
         }
         phase1Namespace = readChatNamespace(getContext());
         phase1Ledger = normalizeActorLedger(phase1Namespace.actorLedger, {
@@ -18615,7 +18636,7 @@ async function runContinuityTarget(captured, {
         return { status: 'stale', reason: 'world_task_owner_changed' };
     }
     guard = stage3TargetIsCurrent(captured, token);
-    if (!guard.ok) return { status: 'stale', reason: guard.reason };
+    if (!guard.ok) return staleWorldResult(guard.reason);
     // No durable write occurred before model validation. Phase1 remains bound
     // to the fresh, profile-compatible snapshot captured above.
     setContinuityStatus('世界连续性：正在整理本回合因果…', 'busy');
@@ -18688,7 +18709,8 @@ async function runContinuityTarget(captured, {
         });
     } catch (error) {
         if (error?.code === 'WORLD_TARGET_STALE') {
-            return finishWorldResult({ status: 'stale', reason: String(error.message || error) });
+            const stale = staleWorldResult(String(error.message || error));
+            return finishWorldResult({ status: 'stale', ...stale });
         }
         const failureKind = String(error?.failureKind || '');
         const safeValidationReason = /^world\.[a-z0-9_.:-]+$/u.test(
