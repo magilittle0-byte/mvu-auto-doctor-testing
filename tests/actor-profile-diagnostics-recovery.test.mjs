@@ -529,6 +529,18 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
                 lastFailureCodes: ['actor_profile.module_missing'], canRetry: true,
             },
         },
+        chat: {
+            present: true,
+            messageCount: 3,
+            generationLifecycleTrace: [{
+                code: 'timer', chatId: 'private-chat-id', epoch: 4, operationEpoch: 7,
+                type: 'normal', typeKind: 'string', normalizedType: 'normal',
+                eventDryRun: false, optionDryRun: false, quiet: 'absent',
+                imposter: 'absent', allowed: true, oldOperationEpoch: 6,
+                newOperationEpoch: 7, stamp: 9, baselinePresent: true,
+                p4: 'ticket_only', reason: 'accepted', privatePayload: 'must-not-export',
+            }],
+        },
         actorShards: {
             status: 'not_reached_by_p1', failed: 0,
             failureCodes: [
@@ -557,6 +569,14 @@ test('privacy-safe diagnostic behavior preserves controlled profile recovery fie
         }],
     });
     assert.equal(projected.plugin.runtimeCriticalFingerprint, 'runtime-critical:12345:abcdef12');
+    assert.deepEqual(projected.currentChat.generationLifecycleTrace, [{
+        code: 'timer', epoch: 4, operationEpoch: 7,
+        type: 'normal', typeKind: 'string', normalizedType: 'normal',
+        eventDryRun: false, optionDryRun: false, quiet: 'absent',
+        imposter: 'absent', allowed: true, oldOperationEpoch: 6,
+        newOperationEpoch: 7, stamp: 9, baselinePresent: true,
+        p4: 'ticket_only', reason: 'accepted',
+    }]);
     assert.deepEqual(projected.latestStatuses.profile, {
         kind: 'error', status: 'not_completed', failingModules: ['personality'],
         lastFailureCodes: ['actor_profile.module_missing'], canRetry: true,

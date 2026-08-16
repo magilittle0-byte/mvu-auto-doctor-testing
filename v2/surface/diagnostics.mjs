@@ -479,6 +479,35 @@ export function createPrivacySafeDiagnosticProjection({
         currentChat: {
             present: chat?.present === true,
             messageCount: Math.max(0, Number(chat?.messageCount) || 0),
+            generationLifecycleTrace: (
+                Array.isArray(chat?.generationLifecycleTrace)
+                    ? chat.generationLifecycleTrace
+                    : []
+            ).slice(-16).map((entry) => ({
+                code: cleanRuntimeCode(entry?.code, 'other'),
+                epoch: nonNegativeInteger(entry?.epoch),
+                operationEpoch: nonNegativeInteger(entry?.operationEpoch),
+                type: ['normal', 'regenerate', 'swipe', 'continue'].includes(entry?.type)
+                    ? entry.type : '',
+                typeKind: ['undefined', 'null', 'string', 'non_string'].includes(entry?.typeKind)
+                    ? entry.typeKind : '',
+                normalizedType: ['normal', 'regenerate', 'swipe', 'continue']
+                    .includes(entry?.normalizedType) ? entry.normalizedType : '',
+                eventDryRun: entry?.eventDryRun === true,
+                optionDryRun: entry?.optionDryRun === true,
+                quiet: ['present', 'absent'].includes(entry?.quiet) ? entry.quiet : '',
+                imposter: ['present', 'absent'].includes(entry?.imposter) ? entry.imposter : '',
+                allowed: entry?.allowed === true ? true : entry?.allowed === false ? false : null,
+                oldOperationEpoch: Number.isFinite(Number(entry?.oldOperationEpoch))
+                    ? Number(entry.oldOperationEpoch) : null,
+                newOperationEpoch: Number.isFinite(Number(entry?.newOperationEpoch))
+                    ? Number(entry.newOperationEpoch) : null,
+                stamp: nonNegativeInteger(entry?.stamp),
+                baselinePresent: entry?.baselinePresent === true,
+                p4: ['placed', 'blocked', 'ticket_only', 'exception'].includes(entry?.p4)
+                    ? entry.p4 : '',
+                reason: cleanRuntimeCode(entry?.reason),
+            })),
             repairJournalCount: Math.max(0, Number(chat?.repairJournalCount) || 0),
             socialAuditCount: Math.max(0, Number(chat?.socialAuditCount) || 0),
             serendipity: {

@@ -24,6 +24,8 @@
 
 正文硬合同、格式检查与规划前缀清洗已从生产事件、设置、界面、提示词、诊断和公开状态退出。MVU `UpdateVariable`、JSONPatch、变量写入、数据库独立填表与人物/世界真实结算不属于该删除面。
 
+`recordGenerationLifecycleTrace` 原有的16项内存环形轨迹现在进入隐私安全诊断投影；只导出固定 `started/session_created/p4/ended/timer/rejected` 等枚举、epoch/serial与布尔门，不导出chatId、正文、提示词、人物名、模型输出或任意宿主事件参数。它只用于区分真实宿主漏发ENDED、无session、P4阶段和accepted-final timer结果，不参与调度、持久化或成功判定。
+
 ## 验证边界
 
 本阶段只进行静态源码与差异审查。没有运行单测、语法/JSON检查、真实 API、宿主、浏览器、构建、CI 或发布验证；本文不声称功能通过、可发布或可更新。
