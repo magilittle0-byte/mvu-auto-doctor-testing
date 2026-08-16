@@ -5059,6 +5059,7 @@ function doctorRuntimeCriticalFingerprint() {
         stage3PreparedWorldCheckpointMatches.toString(),
         stage3PreparedPhase1StatesMatch.toString(),
         stage3NoSemanticDeltaHeldTerminal.toString(),
+        stage3SafeHeldDraftAfterParseFailure.toString(),
         clearContinuityState.toString(),
         stage3ValidateWorldCandidateInMemory.toString(),
         stage3ValidateWorldDraftInMemory.toString(),
@@ -18641,6 +18642,7 @@ async function runContinuityTarget(captured, {
     // to the fresh, profile-compatible snapshot captured above.
     setContinuityStatus('世界连续性：正在整理本回合因果…', 'busy');
     let output = '';
+    let parseFailureSafeHoldRecovery = false;
     let worldModelCalls = 0;
     try {
         const validateCandidateInMemory = (candidateOutput) => {
@@ -18724,29 +18726,47 @@ async function runContinuityTarget(captured, {
             : failureKind === 'foreground_preempted'
                 ? 'actor_scheduling.advance_foreground_preempted'
                 : 'actor_scheduling.advance_transport_failed';
-        if (selected) markActorSchedulingFailure(schedulingFailureCode, {
-            selected,
-            pendingRecovery: pendingActions.attempts.length > 0,
-        });
-        return finishWorldResult({
-            status: 'failed',
-            reason: failureKind === 'foreground_preempted'
-                ? 'foreground_preempted'
-                : String(error?.message || error),
-            module: 'world',
-            validationCode: safeValidationReason
-                ? safeValidationReason
-                : failureKind === 'validation-error'
-                    ? 'world.candidate.invalid'
-                    : failureKind === 'foreground_preempted'
-                        ? 'world.foreground_preempted'
-                        : 'world.transport.failed',
-            initialValidationCode: /^world\.[a-z0-9_.:-]+$/u.test(
-                String(error?.initialValidationCode || ''),
-            ) ? String(error.initialValidationCode) : '',
-            repairFamily: ['proposal', 'adjudication', 'semantic_progress', 'parse']
-                .includes(error?.repairFamily) ? error.repairFamily : '',
-        });
+        const safeHeldDraft = failureKind === 'validation-error'
+            && safeValidationReason === 'world.output.parse_invalid'
+            ? stage3SafeHeldDraftAfterParseFailure(scheduledBase, {
+                nextTurn,
+                scheduledActorIds,
+                pendingActorAttempts: pendingActions.attempts,
+                maxThreads: settings.continuityMaxThreads,
+            })
+            : null;
+        if (safeHeldDraft) {
+            // Two model attempts already failed at the format boundary.  With
+            // no actor attempt to adjudicate, preserve the full authoritative
+            // world projection and let the unchanged validator prove a local
+            // held receipt.  No model prose is treated as world authority.
+            output = JSON.stringify(safeHeldDraft);
+            parseFailureSafeHoldRecovery = true;
+        } else {
+            if (selected) markActorSchedulingFailure(schedulingFailureCode, {
+                selected,
+                pendingRecovery: pendingActions.attempts.length > 0,
+            });
+            return finishWorldResult({
+                status: 'failed',
+                reason: failureKind === 'foreground_preempted'
+                    ? 'foreground_preempted'
+                    : String(error?.message || error),
+                module: 'world',
+                validationCode: safeValidationReason
+                    ? safeValidationReason
+                    : failureKind === 'validation-error'
+                        ? 'world.candidate.invalid'
+                        : failureKind === 'foreground_preempted'
+                            ? 'world.foreground_preempted'
+                            : 'world.transport.failed',
+                initialValidationCode: /^world\.[a-z0-9_.:-]+$/u.test(
+                    String(error?.initialValidationCode || ''),
+                ) ? String(error.initialValidationCode) : '',
+                repairFamily: ['proposal', 'adjudication', 'semantic_progress', 'parse']
+                    .includes(error?.repairFamily) ? error.repairFamily : '',
+            });
+        }
     }
     const parseStartedAt = Date.now();
     const parsed = parseContinuityOutput(output, {
@@ -18938,7 +18958,7 @@ async function runContinuityTarget(captured, {
     }
     // Phase 2 only consumes the durable Phase 1 readback.  A normal run and a
     // restart therefore share exactly the same settlement path.
-    return finishWorldResult(await commitPreparedWorldCandidate(captured, {
+    const committed = await commitPreparedWorldCandidate(captured, {
         token,
         settings,
         namespace: phase1ReadbackNamespace,
@@ -18949,7 +18969,12 @@ async function runContinuityTarget(captured, {
             queueWaitMs, modelMs, parseMs, validationMs, persistMs,
             totalMs: Date.now() - timingStartedAt,
         },
-    }));
+    });
+    if (parseFailureSafeHoldRecovery && committed?.status === 'applied') {
+        committed.recovered = true;
+        committed.recoveryReason = 'local_safe_hold_after_parse_failure';
+    }
+    return finishWorldResult(committed);
 
 }
 
@@ -19818,6 +19843,37 @@ function stage3NoSemanticDeltaHeldTerminal(scheduledBase, next, {
         reason: '本回合没有足够权威依据形成可持久化的世界变化',
     };
     return held;
+}
+
+// A model-format failure must not turn a structure-only world turn into a
+// whole-round failure.  This fallback is deliberately unavailable whenever
+// an actor action exists: the script may preserve authority, but it may never
+// invent an ATT proposal or adjudicated outcome.
+function stage3SafeHeldDraftAfterParseFailure(scheduledState, {
+    nextTurn = 0,
+    scheduledActorIds = [],
+    pendingActorAttempts = [],
+    maxThreads = 24,
+} = {}) {
+    if (scheduledActorIds.length || pendingActorAttempts.length) return null;
+    const base = normalizeContinuityState(scheduledState, {
+        maxThreads,
+        maxResolved: maxThreads,
+    });
+    const activeThread = base.threads.find((thread) => thread.stage !== 'resolved');
+    const targetTurn = Math.max(0, Math.floor(Number(nextTurn) || base.turn));
+    return {
+        turn: targetTurn,
+        lastTick: {
+            turn: targetTurn,
+            action: 'held',
+            threadId: activeThread?.id || 'WORLD',
+            reason: '模型输出格式无法安全恢复，本回合保留既有世界状态',
+        },
+        threads: deepClone(base.threads),
+        scenarioPlan: deepClone(base.scenarioPlan),
+        world: {},
+    };
 }
 
 function stage3ValidateWorldCandidateInMemory(captured, settings, ledger, {

@@ -114,6 +114,22 @@ function loadStage3WorldCandidateValidator({
     return sandbox.validateWorldCandidate;
 }
 
+function loadStage3SafeHeldDraftAfterParseFailure() {
+    const code = sourceSection(
+        'function stage3SafeHeldDraftAfterParseFailure(',
+        'function stage3ValidateWorldCandidateInMemory(',
+    );
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        normalizeContinuityState,
+    };
+    vm.runInNewContext(
+        `${code}\nthis.safeHeldDraft = stage3SafeHeldDraftAfterParseFailure;`,
+        sandbox,
+    );
+    return sandbox.safeHeldDraft;
+}
+
 function loadActorSchedulingSettlementDiagnostics() {
     const code = sourceSection(
         'function markActorSchedulingSettled(',
@@ -2312,6 +2328,82 @@ test('parse repair rejects malformed, ambiguous, incomplete and actor-incomplete
         );
         assert.equal(calls, 2);
     }
+});
+
+test('two parse failures degrade a structure-only turn to a validator-proven held receipt', () => {
+    const safeHeldDraft = loadStage3SafeHeldDraftAfterParseFailure();
+    const scheduledBase = normalizeContinuityState({
+        turn: 4,
+        lastTick: {
+            turn: 3,
+            action: 'advanced',
+            threadId: 'THREAD-A',
+            reason: '此前已有可验证推进',
+        },
+        threads: [{
+            id: 'THREAD-A',
+            title: '既有线程',
+            stage: 'active',
+            urgency: 2,
+            nextBeat: '等待下一条件',
+        }],
+        scenarioPlan: { amendments: [{ id: 'PLAN-A', status: 'held' }] },
+        world: { facts: [{ id: 'FACT-A', value: 'kept' }] },
+    }, { maxThreads: 24, maxResolved: 24 });
+    const draft = safeHeldDraft(scheduledBase, { nextTurn: 4 });
+    assert.equal(draft.lastTick.threadId, 'THREAD-A');
+    assert.equal(draft.lastTick.action, 'held');
+    assert.deepEqual(draft.threads, scheduledBase.threads);
+    assert.deepEqual(draft.scenarioPlan, scheduledBase.scenarioPlan);
+    assert.equal(JSON.stringify(draft.world), '{}');
+
+    const validate = loadStage3WorldCandidateValidator();
+    const validation = validate(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'balanced' },
+        {},
+        {
+            scheduledState: scheduledBase,
+            continuityState: draft,
+            world: draft.world,
+            actionAdjudications: [],
+            nextTurn: 4,
+            worldContextAvailable: true,
+        },
+    );
+    assert.equal(validation.ok, true);
+    assert.equal(validation.next.lastTick.action, 'held');
+    assert.equal(validation.next.lastTick.threadId, 'THREAD-A');
+    assert.equal(continuityWorldDigest(validation.next), continuityWorldDigest(scheduledBase));
+    assert.equal(
+        continuityScenarioDigest(validation.next),
+        continuityScenarioDigest(scheduledBase),
+    );
+});
+
+test('parse-failure safe hold never fabricates an actor attempt or adjudication', () => {
+    const safeHeldDraft = loadStage3SafeHeldDraftAfterParseFailure();
+    const base = normalizeContinuityState({ turn: 1 }, { maxThreads: 24, maxResolved: 24 });
+    assert.equal(safeHeldDraft(base, {
+        nextTurn: 1,
+        scheduledActorIds: ['actor-ready'],
+    }), null);
+    assert.equal(safeHeldDraft(base, {
+        nextTurn: 1,
+        pendingActorAttempts: [{ attemptId: 'ATT-1' }],
+    }), null);
+
+    const run = sourceSection(
+        'async function runContinuityTarget(',
+        'function sameTargetExceptContent(',
+    );
+    assert.match(run, /safeValidationReason === 'world\.output\.parse_invalid'[\s\S]*?stage3SafeHeldDraftAfterParseFailure/u);
+    assert.match(run, /scheduledActorIds,[\s\S]*?pendingActorAttempts: pendingActions\.attempts/u);
+    assert.match(run, /recoveryReason = 'local_safe_hold_after_parse_failure'/u);
+    assert.match(sourceSection(
+        'function doctorRuntimeCriticalFingerprint()',
+        'function diagnosticPayload()',
+    ), /stage3SafeHeldDraftAfterParseFailure\.toString\(\)/u);
 });
 
 test('P3 reports both Advance and its one targeted repair as real world model calls', () => {
