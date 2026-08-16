@@ -857,10 +857,11 @@ function normalizeNextTurnSettlementProof(value) {
         !producerTarget || !actorLedgerDigest || !targetActionAuthorityDigest || !digest
         || targetActionAttemptCount < 0 || targetActionReceiptCount < 0
         || !Array.isArray(source.orderedResults)
+        || source.orderedResults.length > 120
     ) return null;
     const seen = new Set();
     const orderedResults = [];
-    for (const raw of source.orderedResults.slice(0, 6)) {
+    for (const raw of source.orderedResults) {
         const attemptId = cleanText(raw?.attemptId, 180);
         const id = cleanText(raw?.id, 180);
         const status = cleanText(raw?.status, 80);

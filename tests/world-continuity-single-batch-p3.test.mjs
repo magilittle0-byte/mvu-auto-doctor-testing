@@ -4731,6 +4731,111 @@ test('P4 unrelated-ledger allowance keeps the complete same-target ATT authority
     });
     assert.equal(accepts(otherTargetChanged), true, 'other-target ATT evolution is unrelated');
 
+    const eightResults = Array.from({ length: 8 }, (_, index) => ({
+        attemptId: `attempt-eight-${index}`,
+        id: `result-eight-${index}`,
+        status: 'success',
+        actorRef: { actorId: `actor-eight-${index}`, displayName: `Actor ${index}` },
+        outcome: `confirmed-${index}`,
+        worldAdjudicated: true,
+    }));
+    const eightLedger = {
+        actors: eightResults.map((entry) => ({
+            id: entry.actorRef.actorId,
+            profileV6: { status: 'complete' },
+        })),
+        actionAttempts: eightResults.map((entry) => ({
+            id: entry.attemptId,
+            actorId: entry.actorRef.actorId,
+            actorRef: structuredClone(entry.actorRef),
+            target: structuredClone(target),
+            action: `bounded action ${entry.attemptId}`,
+            status: 'success',
+            outcome: entry.id,
+            settlementEligible: false,
+            worldAdjudicationResult: structuredClone(entry),
+        })),
+        actionReceipts: eightResults.map((entry) => ({
+            id: `receipt-${entry.attemptId}`,
+            receiptId: `receipt-${entry.attemptId}`,
+            stage: 'attempted',
+            attemptId: entry.attemptId,
+            actorId: entry.actorRef.actorId,
+            actorRef: structuredClone(entry.actorRef),
+            target: structuredClone(target),
+            summary: `bounded action ${entry.attemptId}`,
+            route: 'background_attempt',
+            status: 'adjudicated',
+            resultId: entry.id,
+            worldAdjudicated: true,
+        })),
+    };
+    const eightProof = persisted.stage3CanonicalSettlementProof(
+        eightLedger,
+        eightResults,
+        target,
+    );
+    const normalizedEightBase = normalizeContinuityState({
+        chatId: target.chatId,
+        turn: 2,
+        nextTurnInjection: null,
+    }, { chatId: target.chatId, maxThreads: 4 });
+    const normalizedEightContinuity = normalizeContinuityState({
+        ...structuredClone(normalizedEightBase),
+        nextTurnInjection: {
+            version: 1,
+            status: 'pending',
+            producerTarget: structuredClone(target),
+            sourceContinuityDigest:
+                persisted.stage3ContinuityDigestWithoutInjection(normalizedEightBase),
+            payload: { text: 'bounded projection', visibleThreadIds: [] },
+            settlementProof: eightProof,
+            createdAt: 1,
+        },
+    }, { chatId: target.chatId, maxThreads: 4 });
+    assert.equal(
+        normalizedEightContinuity.nextTurnInjection.settlementProof.orderedResults.length,
+        8,
+        'normalization preserves every result when eight actors settle in one accepted turn',
+    );
+    assert.equal(
+        persisted.stage3PersistedPackageDecision(
+            normalizedEightContinuity,
+            normalizeActorLedger(eightLedger, {
+                chatId: target.chatId,
+                scopeDigest: target.scopeDigest,
+            }),
+            target,
+            { allowUnrelatedLedgerEvolution: true },
+        ).code,
+        'ok',
+        'the durable normalized eight-actor package retains an exact settlement proof',
+    );
+    const overCapacityProof = structuredClone(eightProof);
+    overCapacityProof.orderedResults = Array.from({ length: 121 }, (_, index) => ({
+        ...structuredClone(eightProof.orderedResults[index % eightProof.orderedResults.length]),
+        attemptId: `over-capacity-${index}`,
+        id: `over-capacity-result-${index}`,
+    }));
+    const overCapacity = normalizeContinuityState({
+        ...structuredClone(normalizedEightBase),
+        nextTurnInjection: {
+            version: 1,
+            status: 'pending',
+            producerTarget: structuredClone(target),
+            sourceContinuityDigest:
+                persisted.stage3ContinuityDigestWithoutInjection(normalizedEightBase),
+            payload: { text: 'bounded projection', visibleThreadIds: [] },
+            settlementProof: overCapacityProof,
+            createdAt: 1,
+        },
+    }, { chatId: target.chatId, maxThreads: 4 });
+    assert.equal(
+        overCapacity.nextTurnInjection.settlementProof,
+        null,
+        'over-capacity proofs fail closed instead of silently dropping results',
+    );
+
     const rawPhase2Ledger = structuredClone(ledger);
     // Phase 2 can still hold the pre-writer attempt shape. The namespace
     // writer then applies normalizeActorLedger and fills canonical technical
