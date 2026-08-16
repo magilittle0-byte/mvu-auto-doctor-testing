@@ -79,7 +79,7 @@ Advance 前只抓取 namespace S0 与本地 Recall，零持久写。模型输出
 
 `world.output.parse_invalid` 是唯一不做 overlay 的分支：首稿没有可依赖的 raw 基线时，定向修复必须自身含完整 `turn/lastTick/threads/scenarioPlan/world` 根对象；有 scheduled actor 时还必须同时含 `actionProposals/actionAdjudications`，已有 pending ATT 时必须含 `actionAdjudications`。满足该机械完整性后仍交给同一个 full validator；格式非法、歧义 wrapper/数组、缺根字段或缺 actor action 字段均保持固定 parse code，最多两次调用且 Phase1 前零写。
 
-若首稿与唯一一次定向格式修复都仍为 `world.output.parse_invalid`，且本目标没有 scheduled actor 与 pending ATT，生产编排器会构造一个不含模型事实的本地 `held` 草案：逐字保留既有 threads/scenarioPlan，以空 world patch 保留世界投影，并再次交给同一个完整 validator、Phase1/Phase2 CAS 与 durable readback。存在任何人物尝试时该降级关闭，继续 fail-closed，脚本不得伪造人物行动或裁决。
+若首稿与唯一一次定向格式修复都仍为 `world.output.parse_invalid`，且本目标没有已持久化的 pending ATT，生产编排器会构造一个不含模型事实的本地 `held` 草案：逐字保留既有 threads/scenarioPlan，以空 world patch 保留世界投影，并再次交给同一个完整 validator、Phase1/Phase2 CAS 与 durable readback。仅在内存中被 scheduler 选中、尚未形成 ATT 的人物会以固定诊断码延期到后续回合，不写尝试、不伪造裁决；存在 pending ATT 时该降级关闭并继续 fail-closed。
 
 其余定向补缺使用精确 `{"repairPatch":{...}}` envelope，并从模型原始输出机械提取显式键，不再经过会补出默认 `turn/threads/world/lastTick` 的完整候选 normalizer。兼容单键 `patch/targetedRepair`、受控 snake_case 字段别名，以及 proposal/adjudication family 的数组根；只投影固定 validationCode 所属的 allowed keys，额外键被忽略且不能覆盖原候选，零命中、歧义 wrapper 或未知 family 拒绝。只有本地首稿 raw 与 repair family 都可用时才发第二次调用；合并后仍运行原 full authority validator，语义门不变。
 

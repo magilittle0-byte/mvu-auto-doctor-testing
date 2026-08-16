@@ -18643,6 +18643,7 @@ async function runContinuityTarget(captured, {
     setContinuityStatus('世界连续性：正在整理本回合因果…', 'busy');
     let output = '';
     let parseFailureSafeHoldRecovery = false;
+    let parseFailureDeferredActorCount = 0;
     let worldModelCalls = 0;
     try {
         const validateCandidateInMemory = (candidateOutput) => {
@@ -18742,6 +18743,18 @@ async function runContinuityTarget(captured, {
             // held receipt.  No model prose is treated as world authority.
             output = JSON.stringify(safeHeldDraft);
             parseFailureSafeHoldRecovery = true;
+            if (scheduledActorIds.length) {
+                parseFailureDeferredActorCount = scheduledActorIds.length;
+                markActorSchedulingFailure('actor_scheduling.advance_parse_deferred_to_hold', {
+                    selected: parseFailureDeferredActorCount,
+                });
+                // These actors were only selected in memory. No ATT has been
+                // persisted, so deferring them does not erase an attempt or
+                // fabricate an outcome. They remain eligible next turn.
+                scheduledActorIds = [];
+                scheduledActors = [];
+                proposalValidationCandidates.clear();
+            }
         } else {
             if (selected) markActorSchedulingFailure(schedulingFailureCode, {
                 selected,
@@ -18973,6 +18986,7 @@ async function runContinuityTarget(captured, {
     if (parseFailureSafeHoldRecovery && committed?.status === 'applied') {
         committed.recovered = true;
         committed.recoveryReason = 'local_safe_hold_after_parse_failure';
+        committed.deferredActorCount = parseFailureDeferredActorCount;
     }
     return finishWorldResult(committed);
 
@@ -19846,16 +19860,16 @@ function stage3NoSemanticDeltaHeldTerminal(scheduledBase, next, {
 }
 
 // A model-format failure must not turn a structure-only world turn into a
-// whole-round failure.  This fallback is deliberately unavailable whenever
-// an actor action exists: the script may preserve authority, but it may never
-// invent an ATT proposal or adjudicated outcome.
+// whole-round failure. In-memory scheduled actors can be deferred because no
+// ATT exists yet. A persisted pending ATT is different: the script may never
+// erase it or invent its adjudicated outcome.
 function stage3SafeHeldDraftAfterParseFailure(scheduledState, {
     nextTurn = 0,
     scheduledActorIds = [],
     pendingActorAttempts = [],
     maxThreads = 24,
 } = {}) {
-    if (scheduledActorIds.length || pendingActorAttempts.length) return null;
+    if (pendingActorAttempts.length) return null;
     const base = normalizeContinuityState(scheduledState, {
         maxThreads,
         maxResolved: maxThreads,

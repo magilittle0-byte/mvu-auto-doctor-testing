@@ -2381,13 +2381,13 @@ test('two parse failures degrade a structure-only turn to a validator-proven hel
     );
 });
 
-test('parse-failure safe hold never fabricates an actor attempt or adjudication', () => {
+test('parse-failure safe hold defers only unpersisted scheduling and never drops a pending ATT', () => {
     const safeHeldDraft = loadStage3SafeHeldDraftAfterParseFailure();
     const base = normalizeContinuityState({ turn: 1 }, { maxThreads: 24, maxResolved: 24 });
-    assert.equal(safeHeldDraft(base, {
+    assert.ok(safeHeldDraft(base, {
         nextTurn: 1,
         scheduledActorIds: ['actor-ready'],
-    }), null);
+    }));
     assert.equal(safeHeldDraft(base, {
         nextTurn: 1,
         pendingActorAttempts: [{ attemptId: 'ATT-1' }],
@@ -2399,7 +2399,10 @@ test('parse-failure safe hold never fabricates an actor attempt or adjudication'
     );
     assert.match(run, /safeValidationReason === 'world\.output\.parse_invalid'[\s\S]*?stage3SafeHeldDraftAfterParseFailure/u);
     assert.match(run, /scheduledActorIds,[\s\S]*?pendingActorAttempts: pendingActions\.attempts/u);
+    assert.match(run, /actor_scheduling\.advance_parse_deferred_to_hold[\s\S]*?scheduledActorIds = \[\]/u);
+    assert.match(run, /proposalValidationCandidates\.clear\(\)/u);
     assert.match(run, /recoveryReason = 'local_safe_hold_after_parse_failure'/u);
+    assert.match(run, /deferredActorCount = parseFailureDeferredActorCount/u);
     assert.match(sourceSection(
         'function doctorRuntimeCriticalFingerprint()',
         'function diagnosticPayload()',
