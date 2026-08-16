@@ -953,6 +953,10 @@ function loadScheduledPhase1RebaseHarness() {
         'async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {',
         'async function stage3PersistAttemptlessPreparedWorldCandidate(captured, {',
     );
+    const adjudicationCode = sourceSection(
+        'function stage3HeldActorProposal(',
+        'function stage3ValidateWorldDraftInMemory(',
+    );
     const readbackCode = sourceSection(
         'function stage3Phase1ReadbackValidationCode(persisted) {',
         'async function runContinuityTarget(captured, {',
@@ -1048,7 +1052,7 @@ function loadScheduledPhase1RebaseHarness() {
         stage3PreparedWorldCheckpointMatches: () => true,
     };
     vm.runInNewContext(
-        `${unchangedGate}\n${readbackCode}\n${profileEvolutionCode}\n${code}\n`
+        `${unchangedGate}\n${readbackCode}\n${profileEvolutionCode}\n${adjudicationCode}\n${code}\n`
         + 'this.rebase = stage3PersistPreparedActorAttemptsOnFreshLedger;',
         sandbox,
     );
@@ -1672,6 +1676,13 @@ test('world local adapter supplies technical defaults and safely holds omitted a
     assert.equal(missing.length, 1);
     assert.equal(missing[0].status, 'delayed');
     assert.equal(validateWorldAdjudicationBatch(missing, [attempt]).valid, true);
+    const normalizedAgain = validator.normalizeAdjudication(normalized, attempt);
+    assert.equal(validateWorldAdjudicationBatch([normalizedAgain], [attempt]).valid, true);
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(normalizedAgain)),
+        JSON.parse(JSON.stringify(normalized)),
+        'the Phase 1 persistence boundary may safely normalize the proven row again',
+    );
     assert.deepEqual(
         JSON.parse(JSON.stringify(validator.heldProposal('actor-a'))),
         {
@@ -1679,6 +1690,30 @@ test('world local adapter supplies technical defaults and safely holds omitted a
             candidateAction: '本轮没有形成可验证的自主行动，保持当前计划并等待后续条件',
             stateChanges: [],
         },
+    );
+});
+
+test('runContinuity carries the proven normalized draft into both Phase 1 persistence paths', () => {
+    const run = sourceSection(
+        'async function runContinuityTarget(',
+        'function sameTargetExceptContent(',
+    );
+    assert.match(run, /const validatedParsed = draftValidation\.parsed/u);
+    assert.match(
+        run,
+        /stage3PersistPreparedActorAttemptsOnFreshLedger[\s\S]*?parsed: validatedParsed/u,
+    );
+    assert.match(
+        run,
+        /stage3PersistAttemptlessPreparedWorldCandidate[\s\S]*?parsed: validatedParsed/u,
+    );
+    const persist = sourceSection(
+        'async function stage3PersistPreparedActorAttemptsOnFreshLedger(',
+        'async function stage3PersistAttemptlessPreparedWorldCandidate(',
+    );
+    assert.match(
+        persist,
+        /return stage3NormalizeWorldAdjudicationShape\(entry, attempt\)/u,
     );
 });
 

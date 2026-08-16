@@ -18902,10 +18902,15 @@ async function runContinuityTarget(captured, {
             module: 'world',
         });
     }
+    // The draft validator returns the locally normalized semantic envelope.
+    // Keep that exact proven candidate for Phase 1/2; falling back to the raw
+    // model shape would reintroduce technical fields that the compact prompt
+    // deliberately leaves to Doctor.
+    const validatedParsed = draftValidation.parsed;
     let phase1Persisted = null;
     if (scheduledActorIds.length) {
-        const proposals = Array.isArray(parsed.raw?.actionProposals)
-            ? parsed.raw.actionProposals
+        const proposals = Array.isArray(validatedParsed.raw?.actionProposals)
+            ? validatedParsed.raw.actionProposals
             : [];
         const proposalIds = proposals.map((proposal) => String(proposal?.actorId || ''));
         if (
@@ -18960,7 +18965,7 @@ async function runContinuityTarget(captured, {
         }
         const phase1PersistStartedAt = Date.now();
         const rebased = await stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
-            token, settings, actionLedger, parsed, checkpointBase, scheduledBase,
+            token, settings, actionLedger, parsed: validatedParsed, checkpointBase, scheduledBase,
             director, nextTurn, actionTarget, recallPacket, worldContext, phase1Expected,
             scheduledActorIds, validatedProposals,
             playerNames: currentPlayerActorNames(context),
@@ -18999,7 +19004,7 @@ async function runContinuityTarget(captured, {
         const rebased = await stage3PersistAttemptlessPreparedWorldCandidate(
             captured,
             {
-                token, settings, actionLedger, parsed, checkpointBase, scheduledBase,
+                token, settings, actionLedger, parsed: validatedParsed, checkpointBase, scheduledBase,
                 director, nextTurn, actionTarget, recallPacket, worldContext,
                 phase1Expected,
             },
@@ -19590,12 +19595,7 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
         ) return { ok: false, reason: 'world_actor_adjudications_incomplete' };
         const adjudications = rawAdjudications.map((entry) => {
             const attempt = recordedByActor.get(String(entry.actorId));
-            return {
-                ...entry,
-                attemptId: attempt.id,
-                actorRef: deepClone(attempt.actorRef),
-                target: deepClone(attempt.target),
-            };
+            return stage3NormalizeWorldAdjudicationShape(entry, attempt);
         });
         const parsedForCommit = {
             ...parsed,
