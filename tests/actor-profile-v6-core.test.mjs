@@ -345,6 +345,7 @@ test('new original characters receive stable script-rolled multi-axis design tic
         fieldSources: {},
         designRolls: first,
     }]);
+    assert.match(messages[0].content, /Identity Confirmation.*MVU自动医生.*人物档案医师/u);
     assert.match(messages[0].content, /不替玩家决定行动、感受、同意或世界结果/u);
     assert.match(messages[0].content, /真实精确 actorId 值/u);
     assert.doesNotMatch(messages[0].content, /characterCreationTicket|coverageState|relationships/u);

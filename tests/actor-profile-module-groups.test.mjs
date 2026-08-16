@@ -102,6 +102,7 @@ test('adult physiology prompt requires sexual physiology instead of accepting a 
     const prompt = buildActorProfileModuleGroupMessages(group, {
         discoveryContext: { acceptedNarrative: '该成年人站在门边等待。' },
     }).map((message) => message.content).join('\n');
+    assert.match(prompt, /Identity Confirmation.*MVU自动医生.*人物档案医师/u);
     assert.match(prompt, /外生殖器/u);
     assert.match(prompt, /内生殖系统/u);
     assert.match(prompt, /第二性征/u);

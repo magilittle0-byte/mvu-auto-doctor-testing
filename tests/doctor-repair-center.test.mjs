@@ -293,7 +293,9 @@ test('production adapter routes modules only to their existing independent repai
         'async function persistDoctorRepairCapsules(capsules, expectedChatId, expectedTarget)',
     );
     const calls = [];
-    let continuityResult = { status: 'applied', readbackVerified: true };
+    let continuityResult = {
+        status: 'applied', readbackVerified: true, worldModelCalls: 2, worldWrites: 0,
+    };
     const sandbox = {
         doctorRepairDiagnosticCounters: () => ({ modelCallCount: 0, writeCount: 0 }),
         doctorRepairCounterDelta: () => ({ modelCallCount: 1, writeCount: 1 }),
@@ -333,6 +335,9 @@ test('production adapter routes modules only to their existing independent repai
         const result = await sandbox.runModule(module, captured);
         assert.equal(result.status, 'applied', module);
         assert.equal(result.readbackVerified, true, module);
+        if (module === 'world') {
+            assert.equal(result.modelCallCount, 2, 'world adapter must preserve actual model calls');
+        }
     }
     assert.deepEqual(calls, ['variable', 'profile', 'world']);
     continuityResult = { status: 'duplicate' };

@@ -511,7 +511,8 @@ export function buildActorProfileModuleGroupMessages(group, {
     ));
     const guides = requestedModuleKeys.map((key) => `${key}: ${PROFILE_MODULE_NOTES[key]}`).join('\n');
     if (discoveryOnly) return [{ role: 'system', content: [
-        '只做已接受正文的人物身份路由，不填档案、不续写剧情。',
+        'Identity Confirmation：你是“MVU自动医生”的人物档案医师，不是正文作者，也不是数据库填表AI。你认真阅读已经接受的故事，认出真正出场的人物，并把身份线索交还给本地医生。',
+        '这一步只做已接受正文的人物身份路由，不填档案、不续写剧情。宁可把不确定身份交给本地复核，也不要擅自取名、合并或创造人物。',
         '输出零到多行裸路由：<profile-target actor="new" name="正文逐字稳定行键" unit="可选CU-id"/>。行键可为姓名、代号、编号、职业或带限定的描述性称谓；不得改写、补名或使用玩家、纯代词、群体、只被提及者、已登记/受保护身份。unit 可省略；省略时脚本按最早且不被更长行键覆盖的独立逐字出现机械绑定，短名若只嵌在本批更长 name 中则拒绝。不要回显 digest、空单元、正文、档案或解释。',
         '若正文明确揭示已登记人物的新行键，actor 必须用已登记索引中的精确 actorId，并在标签内给出 <identity-evidence>同时含旧行键/别名与新行键的最短正文原句片段</identity-evidence>；不得猜测合并。',
         '只有确实没有任何合格新人物或身份揭示时，整个响应精确输出 <no-new/>；不得与 profile-target 混用。',
@@ -522,6 +523,7 @@ export function buildActorProfileModuleGroupMessages(group, {
         `\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a${JSON.stringify(excludedActorNames)}`,
     ].join('\n\n') }];
     return [{ role: 'system', content: [
+        'Identity Confirmation：你是“MVU自动医生”的人物档案医师。你像一位理解故事与人的传记编辑，把零散证据整理成自然、完整、可继续使用的人物档案；你不是正文作者，也不负责数据库、MVU或世界裁决。',
         '\u4f60\u53ea\u586b\u5199\u6307\u5b9a\u7684\u4eba\u7269\u6863\u6848\u6a21\u5757\uff0c\u4e0d\u7eed\u5199\u5267\u60c5\u3002',
         requestedModuleKeys.some((key) => key !== 'physiology')
             ? ACTOR_SOVEREIGNTY_DIVERSITY_CONTRACT : '',
@@ -3729,7 +3731,8 @@ export function buildActorProfileCompletionMessages(candidates, {
     // legacy V6 prompt below unreachable while legacy callers are retired;
     // P2 must never ask a model for the former field table or provenance.
     const narrativeSystem = [
-        '\u4f60\u53ea\u751f\u6210\u4eba\u7269\u6863\u6848\uff0c\u4e0d\u7ee7\u5199\u5267\u60c5\uff0c\u4e0d\u66ff\u73a9\u5bb6\u51b3\u5b9a\u884c\u52a8\u3001\u611f\u53d7\u3001\u540c\u610f\u6216\u4e16\u754c\u7ed3\u679c\u3002',
+        'Identity Confirmation：你是“MVU自动医生”的人物档案医师。你像一位耐心、懂人物的传记编辑，从最终正文和权威材料中认出人物，并写成自然完整的中文档案。你不是正文作者，也不是数据库填表AI。',
+        '\u4f60\u53ea\u751f\u6210\u4eba\u7269\u6863\u6848\uff0c\u4e0d\u7ee7\u5199\u5267\u60c5\uff0c\u4e0d\u66ff\u73a9\u5bb6\u51b3\u5b9a\u884c\u52a8\u3001\u611f\u53d7\u3001\u540c\u610f\u6216\u4e16\u754c\u7ed3\u679c\u3002\u6b63\u6587\u6ca1\u6709\u8bf4\u6b7b\u7684\u6863\u6848\u7ec6\u8282\uff0c\u53ef\u4ee5\u7ed3\u5408\u4e16\u754c\u89c2\u4e0e\u4eba\u7269\u5df2\u77e5\u903b\u8f91\u505a\u53ef\u4fee\u8ba2\u7684\u81ea\u7136\u8865\u5168\uff0c\u4f46\u4e0d\u5f97\u4e0e\u6743\u5a01\u8bbe\u5b9a\u6216\u5df2\u53d1\u751f\u4e8b\u5b9e\u51b2\u7a81\u3002',
         '\u6bcf\u4eba\u4e00\u4e2a\u5bbd\u677e\u4e2d\u6587\u6863\u6848\u5757\uff1a\u3010\u4eba\u7269\u6863\u6848\uff1a\u59d3\u540d\u3011\u3002\u7528\u81ea\u7136\u6bb5\u843d\u4ea4\u4ee3\u8eab\u4efd/\u5916\u8c8c\u3001\u751f\u7406\uff08\u542f\u7528\u65f6\uff09\u3001\u6027\u683c\u5e95\u8272\u3001\u7ecf\u5386\u3001\u5f53\u524d\u72b6\u6001\u3001\u5173\u7cfb\u4e0e\u52a8\u673a\u3001\u77e5\u8bc6/\u80fd\u529b/\u8d44\u6e90\u3002\u53ef\u7528\u5efa\u8bae\u6807\u9898\u6216\u540c\u4e49\u6807\u9898\uff0c\u4e0d\u9700\u9010\u5b57\u5e7f\u5b9a\u4e03\u4e2a\u6807\u9898\uff1b\u6bcf\u4e2a\u6838\u5fc3\u7ef4\u5ea6\u90fd\u5fc5\u987b\u6709\u975e\u5360\u4f4d\u7684\u81ea\u7136\u4e2d\u6587\u3002\u4e0d\u8981 JSON\u3001\u6570\u7ec4\u3001\u6280\u672f\u6807\u8bb0\u6216\u6765\u6e90\u5b57\u6bb5\u3002',
         `\u5b57\u6bb5\u8bed\u4e49\u6307\u5357\uff08\u53ea\u653e\u4e00\u6b21\uff09\uff1a\n${batchFieldGuide}`,
         '\u5df2\u767b\u8bb0\u4eba\u7269\u5728\u540d\u79f0\u4e0b\u4e00\u884c\u5199 ActorRef\uff1a\u540e\u9762\u5fc5\u987b\u662f\u8f93\u5165\u4e2d\u8be5\u4eba\u7269\u7684\u771f\u5b9e\u7cbe\u786e actorId \u503c\uff1b\u4e0d\u5f97\u5199 actorId \u5b57\u9762\u6a21\u677f\u3002\u65b0\u4eba\u7269\u4e0d\u5199 ActorRef \u6216\u951a\u70b9\uff1b\u6807\u9898\u59d3\u540d\u5fc5\u987b\u9010\u5b57\u590d\u7528\u5df2\u63a5\u53d7\u6b63\u6587\u4e2d\u81f3\u5c11\u4e00\u6b21\u51fa\u73b0\u7684\u975e\u6a21\u7cca\u539f\u59cb\u59d3\u540d\u8fde\u7eed\u5b50\u4e32\uff0c\u591a\u6b21\u51fa\u73b0\u65f6\u811a\u672c\u53d6\u7b2c\u4e00\u6b21\u3002\u4e0d\u5f97\u4f7f\u7528\u522b\u540d\u3001\u65b0\u53d6\u540d\u3001\u73a9\u5bb6\u4ee3\u79f0\u3001\u6cdb\u79f0\u6216\u65b0\u589e\u4eba\u7269\u3002',

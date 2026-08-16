@@ -64,11 +64,27 @@ test('world prompt sends one recalled material block and the compact ownership/o
     assert.match(messages, /content: compactUser/u);
     assert.doesNotMatch(messages, /content: system \}/u);
     assert.doesNotMatch(messages, /requiredPrefix \+ optionalUser/u);
+    assert.match(messages, /Identity Confirmation.*MVU自动医生.*世界连续性医师/u);
     assert.match(messages, /人物尝试不等于世界结果/u);
     assert.match(messages, /未ready或未召回人物不得获得本轮自主行动/u);
-    assert.match(messages, /success或partial时appliedStateChanges必须非空/u);
-    assert.match(messages, /禁止advanced配空增量/u);
+    assert.match(messages, /技术身份、尝试编号、账本字段/u);
+    assert.match(messages, /本地把它规范为安全的held\/delayed收据/u);
     assert.match(messages, /输出最小形状/u);
+});
+
+test('world prompt asks only for semantic actor rows and leaves persistence authority to local code', () => {
+    const messages = sourceSection(
+        'function buildContinuityMessages({',
+        'async function generateWorldContinuitySingleBatch',
+    );
+    const activeShape = messages.slice(
+        messages.indexOf('const actionOutputShape = worldCreatesAttempts'),
+        messages.indexOf('/* Historical verbose payload'),
+    );
+    assert.match(activeShape, /actorId.*intent.*candidateAction.*stateChanges/us);
+    assert.match(activeShape, /actorId.*status.*resultSummary.*observableConsequence/us);
+    assert.doesNotMatch(activeShape, /"actorRef"|"target"|"actualResourceCosts"|"visibility"/u);
+    assert.match(messages, /model owns prose semantics|模型/u);
 });
 
 function sourceSection(start, end) {
@@ -108,10 +124,17 @@ function loadStage3WorldCandidateValidator({
         continuityWorldDigest,
     };
     vm.runInNewContext(
-        `${code}\nthis.validateWorldCandidate = stage3ValidateWorldCandidateInMemory;`,
+        `${code}\nthis.validateWorldCandidate = stage3ValidateWorldCandidateInMemory;`
+        + '\nthis.normalizeAdjudication = stage3NormalizeWorldAdjudicationShape;'
+        + '\nthis.adjudicationsForAttempts = stage3WorldAdjudicationsForAttempts;'
+        + '\nthis.heldProposal = stage3HeldActorProposal;',
         sandbox,
     );
-    return sandbox.validateWorldCandidate;
+    const validator = sandbox.validateWorldCandidate;
+    validator.normalizeAdjudication = sandbox.normalizeAdjudication;
+    validator.adjudicationsForAttempts = sandbox.adjudicationsForAttempts;
+    validator.heldProposal = sandbox.heldProposal;
+    return validator;
 }
 
 function loadStage3SafeHeldDraftAfterParseFailure() {
@@ -1612,6 +1635,51 @@ test('production P3 validator accepts WORLD-held only after all ATT are adjudica
         false,
     );
     assert.equal(acceptedAdjacentHold.next.lastTick.threadId, 'THREAD-ACTIVE');
+});
+
+test('world local adapter supplies technical defaults and safely holds omitted actor rows', () => {
+    const validator = loadStage3WorldCandidateValidator();
+    const attempt = {
+        id: 'ATT-A', actorId: 'actor-a', intent: 'execute', route: 'foreground_attempt',
+        expectedRisk: '输入尝试中的有界风险', resourceCosts: [],
+        actorRef: { kind: 'actor_ref', actorId: 'actor-a', displayName: 'Actor A', aliases: [] },
+        target: { chatId: 'chat-world-hold', index: 2, logicalIndex: 2 },
+    };
+    const normalized = validator.normalizeAdjudication({
+        actorId: 'actor-a', status: 'success',
+        resultSummary: '取得了可验证的新结果',
+        observableConsequence: '留下了可观察的新痕迹',
+        appliedStateChanges: [{ kind: 'plan', summary: '形成了一项新的后续计划' }],
+    }, attempt);
+    assert.equal(normalized.attemptId, 'ATT-A');
+    assert.equal(normalized.actorRef.actorId, 'actor-a');
+    assert.equal(normalized.risk, '输入尝试中的有界风险');
+    assert.deepEqual(Array.from(normalized.costs), []);
+    assert.deepEqual(Array.from(normalized.actualResourceCosts), []);
+    assert.equal(normalized.durationTurns, 1);
+    assert.equal(normalized.visibility, 'private');
+    assert.equal(validateWorldAdjudicationBatch([normalized], [attempt]).valid, true);
+
+    const downgraded = validator.normalizeAdjudication({
+        actorId: 'actor-a', status: 'success', resultSummary: '声称成功',
+        observableConsequence: '但没有具体状态变化',
+    }, attempt);
+    assert.equal(downgraded.status, 'delayed');
+    assert.deepEqual(Array.from(downgraded.appliedStateChanges), []);
+    assert.equal(validateWorldAdjudicationBatch([downgraded], [attempt]).valid, true);
+
+    const missing = validator.adjudicationsForAttempts([], [attempt]);
+    assert.equal(missing.length, 1);
+    assert.equal(missing[0].status, 'delayed');
+    assert.equal(validateWorldAdjudicationBatch(missing, [attempt]).valid, true);
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(validator.heldProposal('actor-a'))),
+        {
+            actorId: 'actor-a', intent: 'wait',
+            candidateAction: '本轮没有形成可验证的自主行动，保持当前计划并等待后续条件',
+            stateChanges: [],
+        },
+    );
 });
 
 test('P3 settlement diagnostics distinguish semantic, held, and pending attempts', () => {
@@ -7321,11 +7389,14 @@ test('P3 worldbook activation reuses constant, primary/secondary logic and never
 
 test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudications', () => {
     const prompt = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
-    assert.match(prompt, /newly scheduled actors there is no actionAttempt yet/u);
-    assert.match(prompt, /Do not invent attemptId, actorRef, or target/u);
-    assert.match(prompt, /For existing persisted actionAttempts/u);
-    assert.match(prompt, /"location":"","travelTurns":0/u);
-    assert.match(prompt, /location为空或等于人物当前地点时travelTurns必须为0/u);
-    assert.match(prompt, /明确前往不同地点时必须为>=1的整数/u);
-    assert.doesNotMatch(prompt, /与当前地点不同的明确目标地点/u);
+    const active = prompt.slice(
+        prompt.indexOf('const actionOutputShape = worldCreatesAttempts'),
+        prompt.indexOf('/* Historical verbose payload'),
+    );
+    assert.match(active, /worldCreatesAttempts/u);
+    assert.match(active, /actorId.*intent.*candidateAction.*stateChanges/us);
+    assert.match(active, /actorId.*status.*resultSummary.*observableConsequence/us);
+    assert.match(prompt, /技术身份和账本字段由医生本地绑定/u);
+    assert.match(prompt, /不要抄写或猜测任何内部技术标识/u);
+    assert.doesNotMatch(active, /attemptId|actorRef|target|travelTurns|actualResourceCosts/u);
 });

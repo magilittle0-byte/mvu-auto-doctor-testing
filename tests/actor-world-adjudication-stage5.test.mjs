@@ -1061,7 +1061,16 @@ test('production player identity and adjudicated duration remain hard action aut
     const runStart = indexSource.indexOf('async function runContinuityTarget');
     const helperCall = indexSource.indexOf('stage3PersistPreparedActorAttemptsOnFreshLedger', runStart);
     assert.match(indexSource.slice(helperCall, helperCall + 900), /playerNames:\s*currentPlayerActorNames\(context\)/u);
-    assert.match(indexSource, /interactionTargets/u);
+    const activeWorldShape = indexSource.slice(
+        indexSource.indexOf('const actionOutputShape = worldCreatesAttempts'),
+        indexSource.indexOf('/* Historical verbose payload'),
+    );
+    assert.doesNotMatch(
+        activeWorldShape,
+        /interactionTargets|resourceCosts|capabilityUsed|travelTurns/u,
+        'model prompt must not mirror locally owned action authority fields',
+    );
+    assert.match(indexSource, /function stage3NormalizeWorldAdjudicationShape/u);
     assert.match(indexSource, /knowledge: actor\.knowledge/u);
     assert.match(indexSource, /resources: actor\.resources/u);
     assert.match(indexSource, /stimuli: actor\.stimuli/u);
