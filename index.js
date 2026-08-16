@@ -5146,6 +5146,7 @@ function doctorRuntimeCriticalFingerprint() {
         generateWorldContinuitySingleBatch.toString(),
         actorActionCandidatesFromShard.toString(),
         stage3CanonicalTargetActionReceipt.toString(),
+        stage3CanonicalTargetActionAttempt.toString(),
         stage3TargetActionAuthorityProjection.toString(),
         stage3CanonicalSettlementProof.toString(),
         stage3SettlementProofMatchesTarget.toString(),
@@ -17741,6 +17742,21 @@ function stage3CanonicalTargetActionReceipt(value, captured) {
     return receipt;
 }
 
+function stage3CanonicalTargetActionAttempt(value, captured) {
+    const raw = deepClone(value || {});
+    const normalized = normalizeActorLedger({
+        chatId: String(captured?.chatId || ''),
+        actionAttempts: [raw],
+    }, {
+        chatId: String(captured?.chatId || ''),
+        scopeDigest: String(captured?.scopeDigest || ''),
+    })?.actionAttempts?.[0];
+    // Phase 2 creates a valid attempt before the namespace writer performs its
+    // normal ledger pass. Hash the same canonical shape on both sides of that
+    // write; malformed attempts remain visible and therefore fail closed.
+    return normalized || { invalidAttempt: raw };
+}
+
 function stage3TargetActionAuthorityProjection(ledger, captured) {
     const target = normalizeActorActionTarget(
         captured?.logicalIndex != null || captured?.contentHash
@@ -17750,7 +17766,7 @@ function stage3TargetActionAuthorityProjection(ledger, captured) {
     if (!target) return null;
     const attempts = (Array.isArray(ledger?.actionAttempts) ? ledger.actionAttempts : [])
         .filter((attempt) => actorActionTargetMatches(attempt?.target, target))
-        .map((attempt) => deepClone(attempt))
+        .map((attempt) => stage3CanonicalTargetActionAttempt(attempt, captured))
         .sort((left, right) => (
             String(left?.id || '').localeCompare(String(right?.id || ''))
             || fingerprint(JSON.stringify(left)).localeCompare(fingerprint(JSON.stringify(right)))

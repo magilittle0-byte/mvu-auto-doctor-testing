@@ -4732,6 +4732,12 @@ test('P4 unrelated-ledger allowance keeps the complete same-target ATT authority
     assert.equal(accepts(otherTargetChanged), true, 'other-target ATT evolution is unrelated');
 
     const rawPhase2Ledger = structuredClone(ledger);
+    // Phase 2 can still hold the pre-writer attempt shape. The namespace
+    // writer then applies normalizeActorLedger and fills canonical technical
+    // fields. Both sides must hash the same attempt authority.
+    delete rawPhase2Ledger.actionAttempts[0].compatibilityOnly;
+    delete rawPhase2Ledger.actionAttempts[0].compatibilityReason;
+    delete rawPhase2Ledger.actionAttempts[0].migratedFromLegacyReceipt;
     rawPhase2Ledger.actionReceipts.push({
         receiptId: 'receipt-world-settled',
         actionId: attempt.id,
@@ -4752,10 +4758,16 @@ test('P4 unrelated-ledger allowance keeps the complete same-target ATT authority
     const rawPhase2Continuity = structuredClone(continuity);
     rawPhase2Continuity.nextTurnInjection.settlementProof = rawPhase2Proof;
     const durableNormalizedLedger = structuredClone(rawPhase2Ledger);
-    durableNormalizedLedger.actionReceipts = normalizeActorLedger({
+    const normalizedAuthorityLedger = normalizeActorLedger({
         chatId: target.chatId,
+        actionAttempts: rawPhase2Ledger.actionAttempts,
         actionReceipts: rawPhase2Ledger.actionReceipts,
-    }).actionReceipts;
+    }, {
+        chatId: target.chatId,
+        scopeDigest: target.scopeDigest,
+    });
+    durableNormalizedLedger.actionAttempts = normalizedAuthorityLedger.actionAttempts;
+    durableNormalizedLedger.actionReceipts = normalizedAuthorityLedger.actionReceipts;
     const normalizedDecision = persisted.stage3PersistedPackageDecision(
         rawPhase2Continuity,
         durableNormalizedLedger,
@@ -4765,7 +4777,7 @@ test('P4 unrelated-ledger allowance keeps the complete same-target ATT authority
     assert.equal(
         normalizedDecision.code,
         'ok',
-        'raw Phase2 receipts and the durable normalized read use one canonical proof shape',
+        'raw Phase2 attempts/receipts and the durable normalized read use one canonical proof shape',
     );
     const normalizedReceiptTamper = structuredClone(durableNormalizedLedger);
     normalizedReceiptTamper.actionReceipts.find((entry) => (
@@ -4780,6 +4792,18 @@ test('P4 unrelated-ledger allowance keeps the complete same-target ATT authority
         ).code,
         'authority_digest_mismatch',
         'normalization compatibility never permits same-target receipt authority tampering',
+    );
+    const normalizedAttemptTamper = structuredClone(durableNormalizedLedger);
+    normalizedAttemptTamper.actionAttempts[0].worldAdjudicationResult.id = 'tampered-result';
+    assert.equal(
+        persisted.stage3PersistedPackageDecision(
+            rawPhase2Continuity,
+            normalizedAttemptTamper,
+            target,
+            { allowUnrelatedLedgerEvolution: true },
+        ).code,
+        'authority_digest_mismatch',
+        'attempt canonicalization never permits same-target adjudication tampering',
     );
 
     const mutations = [];
