@@ -65,6 +65,13 @@ path. If none exists, the button returns `doctor.repair.target_unavailable`.
 Consequently the no-fault `repair-all` path performs zero namespace writes and
 zero host chat saves. Explicit module repair may still use the existing normal
 target-migration entrypoint once actual repair work has been requested.
+Before freezing that read-only target, the button resolves the host's current
+worldbook selector scope and passes the resolved scope into capture. This
+prevents a cold page's first click from capturing the fallback selector cache,
+then cancelling itself when the same click hydrates the real selector list.
+Chat changes during this read-only resolution return target-unavailable, and
+any later target/scope change renders a visible cancelled state instead of
+leaving the repair center displayed as busy.
 
 Every request freezes one hashed target identity over chat, message, index,
 swipe, generation serial/id/type, accepted-content fingerprint, and sovereignty
@@ -208,7 +215,8 @@ fingerprint. Its source covers the fixed module/success sets plus `safeCode`,
 counter normalization, the strict readback success gate, health selection,
 execution, capsule creation, and projection; changing an internal success rule
 therefore changes the install/runtime fingerprint. The runtime-critical list
-also binds the read-only identity chain, ordinary and terminal diagnostic
+also binds the read-only identity chain, resolved sovereignty-scope capture,
+ordinary and terminal diagnostic
 recorders/merge/persistence, journal capsule merge/persistence, and conservative
 zero-write classifier. It explicitly binds `stage3FieldState`, the
 `createContinuityPendingOwnerMap` factory, and the runtime-called

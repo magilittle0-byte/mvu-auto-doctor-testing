@@ -3883,6 +3883,11 @@ async function runDoctorRepairCenterUnlocked(requested, captured, targetDigest, 
         && !doctorRepairCenterForegroundActive()
         && !doctorRepairCenterTargetIsCurrent(captured)
     ) {
+        setDoctorRepairCenterStatus(
+            '医生修复中心：目标回复或作用域已变化，本次修复已取消。',
+            'cancelled',
+            { record: false },
+        );
         return {
             status: 'cancelled', code: 'doctor.repair.target_changed',
             targetIndex: captured.index, targetDigest, actions: [], zeroWrite: true,
@@ -3950,6 +3955,13 @@ async function runDoctorRepairCenterUnlocked(requested, captured, targetDigest, 
         String(getContext()?.chatId || '') !== expectedChatId
         || !canContinue()
     ) {
+        setDoctorRepairCenterStatus(
+            String(getContext()?.chatId || '') !== expectedChatId
+                ? '医生修复中心：聊天已切换，本次修复已取消。'
+                : '医生修复中心：目标回复或作用域已变化，本次修复已取消。',
+            'cancelled',
+            { record: false },
+        );
         return {
             ...outcome,
             status: 'cancelled',
@@ -3973,6 +3985,13 @@ async function runDoctorRepairCenterUnlocked(requested, captured, targetDigest, 
         String(getContext()?.chatId || '') !== expectedChatId
         || !canContinue()
     ) {
+        setDoctorRepairCenterStatus(
+            String(getContext()?.chatId || '') !== expectedChatId
+                ? '医生修复中心：聊天已切换，本次修复已取消。'
+                : '医生修复中心：目标回复或作用域已变化，本次修复已取消。',
+            'cancelled',
+            { record: false },
+        );
         return {
             ...outcome,
             status: 'cancelled',
@@ -3998,10 +4017,28 @@ function doctorRepairCenterRequestKey(requested, targetDigest) {
     return targetDigest ? `${targetDigest}:${module}` : '';
 }
 
+async function resolveDoctorRepairTargetReadOnly(context, index) {
+    const expectedChatId = String(context?.chatId || '');
+    if (!expectedChatId) return null;
+    const resolution = await resolveCurrentActorSovereigntyScope(context);
+    const freshContext = getContext();
+    if (
+        !resolution?.resolved
+        || String(freshContext?.chatId || '') !== expectedChatId
+    ) return null;
+    return captureDoctorRepairTargetReadOnly(freshContext, index, {
+        frozenScope: resolution.scope,
+    });
+}
+
 function runDoctorRepairCenter(requested = 'all') {
-    const context = getContext();
-    const latest = latestAiMessage(context);
-    const captured = captureDoctorRepairTargetReadOnly(context, latest.index);
+    const initialContext = getContext();
+    const initialLatest = latestAiMessage(initialContext);
+    return resolveDoctorRepairTargetReadOnly(initialContext, initialLatest.index)
+        .then((captured) => runDoctorRepairCenterForTarget(requested, captured));
+}
+
+function runDoctorRepairCenterForTarget(requested, captured) {
     const targetDigest = doctorRepairTargetIdentityDigest(captured);
     const requestKey = doctorRepairCenterRequestKey(requested, targetDigest);
     if (!requestKey) {
@@ -5030,6 +5067,8 @@ function doctorRuntimeCriticalFingerprint() {
         currentSwipeInfo.toString(),
         ensureRuntimeTargetIdentity.toString(),
         captureDoctorRepairTargetReadOnly.toString(),
+        resolveCurrentActorSovereigntyScope.toString(),
+        resolveDoctorRepairTargetReadOnly.toString(),
         sovereigntyNarrativeEligible.toString(),
         acceptedFinalDispatchKey.toString(),
         acceptedFinalLaunchPromise.toString(),
