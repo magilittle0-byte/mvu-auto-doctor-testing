@@ -16078,7 +16078,6 @@ async function completeActorProfilesForTurn(captured, {
             sourceRef: currentSourceRef,
         },
         semanticRetry: settings.actorProfileSemanticRetries > 0,
-        transportActorLimit: 1,
         transportConcurrency: actorProfileTransportPlan.concurrency,
         transportRouteSlots: actorProfileTransportPlan.slotIndices,
         allowDiscovery: true,

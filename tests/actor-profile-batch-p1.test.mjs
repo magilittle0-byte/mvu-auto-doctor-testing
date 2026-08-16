@@ -315,6 +315,33 @@ test('production actor-row transport runs bounded direct waves and stops before 
     assert.equal(failed.result.recoveryProgress.verifiedFieldCount, 6);
 });
 
+test('production default transport keeps up to six ActorRefs in one validated fill-group call', async () => {
+    const fixture = prepareRegisteredBatch(4, { chatId: 'chat-profile-default-group' });
+    const calls = [];
+    const moduleText = (key, actorId) => `${actorId} ${key}. ${'Complete stable dossier prose records facts limits choices and usable future context. '.repeat(6)}`;
+    const run = await runBatch(fixture, {
+        moduleProtocol: 'raw',
+        transportConcurrency: 2,
+        transportRouteSlots: [0, 2],
+        requestBatch: async (request) => {
+            calls.push({
+                actorIds: request.candidates.map((candidate) => candidate.actorRef.actorId),
+                routeSlotIndex: request.routeSlotIndex,
+            });
+            return request.candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...request.moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.actorId)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].actorIds, fixture.candidates.map((candidate) => candidate.actorRef.actorId));
+    assert.equal(calls[0].routeSlotIndex, 0);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.saveCount, 2);
+});
+
 test('production profile route plan freezes one healthy slot per distinct direct connection key', () => {
     const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
     const helperSource = source.slice(
@@ -5109,7 +5136,7 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /requestKind: 'actor_profile_batch'/u);
     assert.match(profileFunction, /maxFailovers: 1/u);
     assert.match(profileFunction, /noTimeout: true/u);
-    assert.match(profileFunction, /transportActorLimit: 1/u);
+    assert.doesNotMatch(profileFunction, /transportActorLimit:/u);
     assert.match(profileFunction, /transportConcurrency: actorProfileTransportPlan\.concurrency/u);
     assert.match(profileFunction, /transportRouteSlots: actorProfileTransportPlan\.slotIndices/u);
     assert.match(profileFunction, /routeSlotIndex,[\s\S]*?attemptedRouteKeys: occupiedRouteSlotIndices\.map/u);
