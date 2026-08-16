@@ -16495,12 +16495,28 @@ function actorProfileTargetStaleAutomaticRecoveryEligible(result, {
     const failureCodes = (result?.profileBatch?.failed || [])
         .map((entry) => compactActorProfileFailureCode(entry?.reason))
         .filter(Boolean);
+    const verifiedFieldCount = Math.max(
+        0,
+        Number(recoveryProgress?.verifiedFieldCount) || 0,
+    );
+    const sealedWorldCollision = verifiedFieldCount > 0
+        && failureCodes.every((code) => code === 'actor_profile.target_stale');
+    const preparedIdentityRetry = verifiedFieldCount === 0
+        && recoveryProgress?.identityAttempted === false
+        && recoveryProgress?.identityLocked !== true
+        && Math.max(0, Number(recoveryProgress?.manualIdentityRetryCount) || 0) === 1
+        && Array.isArray(recoveryProgress?.rows)
+        && recoveryProgress.rows.length === 0
+        && failureCodes.includes('actor_candidate.identity_missing_or_short')
+        && failureCodes.every((code) => [
+            'actor_candidate.identity_missing_or_short',
+            'actor_profile.target_stale',
+        ].includes(code));
     return result?.status === 'not_completed'
         && recoverySaved === true
         && worldPending !== true
-        && Math.max(0, Number(recoveryProgress?.verifiedFieldCount) || 0) > 0
         && failureCodes.length > 0
-        && failureCodes.every((code) => code === 'actor_profile.target_stale');
+        && (sealedWorldCollision || preparedIdentityRetry);
 }
 
 function actorProfileAutomaticRecoveryResult(initialResult, recoveredResult) {
@@ -16512,11 +16528,16 @@ function actorProfileAutomaticRecoveryResult(initialResult, recoveredResult) {
         0,
         Number(recoveredResult?.profileBatch?.modelCalls) || 0,
     );
+    const initialFailureCodes = (initialResult?.profileBatch?.failed || [])
+        .map((entry) => compactActorProfileFailureCode(entry?.reason))
+        .filter(Boolean);
     return {
         ...recoveredResult,
         automaticRecovery: {
             attempted: true,
-            trigger: 'actor_profile.target_stale',
+            trigger: initialFailureCodes.includes('actor_candidate.identity_missing_or_short')
+                ? 'actor_profile.identity_bootstrap_retry'
+                : 'actor_profile.target_stale',
             initialModelCalls,
             recoveryModelCalls,
         },

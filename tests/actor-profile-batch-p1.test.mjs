@@ -396,8 +396,14 @@ test('identity bootstrap failure calls the full accepted narrative model once an
 
     const manualProgress = prepareActorProfileManualIdentityRetryProgress(
         first.result.recoveryProgress,
-        ['actor_profile.group_row_missing'],
+        [
+            'actor_candidate.identity_missing_or_short',
+            'actor_profile.target_stale',
+        ],
     );
+    assert.equal(manualProgress.identityAttempted, false);
+    assert.equal(manualProgress.identityLocked, false);
+    assert.equal(manualProgress.manualIdentityRetryCount, 1);
     const repaired = await runBatch({ ...fixture, candidates: [] }, {
         ...options,
         recoveryProgress: manualProgress,

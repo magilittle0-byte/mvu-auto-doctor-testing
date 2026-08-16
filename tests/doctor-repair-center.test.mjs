@@ -897,6 +897,26 @@ test('profile queue automatically reuses a sealed target-stale recovery once wit
         recoveryProgress: { verifiedFieldCount: 21 },
         worldPending: false,
     }), false, 'semantic failures never enter the concurrency-only recovery');
+    assert.equal(sandbox.recoveryEligible({
+        status: 'not_completed',
+        profileBatch: {
+            modelCalls: 1,
+            failed: [
+                { reason: 'actor_candidate.identity_missing_or_short' },
+                { reason: 'actor_profile.target_stale' },
+            ],
+        },
+    }, {
+        recoverySaved: true,
+        recoveryProgress: {
+            identityAttempted: false,
+            identityLocked: false,
+            manualIdentityRetryCount: 1,
+            verifiedFieldCount: 0,
+            rows: [],
+        },
+        worldPending: false,
+    }), true, 'one sealed empty identity failure is automatically retried after world settles');
     const result = await sandbox.enqueueProfile(4, {
         force: false,
         expectedTarget: expected,

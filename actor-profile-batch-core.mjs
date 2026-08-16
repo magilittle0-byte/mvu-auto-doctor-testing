@@ -422,6 +422,7 @@ const SAFE_MANUAL_IDENTITY_RETRY_CODES = new Set([
     'actor_profile.group_row_missing',
     'actor_profile.format_unrecoverable',
     'actor_profile.identity_bootstrap_already_attempted',
+    'actor_candidate.identity_missing_or_short',
 ]);
 
 export function normalizeActorProfileRecoveryProgress(value) {
