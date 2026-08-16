@@ -28,6 +28,7 @@ import {
     completeActorProfileBatchTransaction,
     migrateActorProfileLegacyDuplicateOffsetRecoveryProgress,
     normalizeActorProfileRecoveryProgress,
+    prepareActorProfileManualIdentityRetryProgress,
 } from '../actor-profile-batch-core.mjs';
 import {
     discoverActorsFromTurnSources,
@@ -114,6 +115,43 @@ test('P1 recovery progress seals only bounded ActorRef fields against the curren
         actorProfileRecoveryProgressDigest(progress, 'profile-source:two'),
         'the same verified fields cannot be replayed under another SourceRef digest',
     );
+});
+
+test('explicit repair unlocks one zero-progress identity retry and never grants an unbounded loop', () => {
+    const attempted = normalizeActorProfileRecoveryProgress({
+        version: 1,
+        identityAttempted: true,
+        identityLocked: false,
+        rows: [],
+    });
+    const retry = prepareActorProfileManualIdentityRetryProgress(attempted, [
+        'actor_profile.discovery_source_offset_ambiguous',
+        'actor_profile.group_row_missing',
+    ]);
+    assert.deepEqual(retry, {
+        version: 1,
+        identityAttempted: false,
+        identityLocked: false,
+        manualIdentityRetryCount: 1,
+        rows: [],
+        verifiedFieldCount: 0,
+    });
+    const failedAgain = normalizeActorProfileRecoveryProgress({
+        ...retry,
+        identityAttempted: true,
+    });
+    assert.deepEqual(
+        prepareActorProfileManualIdentityRetryProgress(failedAgain, [
+            'actor_profile.group_row_missing',
+        ]),
+        failedAgain,
+        'the same accepted source receives at most one explicit identity repair call',
+    );
+    const unrelated = prepareActorProfileManualIdentityRetryProgress(attempted, [
+        'actor_profile.registry_conflict',
+    ]);
+    assert.equal(unrelated.identityAttempted, true);
+    assert.equal(unrelated.manualIdentityRetryCount, 0);
 });
 
 test('vague discovery labels recover only from one explicit in-unit name', () => {
@@ -355,6 +393,24 @@ test('identity bootstrap failure calls the full accepted narrative model once an
     assert.ok(resumed.result.failures.some((failure) => (
         failure.reason === 'actor_profile.identity_bootstrap_already_attempted'
     )));
+
+    const manualProgress = prepareActorProfileManualIdentityRetryProgress(
+        first.result.recoveryProgress,
+        ['actor_profile.group_row_missing'],
+    );
+    const repaired = await runBatch({ ...fixture, candidates: [] }, {
+        ...options,
+        recoveryProgress: manualProgress,
+        requestBatch: ({ groupKey }) => {
+            assert.equal(groupKey, 'identity_bootstrap');
+            identityCalls += 1;
+            return '<no-new/>';
+        },
+    });
+    assert.equal(identityCalls, 2, 'explicit repair grants exactly one extra identity call');
+    assert.equal(repaired.result.modelCalls, 1);
+    assert.equal(repaired.result.persistenceStatus, 'no_candidates');
+    assert.equal(repaired.saveCount, 0);
 });
 
 function registryPreflight(fixture, acceptedNarrative, {

@@ -177,6 +177,7 @@ import {
     completeActorProfileBatchTransaction,
     migrateActorProfileLegacyDuplicateOffsetRecoveryProgress,
     normalizeActorProfileRecoveryProgress,
+    prepareActorProfileManualIdentityRetryProgress,
 } from './actor-profile-batch-core.mjs';
 import {
     claimDueSovereigntyActorTasks,
@@ -2713,6 +2714,7 @@ async function retrySovereigntyNow() {
     if (!scopeGuard.ok) return { status: 'stale', reason: scopeGuard.reason };
     return enqueueActorProfiles(latest.index, {
         force: true,
+        allowIdentityRetry: true,
         expectedTarget: captured,
     });
 }
@@ -3717,6 +3719,7 @@ async function runDoctorRepairModule(module, captured) {
                 ? joined
                 : await enqueueActorProfiles(captured.index, {
                     force: true,
+                    allowIdentityRetry: true,
                     includeMaintenance: getSettings().actorProfileCompletionMode === 'full_adult',
                     expectedTarget: captured,
                 });
@@ -16208,7 +16211,9 @@ function actorProfileRetryReceiptWithProgressMatches(receipt, {
         && receipt.recoveryProgressDigest === expectedReceipt?.recoveryProgressDigest;
 }
 
-function actorProfileRecoveryProgressFromNamespace(namespace, currentSourceRef) {
+function actorProfileRecoveryProgressFromNamespace(namespace, currentSourceRef, {
+    allowManualIdentityRetry = false,
+} = {}) {
     const receipt = namespace?.actorProfileRetryReceipt;
     if (!receipt) return null;
     const ticketBatch = (namespace?.characterCreationTicketBatches || [])
@@ -16220,10 +16225,16 @@ function actorProfileRecoveryProgressFromNamespace(namespace, currentSourceRef) 
         return null;
     }
     const progress = actorProfileRecoveryProgressFromReceipt(receipt, currentSourceRef);
-    return migrateActorProfileLegacyDuplicateOffsetRecoveryProgress(
+    const migrated = migrateActorProfileLegacyDuplicateOffsetRecoveryProgress(
         progress,
         receipt.failureCodes,
     );
+    return allowManualIdentityRetry
+        ? prepareActorProfileManualIdentityRetryProgress(
+            migrated,
+            receipt.failureCodes,
+        )
+        : migrated;
 }
 
 async function persistActorProfileRecoveryState(captured, result) {
@@ -16459,6 +16470,7 @@ function actorProfileTicketPersistenceFailureCode(failure = {}) {
 async function runActorProfileTarget(captured, {
     force = false,
     includeMaintenance = false,
+    allowIdentityRetry = false,
 } = {}) {
     const preGenerationTicket = npcDesignTicketBatches.get(captured?.generationId);
     const acceptedTicketTarget = sourceRefOf(captured);
@@ -17255,6 +17267,7 @@ async function runActorProfileTarget(captured, {
     const recoveryProgress = actorProfileRecoveryProgressFromNamespace(
         readChatNamespace(getContext()),
         sourceRef,
+        { allowManualIdentityRetry: allowIdentityRetry === true },
     );
     const profileCompletion = await completeActorProfilesForTurn(captured, {
         actorLedger: promptLedger,
@@ -20847,6 +20860,7 @@ async function enqueueActorProfiles(targetId, {
     force = false,
     includeMaintenance = null,
     expectedTarget = null,
+    allowIdentityRetry = false,
 } = {}) {
     const context = getContext();
     if (actorWorldManagementWrite?.chatId === String(context?.chatId || '')) {
@@ -21020,6 +21034,7 @@ async function enqueueActorProfiles(targetId, {
             return runActorProfileTarget(current, {
                 force,
                 includeMaintenance: effectiveMaintenance,
+                allowIdentityRetry,
             });
         })
         .then(async (result) => {

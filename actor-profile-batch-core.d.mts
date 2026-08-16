@@ -40,6 +40,7 @@ export interface ActorProfileRecoveryProgress {
     version: 1;
     identityAttempted: boolean;
     identityLocked: boolean;
+    manualIdentityRetryCount: number;
     rows: ActorProfileRecoveryProgressRow[];
     verifiedFieldCount: number;
 }
@@ -75,6 +76,10 @@ export function migrateActorProfileLegacyDuplicateOffsetRecoveryProgress(
     value: unknown,
     failureCodes?: string[],
 ): object | null;
+export function prepareActorProfileManualIdentityRetryProgress(
+    value: unknown,
+    failureCodes?: string[],
+): ActorProfileRecoveryProgress | null;
 export function actorProfileGroupFailureDiagnostic(
     group: object,
     attempt: number,

@@ -386,6 +386,11 @@ export function actorProfileBatchSemanticFingerprint(overrides = {}) {
             overrides?.legacyDuplicateOffsetRecoveryMigration
                 || migrateActorProfileLegacyDuplicateOffsetRecoveryProgress,
         ),
+        manualIdentityRetryCodes: [...SAFE_MANUAL_IDENTITY_RETRY_CODES].sort(),
+        manualIdentityRetryProgress: String(
+            overrides?.manualIdentityRetryProgress
+                || prepareActorProfileManualIdentityRetryProgress,
+        ),
         recoveryDigest: String(actorProfileRecoveryProgressDigest),
     }))}`;
 }
@@ -410,6 +415,13 @@ const PROFILE_RECOVERY_MODULE_KEYS = Object.freeze([
     'currentState',
     'knowledgeCapabilitiesResources',
     'physiology',
+]);
+
+const SAFE_MANUAL_IDENTITY_RETRY_CODES = new Set([
+    'actor_profile.discovery_source_offset_ambiguous',
+    'actor_profile.group_row_missing',
+    'actor_profile.format_unrecoverable',
+    'actor_profile.identity_bootstrap_already_attempted',
 ]);
 
 export function normalizeActorProfileRecoveryProgress(value) {
@@ -451,10 +463,15 @@ export function normalizeActorProfileRecoveryProgress(value) {
                 ? { identityReveal: clone(raw.identityReveal) } : {}),
         });
     }
+    const manualIdentityRetryCount = Math.min(
+        1,
+        Math.max(0, Math.floor(Number(value.manualIdentityRetryCount) || 0)),
+    );
     const identityLocked = value.identityLocked === true;
     const identityAttempted = identityLocked || value.identityAttempted === true;
     if (
         !identityAttempted
+        && manualIdentityRetryCount === 0
         && !rows.some((row) => Object.keys(row.modules).length > 0)
     ) {
         return null;
@@ -463,6 +480,7 @@ export function normalizeActorProfileRecoveryProgress(value) {
         version: 1,
         identityAttempted,
         identityLocked,
+        manualIdentityRetryCount,
         rows: rows.sort((left, right) => left.actorId.localeCompare(right.actorId)),
         verifiedFieldCount: rows.reduce(
             (sum, row) => sum + Object.keys(row.modules).length,
@@ -487,6 +505,32 @@ export function migrateActorProfileLegacyDuplicateOffsetRecoveryProgress(
     );
     return isLegacyDuplicateOffsetLock
         ? { ...progress, identityLocked: false, identityAttempted: false }
+        : progress;
+}
+
+export function prepareActorProfileManualIdentityRetryProgress(
+    value,
+    failureCodes = [],
+) {
+    const progress = normalizeActorProfileRecoveryProgress(value);
+    if (!progress) return null;
+    const retryableFailure = Array.isArray(failureCodes)
+        && failureCodes.some((code) => SAFE_MANUAL_IDENTITY_RETRY_CODES.has(String(code || '')));
+    const canRetry = (
+        retryableFailure
+        && progress.identityAttempted === true
+        && progress.identityLocked === false
+        && progress.manualIdentityRetryCount < 1
+        && progress.rows.length === 0
+        && progress.verifiedFieldCount === 0
+    );
+    return canRetry
+        ? {
+            ...progress,
+            identityAttempted: false,
+            identityLocked: false,
+            manualIdentityRetryCount: progress.manualIdentityRetryCount + 1,
+        }
         : progress;
 }
 
@@ -702,6 +746,10 @@ export async function completeActorProfileBatchTransaction({
         const identityReveals = new Map();
         const groupDiagnostics = [];
         let identityLocked = latestRecoveryProgress?.identityLocked === true;
+        const manualIdentityRetryCount = Math.min(
+            1,
+            Math.max(0, Number(latestRecoveryProgress?.manualIdentityRetryCount) || 0),
+        );
         let identityAttempted = identityLocked
             || latestRecoveryProgress?.identityAttempted === true;
         const recoveredRows = new Map((latestRecoveryProgress?.rows || []).map((row) => [
@@ -832,6 +880,7 @@ export async function completeActorProfileBatchTransaction({
                 version: 1,
                 identityAttempted,
                 identityLocked,
+                manualIdentityRetryCount,
                 rows,
             });
             return clone(latestRecoveryProgress);
