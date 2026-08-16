@@ -120,6 +120,15 @@ accepted-final
 手动当前来源重试
   └─ enqueueActorProfiles(force=true, includeMaintenance=false)
 
+同一 accepted source 的 P1/P3 并发收口
+  └─ 首次人物模型批次若所有字段已验证、恢复收据已耐久回读，且唯一失败码为
+     actor_profile.target_stale，同时该目标已无运行中的 P3 owner，则 enqueueActorProfiles
+     在原 owner 内直接复用同一个 runActorProfileTarget(force=true,
+     allowIdentityRetry=true) 一次。该路径与“重试人物档案”按钮共用恢复材料和
+     pending/final CAS/readback；不重发正文、不递归入队、不增加第三次身份调用、
+     不建立新 store。若目标/scope 已变、P3 尚在运行、恢复材料缺失、出现任一其他
+     failure code，仍保留原 not_completed 和手动修复入口。
+
 悬浮按钮 / 设置按钮 / public runActorProfiles
   └─ enqueueActorProfiles(force=true, includeMaintenance=true)
 

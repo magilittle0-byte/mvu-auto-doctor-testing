@@ -229,6 +229,8 @@ test('doctor repair projection changes the semantic and runtime fingerprints', (
         'createContinuityPendingOwnerMap',
         'continuityPendingOwnerRegistryFingerprint',
         'stage3FieldState',
+        'actorProfileTargetStaleAutomaticRecoveryEligible',
+        'actorProfileAutomaticRecoveryResult',
     ]) {
         assert.match(runtimeFingerprintSection, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
     }
@@ -278,6 +280,7 @@ test('doctor repair projection changes the semantic and runtime fingerprints', (
         'createContinuityPendingOwnerMap',
         'continuityPendingOwnerRegistryFingerprint',
         'stage3FieldState',
+        'actorProfileTargetStaleAutomaticRecoveryEligible',
     ]) {
         assert.notEqual(
             makeRuntime({ [helper]: function changedDependency() { return helper; } }),
@@ -737,6 +740,11 @@ test('production profile queue catch awaits the durable unavailable receipt befo
         actorProfileTicketBatchPersistenceMatches: () => false,
         actorProfileRetryReceiptMatches: () => false,
         actorProfileRecoveryProgressFromReceipt: () => null,
+        actorProfileRecoveryProgressFromNamespace: () => null,
+        stage3AcceptedTargetKey: () => 'world-key',
+        continuityPendingKeys: new Map(),
+        actorProfileTargetStaleAutomaticRecoveryEligible: () => false,
+        actorProfileAutomaticRecoveryResult: (_initial, recovered) => recovered,
         capturedTargetKey: () => 'profile-key',
         actorProfilePendingKeys: new Map(),
         actorProfileCompletedKeys: new Set(),
@@ -775,6 +783,135 @@ test('production profile queue catch awaits the durable unavailable receipt befo
     assert.equal(state.terminalCalls, 1);
     assert.equal(sandbox.latestActorProfileDiagnostic.canRetry, false);
     assert.equal(state.marks, 1);
+});
+
+test('profile queue automatically reuses a sealed target-stale recovery once with zero extra model calls', async () => {
+    const recoveryHelpers = sourceSection(
+        'function actorProfileTargetStaleAutomaticRecoveryEligible',
+        'async function finalizeUserCancelledActorProfileCompletion',
+    );
+    const enqueueSource = sourceSection(
+        'async function enqueueActorProfiles(targetId, {',
+        'async function confirmDangerousAction(message)',
+    );
+    const expected = {
+        chatId: 'chat-a', index: 4, epoch: 7,
+        scopeDigest: 'scope-a', actorSovereigntyScope: {},
+    };
+    const state = {
+        runCalls: 0, finalizeCalls: 0, terminalCalls: 0, marks: 0, statuses: [],
+    };
+    const initialFailure = {
+        status: 'not_completed',
+        reason: 'actor_profile.target_stale',
+        profileBatch: {
+            modelCalls: 4,
+            failed: [
+                { reason: 'actor_profile.target_stale' },
+                { reason: 'actor_profile.target_stale' },
+                { reason: 'actor_profile.target_stale' },
+            ],
+        },
+    };
+    const recovered = {
+        status: 'atomic_readback',
+        profileBatch: {
+            modelCalls: 0,
+            readbackVerified: true,
+            committed: ['actor-a', 'actor-b', 'actor-c'],
+            failed: [],
+        },
+    };
+    const sandbox = {
+        console: { error: () => undefined },
+        operationEpoch: 7,
+        actorWorldManagementWrite: null,
+        getContext: () => ({ chatId: 'chat-a' }),
+        latestAiMessage: () => ({ index: 4 }),
+        captureTarget: () => structuredClone(expected),
+        freshFrozenScopeGuard: async () => ({ ok: true }),
+        continuityTargetIsCurrent: () => ({ ok: true }),
+        operationToken: () => ({}),
+        sameAcceptedNarrativeTarget: () => true,
+        actorProfileChain: Promise.resolve(),
+        readChatNamespace: () => ({ characterCreationTicketBatches: [] }),
+        actorProfileTicketBatchPersistenceMatches: () => false,
+        actorProfileRetryReceiptMatches: () => false,
+        actorProfileRecoveryProgressFromReceipt: () => null,
+        actorProfileRecoveryProgressFromNamespace: () => ({ verifiedFieldCount: 21 }),
+        capturedTargetKey: () => 'profile-key',
+        actorProfilePendingKeys: new Map(),
+        actorProfileCompletedKeys: new Set(),
+        userCancelledActorProfileKeys: new Set(),
+        actorProfileTargetStateIsCurrent: (epoch, chatId) => (
+            epoch === sandbox.operationEpoch && chatId === 'chat-a'
+        ),
+        setActorProfileStatus: (...args) => { state.statuses.push(args); },
+        renderSovereigntyHealth: () => undefined,
+        syncTaskCancelButtons: () => undefined,
+        getSettings: () => ({ actorProfileCompletionMode: 'full' }),
+        runActorProfileTarget: async (_target, options) => {
+            state.runCalls += 1;
+            if (state.runCalls === 1) return structuredClone(initialFailure);
+            assert.equal(options.force, true);
+            assert.equal(options.allowIdentityRetry, true);
+            return structuredClone(recovered);
+        },
+        actorProfileTransientResult: (status, extra = {}) => ({ status, ...extra }),
+        finalizeActorProfileRecoveryOutcome: async (_target, result) => {
+            state.finalizeCalls += 1;
+            return { result, recoverySaved: true };
+        },
+        finalizeUserCancelledActorProfileCompletion: async (_target, result) => ({
+            handled: true, result, recoverySaved: false,
+        }),
+        recordActorProfileFinalDiagnostic: async () => {
+            state.terminalCalls += 1;
+            return true;
+        },
+        sourceRefOf: () => ({ chatId: 'chat-a', index: 4 }),
+        compactActorProfileFailureCode: (value) => String(value || ''),
+        actorProfileRecoverySourceMatches: () => true,
+        stage3AcceptedTargetKey: () => 'world-key',
+        continuityPendingKeys: new Map(),
+        markActorSchedulingNotReachedByProfile: () => { state.marks += 1; },
+        latestActorProfileDiagnostic: { status: 'waiting' },
+    };
+    vm.runInNewContext(
+        `${recoveryHelpers}\n${enqueueSource}\nthis.enqueueProfile = enqueueActorProfiles;\nthis.recoveryEligible = actorProfileTargetStaleAutomaticRecoveryEligible;`,
+        sandbox,
+    );
+    assert.equal(sandbox.recoveryEligible(initialFailure, {
+        recoverySaved: true,
+        recoveryProgress: { verifiedFieldCount: 21 },
+        worldPending: true,
+    }), false, 'an active world owner keeps the explicit repair fallback instead of risking a cycle');
+    assert.equal(sandbox.recoveryEligible({
+        ...initialFailure,
+        profileBatch: {
+            ...initialFailure.profileBatch,
+            failed: [{ reason: 'actor_profile.schema_incomplete' }],
+        },
+    }, {
+        recoverySaved: true,
+        recoveryProgress: { verifiedFieldCount: 21 },
+        worldPending: false,
+    }), false, 'semantic failures never enter the concurrency-only recovery');
+    const result = await sandbox.enqueueProfile(4, {
+        force: false,
+        expectedTarget: expected,
+    });
+    assert.equal(result.status, 'atomic_readback');
+    assert.equal(result.profileBatch.readbackVerified, true);
+    assert.equal(result.profileBatch.modelCalls, 4);
+    assert.equal(result.automaticRecovery.trigger, 'actor_profile.target_stale');
+    assert.equal(result.automaticRecovery.recoveryModelCalls, 0);
+    assert.equal(state.runCalls, 2, 'one normal attempt plus one bounded recovery');
+    assert.equal(state.finalizeCalls, 2, 'failure receipt is sealed before terminal cleanup');
+    assert.equal(state.terminalCalls, 1, 'only the recovered terminal result is published');
+    assert.equal(state.marks, 0);
+    assert.equal(sandbox.actorProfileCompletedKeys.has('profile-key'), true);
+    assert.match(state.statuses.at(-1)?.[0] || '', /3 人整档已原子保存并回读验证/u);
 });
 
 test('normal profile completion publishes nothing after owner loss during finalize or terminal receipt await', async () => {
@@ -816,6 +953,11 @@ test('normal profile completion publishes nothing after owner loss during finali
             actorProfileTicketBatchPersistenceMatches: () => false,
             actorProfileRetryReceiptMatches: () => false,
             actorProfileRecoveryProgressFromReceipt: () => null,
+            actorProfileRecoveryProgressFromNamespace: () => null,
+            stage3AcceptedTargetKey: () => 'world-key',
+            continuityPendingKeys: new Map(),
+            actorProfileTargetStaleAutomaticRecoveryEligible: () => false,
+            actorProfileAutomaticRecoveryResult: (_initial, recovered) => recovered,
             capturedTargetKey: () => 'profile-key',
             actorProfilePendingKeys: new Map(),
             actorProfileCompletedKeys: new Set(),

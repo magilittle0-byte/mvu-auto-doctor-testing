@@ -5049,6 +5049,8 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileNoCandidatesTerminalReadbackMatches.toString(),
         persistActorProfileRecoveryState.toString(),
         finalizeActorProfileRecoveryOutcome.toString(),
+        actorProfileTargetStaleAutomaticRecoveryEligible.toString(),
+        actorProfileAutomaticRecoveryResult.toString(),
         finalizeUserCancelledActorProfileCompletion.toString(),
         actorProfileCompletionGroupPlan.toString(),
         buildActorProfileModuleGroupMessages.toString(),
@@ -16485,6 +16487,46 @@ async function finalizeActorProfileRecoveryOutcome(captured, result, {
     return { result: failedResult, recoverySaved: recoverySaved === true };
 }
 
+function actorProfileTargetStaleAutomaticRecoveryEligible(result, {
+    recoverySaved = false,
+    recoveryProgress = null,
+    worldPending = false,
+} = {}) {
+    const failureCodes = (result?.profileBatch?.failed || [])
+        .map((entry) => compactActorProfileFailureCode(entry?.reason))
+        .filter(Boolean);
+    return result?.status === 'not_completed'
+        && recoverySaved === true
+        && worldPending !== true
+        && Math.max(0, Number(recoveryProgress?.verifiedFieldCount) || 0) > 0
+        && failureCodes.length > 0
+        && failureCodes.every((code) => code === 'actor_profile.target_stale');
+}
+
+function actorProfileAutomaticRecoveryResult(initialResult, recoveredResult) {
+    const initialModelCalls = Math.max(
+        0,
+        Number(initialResult?.profileBatch?.modelCalls) || 0,
+    );
+    const recoveryModelCalls = Math.max(
+        0,
+        Number(recoveredResult?.profileBatch?.modelCalls) || 0,
+    );
+    return {
+        ...recoveredResult,
+        automaticRecovery: {
+            attempted: true,
+            trigger: 'actor_profile.target_stale',
+            initialModelCalls,
+            recoveryModelCalls,
+        },
+        profileBatch: {
+            ...(recoveredResult?.profileBatch || {}),
+            modelCalls: initialModelCalls + recoveryModelCalls,
+        },
+    };
+}
+
 async function finalizeUserCancelledActorProfileCompletion(expected, result, {
     persistRecoveryState = persistActorProfileRecoveryState,
 } = {}) {
@@ -21242,11 +21284,63 @@ async function enqueueActorProfiles(targetId, {
         })
         .then(async (result) => {
             const currentOwner = actorProfileOwnerIsCurrent();
-            const recovery = currentOwner
+            let recovery = currentOwner
                 ? await finalizeActorProfileRecoveryOutcome(expected, result)
                 : await finalizeUserCancelledActorProfileCompletion(expected, result);
             result = recovery.result;
             if (!actorProfileOwnerIsCurrent()) return result;
+            const recoveryNamespace = readChatNamespace(getContext());
+            const recoveryProgress = actorProfileRecoveryProgressFromNamespace(
+                recoveryNamespace,
+                sourceRefOf(expected),
+                { allowManualIdentityRetry: true },
+            );
+            const continuityKey = stage3AcceptedTargetKey(expected);
+            if (actorProfileTargetStaleAutomaticRecoveryEligible(result, {
+                recoverySaved: recovery.recoverySaved,
+                recoveryProgress,
+                worldPending: !!(
+                    continuityKey
+                    && continuityPendingKeys.has(continuityKey)
+                ),
+            })) {
+                const freshScope = await freshFrozenScopeGuard(expected);
+                const freshTarget = captureTarget(getContext(), expected.index, {
+                    frozenScope: expected.actorSovereigntyScope,
+                    unscoped: !expected.scopeDigest,
+                });
+                if (
+                    actorProfileOwnerIsCurrent()
+                    && freshScope.ok
+                    && actorProfileRecoverySourceMatches(
+                        sourceRefOf(expected),
+                        sourceRefOf(freshTarget),
+                    )
+                ) {
+                    const initialResult = result;
+                    const retried = await runActorProfileTarget(freshTarget, {
+                        force: true,
+                        includeMaintenance: includeMaintenance == null
+                            ? getSettings().actorProfileCompletionMode === 'full_adult'
+                            : includeMaintenance === true,
+                        allowIdentityRetry: true,
+                    });
+                    if (!actorProfileOwnerIsCurrent()) return retried;
+                    const retriedRecovery = await finalizeActorProfileRecoveryOutcome(
+                        expected,
+                        retried,
+                    );
+                    result = actorProfileAutomaticRecoveryResult(
+                        initialResult,
+                        retriedRecovery.result,
+                    );
+                    recovery = {
+                        ...retriedRecovery,
+                        result,
+                    };
+                    if (!actorProfileOwnerIsCurrent()) return result;
+                }
+            }
             const recoverySaved = recovery.recoverySaved;
             const validation = result?.profileBatch?.validationDiagnostic || {};
             const failed = Array.isArray(result?.profileBatch?.failed)
