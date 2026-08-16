@@ -2,6 +2,7 @@ import {
     deepClone,
     deepSubset,
     buildLifecycleHistoryHints,
+    coalesceMissingObjectTargetsPatch,
     diffStates,
     extractLastUpdateBlock,
     extractUpdateBlockCandidate,
@@ -4967,6 +4968,15 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileTransportRoutePlan.toString(),
         assertUsableModelOutput.toString(),
         callModel.toString(),
+        extractUpdateBlockCandidate.toString(),
+        stripAutomaticallyComputedOps.toString(),
+        stripRedundantExistingContainerOps.toString(),
+        normalizeObjectPropertyOps.toString(),
+        preparePatch.toString(),
+        coalesceMissingObjectTargetsPatch.toString(),
+        validatePatchResult.toString(),
+        recognizeDeterministicMvuSideEffects.toString(),
+        parseCandidate.toString(),
         persistRepairRecord.toString(),
         commitCandidateUnlocked.toString(),
         commitCandidate.toString(),
@@ -12009,7 +12019,7 @@ async function parseCandidate(Mvu, oldData, output, {
         containerNormalized.repairReason,
         objectOpsNormalized.repairReason,
     ].filter(Boolean).join('；');
-    const prepared = preparePatch(objectOpsNormalized.block, oldData);
+    let prepared = preparePatch(objectOpsNormalized.block, oldData);
     if (prepared.error) {
         return {
             status: 'failed',
@@ -12055,6 +12065,7 @@ async function parseCandidate(Mvu, oldData, output, {
     }
     let checked = validatePatchResult(oldData, parsed, prepared);
     let parserSideEffectPaths = [];
+    let objectParentRepairPaths = [];
     if (!checked.ok && !checked.nochange) {
         parserSideEffectPaths = await recognizeDeterministicMvuSideEffects(
             Mvu,
@@ -12074,6 +12085,78 @@ async function parseCandidate(Mvu, oldData, output, {
             checked = validatePatchResult(oldData, parsed, prepared);
         }
     }
+    if (!checked.ok && !checked.nochange) {
+        const parentRepair = coalesceMissingObjectTargetsPatch(
+            prepared,
+            oldData,
+            checked,
+        );
+        if (!parentRepair.error) {
+            try {
+                const repairedPrepared = parentRepair.prepared;
+                repairedPrepared.automaticallyComputedPaths = [
+                    ...prepared.automaticallyComputedPaths,
+                ];
+                repairedPrepared.ignoredAutomaticallyComputedPaths = [
+                    ...(prepared.ignoredAutomaticallyComputedPaths || []),
+                ];
+                repairedPrepared.ignoredRedundantContainerPaths = [
+                    ...(prepared.ignoredRedundantContainerPaths || []),
+                ];
+                repairedPrepared.normalizedObjectPropertyPaths = [
+                    ...(prepared.normalizedObjectPropertyPaths || []),
+                ];
+                repairedPrepared.objectParentRepairPaths = [
+                    ...parentRepair.parentPaths,
+                ];
+                const repairedParsed = await Mvu.parseMessage(
+                    repairedPrepared.block,
+                    deepClone(oldData),
+                );
+                let repairedChecked = validatePatchResult(
+                    oldData,
+                    repairedParsed,
+                    repairedPrepared,
+                );
+                if (!repairedChecked.ok && !repairedChecked.nochange) {
+                    const repairedSideEffects = await recognizeDeterministicMvuSideEffects(
+                        Mvu,
+                        oldData,
+                        repairedParsed,
+                        repairedPrepared,
+                        repairedChecked,
+                    );
+                    if (repairedSideEffects.length) {
+                        parserSideEffectPaths = [
+                            ...new Set([...parserSideEffectPaths, ...repairedSideEffects]),
+                        ];
+                        repairedPrepared.automaticallyComputedPaths = [
+                            ...new Set([
+                                ...repairedPrepared.automaticallyComputedPaths,
+                                ...repairedSideEffects,
+                            ]),
+                        ];
+                        repairedPrepared.detectedParserSideEffectPaths = parserSideEffectPaths;
+                        repairedChecked = validatePatchResult(
+                            oldData,
+                            repairedParsed,
+                            repairedPrepared,
+                        );
+                    }
+                }
+                if (repairedChecked.ok) {
+                    prepared = repairedPrepared;
+                    parsed = repairedParsed;
+                    checked = repairedChecked;
+                    objectParentRepairPaths = [...parentRepair.parentPaths];
+                }
+            } catch {
+                // The normal bounded model retry remains available. A local
+                // transport repair may never turn a parser/schema error into
+                // an accepted write by itself.
+            }
+        }
+    }
     if (!checked.ok) {
         return {
             status: checked.nochange ? 'nochange' : 'failed',
@@ -12087,6 +12170,13 @@ async function parseCandidate(Mvu, oldData, output, {
             recoveryReason: localRecoveryReason,
         };
     }
+    const recoveredByObjectParent = objectParentRepairPaths.length > 0;
+    const finalRecoveryReason = [
+        localRecoveryReason,
+        recoveredByObjectParent
+            ? `已将 ${objectParentRepairPaths.length} 个动态对象父路径机械重组并重新通过 MVU/Schema 校验`
+            : '',
+    ].filter(Boolean).join('；');
     return {
         status: 'ready',
         retryable: false,
@@ -12097,8 +12187,9 @@ async function parseCandidate(Mvu, oldData, output, {
         ignoredAutomaticallyComputedPaths: stripped.ignoredPaths,
         ignoredRedundantContainerPaths: containerNormalized.ignoredPaths,
         parserSideEffectPaths,
-        recoveredOutput: locallyRecovered,
-        recoveryReason: localRecoveryReason,
+        objectParentRepairPaths,
+        recoveredOutput: locallyRecovered || recoveredByObjectParent,
+        recoveryReason: finalRecoveryReason,
     };
 }
 
@@ -12857,6 +12948,7 @@ async function runTarget(targetId, {
             recoveredOutput: candidate.recoveredOutput,
             recoveryReason: candidate.recoveryReason,
             parserSideEffectPaths: candidate.parserSideEffectPaths || [],
+            objectParentRepairPaths: candidate.objectParentRepairPaths || [],
         };
     } catch (error) {
         result = {

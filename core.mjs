@@ -586,6 +586,74 @@ export function preparePatch(patchBlock, oldData) {
     };
 }
 
+/**
+ * Some MVU builds accept a dynamic object in the active schema but silently
+ * drop fine-grained writes to new members below that object.  When every
+ * validation failure is exactly such a missing, explicitly touched member,
+ * rebuild the nearest existing object parent and send that complete object
+ * through the same MVU parser/schema again.  This is a mechanical transport
+ * repair only: mixed failures, arrays, readonly paths, missing parents and
+ * unrelated state loss remain fail-closed.
+ */
+export function coalesceMissingObjectTargetsPatch(prepared, oldData, checked) {
+    const oldStat = statDataOf(oldData);
+    const expectedStat = prepared?.expectedStat;
+    const details = Array.isArray(checked?.details) ? checked.details : [];
+    if (!oldStat || !isPlainObject(expectedStat) || checked?.ok || checked?.nochange || !details.length) {
+        return { error: '没有可安全重组的动态对象目标' };
+    }
+
+    const touched = new Set(prepared?.touched || []);
+    const parentPaths = [];
+    for (const detail of details) {
+        const path = String(detail?.path || '');
+        if (
+            !path
+            || path === '/'
+            || detail?.actual !== '(路径不存在)'
+            || detail?.reason === '补丁未触碰的旧字段必须保留'
+            || !touched.has(path)
+            || pathHasReadonlySegment(path)
+        ) return { error: '失败项不全是可重组的已触碰动态对象成员' };
+
+        const parts = pointerSegments(path);
+        if (!parts || parts.length < 2) return { error: '动态对象目标缺少可重组父路径' };
+        const parentPath = pointerPath(parts.slice(0, -1));
+        const oldParent = pointerGet(oldStat, parentPath);
+        const expectedParent = pointerGet(expectedStat, parentPath);
+        if (
+            !oldParent.found
+            || !expectedParent.found
+            || !isPlainObject(oldParent.value)
+            || !isPlainObject(expectedParent.value)
+        ) return { error: '动态对象目标的父路径不是现有普通对象' };
+        parentPaths.push(parentPath);
+    }
+
+    const uniqueParents = [...new Set(parentPaths)].filter(
+        (path, index, all) => !all.some(
+            (other, otherIndex) => otherIndex !== index
+                && (other === '' || path.startsWith(`${other}/`)),
+        ),
+    );
+    if (!uniqueParents.length) return { error: '没有唯一的动态对象父路径' };
+
+    const ops = uniqueParents.map((path) => ({
+        op: 'replace',
+        path,
+        value: deepClone(pointerGet(expectedStat, path).value),
+    }));
+    const block = renderPatchBlock(prepared.block, ops);
+    const repaired = preparePatch(block, oldData);
+    if (repaired.error) return repaired;
+    return {
+        block: repaired.block,
+        prepared: repaired,
+        parentPaths: uniqueParents,
+        repairedTargetCount: details.length,
+    };
+}
+
 function leafPaths(value, parts = [], result = []) {
     if (Array.isArray(value)) {
         if (!value.length) result.push(pointerPath(parts));

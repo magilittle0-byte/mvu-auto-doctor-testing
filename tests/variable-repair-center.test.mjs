@@ -12,6 +12,18 @@ import {
     variableRepairCenterSemanticFingerprint,
 } from '../v2/repair/variable-repair-center.mjs';
 import { createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
+import {
+    coalesceMissingObjectTargetsPatch,
+    deepClone,
+    extractUpdateBlockCandidate,
+    normalizeObjectPropertyOps,
+    parsePatchBlock,
+    preparePatch,
+    statDataOf,
+    stripAutomaticallyComputedOps,
+    stripRedundantExistingContainerOps,
+    validatePatchResult,
+} from '../core.mjs';
 
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const moduleSource = await readFile(
@@ -200,6 +212,101 @@ test('projection exposes only counts, fixed codes, timing and readback proof', (
     assert.equal(JSON.stringify(diagnostic.variableRepair).includes('hidden'), false);
 });
 
+test('dynamic object members are mechanically coalesced and revalidated without another model call', async () => {
+    const oldData = {
+        stat_data: {
+            state: {
+                dynamic: {
+                    existing: { score: 1 },
+                },
+            },
+            untouched: { flag: true },
+        },
+    };
+    const block = [
+        '<UpdateVariable>',
+        '<Analysis>synthetic dynamic object update</Analysis>',
+        '<JSONPatch>',
+        JSON.stringify([
+            { op: 'insert', path: '/state/dynamic/new-a', value: { score: 2 } },
+            { op: 'insert', path: '/state/dynamic/new-b', value: { score: 3 } },
+        ]),
+        '</JSONPatch>',
+        '</UpdateVariable>',
+    ].join('\n');
+    const prepared = preparePatch(block, oldData);
+    const dropped = deepClone(oldData);
+    const rejected = validatePatchResult(oldData, dropped, prepared);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.details.length, 2);
+
+    const local = coalesceMissingObjectTargetsPatch(prepared, oldData, rejected);
+    assert.equal(local.error, undefined);
+    assert.deepEqual(local.parentPaths, ['/state/dynamic']);
+    const localOps = parsePatchBlock(local.block).ops;
+    assert.equal(localOps.length, 1);
+    assert.equal(localOps[0].op, 'replace');
+    assert.equal(localOps[0].path, '/state/dynamic');
+    assert.deepEqual(Object.keys(localOps[0].value).sort(), ['existing', 'new-a', 'new-b']);
+
+    const start = indexSource.indexOf('async function parseCandidate(');
+    const end = indexSource.indexOf('function variableFailureResolution(', start);
+    assert.ok(start >= 0 && end > start);
+    const parserSource = indexSource.slice(start, end);
+    let parseCalls = 0;
+    const Mvu = {
+        parseMessage: async (candidateBlock, candidateOldData) => {
+            parseCalls += 1;
+            if (parseCalls === 1) return deepClone(candidateOldData);
+            const candidatePrepared = preparePatch(candidateBlock, candidateOldData);
+            return {
+                ...deepClone(candidateOldData),
+                stat_data: candidatePrepared.expectedStat,
+            };
+        },
+    };
+    const sandbox = {
+        extractUpdateBlockCandidate,
+        stripAutomaticallyComputedOps,
+        stripRedundantExistingContainerOps,
+        normalizeObjectPropertyOps,
+        preparePatch,
+        coalesceMissingObjectTargetsPatch,
+        validatePatchResult,
+        deepClone,
+        recognizeDeterministicMvuSideEffects: async () => [],
+    };
+    vm.runInNewContext(`${parserSource}\nthis.parseCandidate = parseCandidate;`, sandbox);
+    const result = await sandbox.parseCandidate(Mvu, oldData, block);
+    assert.equal(result.status, 'ready');
+    assert.equal(parseCalls, 2, 'one model output is parsed once, then locally regrouped once');
+    assert.deepEqual([...result.objectParentRepairPaths], ['/state/dynamic']);
+    assert.equal(result.recoveredOutput, true);
+    assert.equal(validatePatchResult(oldData, result.newData, result.prepared).ok, true);
+    assert.equal(result.newData.stat_data.untouched.flag, true);
+});
+
+test('dynamic object coalescing stays fail-closed for mixed or unrelated state loss', () => {
+    const oldData = {
+        stat_data: {
+            state: { dynamic: { existing: 1 } },
+            untouched: { flag: true },
+        },
+    };
+    const block = '<UpdateVariable><Analysis>x</Analysis><JSONPatch>'
+        + '[{"op":"insert","path":"/state/dynamic/new","value":2}]'
+        + '</JSONPatch></UpdateVariable>';
+    const prepared = preparePatch(block, oldData);
+    const parsedWithUnrelatedLoss = {
+        stat_data: { state: { dynamic: { existing: 1 } } },
+    };
+    const checked = validatePatchResult(oldData, parsedWithUnrelatedLoss, prepared);
+    assert.equal(checked.ok, false);
+    assert.ok(checked.details.some((detail) => detail.reason === '补丁未触碰的旧字段必须保留'));
+    const local = coalesceMissingObjectTargetsPatch(prepared, oldData, checked);
+    assert.match(local.error, /失败项不全是/u);
+});
+
 test('production adapter stays independent from actor and world repair flows', () => {
     const start = indexSource.indexOf('async function runVariableSafeRepair({');
     const end = indexSource.indexOf('function renderSocialAudit()', start);
@@ -247,6 +354,9 @@ test('production adapter stays independent from actor and world repair flows', (
         executeVariableRepairPlan: async function changedVariableRepairExecutor() {},
     }), semantic);
     assert.match(indexSource, /variableRepairCenterSemanticFingerprint\(\)/u);
+    assert.match(indexSource, /coalesceMissingObjectTargetsPatch\(/u);
+    assert.match(indexSource, /coalesceMissingObjectTargetsPatch\.toString\(\)/u);
+    assert.match(indexSource, /parseCandidate\.toString\(\)/u);
 });
 
 test('production variable repair continuously guards outcome, journal precondition, and final UI', async () => {
