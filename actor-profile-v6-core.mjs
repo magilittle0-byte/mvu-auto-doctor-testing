@@ -513,9 +513,9 @@ export function buildActorProfileModuleGroupMessages(group, {
     if (discoveryOnly) return [{ role: 'system', content: [
         'Identity Confirmation：你是“MVU自动医生”的人物档案医师，不是正文作者，也不是数据库填表AI。你认真阅读已经接受的故事，认出真正出场的人物，并把身份线索交还给本地医生。',
         '这一步只做已接受正文的人物身份路由，不填档案、不续写剧情。宁可把不确定身份交给本地复核，也不要擅自取名、合并或创造人物。',
-        '输出零到多行裸路由：<profile-target actor="new" name="正文逐字稳定行键" unit="可选CU-id"/>。行键可为姓名、代号、编号、职业或带限定的描述性称谓；不得改写、补名或使用玩家、纯代词、群体、只被提及者、已登记/受保护身份。unit 可省略；省略时脚本按最早且不被更长行键覆盖的独立逐字出现机械绑定，短名若只嵌在本批更长 name 中则拒绝。不要回显 digest、空单元、正文、档案或解释。',
-        '若正文明确揭示已登记人物的新行键，actor 必须用已登记索引中的精确 actorId，并在标签内给出 <identity-evidence>同时含旧行键/别名与新行键的最短正文原句片段</identity-evidence>；不得猜测合并。',
-        '只有确实没有任何合格新人物或身份揭示时，整个响应精确输出 <no-new/>；不得与 profile-target 混用。',
+        '输出一份很短的中文人物清单，不要写 JSON、XML、函数、变量、digest、正文复述、档案或解释。每个真正出场的新人物单独一行，写成“新人物：正文中的逐字稳定行键”。行键可为姓名、代号、编号、职业或带限定的描述性称谓；不得改写、补名或使用玩家、纯代词、群体、只被提及者、已登记/受保护身份。脚本会把逐字行键机械绑定到最早独立出现的位置，短名若只嵌在更长行键中会被拒绝。',
+        '若正文明确揭示已登记人物的新行键，单独一行写成“身份揭示：精确ActorId｜新行键｜同时含旧行键或别名与新行键的最短正文原句”；不得猜测合并。',
+        '只有确实没有任何合格新人物或身份揭示时，整个响应只写“没有新人物”。不得把“没有新人物”与人物清单混用。',
         validationFeedback.length ? `\u4ec5\u4fee\u590d\u8eab\u4efd\u53d1\u73b0\u8def\u7531\uff1a${validationFeedback.join('; ')}` : '',
     ].filter(Boolean).join('\n\n') }, { role: 'user', content: [
         `\u5df2\u63a5\u53d7\u6b63\u6587 coverage units\uff1a${JSON.stringify((group?.discoveryCoverage?.units || []).map((unit) => ({ id: unit.id, text: unit.text })))}`,
@@ -658,7 +658,7 @@ export function parseActorProfileModuleGroupOutput(output, group, {
 } = {}) {
     const text = String(output || '').replace(/[“”]/gu, '"').replace(/[‘’]/gu, "'")
         .replace(/```(?:xml|html|text|markdown)?/giu, '').replace(/```/gu, '').trim();
-    const normalized = text
+    const normalizedMarkup = text
         .replace(/\[\s*coverage[-_ ]unit\s+([^\]]+)\]/giu, '<coverage-unit $1>')
         .replace(/\[\s*\/\s*coverage[-_ ]unit\s*\]/giu, '</coverage-unit>')
         .replace(/<\s*coverage[_ ]unit\b/giu, '<coverage-unit')
@@ -671,9 +671,71 @@ export function parseActorProfileModuleGroupOutput(output, group, {
         .replace(/<profile-target\b([^>]*)\/\s*>/giu, '<profile-target$1></profile-target>')
         .replace(/\[\s*module\s*[:=]\s*([^\]]+)\]/giu, '<module key="$1">')
         .replace(/\[\s*\/\s*module\s*\]/giu, '</module>');
+    const naturalIdentityRoute = (() => {
+        if (group?.key !== 'identity_bootstrap') return null;
+        if (/<\/?(?:profile-target|coverage-unit)\b|<no-new\s*\//iu.test(normalizedMarkup)) return null;
+        const compact = normalizedMarkup.replace(/\*\*/gu, '').trim();
+        if (/^(?:\u6ca1\u6709\u65b0\u4eba\u7269|\u65e0\u65b0\u4eba\u7269|\u672a\u53d1\u73b0\u65b0\u4eba\u7269|\u672a\u53d1\u73b0\u9700\u8981\u767b\u8bb0\u7684\u65b0\u4eba\u7269|\u6ca1\u6709\u53d1\u73b0\u9700\u8981\u767b\u8bb0\u7684\u4eba\u7269)[\u3002.!\uff01]?$/u.test(compact)) {
+            return { markup: '<no-new/>', repairs: ['actor_profile.route_natural_empty_normalized'] };
+        }
+        const quoteAttr = (value) => {
+            const clean = cleanText(String(value || '')
+                .replace(/^[\u201c\u201d\u300c\u300d\u300e\u300f"']+|[\u201c\u201d\u300c\u300d\u300e\u300f"'\u3002.!\uff01]+$/gu, ''), 240);
+            if (!clean || /[<>]/u.test(clean) || (clean.includes('"') && clean.includes("'"))) return null;
+            return clean.includes('"') ? `'${clean}'` : `"${clean}"`;
+        };
+        const rows = [];
+        const residue = [];
+        let newList = false;
+        for (const rawLine of compact.split(/\r?\n/u)) {
+            const original = rawLine.trim();
+            if (!original) continue;
+            const line = original.replace(/^\s*(?:[-*\u2022]|\d+[.)\u3001])\s*/u, '').trim();
+            if (/^(?:\u65b0\u4eba\u7269|\u65b0\u89d2\u8272|\u65b0\u589e\u4eba\u7269|\u4eba\u7269\u6e05\u5355|\u65b0\u4eba\u7269\u6e05\u5355)\s*[:\uff1a]\s*$/u.test(line)) {
+                newList = true;
+                continue;
+            }
+            const reveal = line.match(/^(?:\u8eab\u4efd\u63ed\u793a|\u8eab\u4efd\u66f4\u65b0|\u5df2\u767b\u8bb0\u4eba\u7269)\s*[:\uff1a]\s*([^|\uff5c]+)\s*[|\uff5c]\s*([^|\uff5c]+)\s*[|\uff5c]\s*(.+)$/u);
+            if (reveal) {
+                const actor = quoteAttr(reveal[1]);
+                const name = quoteAttr(reveal[2]);
+                const evidence = cleanModuleBody(reveal[3]);
+                if (!actor || !name || !evidence || /[<>]/u.test(evidence)) {
+                    residue.push(line);
+                    continue;
+                }
+                rows.push(`<profile-target actor=${actor} name=${name}><identity-evidence>${evidence}</identity-evidence></profile-target>`);
+                newList = false;
+                continue;
+            }
+            const discovered = line.match(/^(?:\u65b0\u4eba\u7269|\u65b0\u89d2\u8272|\u65b0\u589e\u4eba\u7269|\u4eba\u7269)\s*[:\uff1a|\uff5c]\s*(.+)$/u);
+            const nameText = discovered?.[1] || (newList && /^\s*(?:[-*\u2022]|\d+[.)\u3001])\s*/u.test(original)
+                ? line : '');
+            if (nameText) {
+                const name = quoteAttr(nameText);
+                if (!name) residue.push(line);
+                else rows.push(`<profile-target actor="new" name=${name}></profile-target>`);
+                continue;
+            }
+            residue.push(line);
+        }
+        if (!rows.length) return null;
+        const identityLikeResidue = residue.some((line) => (
+            /(?:\u65b0\u4eba\u7269|\u65b0\u89d2\u8272|\u65b0\u589e\u4eba\u7269|\u4eba\u7269\s*[:\uff1a]|\u8eab\u4efd\u63ed\u793a|\u8eab\u4efd\u66f4\u65b0|\u5df2\u767b\u8bb0\u4eba\u7269|\u6ca1\u6709.*\u4eba\u7269|\u65e0\u65b0\u4eba\u7269|\u672a\u53d1\u73b0.*\u4eba\u7269)/u.test(line)
+        ));
+        if (identityLikeResidue) return null;
+        return {
+            markup: rows.join('\n'),
+            repairs: [
+                'actor_profile.route_natural_list_normalized',
+                ...(residue.length ? ['actor_profile.route_extra_prose_ignored'] : []),
+            ],
+        };
+    })();
+    const normalized = naturalIdentityRoute?.markup || normalizedMarkup;
     const entries = [];
     const failures = [];
-    const routeRepairs = [];
+    const routeRepairs = [...(naturalIdentityRoute?.repairs || [])];
     const scheduledCandidates = [...new Map(Object.values(group?.targets || {})
         .flat()
         .map((candidate) => [candidateActorIdForPrompt(candidate), candidate])

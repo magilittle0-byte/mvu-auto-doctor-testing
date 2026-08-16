@@ -346,10 +346,11 @@ test('identity bootstrap is a route-only row-key probe isolated from dossier aut
     const all = messages.map((message) => message.content).join('\n');
     assert.equal(all.match(/NPC-old/gu)?.length, 1);
     assert.equal(all.includes('ticket-1'), false);
-    assert.match(all, /actor="new"/u);
+    assert.match(all, /\u65b0\u4eba\u7269\uff1a\u6b63\u6587\u4e2d\u7684\u9010\u5b57\u7a33\u5b9a\u884c\u952e/u);
     assert.match(all, /\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13/u);
-    assert.match(all, /\u6574\u4e2a\u54cd\u5e94\u7cbe\u786e\u8f93\u51fa <no-new\/>/u);
-    assert.match(all, /\u4e0d\u8981\u56de\u663e digest\u3001\u7a7a\u5355\u5143/u);
+    assert.match(all, /\u6574\u4e2a\u54cd\u5e94\u53ea\u5199\u201c\u6ca1\u6709\u65b0\u4eba\u7269\u201d/u);
+    assert.match(all, /\u4e0d\u8981\u5199 JSON\u3001XML\u3001\u51fd\u6570\u3001\u53d8\u91cf\u3001digest/u);
+    assert.doesNotMatch(all, /<profile-target|<no-new\/>/u);
     assert.doesNotMatch(all, /coverage-unit:/u);
     assert.doesNotMatch(all, /\u58eb\u5175A|\u53d7\u4f24\u7684\u8b66\u536b/u);
     assert.doesNotMatch(all, /\u6743\u5a01\u6750\u6599|\u5168\u5c40\u9644\u52a0\u63d0\u793a/u);
@@ -433,11 +434,46 @@ test('identity compact coverage accepts only exact empty or locally provable fla
     assert.ok(wrongKnownUnit.failures.some((entry) => (
         entry.reason === 'actor_profile.discovery_name_not_in_coverage_unit'
     )));
-    const proseOnly = parseActorProfileModuleGroupOutput('没有发现需要登记的人物。', group, {
+    const naturalEmpty = parseActorProfileModuleGroupOutput('没有发现需要登记的人物。', group, {
         acceptedNarrative,
     });
-    assert.equal(proseOnly.explicitEmpty, false);
-    assert.ok(proseOnly.failures.some((entry) => (
+    assert.equal(naturalEmpty.explicitEmpty, true);
+    assert.ok(naturalEmpty.coverageProof);
+    assert.ok(naturalEmpty.routeRepairs.includes('actor_profile.route_natural_empty_normalized'));
+});
+
+test('identity parser accepts a natural Chinese list and still binds every row locally', () => {
+    const acceptedNarrative = `记录员推门进来。${'甲'.repeat(430)}守门人站在走廊尽头。`;
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const parsed = parseActorProfileModuleGroupOutput([
+        '以下是识别结果：',
+        '新人物：记录员',
+        '新人物：守门人',
+    ].join('\n'), group, { acceptedNarrative });
+    assert.deepEqual(parsed.failures, []);
+    assert.deepEqual(parsed.entries.map((entry) => entry.name), ['记录员', '守门人']);
+    assert.equal(parsed.entries[0].coverageUnitId, group.discoveryCoverage.units[0].id);
+    assert.equal(parsed.entries[1].coverageUnitId, group.discoveryCoverage.units.at(-1).id);
+    assert.ok(parsed.coverageProof);
+    assert.ok(parsed.routeRepairs.includes('actor_profile.route_natural_list_normalized'));
+    assert.ok(parsed.routeRepairs.includes('actor_profile.route_extra_prose_ignored'));
+});
+
+test('identity parser keeps natural no-person text mixed with a route fail-closed', () => {
+    const acceptedNarrative = '记录员走进房间。';
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const parsed = parseActorProfileModuleGroupOutput([
+        '没有新人物',
+        '新人物：记录员',
+    ].join('\n'), group, { acceptedNarrative });
+    assert.equal(parsed.coverageProof, null);
+    assert.ok(parsed.failures.some((entry) => (
         entry.reason === 'actor_profile.discovery_coverage_extra_content'
     )));
 });
