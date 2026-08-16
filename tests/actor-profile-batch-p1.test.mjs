@@ -381,7 +381,7 @@ test('production profile route plan freezes one healthy slot per distinct direct
     assert.equal(mixed.concurrency, 1);
 });
 
-test('identity bootstrap failure calls the full accepted narrative model once and writes no partial profile', async () => {
+test('identity bootstrap failure gets one targeted resend and writes no partial profile', async () => {
     const fixture = prepareRegisteredBatch(0, { chatId: 'chat-identity-once' });
     let identityCalls = 0;
     const options = {
@@ -398,8 +398,8 @@ test('identity bootstrap failure calls the full accepted narrative model once an
         },
     };
     const first = await runBatch({ ...fixture, candidates: [] }, options);
-    assert.equal(identityCalls, 1);
-    assert.equal(first.result.modelCalls, 1);
+    assert.equal(identityCalls, 2);
+    assert.equal(first.result.modelCalls, 2);
     assert.equal(first.result.persistenceStatus, 'not_completed');
     assert.equal(first.saveCount, 0);
     assert.equal(first.result.ledger.actors.length, 0);
@@ -411,7 +411,7 @@ test('identity bootstrap failure calls the full accepted narrative model once an
         ...options,
         recoveryProgress: first.result.recoveryProgress,
     });
-    assert.equal(identityCalls, 1, 'sealed recovery must not resend the accepted narrative');
+    assert.equal(identityCalls, 2, 'sealed recovery must not start a third automatic identity call');
     assert.equal(resumed.result.modelCalls, 0);
     assert.equal(resumed.result.persistenceStatus, 'not_completed');
     assert.equal(resumed.saveCount, 0);
@@ -440,7 +440,7 @@ test('identity bootstrap failure calls the full accepted narrative model once an
             return '<no-new/>';
         },
     });
-    assert.equal(identityCalls, 2, 'explicit repair grants exactly one extra identity call');
+    assert.equal(identityCalls, 3, 'explicit later repair grants exactly one separately sealed identity call');
     assert.equal(repaired.result.modelCalls, 1);
     assert.equal(repaired.result.persistenceStatus, 'no_candidates');
     assert.equal(repaired.saveCount, 0);
@@ -1263,7 +1263,7 @@ test('rowless nonempty batch output keeps only bounded parse metadata', () => {
     assert.equal(parsed.unexpected.length, 0);
 });
 
-test('rowless current-source identity response fails after one model call with zero writes', async () => {
+test('rowless current-source identity response recovers once and commits the complete profile atomically', async () => {
     const fixture = prepareRegisteredBatch(1);
     const resolvedCandidates = structuredClone(fixture.candidates);
     const name = fixture.candidates[0].actorRef.name;
@@ -1308,11 +1308,16 @@ test('rowless current-source identity response fails after one model call with z
     });
     assert.deepEqual(calls, [
         { groupKey: 'identity_bootstrap', attempt: 0, count: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1, count: 0 },
+        { groupKey: 'character_core', attempt: 0, count: 1 },
     ]);
     assert.equal(resolverCalls, 1);
-    assert.equal(run.result.persistenceStatus, 'not_completed');
+    assert.equal(run.result.modelCalls, 3);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.readbackVerified, true);
     assert.equal(run.result.batchFormatReplacementAttempted, false);
-    assert.equal(run.saveCount, 0);
+    assert.equal(run.result.accepted.length, 1);
+    assert.equal(run.saveCount, 2);
 });
 
 test('flat identity routes bind locally and complete Registry through atomic pending-final readback', async () => {
@@ -1391,7 +1396,7 @@ test('a vague identity route uses one explicit evidence label without relaxing b
     assert.equal(run.saveCount, 2);
 });
 
-test('holdout invented discovery name fails once without resending accepted narrative', async () => {
+test('holdout invented discovery name is replaced once by a literal route and commits atomically', async () => {
     const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-literal-retry' });
     const literalName = '\u9646\u7d20\u82e9';
     const inventedName = '\u6c88\u96fe\u9065';
@@ -1429,14 +1434,20 @@ test('holdout invented discovery name fails once without resending accepted narr
     });
     assert.deepEqual(calls.map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
         { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
+        { groupKey: 'character_core', attempt: 0 },
     ]);
-    assert.equal(run.result.persistenceStatus, 'not_completed');
-    assert.equal(run.result.readbackVerified, false);
-    assert.equal(run.saveCount, 0);
-    assert.equal(run.result.ledger.actors.length, 0);
+    const retryPrompt = calls[1].messages.map((entry) => entry.content).join('\n');
+    assert.match(retryPrompt, /\u65b0\u4eba\u7269\uff1a\u5df2\u63a5\u53d7\u6b63\u6587/u);
+    assert.match(retryPrompt, /\u6574\u4e2a\u54cd\u5e94\u53ea\u5199\u201c\u6ca1\u6709\u65b0\u4eba\u7269\u201d/u);
+    assert.doesNotMatch(retryPrompt, /<no-new\s*\/>|<profile-target|coverage wrapper \u5168\u96c6/u);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback');
+    assert.equal(run.result.readbackVerified, true);
+    assert.equal(run.saveCount, 2);
+    assert.equal(run.result.ledger.actors.length, 1);
 });
 
-test('an invented-only identity answer fails once and cannot become strict no-candidates', async () => {
+test('an invented-only identity answer gets one bounded resend but vague empty prose remains fail-closed', async () => {
     const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-empty-retry' });
     const inventedName = '\u97e9\u77f3\u8c61';
     const acceptedNarrative = '\u7a7a\u8d70\u5eca\u91cc\u53ea\u6709\u98ce\u5439\u52a8\u5e18\u5b50\uff0c\u6ca1\u6709\u4efb\u4f55\u5177\u540d\u4eba\u7269\u51fa\u573a\u3002';
@@ -1460,14 +1471,16 @@ test('an invented-only identity answer fails once and cannot become strict no-ca
             ].join('\n');
         },
     });
-    assert.equal(retryPrompt, '');
+    assert.match(retryPrompt, /\u7f3a\u9677\u7801\uff1aactor_profile\.discovery_name_not_in_narrative/u);
+    assert.match(retryPrompt, /\u65b0\u4eba\u7269\uff1a\u5df2\u63a5\u53d7\u6b63\u6587/u);
+    assert.doesNotMatch(retryPrompt, /<no-new\s*\/>|<profile-target/u);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.ok(run.result.failures.some((entry) => (
-        entry.reason === 'actor_profile.discovery_name_not_in_narrative'
+        entry.reason === 'actor_profile.identity_retry_empty_after_candidate'
     )));
     assert.equal(run.result.readbackVerified, false);
     assert.equal(run.saveCount, 0);
-    assert.equal(identityCalls, 1);
+    assert.equal(identityCalls, 2);
 });
 
 test('full unit coverage with no-new still fills an existing incomplete ActorRef', async () => {
@@ -1495,7 +1508,7 @@ test('full unit coverage with no-new still fills an existing incomplete ActorRef
     assert.equal(run.saveCount, 2);
 });
 
-test('one naked empty identity answer stays fail-closed without a second full-narrative call', async () => {
+test('vague empty identity prose gets one bounded resend and remains fail-closed when resend fails', async () => {
     for (const mode of ['empty', 'transport', 'format']) {
         const fixture = prepareRegisteredBatch(0, { chatId: `chat-empty-${mode}` });
         let calls = 0;
@@ -1518,8 +1531,8 @@ test('one naked empty identity answer stays fail-closed without a second full-na
                 return 'not a profile route';
             },
         });
-        assert.equal(calls, 1, mode);
-        assert.equal(run.result.modelCalls, 1, mode);
+        assert.equal(calls, 2, mode);
+        assert.equal(run.result.modelCalls, 2, mode);
         assert.equal(run.result.persistenceStatus, 'not_completed', mode);
         assert.equal(run.saveCount, 0, mode);
         assert.ok(run.result.failures.length > 0, mode);
@@ -1607,13 +1620,12 @@ test('invalid narrative discovery rows fail closed before Registry or profile pe
                 };
             },
         });
-        assert.deepEqual(calls, [0], label);
-        assert.equal(run.result.modelCalls, 1, label);
+        assert.deepEqual(calls, [0, 1], label);
+        assert.equal(run.result.modelCalls, 2, label);
         assert.equal(run.result.persistenceStatus, 'not_completed', label);
         assert.equal(run.result.readbackVerified, false, `${label}: must not issue a P3 no-candidate permit`);
-        assert.deepEqual(
-            run.result.batchMeta.moduleGroups.filter((entry) => entry.attempt === 1),
-            [],
+        assert.ok(
+            run.result.batchMeta.moduleGroups.some((entry) => entry.attempt === 1),
             label,
         );
         assert.equal(resolverCalls, 1, label);
@@ -1669,6 +1681,7 @@ test('a rejected narrative discovery blocks a first-pass ActorRef peer from dura
     });
     assert.deepEqual(calls, [
         { attempt: 0, actorIds: [] },
+        { attempt: 1, actorIds: [] },
     ]);
     assert.ok(calls.every((entry) => entry.actorIds.length === 0));
     assert.equal(resolverCalls, 1);
@@ -1772,7 +1785,7 @@ test('valid existing plus valid discovery silently dropped by resolver keeps the
             omitTitle: NARRATIVE_SECTION_TITLES[0],
         }),
     });
-    assert.equal(malformed.result.modelCalls, 1);
+    assert.equal(malformed.result.modelCalls, 2);
     assert.equal(malformed.saveCount, 0);
 
     const mixedCalls = [];
@@ -2131,7 +2144,7 @@ test('mixed valid and invalid identity candidates fail atomically after one call
     )));
 });
 
-test('identity module or format failure gets no second model call', async () => {
+test('identity format failure gets exactly one targeted resend and vague empty prose cannot erase the failed route', async () => {
     const fixture = prepareRegisteredBatch(0);
     const acceptedNarrative = '合成人物丙走进大厅。';
     const calls = [];
@@ -2149,11 +2162,12 @@ test('identity module or format failure gets no second model call', async () => 
     });
     assert.deepEqual(calls, [
         { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
     ]);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.saveCount, 0);
     assert.ok(run.result.failures.some((failure) => (
-        failure.groupKey === 'identity_bootstrap' && String(failure.reason || '').length > 0
+        failure.reason === 'actor_profile.identity_retry_empty_after_candidate'
     )));
 });
 
@@ -3278,7 +3292,7 @@ test('parsed narrative discoveries remain ordinary local data within one resolut
     assert.equal(replay.candidates.length, 1, 'the resolver revalidates ordinary local rows against the current narrative');
 });
 
-test('a rowless identity response fails closed after one call with no save', async () => {
+test('a rowless identity response fails closed after one targeted resend with no save', async () => {
     const fixture = prepareRegisteredBatch(1);
     const calls = [];
     const run = await runBatch({ ...fixture, candidates: [] }, {
@@ -3289,7 +3303,10 @@ test('a rowless identity response fails closed after one call with no save', asy
             return 'not a profile array';
         },
     });
-    assert.deepEqual(calls, [{ attempt: 0, count: 0 }]);
+    assert.deepEqual(calls, [
+        { attempt: 0, count: 0 },
+        { attempt: 1, count: 0 },
+    ]);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.result.batchFormatReplacementAttempted, false);
     assert.equal(run.saveCount, 0);

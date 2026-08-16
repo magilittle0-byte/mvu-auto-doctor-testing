@@ -31,7 +31,7 @@ six distinct required keys, and composes the existing natural-Chinese module.
 It never infers a field from medical keywords or creates a second schema/store.
 Legacy `physiology-coverage` responses remain read-compatible only.
 
-Identity coverage remains one model call. The local partition was reduced from
+Identity coverage remains one complete accepted-narrative input. The local partition was reduced from
 approximately 900 characters to at most 420 characters at mechanical
 punctuation boundaries; concatenating all unit texts exactly reconstructs the
 accepted narrative. This changes no identity classifier and performs no
@@ -46,6 +46,12 @@ compatible; partial wrappers, unknown explicit units, route-plus-empty and
 free-text empty claims fail closed. Supported `profile_target` / `no_new`
 spelling drift is normalized mechanically; any remaining target/empty
 control-like residue fails closed instead of being ignored as prose, so a
-malformed peer cannot disappear from flat or legacy output. No format failure can trigger a second
-full-narrative identity call. The existing terminal CAS/readback receipt stays
-unchanged.
+malformed peer cannot disappear from flat or legacy output. When the first
+identity response contains no locally retainable route and ends in a bounded
+format/identity failure, production may send that same complete input exactly
+once more with only privacy-safe failure codes and the same natural Chinese
+`新人物/身份揭示/没有新人物` output contract. It never asks for XML, JSON, digest
+or empty-unit echoes on that resend. A first response that already contains a
+retainable row is never resent; a second invalid response is terminal and
+atomic; an empty resend cannot erase a failed candidate claim. The existing
+terminal CAS/readback receipt stays unchanged.

@@ -81,6 +81,14 @@ const SAFE_IDENTITY_RETRY_GUIDANCE = Object.freeze({
     'actor_profile.identity_reveal_conflict': '\u65b0\u884c\u952e\u5df2\u5c5e\u4e8e\u53e6\u4e00 ActorRef\uff0c\u4e0d\u5f97\u6a21\u7cca\u5408\u5e76\u6216\u590d\u5236\u6863\u6848\uff1b\u4fdd\u7559\u51b2\u7a81\u4f9b\u672c\u5730\u6062\u590d\u3002',
 });
 
+const SAFE_IDENTITY_RETRY_OUTPUT_CONTRACT = [
+    '\u4ecd\u53ea\u4f7f\u7528\u5f53\u524d\u8f7b\u91cf\u4e2d\u6587\u8eab\u4efd\u6e05\u5355\uff1a',
+    '\u6bcf\u4e2a\u65b0\u4eba\u4e00\u884c\u201c\u65b0\u4eba\u7269\uff1a\u5df2\u63a5\u53d7\u6b63\u6587\u4e2d\u9010\u5b57\u51fa\u73b0\u7684\u7a33\u5b9a\u884c\u952e\u201d\uff1b',
+    '\u8eab\u4efd\u63ed\u793a\u4e00\u884c\u201c\u8eab\u4efd\u63ed\u793a\uff1a\u7cbe\u786eActorId\uff5c\u65b0\u884c\u952e\uff5c\u540c\u65f6\u5305\u542b\u65e7\u884c\u952e/\u522b\u540d\u4e0e\u65b0\u884c\u952e\u7684\u6700\u77ed\u6b63\u6587\u539f\u53e5\u201d\uff1b',
+    '\u82e5\u786e\u65e0\u5408\u683c\u65b0\u4eba\u7269\u6216\u8eab\u4efd\u63ed\u793a\uff0c\u6574\u4e2a\u54cd\u5e94\u53ea\u5199\u201c\u6ca1\u6709\u65b0\u4eba\u7269\u201d\u3002',
+    '\u4e0d\u5f97\u8f93\u51faJSON\u3001XML\u3001coverage wrapper\u3001digest\u3001\u6863\u6848\u5185\u5bb9\u6216\u89e3\u91ca\u3002',
+].join('');
+
 const SAFE_PROFILE_RETRY_CODES = new Set([
     'actor_profile.format_unrecoverable',
     'actor_profile.module_target_duplicate',
@@ -358,6 +366,7 @@ export function actorProfileDiscoverySourceOrder(discoveries = [], acceptedNarra
 export function actorProfileBatchSemanticFingerprint(overrides = {}) {
     return `actor-profile-batch:${fingerprint(JSON.stringify({
         identityRetryGuidance: SAFE_IDENTITY_RETRY_GUIDANCE,
+        identityRetryOutputContract: SAFE_IDENTITY_RETRY_OUTPUT_CONTRACT,
         profileRetryCodes: [...SAFE_PROFILE_RETRY_CODES].sort(),
         transportRows: ACTOR_PROFILE_GROUP_TRANSPORT_ROWS,
         groupChunks: String(actorProfileModuleGroupChunks),
@@ -1300,10 +1309,19 @@ export async function completeActorProfileBatchTransaction({
                     .map((value) => safeToken(value))
                     .filter(Boolean)
                     .slice(0, 8);
+                if (group?.key === 'identity_bootstrap') {
+                    const boundedAction = identityAction
+                        && !/(?:profile-target|coverage wrapper|<no-new|unit=)/iu.test(identityAction)
+                        ? identityAction
+                        : '\u5220\u9664\u4e0e\u56fa\u5b9a\u7f3a\u9677\u7801\u5bf9\u5e94\u7684\u5931\u8d25\u884c\uff0c\u5e76\u4ece\u5df2\u63a5\u53d7\u6b63\u6587\u91cd\u65b0\u9010\u5b57\u6838\u5bf9\u3002';
+                    return `\u7f3a\u9677\u7801\uff1a${code}\u3002${boundedAction}${SAFE_IDENTITY_RETRY_OUTPUT_CONTRACT}`;
+                }
                 return JSON.stringify({
                     code,
                     action: identityAction
-                        ? `${identityAction}必须仍按原 coverage unit 全集逐项作答；某个 unit 没有合格人物时在该 unit 内输出 <no-new/>，不得输出裸的“无人物档案”。`
+                        ? `${/(?:profile-target|coverage wrapper|<no-new|unit=)/iu.test(identityAction)
+                            ? '删除与固定缺陷码对应的失败行，并从已接受正文重新逐字核对。'
+                            : identityAction}${SAFE_IDENTITY_RETRY_OUTPUT_CONTRACT}`
                         : '\u6309\u5f53\u524d\u8def\u7531\u534f\u8bae\u4ec5\u91cd\u53d1\u672c\u7ec4\u5931\u8d25\u5185\u5bb9\uff0c\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u8f93\u51fa\uff0c\u4e0d\u8981\u6dfb\u52a0\u89e3\u91ca\u3002',
                     actorId: safeToken(entry?.actorId),
                     moduleKey: safeToken(entry?.moduleKey, 80),
@@ -1436,7 +1454,7 @@ export async function completeActorProfileBatchTransaction({
                     recoveryProgress: captureRecoveryProgress(),
                 };
             }
-            const parsed = await callGroup(identity, 0);
+            let parsed = await callGroup(identity, 0);
             if (parsed.stale) return parsed;
             if (parsed.requestFailure) {
                 if (
@@ -1449,12 +1467,77 @@ export async function completeActorProfileBatchTransaction({
                 return parsed;
             }
             identityAttempted = true;
-            const preparedApply = prepareGroupApply(identity, parsed);
-            const preflight = parsed.formatUnrecoverable
+            let preparedApply = prepareGroupApply(identity, parsed);
+            let preflight = parsed.formatUnrecoverable
                 ? { stale: false, failures: [] }
                 : await preflightIdentityDiscoveries(preparedApply, identity, 0);
             if (preflight.stale) return { stale: true };
             preparedApply.failures.push(...preflight.failures);
+            const initialFailureDiagnostic = actorProfileGroupFailureDiagnostic(
+                identity,
+                0,
+                parsed,
+                preparedApply.failures,
+            );
+            if (initialFailureDiagnostic) groupDiagnostics.push(initialFailureDiagnostic);
+            const initialIdentityClaimFailed = [
+                ...(preparedApply.failures || []),
+                ...(parsed.failures || []),
+            ].some((entry) => Boolean(
+                SAFE_IDENTITY_RETRY_GUIDANCE[cleanText(entry?.reason, 160)],
+            ));
+            // Identity still runs on the same complete accepted narrative. If
+            // its first response contains no locally retainable route at all,
+            // permit one targeted resend with fixed privacy-safe failure
+            // guidance. This mirrors the existing per-group repair boundary:
+            // no partial row is published, no standard is lowered, and a
+            // second invalid response remains a terminal atomic failure.
+            const noRetainableIdentityRows = !preparedApply.sectionUpdates.length
+                && !preparedApply.discoveryUpdates.length
+                && !(preparedApply.identityRevealUpdates || []).length;
+            const retryableIdentityFailure = parsed.formatUnrecoverable === true
+                || preparedApply.failures.some((entry) => (
+                    Boolean(SAFE_IDENTITY_RETRY_GUIDANCE[cleanText(entry?.reason, 160)])
+                    || SAFE_PROFILE_RETRY_CODES.has(cleanText(entry?.reason, 160))
+                ));
+            if (
+                semanticRetry
+                && noRetainableIdentityRows
+                && retryableIdentityFailure
+                && (parsed.formatUnrecoverable || preparedApply.failures.length)
+            ) {
+                parsed = await callGroup(
+                    identity,
+                    1,
+                    retryFeedbackFor(preparedApply, parsed, identity),
+                );
+                if (parsed.stale) return parsed;
+                if (parsed.requestFailure) return parsed;
+                preparedApply = prepareGroupApply(identity, parsed);
+                preflight = parsed.formatUnrecoverable
+                    ? { stale: false, failures: [] }
+                    : await preflightIdentityDiscoveries(preparedApply, identity, 1);
+                if (preflight.stale) return { stale: true };
+                preparedApply.failures.push(...preflight.failures);
+                // A focused resend may correct a bad route, but it may not
+                // erase evidence that the first answer attempted to identify
+                // somebody by replying with an empty terminal. This keeps a
+                // malformed candidate recoverable instead of silently sealing
+                // a false no-candidates proof.
+                if (parsed.explicitEmpty && initialIdentityClaimFailed) {
+                    preparedApply.failures.push({
+                        reason: 'actor_profile.identity_retry_empty_after_candidate',
+                        groupKey: identity.key,
+                    });
+                }
+                const retryFailureDiagnostic = actorProfileGroupFailureDiagnostic(
+                    identity,
+                    1,
+                    parsed,
+                    preparedApply.failures,
+                );
+                if (retryFailureDiagnostic) groupDiagnostics.push(retryFailureDiagnostic);
+            }
             if (parsed.explicitEmpty && profileById.size === 0 && !preparedApply.failures.length) {
                 return {
                     entries: [], discoveries: [], identityReveals: [], unresolved: [], failures: [], unexpected: [],
