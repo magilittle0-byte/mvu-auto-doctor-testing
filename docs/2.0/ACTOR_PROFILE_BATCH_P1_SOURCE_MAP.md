@@ -151,12 +151,12 @@ public runContinuity / enqueueContinuity / runContinuityTarget
 当模型把新人物路由成裸泛称时，Doctor 只在同一 accepted-narrative coverage unit 内发现唯一的明确引号或“名为/称作”证据时机械替换为该原文标签；没有明确证据或存在多个标签则保持 `actor_profile.discovery_name_vague`。自动链会用该固定码对同一完整正文精准重发至多一次；若仍失败则零写并交给修复中心，修复中心的唯一手动调用继续携带该固定码。该适配不从形容词、职业或自由叙述猜名。
 | TavernDB 独立列 Note + 缺列补填 | **A：**成人生理仍保存一个自然中文模块；六个明确 transport 字段在本地完整校验后合成为该模块，缺项进入现有 failed-group 定向补填与 transaction-local working clone。字段标签不持久化，不新增表、store 或状态机；旧 coverage 声明只作兼容读取。|
 | `actor-ledger-core.mjs/actorLedgerDigest` 与 `actorProfilePendingWriteSetDigest` | canonical actorLedger CAS；pending write-set 投影包含 ActorRef/schema/commitId/profileDigest/pending/readback=false/not-ready/locks/manualOverrides 和 preparedFieldRevision |
-| `actor-ledger-core.mjs/actorProfileReadinessInLedger` | 单 actor helper 只作第一层快速否定；持久 ready 必须从 final ledger 重建整批 pending 投影并核对 verification、当前 ActorRef/schema/profile digest |
+| `actor-ledger-core.mjs/actorProfileReadinessInLedger + actorProfileCommitEvidenceDigest` | pending→final 当下仍从 durable ledger 重建并严格核对整批 pending 投影；持久 ready 改核当前人物自己的完整 profile/digest/ActorRef/schema/locks/manualOverrides 与不可变 transaction/write-set/commit evidence，不再把同批其他人物后来合法维护成旧档案失效。v1 旧收据仅在整批仍匹配，或唯一差异可证明来自同伴后续有效 commit 时兼容。 |
 | `actor-profile-v6-core.mjs/selectActorProfileCompletionCandidates` | current-source initialActorIds 不限人数、不受 8/24 截断；历史欠账只在 maintenance 下受 actorProfileBatchCapacity 预算。用户明确切换到 `full_adult` 后，既有核心档案会作为生理缺项 maintenance 候选，在 `character_core` 中只填 physiology 目标，不重生已完成模块。 |
 | `actor-profile-v6-core.mjs/actorProfileCompletionGroupPlan + buildActorProfileModuleGroupMessages` | 从 fresh canonical profile 选择 missing/refresh module targets；每个兼容 group 的 Notes 只注入一次；隐藏 JSON 只作人物/module 路由，模块值保持自然中文；后续 group 读取同一 transaction working row 与权威投影 |
 | `actor-profile-v6-core.mjs/parseActorProfileModuleGroupOutput` | 去围栏/前后文、宽容标签引号/中文标点/alias；严格拒绝重复、越界、缺 target/module；不按中文语义关键词猜槽，不把旧整篇档案 parser 带回生产协议 |
 | `actor-profile-batch-core.mjs/completeActorProfileBatchTransaction` | identity bootstrap → dependency-ordered groups；每组先在 group-local clone 验完再并入 transaction working clone；失败只携真实安全反馈重试该组；任一终局失败整批 S0；全部成功才进入 pending/final 两阶段读回并 ready |
-| `actor-profile-v6-core.mjs/actorProfileActionReadiness` | 兼容用第一层快速否定，不能单独授予持久 ready；阶段二生产判定统一使用 ledger-level 重建验证 |
+| `actor-profile-v6-core.mjs/actorProfileActionReadiness` | 兼容用第一层快速否定，不能单独授予持久 ready；阶段二生产判定还必须通过 ledger-level 当前人物 commit evidence 验证。 |
 | `index.js/runContinuityTarget`、`enqueueContinuity` | P3 单批世界入口；不含 discovery、Registry upsert/promotion、Registry readback 或 profile completion，且不恢复 combined pool、barrier 或旧注入 |
 
 ## 人数、预算与重试
@@ -181,7 +181,7 @@ public runContinuity / enqueueContinuity / runContinuityTarget
 - 联合提示中的详细 ActorRef 只来自 current-source initial 与显式 maintenance；其余全部 registered ActorRef 仅存在于 compact 去重索引，不作为可选历史欠档目标，也不会触发自动维护。
 - Registry 无实际 mutation 时零 host save/readback，S1=S0。Profile Phase1 只落 `pending_readback/readbackVerified=false/preparedForAction=false` 并读回 S2；pending 永不 action ready。
 - Phase2 只从真实 S2 构造 finalization。最终读回成功才是本次 atomic_readback；失败时本次 not_completed，返回/渲染不采用未认证 final candidate。
-- refresh/restart 只从宿主 final ledger 重建对应 pending write-set projection，核对 preparedLedgerDigest、preparedFieldRevision、commitId、profileDigest、ActorRef/schema/locks/manualOverrides；不能只信 status/readbackVerified/verification 自报字段。
+- refresh/restart 只从宿主 final ledger 复验当前人物的 profile digest、ActorRef/schema/locks/manualOverrides，以及 `transactionId/writeSetDigest/preparedLedgerDigest/preparedFieldRevision/commitEvidenceDigest`；pending→final 当下的整批投影仍严格读回。持久阶段不再拿历史整批去约束其他人物未来的合法维护，也不能只信 status/readbackVerified 自报字段。
 - `{module:'actor_profiles', ...}` 只作为本次 Promise 返回与当前诊断展示，不持久化为 barrier、receipt 或总完成状态。
 - refresh/restart/CHAT_CHANGED/CHAT_LOADED 只 invalidate/cancel、清模块内存状态并从 actorLedger 读取；不会 discovery、调用模型或自动补历史欠账。
 - 新聊天由 chat/card/worldbook/scope 隔离；swipe/regenerate 使用当前捕获 sourceRef 的 message/swipe/generation/scope/content 全字段精确匹配，旧分支迟到结果被 epoch/chat/scope/CAS 拒绝。

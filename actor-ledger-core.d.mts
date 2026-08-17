@@ -293,6 +293,7 @@ export function actorProfilePendingWriteSetDigest(
     options?: { preparedFieldRevision?: number; transactionId?: string; writeSetDigest?: string },
 ): string;
 export function actorProfileWriteSetDigest(expectedCommits: unknown[]): string;
+export function actorProfileCommitEvidenceDigest(value?: unknown): string;
 export function actorProfileTransactionId(options?: {
     chatId?: string;
     sourceRef?: ActorLedgerSourceRef | null;

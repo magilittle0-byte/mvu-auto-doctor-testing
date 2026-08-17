@@ -1244,6 +1244,32 @@ export function actorProfileTransactionId({ chatId = '', sourceRef = null, prepa
     ])).slice(0, 24)}`;
 }
 
+// The batch seal proves atomicity at final readback. Long-lived action
+// readiness must not rebuild that historical batch against today's profiles:
+// a later, valid maintenance commit for one peer would otherwise invalidate
+// every untouched member of the old batch. This compact receipt binds the
+// immutable transaction metadata and original write-set without binding
+// current peer profile values.
+export function actorProfileCommitEvidenceDigest(value = {}) {
+    const writeSet = canonicalProfileWriteSet(value.writeSet);
+    const projection = canonicalActorLedgerValue({
+        version: 2,
+        transactionId: cleanText(value.transactionId, 180),
+        writeSetDigest: cleanText(value.writeSetDigest, 180),
+        preparedLedgerDigest: cleanText(value.preparedLedgerDigest, 180),
+        preparedFieldRevision: integer(
+            value.preparedFieldRevision,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            0,
+        ),
+        commitId: cleanText(value.commitId, 180),
+        profileDigest: cleanText(value.profileDigest, 120),
+        writeSet,
+    });
+    return `actor-profile-commit-evidence-v2:${fingerprint(JSON.stringify(projection))}`;
+}
+
 export function actorProfilePendingWriteSetProjection(value, expectedCommits, {
     preparedFieldRevision = 0,
     transactionId = '',
@@ -1703,7 +1729,7 @@ export function finalizeActorProfileBaselinesInLedger(value, expectedCommits, {
                 readbackVerified: true,
                 phase: 'final',
                 verification: {
-                    version: 1,
+                    version: 2,
                     transactionId: expectedTransactionId,
                     writeSetDigest: expectedWriteSetDigest,
                     preparedLedgerDigest: expectedPreparedDigest,
@@ -1712,6 +1738,15 @@ export function finalizeActorProfileBaselinesInLedger(value, expectedCommits, {
                     profileDigest: expected.profileDigest,
                     writeSet: clone(writeSet),
                     preparedProjection: clone(pending.preparedProjection),
+                    commitEvidenceDigest: actorProfileCommitEvidenceDigest({
+                        transactionId: expectedTransactionId,
+                        writeSetDigest: expectedWriteSetDigest,
+                        preparedLedgerDigest: expectedPreparedDigest,
+                        preparedFieldRevision: revision,
+                        commitId: expected.commitId,
+                        profileDigest: expected.profileDigest,
+                        writeSet,
+                    }),
                 },
             });
         if (!replaced.committed) {
@@ -1859,16 +1894,94 @@ export function actorProfileReadinessInLedger(value, actorId) {
     }
     const base = actorProfileActionReadiness(actor);
     if (!base.ready) return base;
-    const matched = actorProfileCommitMatchesLedger(ledger, {
-        actorRef: {
-            actorId: actor.id,
-            name: actor.name,
-        },
-        schemaVersion: actor.profileV6?.baselineCommit?.schemaVersion,
-        commitId: actor.profileV6?.baselineCommit?.commitId,
-        digest: actor.profileV6?.baselineCommit?.digest,
-        phase: 'final',
+    const profile = normalizeActorProfileV6(actor.profileV6, {
+        actorId: actor.id,
+        name: actor.name,
     });
+    const commit = profile.baselineCommit;
+    const verification = commit?.verification;
+    const writeSet = canonicalProfileWriteSet(verification?.writeSet);
+    const ownEntry = writeSet.find((entry) => entry.actorRef.actorId === actor.id);
+    const mismatches = [];
+    if (!verification || !writeSet.length || !ownEntry) mismatches.push('verification');
+    if (verification?.writeSetDigest !== actorProfileWriteSetDigest(writeSet)) {
+        mismatches.push('writeSetDigest');
+    }
+    if (!verification?.transactionId) {
+        mismatches.push('transactionId');
+    }
+    if (!String(verification?.preparedLedgerDigest || '').startsWith('actor-profile-pending-v1:')) {
+        mismatches.push('preparedLedgerDigest');
+    }
+    if (
+        !ownEntry
+        || ownEntry.actorRef.actorId !== actor.id
+        || ownEntry.actorRef.name !== actor.name
+        || ownEntry.schemaVersion !== profile.version
+        || ownEntry.commitId !== commit?.commitId
+        || ownEntry.profileDigest !== commit?.digest
+        || JSON.stringify(canonicalActorLedgerValue(normalizeSourceRef(ownEntry.sourceRef)))
+            !== JSON.stringify(canonicalActorLedgerValue(normalizeSourceRef(commit?.sourceRef)))
+        || cleanText(ownEntry.scopeDigest || ownEntry.sourceRef?.scopeDigest, 180)
+            !== cleanText(commit?.sourceRef?.scopeDigest, 180)
+        || JSON.stringify(canonicalActorLedgerValue(ownEntry.locks || {}))
+            !== JSON.stringify(canonicalActorLedgerValue(profile.locks || {}))
+        || JSON.stringify(canonicalActorLedgerValue(ownEntry.manualOverrides || {}))
+            !== JSON.stringify(canonicalActorLedgerValue(profile.manualOverrides || {}))
+    ) mismatches.push('actorCommitEvidence');
+
+    if (Number(verification?.version || 0) >= 2) {
+        if (
+            !verification.commitEvidenceDigest
+            || verification.commitEvidenceDigest !== actorProfileCommitEvidenceDigest(verification)
+        ) mismatches.push('commitEvidenceDigest');
+    } else if (!mismatches.length) {
+        // Version-1 receipts predate the compact stable evidence digest. Keep
+        // their strict whole-batch proof while it still matches. If it differs
+        // only because peers now carry independently valid later commits,
+        // preserve this untouched actor's readiness instead of forcing a
+        // destructive full-batch regeneration.
+        const liveMatch = actorProfileCommitMatchesLedger(ledger, {
+            actorRef: { actorId: actor.id, name: actor.name },
+            schemaVersion: profile.version,
+            commitId: commit?.commitId,
+            digest: commit?.digest,
+            phase: 'final',
+        });
+        if (!liveMatch.ok) {
+            let changedPeerCount = 0;
+            let invalidPeerEvolution = false;
+            for (const entry of writeSet) {
+                if (entry.actorRef.actorId === actor.id) continue;
+                const peer = ledger.actors.find((candidate) => (
+                    candidate.id === entry.actorRef.actorId
+                ));
+                const peerCommit = peer?.profileV6?.baselineCommit;
+                const sameHistoricalCommit = !!peer
+                    && peer.name === entry.actorRef.name
+                    && peerCommit?.schemaVersion === entry.schemaVersion
+                    && peerCommit?.commitId === entry.commitId
+                    && peerCommit?.digest === entry.profileDigest
+                    && JSON.stringify(canonicalActorLedgerValue(normalizeSourceRef(
+                        peerCommit?.sourceRef,
+                    ))) === JSON.stringify(canonicalActorLedgerValue(normalizeSourceRef(
+                        entry.sourceRef,
+                    )));
+                if (sameHistoricalCommit) continue;
+                if (!peer || actorProfileActionReadiness(peer).ready !== true) {
+                    invalidPeerEvolution = true;
+                    continue;
+                }
+                changedPeerCount += 1;
+            }
+            if (
+                !changedPeerCount
+                || invalidPeerEvolution
+                || liveMatch.mismatches.some((entry) => entry !== 'preparedLedgerDigest')
+            ) mismatches.push(...liveMatch.mismatches);
+        }
+    }
+    const matched = { ok: mismatches.length === 0, mismatches: [...new Set(mismatches)] };
     return matched.ok
         ? { ready: true, reason: '', migrationRequired: false }
         : {

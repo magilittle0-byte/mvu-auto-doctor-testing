@@ -16,13 +16,17 @@ import {
 } from '../actor-shard-core.mjs';
 import { actorIdFromName } from '../actor-ref-core.mjs';
 import {
+    actorProfileCommitMatchesLedger,
     actorProfileReadinessInLedger,
     finalizeActorProfileBaselinesInLedger,
     replaceActorProfileBaselineInLedger,
     sealActorProfilePendingTransactionInLedger,
 } from '../actor-ledger-core.mjs';
 import { actorProfileBaselineDigest, materializeActorProfileBaseline } from '../actor-profile-v6-core.mjs';
-import { makeActionReadyActor } from './helpers/actor-action-ready-fixture.mjs';
+import {
+    makeActionReadyActor,
+    makeActionReadyLedger,
+} from './helpers/actor-action-ready-fixture.mjs';
 
 const ACTOR_SHARD_CHAT_ID = 'actor-shard-test';
 
@@ -424,6 +428,71 @@ test('P3 accepts only a final narrative receipt and rejects section or receipt t
         assert.equal(actorProfileReadinessInLedger(copy, actor.id).ready, false);
         assert.deepEqual(selectActorShardCandidates({ continuity, actorLedger: copy, maxWorkers: 1 }), []);
     }
+});
+
+test('a later valid peer profile maintenance commit does not invalidate untouched batch members', () => {
+    const firstTarget = canonicalActorShardTarget(1);
+    const baseActor = (suffix) => ({
+        chatId: ACTOR_SHARD_CHAT_ID,
+        id: `NPC-STABLE-${suffix}`,
+        name: `稳定人物${suffix}`,
+        status: 'active',
+        tier: 'secondary',
+        identity: { role: `职责${suffix}`, aliases: [], traits: [], desires: [], boundaries: [] },
+        longTermGoals: [`完成长期目标${suffix}`],
+        currentGoals: [`完成当前目标${suffix}`],
+        knowledge: [],
+        location: { name: '北港', sinceTurn: 1, evidence: ['fixture'] },
+        resources: [],
+        capabilities: [],
+        relationships: [],
+        commitments: [],
+        hidden: { emotionalInertia: [], innerConflicts: [], privateIntentions: [] },
+        plan: { summary: `执行计划${suffix}`, steps: [], status: 'active' },
+        evidence: ['fixture'],
+    });
+    const initial = makeActionReadyLedger({
+        chatId: ACTOR_SHARD_CHAT_ID,
+        turn: 1,
+        actors: [baseActor('A'), baseActor('B')],
+    }, { sourceRef: firstTarget, turn: 1 });
+    assert.equal(actorProfileReadinessInLedger(initial, 'NPC-STABLE-A').ready, true);
+    assert.equal(actorProfileReadinessInLedger(initial, 'NPC-STABLE-B').ready, true);
+
+    const maintainedA = makeActionReadyLedger({
+        chatId: ACTOR_SHARD_CHAT_ID,
+        turn: 2,
+        actors: [{
+            ...structuredClone(initial.actors[0]),
+            chatId: ACTOR_SHARD_CHAT_ID,
+            identity: {
+                ...structuredClone(initial.actors[0].identity),
+                role: '后续合法维护后的职责A',
+            },
+        }],
+    }, { sourceRef: canonicalActorShardTarget(2), turn: 2 }).actors[0];
+    const evolved = structuredClone(initial);
+    evolved.turn = 2;
+    evolved.actors[0] = maintainedA;
+
+    const untouchedB = evolved.actors[1];
+    const strictHistoricalMatch = actorProfileCommitMatchesLedger(evolved, {
+        actorRef: { actorId: untouchedB.id, name: untouchedB.name },
+        schemaVersion: untouchedB.profileV6.baselineCommit.schemaVersion,
+        commitId: untouchedB.profileV6.baselineCommit.commitId,
+        digest: untouchedB.profileV6.baselineCommit.digest,
+        phase: 'final',
+    });
+    assert.equal(strictHistoricalMatch.ok, false);
+    assert.ok(strictHistoricalMatch.mismatches.includes('preparedLedgerDigest'));
+    const maintainedReadiness = actorProfileReadinessInLedger(evolved, 'NPC-STABLE-A');
+    const untouchedReadiness = actorProfileReadinessInLedger(evolved, 'NPC-STABLE-B');
+    assert.equal(maintainedReadiness.ready, true, JSON.stringify(maintainedReadiness));
+    assert.equal(untouchedReadiness.ready, true, JSON.stringify(untouchedReadiness));
+
+    const tampered = structuredClone(evolved);
+    tampered.actors[1].profileV6.baselineCommit.verification.commitEvidenceDigest = 'tampered';
+    assert.equal(actorProfileReadinessInLedger(tampered, 'NPC-STABLE-B').ready, false);
 });
 
 test('an explicitly empty actor schedule remains empty instead of bypassing readiness', () => {

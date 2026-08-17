@@ -1468,6 +1468,10 @@ export function normalizeActorProfileV6(value, {
                         source.baselineCommit.verification.profileDigest,
                         120,
                     ),
+                    commitEvidenceDigest: cleanText(
+                        source.baselineCommit.verification.commitEvidenceDigest,
+                        180,
+                    ),
                     writeSet: (Array.isArray(source.baselineCommit.verification.writeSet)
                         ? source.baselineCommit.verification.writeSet
                         : []).map((entry) => ({
@@ -2760,6 +2764,8 @@ export function actorProfileGenerationCriticalFingerprint(overrides = {}) {
         identityRevealRefreshModules: ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
         vagueDiscoveryTerms: [...DISCOVERY_NAME_VAGUE_TERMS].sort(),
         discoveryNameRecovery: String(recoverActorProfileDiscoveryNameFromEvidence),
+        profileNormalizer: String(normalizeActorProfileV6),
+        actionReadiness: String(actorProfileActionReadiness),
         completionGroupPlan: String(actorProfileCompletionGroupPlan),
         buildGroupMessages: String(buildActorProfileModuleGroupMessages),
         compactRelevantFragments: String(compactRelevantFragments),

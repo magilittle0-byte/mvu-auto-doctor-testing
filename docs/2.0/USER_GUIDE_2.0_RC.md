@@ -160,7 +160,7 @@ rc.14 沿用人物账本 v6 和“世界、人物与事件”悬浮面板，并�
 - 旧 combined continuity 执行体已停止；`runContinuity` 与设置页世界按钮仅进入当前 P3 单批世界链，不会重接人物 discovery、Registry upsert/promotion/readback、profile completion、barrier 或旧注入。
 - 人物档案模型只使用全局提示入口中适用于 profile/fast 的配置，以及既有的字段、权威事实、同票和共享正文材料。它不增加内容审查，也不替玩家决定行动、感受、同意或关系结果。
 - 票据只条件消费当前同 generation 已存在的 Stage4 批次；阶段二不签发、不补掷、不重掷，也不恢复旧注入。没有票或票池耗尽时仍完整生成 hypothesis 档案并明确提示。
-- refresh/restart/CHAT_CHANGED/CHAT_LOADED 只从宿主 actorLedger 读回；行动就绪会重建对应 pending write-set，核对 preparedLedgerDigest、preparedFieldRevision、commitId、profileDigest、ActorRef/schema/locks/manualOverrides，不能只信档案自带的成功字段，也不会自动 discovery 或补历史欠账。
+- refresh/restart/CHAT_CHANGED/CHAT_LOADED 只从宿主 actorLedger 读回；行动就绪会核对当前人物的 profile digest、ActorRef/schema/locks/manualOverrides 与持久 transaction/write-set/commit evidence。整批 pending 投影仍只在原子 final/readback 当下严格重建，避免同批其他人物后来合法维护反向废掉旧档案；不能只信档案自带的成功字段，也不会自动 discovery 或补历史欠账。
 - 手动“重试当前正文人物档案”只处理当前捕获来源；手动“补全人物档案（含历史欠账）”才会在当前初始人物之外加入受预算限制的维护候选。
 
 ### 世界惊喜与偶发许可证（阶段一停用）
