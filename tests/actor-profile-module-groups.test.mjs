@@ -631,3 +631,24 @@ test('identity reveal refuses an invented ActorRef and never downgrades it to a 
         entry.reason === 'actor_profile.identity_reveal_actor_ref_unknown'
     )));
 });
+
+test('first bootstrap locally normalizes an invented ActorRef to a literal new-person route only when Registry is empty', () => {
+    const acceptedNarrative = '杰克推门走进了大厅。';
+    const group = actorProfileCompletionGroupPlan([], {
+        allowDiscovery: true,
+        acceptedNarrative,
+    })[0];
+    const parsed = parseActorProfileModuleGroupOutput(
+        '<profile-target actor="NPC-invented" name="杰克"></profile-target>',
+        group,
+        { acceptedNarrative, registeredActorIndex: [] },
+    );
+    assert.deepEqual(parsed.failures, []);
+    assert.equal(parsed.entries.length, 1);
+    assert.equal(parsed.entries[0].actorId, 'new');
+    assert.equal(parsed.entries[0].name, '杰克');
+    assert.ok(parsed.entries[0].sourceAnchor.includes('杰克'));
+    assert.ok(parsed.routeRepairs.includes(
+        'actor_profile.identity_empty_registry_unknown_ref_normalized_to_new',
+    ));
+});

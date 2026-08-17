@@ -1067,6 +1067,32 @@ export function parseActorProfileModuleGroupOutput(output, group, {
         if (group?.key === 'identity_bootstrap' && !group?.modules?.length && actorId !== 'new') {
             const registered = registeredById.get(actorId);
             if (!registered) {
+                // On the first ledger bootstrap there is no ActorRef that can
+                // possibly be revealed. Models still sometimes format an
+                // otherwise literal new-person row as an invented ActorRef.
+                // Normalize only that empty-registry case back to `new`; the
+                // exact accepted-text/unit anchor is retained and the later
+                // local protected-name/Registry preflight remains unchanged.
+                // Once any ActorRef exists, an unknown id stays fail-closed so
+                // a misspelled reveal can never duplicate or merge an actor.
+                if (
+                    registeredById.size === 0
+                    && name
+                    && routeSource?.sourceAnchor?.includes(name)
+                ) {
+                    entries.push({
+                        actorId: 'new',
+                        name,
+                        modules,
+                        coverageUnitId: routeSource.coverageUnitId,
+                        sourceUnitOffset: routeSource.sourceUnitOffset,
+                        sourceAnchor: routeSource.sourceAnchor,
+                    });
+                    routeRepairs.push(
+                        'actor_profile.identity_empty_registry_unknown_ref_normalized_to_new',
+                    );
+                    continue;
+                }
                 failures.push({ actorId, name, reason: 'actor_profile.identity_reveal_actor_ref_unknown', retryable: true });
                 continue;
             }
