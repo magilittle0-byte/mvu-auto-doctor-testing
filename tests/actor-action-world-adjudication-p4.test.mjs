@@ -218,6 +218,30 @@ test('current P3 packet binds the persisted carrier so P4 does not rerender it',
     );
 });
 
+test('a digest-bound empty current packet is an explicit safe zero-consumption result', () => {
+    const fixture = persistedWorldPacket({
+        maxVisible: 0,
+        visibleThreadIds: [],
+    });
+    const packet = structuredClone(fixture.packet);
+    packet.payload = { text: '', visibleThreadIds: [] };
+    packet.payloadFormat = 'canonical-bounded-v1';
+    packet.payloadDigest = continuityPacketPayloadDigest(packet.payload);
+
+    const projected = buildContinuityConsumerPayload(fixture.saved, packet);
+    assert.equal(projected.ok, true);
+    assert.equal(projected.empty, true);
+    assert.equal(projected.text, '');
+
+    const inconsistent = structuredClone(packet);
+    inconsistent.payload.visibleThreadIds = ['thread-without-text'];
+    inconsistent.payloadDigest = continuityPacketPayloadDigest(inconsistent.payload);
+    assert.deepEqual(
+        buildContinuityConsumerPayload(fixture.saved, inconsistent),
+        { ok: false, reason: 'payload_structure_invalid' },
+    );
+});
+
 test('P3 uses local structured recall then one Advance call; no separate actor proposal model or repair path', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const runStart = source.indexOf('async function runContinuityTarget(captured, {');
@@ -277,6 +301,7 @@ test('P4 has one Doctor-owned exact-once consumer for the verified world package
         consumer,
         /buildContinuityConsumerPayload\(namespace\.continuity, verified\.packet\)/u,
     );
+    assert.match(consumer, /if \(projection\.empty === true\) \{[\s\S]*?packet = null;/u);
     assert.match(consumer, /providerId: DOCTOR_NEXT_TURN_PROVIDER_ID/u);
     assert.match(consumer, /recordNextTurnConsumerInspection\(session,[\s\S]*?worldPackage: packet \? 'verified' : 'ticket_only'/u);
     assert.doesNotMatch(

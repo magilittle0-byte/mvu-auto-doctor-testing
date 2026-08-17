@@ -14125,7 +14125,14 @@ async function precomposeNextTurnConsumer(session) {
             // Keep the raw durable packet for the lease path. All authority
             // decisions above came from the verifier; no raw field is trusted
             // without that proof.
-            worldText = projection.text;
+            if (projection.empty === true) {
+                // A committed world turn may have no public/converging carrier.
+                // Its digest-bound empty payload is a verified safe zero-
+                // consumption result, not a broken package or a lease target.
+                packet = null;
+            } else {
+                worldText = projection.text;
+            }
         }
     }
     const ticketBatch = prepareNpcDesignTicketBatch();

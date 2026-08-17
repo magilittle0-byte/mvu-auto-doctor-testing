@@ -3145,7 +3145,6 @@ export function buildContinuityConsumerPayload(state, packet) {
     if (
         !normalizedPacket
         || normalizedPacket.version !== 1
-        || !canonicalText
         || !normalizedPacket.settlementProof
         || canonicalText !== normalizedPacket.payload.text
     ) return { ok: false, reason: 'legacy_packet_invalid' };
@@ -3163,6 +3162,17 @@ export function buildContinuityConsumerPayload(state, packet) {
             normalizedPacket.payloadDigest
                 !== continuityPacketPayloadDigest(normalizedPacket.payload)
         ) return { ok: false, reason: 'payload_digest_mismatch' };
+        if (!canonicalText) {
+            if (normalizedPacket.payload.visibleThreadIds.length) {
+                return { ok: false, reason: 'payload_structure_invalid' };
+            }
+            return {
+                ok: true,
+                text: '',
+                empty: true,
+                legacy: null,
+            };
+        }
         if (
             !canonicalText.startsWith(`${CONTINUITY_PACKET_OPEN} `)
             || !canonicalText.endsWith(CONTINUITY_PACKET_CLOSE)
@@ -3170,9 +3180,12 @@ export function buildContinuityConsumerPayload(state, packet) {
         return {
             ok: true,
             text: canonicalText,
+            empty: false,
             legacy: null,
         };
     }
+
+    if (!canonicalText) return { ok: false, reason: 'legacy_packet_invalid' };
 
     const candidates = new Map();
     for (const rawMaxVisible of LEGACY_CONSUMER_RAW_MAX_VISIBLE) {

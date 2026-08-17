@@ -39,7 +39,7 @@ world package 与 ticket 不属于同一 producer：前者来自上一 accepted 
 |---|---|---|---|
 | 世界事实与玩家边界 | `continuity-core.mjs:buildContinuityInjection` | 原样复用内层行，最小容器适配 | 不投递旧 bridge 外壳或 fixed director 行 |
 | legacy package | P3 `index.js` 在 world durable readback 前写 `nextTurnInjection.payload.text/visibleThreadIds` | 只读验证 | P4 不覆盖 payload、producerTarget、digest 或 settlementProof |
-| 无桥投影 | `continuity-core.mjs:buildContinuityPacketText/continuityPacketPayloadDigest/buildContinuityConsumerPayload` 与 `index.js:precomposeNextTurnConsumer` | 必要新胶水 | 当前 P3 把同一结构保全的 12000 字符 carrier 与 visible IDs 做成一个 canonical payload 并持久绑定 digest；P4 用规范化副本验证 producer target、continuity digest、settlement proof 与同 target action authority 后，必须把 durable namespace 中读取的原始 packet 交给载荷投影器核 digest 并消费，禁止用验证器的二次表示替代持久载荷。旧包仍走原有 director x rawMaxVisible 严格重演兼容；不使用新 parser、正则或 HTML 清洗 |
+| 无桥投影 | `continuity-core.mjs:buildContinuityPacketText/continuityPacketPayloadDigest/buildContinuityConsumerPayload` 与 `index.js:precomposeNextTurnConsumer` | 必要新胶水 | 当前 P3 把同一结构保全的 12000 字符 carrier 与 visible IDs 做成一个 canonical payload 并持久绑定 digest；P4 用规范化副本验证 producer target、continuity digest、settlement proof 与同 target action authority 后，必须把 durable namespace 中读取的原始 packet 交给载荷投影器核 digest 并消费，禁止用验证器的二次表示替代持久载荷。严格空 carrier 走安全零消费，不建立世界 lease；旧包仍走原有 director x rawMaxVisible 严格重演兼容；不使用新 parser、正则或 HTML 清洗 |
 | 人物票据文本 | `index.js:npcDesignTicketPrompt(batch)` | 原样复用 | 禁止另造人格池、票据提示词或二次掷骰 |
 | P5 预设读取 | `fair-director-preset-core.mjs:CHARACTER_DIVERSITY_CONTRACT` | 原样复用 | 读取 `<Original_NPC_Dice_Tickets>`，票据仅在 P2 注册/readback 后逐人消费 |
 | Doctor 自有宿主 slot | SillyTavern `setExtensionPrompt` | 最小适配 | 唯一 key `mvu-auto-doctor-next-turn-consumer`，IN_CHAT/depth 1/system；不接受外部 provider 注册、优先级或 callback |
@@ -61,7 +61,7 @@ threads
   .map(thread => thread.id)
 ```
 
-当前包以 `payloadFormat=canonical-bounded-v1` 和 `payloadDigest` 绑定 P3 已持久的 canonical 文本与 visible IDs；P4 先用规范化副本完成 producer、continuity 与 settlement/action authority 复验，再对同一次 durable read 得到的原始 packet 核 payload digest 和开闭标记，随后原样投影这份 carrier。这样 renderer 全文超过 12000 或验证器规范化改变表示时，也不会把已验证载荷误判为 projection invalid；文本或 visible IDs 任一改变而 digest 未同步即 fail-closed。缺少新格式标记的历史包仍按 `(canonicalText, visibleProjection)` 枚举去重并严格唯一匹配，兼容读取旧 director，但旧名不进入新生成、分支或 UI。
+当前包以 `payloadFormat=canonical-bounded-v1` 和 `payloadDigest` 绑定 P3 已持久的 canonical 文本与 visible IDs；P4 先用规范化副本完成 producer、continuity 与 settlement/action authority 复验，再对同一次 durable read 得到的原始 packet 核 payload digest 和开闭标记，随后原样投影这份 carrier。若 P3 已严格提交但没有任何公开/汇流内容，`text='' + visibleThreadIds=[]` 的 digest-bound packet 是明确的安全零消费：P4 不建立世界 lease、不写 consumeProof、也不报 projection failure；空文本却带 visible ID 仍 fail-closed。这样 renderer 全文超过 12000、验证器规范化改变表示或世界本轮无可投递内容时，都不会把已验证终态误判为 projection invalid。缺少新格式标记的历史包仍按 `(canonicalText, visibleProjection)` 枚举去重并严格唯一匹配，兼容读取旧 director，但旧名不进入新生成、分支或 UI。
 
 不匹配、缺闭合、未知版本、多个三元组匹配、callback throw 或 receipt digest 不符，均 release + fail-closed，绝不投 legacy bridge 文本。
 
