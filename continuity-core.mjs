@@ -923,6 +923,10 @@ function normalizeNextTurnInjection(value) {
             text: cleanText(payload.text, 12000),
             visibleThreadIds: cleanList(payload.visibleThreadIds, 4, 90),
         },
+        payloadFormat: source.payloadFormat === 'canonical-bounded-v1'
+            ? 'canonical-bounded-v1'
+            : '',
+        payloadDigest: cleanText(source.payloadDigest, 180),
         settlementProof: normalizeNextTurnSettlementProof(source.settlementProof),
         createdAt: boundedInteger(source.createdAt, 0, Number.MAX_SAFE_INTEGER, 0),
         ...(reservedFor ? { reservedFor } : {}),
@@ -956,6 +960,15 @@ export function continuityCoreSemanticFingerprint(overrides = {}) {
         ),
         nextTurnInjection: String(
             overrides?.normalizeNextTurnInjection || normalizeNextTurnInjection,
+        ),
+        packetPayloadDigest: String(
+            overrides?.continuityPacketPayloadDigest || continuityPacketPayloadDigest,
+        ),
+        packetText: String(
+            overrides?.buildContinuityPacketText || buildContinuityPacketText,
+        ),
+        consumerPayload: String(
+            overrides?.buildContinuityConsumerPayload || buildContinuityConsumerPayload,
         ),
         continuityState: String(
             overrides?.normalizeContinuityState || normalizeContinuityState,
@@ -3068,6 +3081,15 @@ const CONTINUITY_PACKET_MAX_CHARS = 12000;
 const CONTINUITY_PACKET_OPEN = '<World_Continuity_Package>';
 const CONTINUITY_PACKET_CLOSE = '</World_Continuity_Package>';
 
+export function continuityPacketPayloadDigest(payload) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    const normalized = {
+        text: cleanText(source.text, CONTINUITY_PACKET_MAX_CHARS),
+        visibleThreadIds: cleanList(source.visibleThreadIds, 4, 90),
+    };
+    return `continuity-payload:${fingerprint(JSON.stringify(normalized))}`;
+}
+
 /**
  * Produces the exact bounded text persisted by P3 and reconstructed by P4.
  * When the legacy renderer exceeds the carrier budget, only its canonical
@@ -3127,6 +3149,30 @@ export function buildContinuityConsumerPayload(state, packet) {
         || !normalizedPacket.settlementProof
         || canonicalText !== normalizedPacket.payload.text
     ) return { ok: false, reason: 'legacy_packet_invalid' };
+
+    // Current P3 packets bind the exact persisted carrier text and visible-ID
+    // projection. P4 already verifies the producer target, continuity digest,
+    // settlement proof, and same-target action authority before entering this
+    // projector, so the payload digest closes the last mutable field without
+    // requiring a second render of a potentially very large world state.
+    if (normalizedPacket.payloadFormat === 'canonical-bounded-v1') {
+        if (!normalizedPacket.payloadDigest) {
+            return { ok: false, reason: 'payload_digest_missing' };
+        }
+        if (
+            normalizedPacket.payloadDigest
+                !== continuityPacketPayloadDigest(normalizedPacket.payload)
+        ) return { ok: false, reason: 'payload_digest_mismatch' };
+        if (
+            !canonicalText.startsWith(`${CONTINUITY_PACKET_OPEN} `)
+            || !canonicalText.endsWith(CONTINUITY_PACKET_CLOSE)
+        ) return { ok: false, reason: 'payload_structure_invalid' };
+        return {
+            ok: true,
+            text: canonicalText,
+            legacy: null,
+        };
+    }
 
     const candidates = new Map();
     for (const rawMaxVisible of LEGACY_CONSUMER_RAW_MAX_VISIBLE) {

@@ -7,6 +7,7 @@ import {
     buildContinuityConsumerPayload,
     buildContinuityInjection,
     buildContinuityPacketText,
+    continuityPacketPayloadDigest,
     normalizeContinuityState,
 } from '../continuity-core.mjs';
 
@@ -176,6 +177,47 @@ test('canonical world projection remains strict about text and visible thread ID
     assert.match(oversizedConsumer.text, /<\/World_Continuity_Package>$/u);
 });
 
+test('current P3 packet binds the persisted carrier so P4 does not rerender it', () => {
+    const fixture = persistedWorldPacket({
+        maxVisible: 4,
+        visibleThreadIds: Array.from(
+            { length: 4 },
+            (_, index) => `thread-converging-${index}`,
+        ),
+        oversized: true,
+    });
+    const packet = structuredClone(fixture.packet);
+    packet.payloadFormat = 'canonical-bounded-v1';
+    packet.payloadDigest = continuityPacketPayloadDigest(packet.payload);
+
+    const changedRendererState = normalizeContinuityState({
+        ...fixture.saved,
+        world: {},
+        threads: [],
+    }, { chatId: packet.producerTarget.chatId });
+    const projected = buildContinuityConsumerPayload(changedRendererState, packet);
+    assert.equal(projected.ok, true);
+    assert.equal(projected.text, packet.payload.text);
+    assert.equal(projected.legacy, null);
+
+    const textTampered = structuredClone(packet);
+    textTampered.payload.text = textTampered.payload.text.replace(
+        '<World_Continuity_Package>',
+        '<World_Continuity_Packagf>',
+    );
+    assert.deepEqual(
+        buildContinuityConsumerPayload(changedRendererState, textTampered),
+        { ok: false, reason: 'payload_digest_mismatch' },
+    );
+
+    const visibleIdsTampered = structuredClone(packet);
+    visibleIdsTampered.payload.visibleThreadIds = [];
+    assert.deepEqual(
+        buildContinuityConsumerPayload(changedRendererState, visibleIdsTampered),
+        { ok: false, reason: 'payload_digest_mismatch' },
+    );
+});
+
 test('P3 uses local structured recall then one Advance call; no separate actor proposal model or repair path', async () => {
     const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const runStart = source.indexOf('async function runContinuityTarget(captured, {');
@@ -188,6 +230,8 @@ test('P3 uses local structured recall then one Advance call; no separate actor p
     const helperStart = source.indexOf('async function stage3PersistPreparedActorAttemptsOnFreshLedger');
     const helperEnd = source.indexOf('async function stage3PersistAttemptlessPreparedWorldCandidate', helperStart);
     const helper = source.slice(helperStart, helperEnd);
+    assert.match(source, /payloadFormat: 'canonical-bounded-v1'/u);
+    assert.match(source, /payloadDigest: continuityPacketPayloadDigest\(nextTurnPayload\)/u);
     const prepare = helper.indexOf('prepareActorActionAttempts');
     const persist = helper.indexOf('await persistActorActionAttemptsForTurn', prepare);
     assert.ok(recall >= 0 && advance > recall && rebase > advance);

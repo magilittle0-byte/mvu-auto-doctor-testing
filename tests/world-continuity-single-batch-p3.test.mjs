@@ -7238,6 +7238,7 @@ test('production Phase2 zero-model recovery neutralizes a legacy prepared direct
             injectionOptions = structuredClone(options);
             return '';
         },
+        continuityPacketPayloadDigest: () => 'continuity-payload:test',
         deepClone: (value) => structuredClone(value),
         stage3TaskOwnsCurrent: () => true,
         stage3TargetIsCurrent: () => ({ ok: true }),
@@ -7293,6 +7294,8 @@ test('production Phase2 zero-model recovery neutralizes a legacy prepared direct
     assert.deepEqual(attachedFrom, scheduledBase);
     assert.equal(written.continuityCheckpoint.stage3Phase, 'world_committed');
     assert.equal(written.continuityDirector, 'doctor');
+    assert.equal(written.continuity.nextTurnInjection.payloadFormat, 'canonical-bounded-v1');
+    assert.equal(written.continuity.nextTurnInjection.payloadDigest, 'continuity-payload:test');
     assert.equal(written.actorLedger.actors[0].profileV6.status, 'complete');
     assert.equal(injectionOptions.director, 'doctor');
     assert.equal(packageValidationOptions.allowUnrelatedLedgerEvolution, true);

@@ -50,6 +50,7 @@ import {
     buildContinuityConsumerPayload,
     buildContinuityInjection,
     buildContinuityPacketText,
+    continuityPacketPayloadDigest,
     continuityContentDigest,
     continuityCoreSemanticFingerprint,
     continuityGlobalHoldIsVerifiable,
@@ -21142,14 +21143,18 @@ async function commitPreparedWorldCandidate(captured, {
     next = normalizeContinuityState(next, { chatId: captured.chatId, maxThreads: settings.continuityMaxThreads });
     const settlementLedger = settlement ? settlement.ledger : ledger;
     const settlementProof = stage3CanonicalSettlementProof(settlementLedger, settlement?.results || [], captured);
+    const nextTurnPayload = {
+        text: buildContinuityPacketText(next, { director: 'doctor', maxVisible: settings.continuityMaxVisible }),
+        visibleThreadIds: next.threads.filter((thread) => thread.stage !== 'resolved' && thread.relation === 'converging')
+            .slice(0, Math.max(0, Number(settings.continuityMaxVisible) || 0)).map((thread) => thread.id),
+    };
     next.nextTurnInjection = {
         version: 1, status: 'pending', producerTarget: stage3AcceptedTarget(captured),
         sourceContinuityDigest: stage3ContinuityDigestWithoutInjection(next),
-        payload: {
-            text: buildContinuityPacketText(next, { director: 'doctor', maxVisible: settings.continuityMaxVisible }),
-            visibleThreadIds: next.threads.filter((thread) => thread.stage !== 'resolved' && thread.relation === 'converging')
-                .slice(0, Math.max(0, Number(settings.continuityMaxVisible) || 0)).map((thread) => thread.id),
-        }, settlementProof, createdAt: Date.now(),
+        payload: nextTurnPayload,
+        payloadFormat: 'canonical-bounded-v1',
+        payloadDigest: continuityPacketPayloadDigest(nextTurnPayload),
+        settlementProof, createdAt: Date.now(),
     };
     next = normalizeContinuityState(next, { chatId: captured.chatId, maxThreads: settings.continuityMaxThreads });
     const writeNamespace = deepClone(namespace);
