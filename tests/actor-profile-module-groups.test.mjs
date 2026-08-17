@@ -329,6 +329,8 @@ test('identity coverage uses small mechanical units while preserving the complet
         discoveryContext: { acceptedNarrative, registeredActorIndex: [], excludedActorNames: [] },
     }).map((message) => message.content).join('\n');
     assert.equal(prompt.match(/mechanical paragraph 0/gu)?.length, 1);
+    assert.match(prompt, /【已接受正文开始】[\s\S]*【已接受正文结束】/u);
+    assert.doesNotMatch(prompt, /CU-001|coverage units|"text"\s*:/u);
     assert.equal(group.discoveryCoverage.coverageDigest, coverage.coverageDigest);
 });
 
@@ -350,6 +352,8 @@ test('identity bootstrap is a route-only row-key probe isolated from dossier aut
     assert.match(all, /\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13/u);
     assert.match(all, /\u6574\u4e2a\u54cd\u5e94\u53ea\u5199\u201c\u6ca1\u6709\u65b0\u4eba\u7269\u201d/u);
     assert.match(all, /\u4e0d\u8981\u5199 JSON\u3001XML\u3001\u51fd\u6570\u3001\u53d8\u91cf\u3001digest/u);
+    assert.match(all, /\u4e25\u7981\u53ea\u5199\u201c\u4eba\u7269\u3001\u89d2\u8272\u3001\u964c\u751f\u4eba/u);
+    assert.match(all, /NPC-old\uff5c\u65e7\u4eba\u7269/u);
     assert.doesNotMatch(all, /<profile-target|<no-new\/>/u);
     assert.doesNotMatch(all, /coverage-unit:/u);
     assert.doesNotMatch(all, /\u58eb\u5175A|\u53d7\u4f24\u7684\u8b66\u536b/u);

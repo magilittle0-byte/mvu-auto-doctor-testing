@@ -35,12 +35,14 @@ Identity coverage remains one complete accepted-narrative input. The local parti
 approximately 900 characters to at most 420 characters at mechanical
 punctuation boundaries; concatenating all unit texts exactly reconstructs the
 accepted narrative. This changes no identity classifier and performs no
-keyword NER. The normal response is now only flat literal `profile-target`
-routes (an optional short unit id, no digest or empty-unit echo), or the whole
-response exactly `<no-new/>`. The script binds an omitted unit to the earliest
-independent literal occurrence, skipping occurrences covered by a longer route
-name; registered identity reveals instead bind their complete literal evidence
-span. It then derives the coverage proof from the complete local plan already
+keyword NER. The normal response is now only a short natural Chinese list:
+`新人物：正文逐字行键`, `身份揭示：ActorId｜新行键｜最短原句`, or the whole response
+`没有新人物`. The model is not asked to emit XML, JSON, functions, variables,
+unit ids, digests, or empty-unit echoes. The script normalizes those bounded
+surface forms into its private route representation and binds each route to the
+earliest independent literal occurrence, skipping occurrences covered by a
+longer route name; registered identity reveals instead bind their complete
+literal evidence span. It then derives the coverage proof from the complete local plan already
 sent in that same call. Complete legacy id/digest wrappers remain read-only
 compatible; partial wrappers, unknown explicit units, route-plus-empty and
 free-text empty claims fail closed. Supported `profile_target` / `no_new`
@@ -50,8 +52,9 @@ malformed peer cannot disappear from flat or legacy output. When the first
 identity response contains no locally retainable route and ends in a bounded
 format/identity failure, production may send that same complete input exactly
 once more with only privacy-safe failure codes and the same natural Chinese
-`新人物/身份揭示/没有新人物` output contract. It never asks for XML, JSON, digest
-or empty-unit echoes on that resend. A first response that already contains a
-retainable row is never resent; a second invalid response is terminal and
-atomic; an empty resend cannot erase a failed candidate claim. The existing
-terminal CAS/readback receipt stays unchanged.
+`新人物/身份揭示/没有新人物` output contract. A locally parsed row rejected solely
+because its label is the bare vague term `人物` is also non-retainable and gets
+that one precise resend; protected identities, Registry conflicts, and ambiguous
+nested row keys do not become resend permission. A second invalid response is
+terminal and atomic, and an empty resend cannot erase a failed candidate claim.
+The existing terminal CAS/readback receipt stays unchanged.

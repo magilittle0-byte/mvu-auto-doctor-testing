@@ -513,14 +513,17 @@ export function buildActorProfileModuleGroupMessages(group, {
     if (discoveryOnly) return [{ role: 'system', content: [
         'Identity Confirmation：你是“MVU自动医生”的人物档案医师，不是正文作者，也不是数据库填表AI。你认真阅读已经接受的故事，认出真正出场的人物，并把身份线索交还给本地医生。',
         '这一步只做已接受正文的人物身份路由，不填档案、不续写剧情。宁可把不确定身份交给本地复核，也不要擅自取名、合并或创造人物。',
-        '输出一份很短的中文人物清单，不要写 JSON、XML、函数、变量、digest、正文复述、档案或解释。每个真正出场的新人物单独一行，写成“新人物：正文中的逐字稳定行键”。行键可为姓名、代号、编号、职业或带限定的描述性称谓；不得改写、补名或使用玩家、纯代词、群体、只被提及者、已登记/受保护身份。脚本会把逐字行键机械绑定到最早独立出现的位置，短名若只嵌在更长行键中会被拒绝。',
+        '输出一份很短的中文人物清单，不要写 JSON、XML、函数、变量、digest、正文复述、档案或解释。每个真正出场的新人物单独一行，写成“新人物：正文中的逐字稳定行键”。行键可为姓名、代号、编号、职业或带限定的描述性称谓；必须逐字复制正文，严禁只写“人物、角色、陌生人、男人、女人、他、她”等泛称。没有姓名时，复制正文里能唯一指向一人的完整称谓，例如“柜台后的灰衣记录员”，不要自行缩成“人物”或“记录员”。不得改写、补名或使用玩家、群体、只被提及者、已登记/受保护身份。脚本会把逐字行键机械绑定到最早独立出现的位置，短名若只嵌在更长行键中会被拒绝。',
         '若正文明确揭示已登记人物的新行键，单独一行写成“身份揭示：精确ActorId｜新行键｜同时含旧行键或别名与新行键的最短正文原句”；不得猜测合并。',
         '只有确实没有任何合格新人物或身份揭示时，整个响应只写“没有新人物”。不得把“没有新人物”与人物清单混用。',
         validationFeedback.length ? `\u4ec5\u4fee\u590d\u8eab\u4efd\u53d1\u73b0\u8def\u7531\uff1a${validationFeedback.join('; ')}` : '',
     ].filter(Boolean).join('\n\n') }, { role: 'user', content: [
-        `\u5df2\u63a5\u53d7\u6b63\u6587 coverage units\uff1a${JSON.stringify((group?.discoveryCoverage?.units || []).map((unit) => ({ id: unit.id, text: unit.text })))}`,
-        `\u5df2\u767b\u8bb0\u7d22\u5f15\uff1a${JSON.stringify(discoveryContext?.registeredActorIndex || [])}`,
-        `\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a${JSON.stringify(excludedActorNames)}`,
+        `【已接受正文开始】\n${String(discoveryContext?.acceptedNarrative || '')}\n【已接受正文结束】`,
+        `【已登记人物，仅用于排除或身份揭示】\n${(discoveryContext?.registeredActorIndex || []).map((entry) => {
+            const aliases = cleanList(entry?.aliases, 12, 160);
+            return `${cleanText(entry?.actorId, 120)}｜${cleanText(entry?.displayName || entry?.name, 160)}${aliases.length ? `｜别名：${aliases.join('、')}` : ''}`;
+        }).filter((line) => line.split('｜').slice(0, 2).every(Boolean)).join('\n') || '无'}`,
+        `【受保护身份，仅用于排除】\n${excludedActorNames.join('、') || '无'}`,
     ].join('\n\n') }];
     return [{ role: 'system', content: [
         'Identity Confirmation：你是“MVU自动医生”的人物档案医师。你像一位理解故事与人的传记编辑，把零散证据整理成自然、完整、可继续使用的人物档案；你不是正文作者，也不负责数据库、MVU或世界裁决。',

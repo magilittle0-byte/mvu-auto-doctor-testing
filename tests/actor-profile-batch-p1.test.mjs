@@ -133,6 +133,9 @@ test('explicit repair unlocks one zero-progress identity retry and never grants 
         identityAttempted: false,
         identityLocked: false,
         manualIdentityRetryCount: 1,
+        manualIdentityRetryFailureCodes: [
+            'actor_profile.discovery_source_offset_ambiguous',
+        ],
         rows: [],
         verifiedFieldCount: 0,
     });
@@ -1396,6 +1399,93 @@ test('a vague identity route uses one explicit evidence label without relaxing b
     assert.equal(run.saveCount, 2);
 });
 
+test('a vague identity route receives one precise natural-language resend and commits the literal label', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-vague-route-targeted-resend' });
+    const literalName = '柜台后的灰衣记录员';
+    const acceptedNarrative = `${literalName}收起印章；他是刚刚进入大厅的新人物。`;
+    const calls = [];
+    const moduleText = (key, name) => `${name}${key}：${'这是完整、自然且可长期使用的合成人物档案内容，包含稳定事实、现实限制、选择依据与后续发展空间。'.repeat(4)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys, attempt, messages }) => {
+            calls.push({ groupKey, attempt, messages });
+            if (groupKey === 'identity_bootstrap') {
+                return attempt === 0 ? '新人物：人物' : `新人物：${literalName}`;
+            }
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.deepEqual(calls.slice(0, 2).map(({ groupKey, attempt }) => ({ groupKey, attempt })), [
+        { groupKey: 'identity_bootstrap', attempt: 0 },
+        { groupKey: 'identity_bootstrap', attempt: 1 },
+    ]);
+    const retryPrompt = calls[1].messages.map((entry) => entry.content).join('\n');
+    assert.match(retryPrompt, /缺陷码：actor_profile\.discovery_name_vague/u);
+    assert.match(retryPrompt, /人物、角色、陌生人、男人、女人、他、她/u);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(run.result.readbackVerified, true);
+    assert.equal(run.result.accepted.length, 1);
+    assert.equal(run.result.accepted[0].name, literalName);
+    assert.equal(run.saveCount, 2);
+});
+
+test('manual identity repair carries the prior vague-name code into its only model call', async () => {
+    const fixture = prepareRegisteredBatch(0, { chatId: 'chat-vague-route-manual-repair' });
+    const literalName = '窗边的蓝衣向导';
+    const acceptedNarrative = `${literalName}把地图摊在桌上，等待众人确认方向。`;
+    const progress = prepareActorProfileManualIdentityRetryProgress(
+        normalizeActorProfileRecoveryProgress({
+            version: 1,
+            identityAttempted: true,
+            identityLocked: false,
+            rows: [],
+        }),
+        ['actor_profile.discovery_name_vague', 'actor_profile.group_row_missing'],
+    );
+    let identityPrompt = '';
+    const moduleText = (key, name) => `${name}${key}：${'这是完整、自然且可长期使用的合成人物档案内容，包含稳定事实、现实限制、选择依据与后续发展空间。'.repeat(4)}`;
+    const run = await runBatch({ ...fixture, candidates: [] }, {
+        moduleProtocol: 'raw',
+        allowDiscovery: true,
+        recoveryProgress: progress,
+        discoveryContext: {
+            acceptedNarrative,
+            completionMode: 'full',
+            sourceRef: narrativeDiscoverySourceRef(fixture.ref),
+        },
+        preflightDiscoveries: registryPreflight(fixture, acceptedNarrative),
+        resolveDiscoveries: resolveLiteralDiscoveries(fixture, acceptedNarrative),
+        requestBatch: ({ candidates, groupKey, moduleKeys, messages }) => {
+            if (groupKey === 'identity_bootstrap') {
+                identityPrompt = messages.map((entry) => entry.content).join('\n');
+                return `新人物：${literalName}`;
+            }
+            return candidates.map((candidate) => [
+                `<profile-target actor="${candidate.actorRef.actorId}" name="${candidate.actorRef.name}">`,
+                ...moduleKeys.map((key) => `<module key="${key}">${moduleText(key, candidate.actorRef.name)}</module>`),
+                '</profile-target>',
+            ].join('\n')).join('\n');
+        },
+    });
+    assert.match(identityPrompt, /缺陷码：actor_profile\.discovery_name_vague/u);
+    assert.equal(run.result.persistenceStatus, 'atomic_readback', JSON.stringify(run.result.failures));
+    assert.equal(run.result.readbackVerified, true);
+    assert.equal(run.result.accepted[0].name, literalName);
+    assert.equal(run.saveCount, 2);
+});
+
 test('holdout invented discovery name is replaced once by a literal route and commits atomically', async () => {
     const fixture = prepareRegisteredBatch(0, { chatId: 'chat-holdout-literal-retry' });
     const literalName = '\u9646\u7d20\u82e9';
@@ -2275,8 +2365,9 @@ test('protected identity failure stops after one bootstrap call and keeps the le
     const identityCalls = calls.filter((entry) => entry.groupKey === 'identity_bootstrap');
     assert.equal(identityCalls.length, 1);
     const firstUserPrompt = identityCalls[0].messages.find((entry) => entry.role === 'user').content;
-    assert.equal((firstUserPrompt.match(/\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09/g) || []).length, 1);
-    assert.match(firstUserPrompt, /\u672c\u5730\u53d7\u4fdd\u62a4\u8eab\u4efd\u7d22\u5f15\uff08\u7981\u6b62\u4f5c\u4e3a new\uff09\uff1a\["\u73a9\u5bb6\u7532"\]/u);
+    assert.equal((firstUserPrompt.match(/【\u53d7\u4fdd\u62a4\u8eab\u4efd\uff0c\u4ec5\u7528\u4e8e\u6392\u9664】/gu) || []).length, 1);
+    assert.match(firstUserPrompt, /【\u53d7\u4fdd\u62a4\u8eab\u4efd\uff0c\u4ec5\u7528\u4e8e\u6392\u9664】\n\u73a9\u5bb6\u7532/u);
+    assert.doesNotMatch(firstUserPrompt, /\["\u73a9\u5bb6\u7532"\]|coverage units/u);
     assert.equal(calls.filter((entry) => entry.groupKey !== 'identity_bootstrap').length, 0);
     assert.equal(run.result.persistenceStatus, 'not_completed');
     assert.equal(run.result.readbackVerified, false);

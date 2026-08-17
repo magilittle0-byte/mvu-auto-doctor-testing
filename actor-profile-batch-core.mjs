@@ -58,6 +58,7 @@ function failureFor(candidate, reason, extras = {}) {
 }
 
 const SAFE_IDENTITY_RETRY_GUIDANCE = Object.freeze({
+    'actor_profile.discovery_source_offset_ambiguous': '\u5220\u9664\u65e0\u6cd5\u7a33\u5b9a\u5b9a\u4f4d\u7684\u77ed\u79f0\uff1b\u4ece\u5df2\u63a5\u53d7\u6b63\u6587\u9010\u5b57\u590d\u5236\u80fd\u552f\u4e00\u6307\u5411\u8be5\u4eba\u7684\u66f4\u5b8c\u6574\u59d3\u540d\u3001\u7f16\u53f7\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13\uff1b\u4e0d\u5f97\u81ea\u884c\u6539\u5199\u6216\u53d6\u540d\u3002',
     'actor_profile.discovery_coverage_unit_missing': '\u8be5\u88f8 route \u65e0\u6cd5\u7ed1\u5b9a\u5230\u5df2\u53d1\u9001\u6b63\u6587\u4e2d\u7684\u72ec\u7acb\u9010\u5b57\u51fa\u73b0\uff1b\u53ea\u5728\u5fc5\u8981\u65f6\u8865 unit=\u5df2\u7ed9CU-id\uff0c\u4e0d\u5f97\u56de\u663e digest \u6216\u7a7a unit\u3002',
     'actor_profile.discovery_coverage_unit_duplicate': '\u5220\u9664\u65e7 coverage wrapper\uff0c\u53ea\u8fd4\u56de\u53bb\u91cd\u540e\u7684\u88f8 profile-target\uff1b\u4e0d\u5f97\u56de\u663e digest \u6216\u7a7a unit\u3002',
     'actor_profile.discovery_coverage_unit_unknown': '\u5220\u9664\u81ea\u521b unit\uff1b\u88f8 route \u53ef\u7701\u7565 unit\uff0c\u5fc5\u987b\u663e\u5f0f\u65f6\u53ea\u80fd\u7528\u8f93\u5165\u5df2\u7ed9 CU-id\u3002',
@@ -66,6 +67,7 @@ const SAFE_IDENTITY_RETRY_GUIDANCE = Object.freeze({
     'actor_profile.discovery_coverage_extra_content': '\u8fd4\u56de\u4e00\u4e2a\u6216\u591a\u4e2a\u88f8 profile-target\uff1b\u82e5\u786e\u5b9e\u65e0\u4eba\uff0c\u6574\u4e2a\u54cd\u5e94\u53ea\u8fd4\u56de <no-new/>\uff0c\u4e0d\u5f97\u7528\u81ea\u7531\u6587\u672c\u8868\u793a\u7a7a\u7ed3\u679c\u3002',
     'actor_profile.discovery_name_not_in_coverage_unit': '\u5220\u9664\u8be5\u5355\u5143\u4e2d\u7684\u8de8\u5355\u5143\u6216\u675c\u64b0\u884c\u952e\uff1b\u4ec5\u4ece\u5f53\u524d coverage unit \u6587\u672c\u9010\u5b57\u590d\u5236\u7a33\u5b9a\u4eba\u7269\u884c\u952e\u3002',
     'actor_profile.discovery_name_not_in_narrative': '\u5220\u9664\u8be5\u675c\u64b0\u884c\u952e\u5019\u9009\uff1b\u4e0d\u8981\u6539\u5199\u3001\u7f29\u5199\u6216\u65b0\u53d6\u540d\uff0c\u53ea\u80fd\u4ece\u201c\u5df2\u63a5\u53d7\u6b63\u6587\u201d\u4e2d\u9010\u5b57\u590d\u5236\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u7a33\u5b9a\u4eba\u7269\u6807\u8bc6\u4f5c\u4e3a actor="new" \u7684 name\uff1b\u53ef\u4ee5\u662f\u771f\u540d\u3001\u7f16\u53f7\u79f0\u8c13\u6216\u6b63\u6587\u4e2d\u53ef\u6307\u5411\u4e00\u4eba\u7684\u7a33\u5b9a\u63cf\u8ff0\u6027\u79f0\u8c13\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
+    'actor_profile.discovery_name_vague': '\u5220\u9664\u201c\u4eba\u7269\u3001\u89d2\u8272\u3001\u964c\u751f\u4eba\u3001\u7537\u4eba\u3001\u5973\u4eba\u3001\u4ed6\u3001\u5979\u201d\u7b49\u6cdb\u79f0\uff1b\u5fc5\u987b\u4ece\u5df2\u63a5\u53d7\u6b63\u6587\u9010\u5b57\u590d\u5236\u80fd\u552f\u4e00\u6307\u5411\u4e00\u4eba\u7684\u5b8c\u6574\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u5e26\u9650\u5b9a\u7684\u63cf\u8ff0\u6027\u79f0\u8c13\uff1b\u4e0d\u5f97\u81ea\u884c\u7f29\u77ed\u6216\u53d6\u540d\u3002',
     'actor_candidate.identity_missing_or_short': '\u5220\u9664\u8be5\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u9010\u5b57\u660e\u786e\u3001\u4e0d\u5c11\u4e8e\u4e24\u4e2a\u5b57\u7b26\u7684\u7a33\u5b9a\u4eba\u7269\u884c\u952e\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
     'actor_candidate.identity_system': '\u5220\u9664\u7cfb\u7edf\u3001\u65c1\u767d\u3001\u73af\u5883\u6216\u6e38\u620f\u63d0\u793a\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u660e\u786e\u51fa\u573a\u7684\u7a33\u5b9a\u4eba\u7269\u884c\u952e\uff08\u53ef\u4e3a\u59d3\u540d\u3001\u4ee3\u53f7\u3001\u7f16\u53f7\u3001\u804c\u4e1a\u6216\u63cf\u8ff0\u6027\u79f0\u8c13\uff09\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
     'actor_candidate.identity_group': '\u5220\u9664\u7ec4\u7ec7\u3001\u56e2\u4f53\u6216\u7fa4\u4f53\u540d\u79f0\u5019\u9009\uff1b\u53ea\u91cd\u53d1\u6b63\u6587\u4e2d\u5176\u4ed6\u9010\u5b57\u7a33\u5b9a\u3001\u53ef\u6307\u5411\u4e00\u4eba\u7684\u4eba\u7269\u884c\u952e\uff0c\u5e76\u4fdd\u7559\u672c\u7ec4\u5176\u4ed6\u6709\u6548\u65b0\u4eba\u3002',
@@ -428,6 +430,7 @@ const PROFILE_RECOVERY_MODULE_KEYS = Object.freeze([
 
 const SAFE_MANUAL_IDENTITY_RETRY_CODES = new Set([
     'actor_profile.discovery_source_offset_ambiguous',
+    'actor_profile.discovery_name_vague',
     'actor_profile.group_row_missing',
     'actor_profile.format_unrecoverable',
     'actor_profile.identity_bootstrap_already_attempted',
@@ -477,6 +480,12 @@ export function normalizeActorProfileRecoveryProgress(value) {
         1,
         Math.max(0, Math.floor(Number(value.manualIdentityRetryCount) || 0)),
     );
+    const manualIdentityRetryFailureCodes = [...new Set(
+        (Array.isArray(value.manualIdentityRetryFailureCodes)
+            ? value.manualIdentityRetryFailureCodes : [])
+            .map((code) => cleanText(code, 160))
+            .filter((code) => Boolean(SAFE_IDENTITY_RETRY_GUIDANCE[code])),
+    )].slice(0, 8);
     const identityLocked = value.identityLocked === true;
     const identityAttempted = identityLocked || value.identityAttempted === true;
     if (
@@ -491,6 +500,8 @@ export function normalizeActorProfileRecoveryProgress(value) {
         identityAttempted,
         identityLocked,
         manualIdentityRetryCount,
+        ...(manualIdentityRetryFailureCodes.length
+            ? { manualIdentityRetryFailureCodes } : {}),
         rows: rows.sort((left, right) => left.actorId.localeCompare(right.actorId)),
         verifiedFieldCount: rows.reduce(
             (sum, row) => sum + Object.keys(row.modules).length,
@@ -540,6 +551,9 @@ export function prepareActorProfileManualIdentityRetryProgress(
             identityAttempted: false,
             identityLocked: false,
             manualIdentityRetryCount: progress.manualIdentityRetryCount + 1,
+            manualIdentityRetryFailureCodes: [...new Set(failureCodes
+                .map((code) => cleanText(code, 160))
+                .filter((code) => Boolean(SAFE_IDENTITY_RETRY_GUIDANCE[code])))].slice(0, 8),
         }
         : progress;
 }
@@ -891,6 +905,8 @@ export async function completeActorProfileBatchTransaction({
                 identityAttempted,
                 identityLocked,
                 manualIdentityRetryCount,
+                manualIdentityRetryFailureCodes:
+                    latestRecoveryProgress?.manualIdentityRetryFailureCodes || [],
                 rows,
             });
             return clone(latestRecoveryProgress);
@@ -1454,7 +1470,13 @@ export async function completeActorProfileBatchTransaction({
                     recoveryProgress: captureRecoveryProgress(),
                 };
             }
-            let parsed = await callGroup(identity, 0);
+            const manualRetryFeedback = manualIdentityRetryCount > 0
+                ? retryFeedbackFor({
+                    failures: (latestRecoveryProgress?.manualIdentityRetryFailureCodes || [])
+                        .map((reason) => ({ reason, groupKey: identity.key })),
+                }, { failures: [] }, identity)
+                : validationFeedback;
+            let parsed = await callGroup(identity, 0, manualRetryFeedback);
             if (parsed.stale) return parsed;
             if (parsed.requestFailure) {
                 if (
@@ -1492,8 +1514,22 @@ export async function completeActorProfileBatchTransaction({
             // guidance. This mirrors the existing per-group repair boundary:
             // no partial row is published, no standard is lowered, and a
             // second invalid response remains a terminal atomic failure.
+            const preflightRejectedOnlyRepairableDiscoveryRoutes = (
+                preparedApply.discoveryUpdates.length > 0
+                && !(preparedApply.identityRevealUpdates || []).length
+                && preflight.validCandidateCount === 0
+                && preflight.failures.length > 0
+                && preflight.failures.every((entry) => {
+                    const reason = cleanText(entry?.reason, 160);
+                    return reason === 'actor_profile.discovery_name_vague'
+                        && Boolean(SAFE_IDENTITY_RETRY_GUIDANCE[reason]);
+                })
+            );
             const noRetainableIdentityRows = !preparedApply.sectionUpdates.length
-                && !preparedApply.discoveryUpdates.length
+                && (
+                    !preparedApply.discoveryUpdates.length
+                    || preflightRejectedOnlyRepairableDiscoveryRoutes
+                )
                 && !(preparedApply.identityRevealUpdates || []).length;
             const retryableIdentityFailure = parsed.formatUnrecoverable === true
                 || preparedApply.failures.some((entry) => (
