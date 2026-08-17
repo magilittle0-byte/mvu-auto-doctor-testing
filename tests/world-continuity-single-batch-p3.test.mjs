@@ -1649,7 +1649,7 @@ test('production P3 validator accepts WORLD-held only after all ATT are adjudica
         world: {},
         scenarioPlan: {},
     }, { chatId: 'chat-world-hold' });
-    const missing = loadStage3WorldCandidateValidator()(
+    const locallyHeldActive = loadStage3WorldCandidateValidator()(
         { chatId: 'chat-world-hold' },
         { continuityMaxThreads: 24, continuityAutonomy: 'living' },
         {},
@@ -1659,12 +1659,34 @@ test('production P3 validator accepts WORLD-held only after all ATT are adjudica
             continuityState: activeBefore,
         },
     );
-    assert.equal(missing.ok, false);
-    assert.deepEqual(structuredClone(missing.repairContext), {
-        family: 'semantic_progress',
-        targetTurn: 1,
-        allowedThreadIds: ['THREAD-ACTIVE'],
-    });
+    assert.equal(locallyHeldActive.ok, true);
+    assert.equal(locallyHeldActive.next.lastTick.action, 'held');
+    assert.equal(locallyHeldActive.next.lastTick.threadId, 'THREAD-ACTIVE');
+    assert.ok(locallyHeldActive.next.lastTick.reason.length >= 8);
+    const adjudicatedActiveHold = loadStage3WorldCandidateValidator({
+        pendingAttempts: [pendingAttempt],
+        settlement: {
+            ledger: {}, pendingWorld: [],
+            results: [{
+                attemptId: pendingAttempt.id,
+                status: 'held',
+                worldAdjudicated: true,
+                appliedStateChanges: [],
+            }],
+            worldEvents: [],
+        },
+    })(
+        { chatId: 'chat-world-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        {
+            ...args,
+            scheduledState: activeBefore,
+            continuityState: activeBefore,
+        },
+    );
+    assert.equal(adjudicatedActiveHold.ok, true);
+    assert.equal(adjudicatedActiveHold.next.lastTick.threadId, 'THREAD-ACTIVE');
     const activeHeld = normalizeContinuityState({
         ...structuredClone(activeBefore),
         lastTick: {
@@ -1702,13 +1724,15 @@ test('production P3 validator accepts WORLD-held only after all ATT are adjudica
             reason: '未知目标不应被本地时钟规范化放行',
         },
     }, { chatId: 'chat-world-hold' });
-    const rejectedUnknown = loadStage3WorldCandidateValidator()(
+    const locallyReboundUnknown = loadStage3WorldCandidateValidator()(
         { chatId: 'chat-world-hold' },
         { continuityMaxThreads: 24, continuityAutonomy: 'living' },
         {},
         { ...args, scheduledState: activeBefore, continuityState: unknownActive },
     );
-    assert.equal(rejectedUnknown.ok, false);
+    assert.equal(locallyReboundUnknown.ok, true);
+    assert.equal(locallyReboundUnknown.next.lastTick.threadId, 'THREAD-ACTIVE');
+    assert.notEqual(locallyReboundUnknown.next.lastTick.reason, unknownActive.lastTick.reason);
 
     const adjacentBefore = normalizeContinuityState({
         ...structuredClone(activeBefore),

@@ -20354,7 +20354,6 @@ function stage3NoSemanticDeltaHeldTerminal(scheduledBase, next, {
     if (Array.isArray(settlement?.worldEvents) && settlement.worldEvents.length) return null;
     const before = normalizeContinuityState(scheduledBase, { maxThreads: 24, maxResolved: 24 });
     const after = normalizeContinuityState(next, { maxThreads: 24, maxResolved: 24 });
-    if (before.threads.some((thread) => thread.stage !== 'resolved')) return null;
     if (
         after.turn !== before.turn
         || continuityLifecycleStats(before, after).changedExisting !== 0
@@ -20363,13 +20362,28 @@ function stage3NoSemanticDeltaHeldTerminal(scheduledBase, next, {
         || continuityWorldDigest(before) !== continuityWorldDigest(after)
         || continuityScenarioDigest(before) !== continuityScenarioDigest(after)
     ) return null;
+    const activeThreadIds = before.threads
+        .filter((thread) => thread.stage !== 'resolved')
+        .map((thread) => thread.id);
+    const requestedThreadId = String(after.lastTick?.threadId || '');
+    const threadId = activeThreadIds.includes(requestedThreadId)
+        ? requestedThreadId
+        : activeThreadIds[0] || 'WORLD';
+    const requestedReason = String(after.lastTick?.reason || '').trim();
+    const reason = after.lastTick?.action === 'held'
+        && requestedThreadId === threadId
+        && requestedReason.length >= 8
+        ? requestedReason
+        : activeThreadIds.length
+            ? '现有活动线程尚未满足可验证推进条件，本回合保持原状'
+            : '本回合没有足够权威依据形成可持久化的世界变化';
     const held = deepClone(after);
     held.turn = before.turn;
     held.lastTick = {
         turn: Math.max(0, Math.floor(Number(nextTurn) || before.turn)),
         action: 'held',
-        threadId: 'WORLD',
-        reason: '本回合没有足够权威依据形成可持久化的世界变化',
+        threadId,
+        reason,
     };
     return held;
 }
