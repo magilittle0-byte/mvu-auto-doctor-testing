@@ -14098,8 +14098,13 @@ async function precomposeNextTurnConsumer(session) {
             frozenScope,
             proofDecision,
         );
+        // The verifier proves the normalized producer/continuity/settlement/
+        // action authority. The carrier projector must still receive the raw
+        // packet read from durable chat state: current packets deliberately
+        // bind that exact persisted payload, and projecting the verifier's
+        // normalized copy would create a second representation.
         const projection = verified
-            ? buildContinuityConsumerPayload(namespace.continuity, verified.packet)
+            ? buildContinuityConsumerPayload(namespace.continuity, packet)
             : { ok: false, reason: 'world_package_proof_invalid' };
         if (!verified || !projection.ok || packet.consumeProof || packet.consumerLease?.state === 'reserved') {
             session.p4WorldPackageReason = !verified
@@ -14117,7 +14122,9 @@ async function precomposeNextTurnConsumer(session) {
             );
             packet = null;
         } else {
-            packet = verified.packet;
+            // Keep the raw durable packet for the lease path. All authority
+            // decisions above came from the verifier; no raw field is trusted
+            // without that proof.
             worldText = projection.text;
         }
     }

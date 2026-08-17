@@ -268,6 +268,15 @@ test('P4 has one Doctor-owned exact-once consumer for the verified world package
     assert.ok(clearAt >= 0 && verifyAt > clearAt && projectAt > verifyAt);
     assert.ok(ticketAt > projectAt && payloadAt > ticketAt && leaseAt > payloadAt);
     assert.ok(fallbackAt > leaseAt);
+    assert.match(
+        consumer,
+        /buildContinuityConsumerPayload\(namespace\.continuity, packet\)/u,
+        'P4 must project the exact raw durable carrier after authority verification',
+    );
+    assert.doesNotMatch(
+        consumer,
+        /buildContinuityConsumerPayload\(namespace\.continuity, verified\.packet\)/u,
+    );
     assert.match(consumer, /providerId: DOCTOR_NEXT_TURN_PROVIDER_ID/u);
     assert.match(consumer, /recordNextTurnConsumerInspection\(session,[\s\S]*?worldPackage: packet \? 'verified' : 'ticket_only'/u);
     assert.doesNotMatch(
@@ -378,7 +387,7 @@ test('fresh-chat P3 build, normalize and P4 projection receive the current gener
     );
     assert.ok(verified);
     assert.deepEqual(persistedOptions, { allowUnrelatedLedgerEvolution: true });
-    const projection = buildContinuityConsumerPayload(namespace.continuity, verified.packet);
+    const projection = buildContinuityConsumerPayload(namespace.continuity, packet);
     assert.equal(projection.ok, true);
     assert.ok(projection.text);
 
