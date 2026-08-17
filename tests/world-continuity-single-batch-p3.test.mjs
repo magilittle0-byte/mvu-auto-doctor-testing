@@ -39,17 +39,14 @@ import {
 
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 
-test('world prompts reuse the canonical read-only profile view and expose a separate recovery control', () => {
-    const messages = sourceSection(
-        'function buildContinuityMessages({',
-        'async function generateWorldContinuitySingleBatch',
+test('world prompts use a bounded semantic profile projection and expose a separate recovery control', () => {
+    const promptView = sourceSection(
+        'function stage3WorldProfilePromptView(',
+        'function stage3WorldThreadPromptView(',
     );
-    const promptView = messages.slice(
-        messages.indexOf('const actorPromptView = (actor) => ({'),
-        messages.indexOf('const recalledActors ='),
-    );
-    assert.match(promptView, /profile: actor\.profileV6 \? actorProfileV6View\(actor\) : null/u);
-    assert.doesNotMatch(promptView, /profile: actor\.profileV6\s*(?:\|\||[,}])/u);
+    assert.match(promptView, /const profile = actorProfileV6View\(actor\)/u);
+    assert.match(promptView, /narrativeSections: Object\.fromEntries/u);
+    assert.doesNotMatch(promptView, /moduleStatuses|historyCount|fieldSourceCount|designRolls/u);
     assert.match(source, /mvuad-floating-continuity-run[^>]*>继续\/恢复世界连续性</u);
     assert.match(source, /mvuad-world-run[^>]*>继续\/恢复世界连续性</u);
     assert.match(source, /mvuad-floating-continuity-run'[\s\S]*?enqueueContinuity\(null, \{ force: true, manualRecovery: true \}\)/u);
@@ -62,7 +59,7 @@ test('world prompt sends one recalled material block and the compact ownership/o
         'async function generateWorldContinuitySingleBatch',
     );
     assert.match(messages, /const compactSystem = \[/u);
-    assert.match(messages, /const compactUser = \[/u);
+    assert.match(messages, /const buildCompactUser = \(worldbookEvidence = ''\) => \[/u);
     assert.match(messages, /content: compactSystem/u);
     assert.match(messages, /content: compactUser/u);
     assert.doesNotMatch(messages, /content: system \}/u);
@@ -73,6 +70,23 @@ test('world prompt sends one recalled material block and the compact ownership/o
     assert.match(messages, /技术身份、尝试编号、账本字段/u);
     assert.match(messages, /本地把它规范为安全的held\/delayed收据/u);
     assert.match(messages, /输出最小形状/u);
+    assert.match(messages, /STAGE3_WORLD_MODEL_INPUT_MAX_CHARS/u);
+    assert.doesNotMatch(messages, /world_prompt_projection_budget_exceeded/u);
+    const runtimeFingerprint = sourceSection(
+        'function doctorRuntimeCriticalFingerprint()',
+        'function diagnosticPayload()',
+    );
+    [
+        'stage3WorldPromptText',
+        'stage3WorldPromptValue',
+        'stage3WorldProfilePromptView',
+        'stage3WorldActorPromptView',
+        'stage3WorldThreadPromptView',
+        'stage3WorldRecallPromptView',
+        'stage3WorldActorShardPromptView',
+        'stage3WorldPromptInputChars',
+    ].forEach((helper) => assert.match(runtimeFingerprint, new RegExp(`${helper}\\.toString\\(\\)`, 'u')));
+    assert.match(runtimeFingerprint, /stage3-world-model-input-max:40000/u);
 });
 
 test('world prompt asks only for semantic actor rows and leaves persistence authority to local code', () => {
@@ -193,6 +207,34 @@ function loadStage3WorldbookPromptMaterial() {
     };
     vm.runInNewContext(`${code}\nthis.buildMaterial = stage3WorldbookPromptMaterial;`, sandbox);
     return sandbox.buildMaterial;
+}
+
+function loadBuildContinuityMessages() {
+    const code = sourceSection(
+        'function stage3WorldbookPromptMaterial(',
+        'async function generateWorldContinuitySingleBatch(',
+    );
+    const settings = {
+        continuityAutonomy: 'normal', continuityPromptAddon: '', actorShardPromptAddon: '',
+        continuityContextMessages: 8, forumMaxPosts: 20, forumMaxComments: 20,
+        fastApiJsonMode: true,
+    };
+    const sandbox = {
+        actorActionAttemptWorldView: (value) => structuredClone(value),
+        actorProfileV6View: (actor) => structuredClone(actor.profileV6View),
+        constrainForumCausalSignals: (value) => value,
+        cropText: (value, maxChars) => String(value || '').slice(0, maxChars),
+        directProfile: () => ({ provider: 'direct' }),
+        formatUserNarrativeInstruction: () => '',
+        forumView: () => ({ active: [] }),
+        getSettings: () => settings,
+        publicContinuityRecordsForForum: () => [],
+        readChatNamespace: () => ({ forum: {} }),
+        recentTranscriptThrough: () => '最近剧情'.repeat(18000),
+        safeJson: (value, indent = 2) => JSON.stringify(value, null, indent),
+    };
+    vm.runInNewContext(`${code}\nthis.buildMessages = buildContinuityMessages;`, sandbox);
+    return sandbox.buildMessages;
 }
 
 function loadStage3ProfileEvolutionGate() {
@@ -7401,13 +7443,13 @@ test('P3 keeps full persistent thread history while P4 remains a separate visibl
     );
 });
 
-test('P3 source retains every scheduled ActorRef without a Doctor-owned prompt ceiling', () => {
+test('P3 source retains every scheduled ActorRef inside a bounded model projection', () => {
     const advance = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
     const recall = sourceSection('function stage3LocalRecallPacket({', 'function stage3WorldbookPromptMaterial(');
     assert.match(advance, /recalledActors = \[\.\.\.\(actorLedger\?\.actors \|\| \[\]\)\]/u);
     assert.match(advance, /world_recall_missing_scheduled_actor_material/u);
     assert.doesNotMatch(advance, /world_recall_capacity_unavailable/u);
-    assert.doesNotMatch(advance, /CONTINUITY_MODEL_PROMPT_MAX_CHARS/u);
+    assert.match(advance, /STAGE3_WORLD_MODEL_INPUT_MAX_CHARS/u);
     assert.doesNotMatch(advance, /requiredMaterial\.length\s*>/u);
     assert.doesNotMatch(advance, /recalledActors\.slice\(/u);
     assert.doesNotMatch(recall, /world_recall_capacity_unavailable/u);
@@ -7499,9 +7541,121 @@ test('P3 prompt keeps the full worldbook authority manifest while bounding model
     assert.equal(material.manifest.length, 3);
     assert.equal(material.manifest.every((entry) => !Object.hasOwn(entry, 'content')), true);
     assert.equal(material.manifest.map((entry) => entry.contentDigest).join(','), 'digest-a,digest-b,digest-c');
-    assert.equal(material.evidenceText.length, 18000);
+    assert.equal(material.evidenceText.length, 6000);
     assert.equal(material.evidenceText.includes('A'.repeat(1000)), true);
     assert.equal(material.evidenceText.includes('C'.repeat(1000)), false);
+});
+
+test('P3 production prompt stays within 40000 characters while preserving every required actor and thread ID', () => {
+    const buildMessages = loadBuildContinuityMessages();
+    const actorIds = Array.from({ length: 10 }, (_, index) => `actor-budget-${index + 1}`);
+    const threadIds = Array.from({ length: 12 }, (_, index) => `thread-budget-${index + 1}`);
+    const worldbookEntries = Array.from({ length: 99 }, (_, index) => ({
+        id: `worldbook-entry-${index + 1}`,
+        sourceDomain: 'embedded',
+        nativeId: String(index + 1),
+        world: '99条内嵌世界书',
+        title: `世界设定${index + 1}`,
+        keys: [`关键词${index + 1}`],
+        constant: true,
+        content: `第${index + 1}条完整世界设定。`.repeat(180),
+        contentDigest: `content-digest-${index + 1}`,
+    }));
+    const narrativeSections = Object.fromEntries([
+        'person', 'physiology', 'personality', 'history', 'currentState',
+        'relationshipsMotives', 'knowledgeCapabilitiesResources',
+    ].map((key) => [key, {
+        title: key,
+        text: `${key}人物档案自然语言内容。`.repeat(180),
+        source: 'hypothesis',
+        evidence: ['本地权威证据'.repeat(40)],
+    }]));
+    const actors = actorIds.map((id, index) => ({
+        id,
+        name: `人物${index + 1}`,
+        status: 'ready',
+        identity: { role: '独立人物', aliases: [`人物别名${index + 1}`] },
+        currentGoals: [{ summary: '推进自己的目标'.repeat(80) }],
+        longTermGoals: [{ summary: '保持长期计划'.repeat(80) }],
+        knowledge: [{ summary: '有限知识'.repeat(100) }],
+        capabilities: [{ summary: '已验证能力'.repeat(100) }],
+        resources: [{ summary: '当前资源'.repeat(100) }],
+        profileV6: { profileFormat: 'narrative-v1' },
+        profileV6View: {
+            preparedForAction: true,
+            coverage: 100,
+            backgroundPending: false,
+            narrativeSections,
+            moduleStatuses: { hiddenPersistenceDetail: { status: 'ready' } },
+            historyCount: 999,
+            fieldSourceCount: 999,
+            designRolls: { ticketId: 'must-not-be-sent' },
+        },
+    }));
+    const threads = threadIds.map((id, index) => ({
+        id,
+        title: `事件${index + 1}`,
+        kind: 'parallel', origin: 'setting_linked', relation: 'latent', stage: 'advancing',
+        stageProgress: 3, urgency: 2, createdTurn: 1, lastAdvancedTurn: 2,
+        summary: `事件摘要${index + 1}`.repeat(120),
+        offscreenBeat: '幕后变化'.repeat(120),
+        nextBeat: '下一步可能'.repeat(120),
+        trigger: '具体触发条件'.repeat(120),
+        sourceRefs: Array.from({ length: 30 }, () => ({ private: '持久化来源'.repeat(100) })),
+    }));
+    const recallPacket = {
+        version: 2,
+        selection: 'local_structured_schedule',
+        actorIds,
+        threadIds,
+        laneIds: ['lane-budget-1'],
+        mustActorIds: actorIds,
+        mustThreadIds: threadIds,
+        mustLaneIds: ['lane-budget-1'],
+        worldbookEntryIds: worldbookEntries.map((entry) => entry.id),
+        worldbookEvidenceEntryIds: worldbookEntries.map((entry) => entry.id),
+        worldbookSourceRefs: worldbookEntries.map((entry) => ({ private: entry.id.repeat(80) })),
+        worldbookDigest: 'worldbook-authority-digest',
+        selectedWorldbookCount: worldbookEntries.length,
+        digest: 'recall-plan-digest',
+    };
+    const messages = buildMessages({
+        context: { chatId: 'chat-budget' },
+        captured: { chatId: 'chat-budget', index: 12, swipeId: 0 },
+        base: {
+            version: 1,
+            chatId: 'chat-budget',
+            turn: 12,
+            lastTick: { turn: 11, action: 'held', threadId: threadIds[0], reason: '等待条件' },
+            scenarioPlan: { baseline: '场景规划'.repeat(2000) },
+            world: { digest: '世界状态'.repeat(4000), trends: [], factions: [], winds: [], influences: [] },
+            threads,
+        },
+        worldContext: { entries: worldbookEntries, hasSetting: true, sourceCount: 99 },
+        stateAnchors: 'MVU只读主线锚点'.repeat(3000),
+        actorShardCandidates: {
+            scheduledActorIds: actorIds,
+            proposals: actorIds.map((actorId) => ({
+                actorId,
+                intent: 'execute',
+                candidateAction: '人物自己的具体尝试'.repeat(500),
+                stateChanges: [{ kind: 'plan', summary: '准备行动'.repeat(300) }],
+            })),
+            rejectedActions: [],
+        },
+        actorLedger: { actors },
+        worldLaneSchedule: {
+            candidates: [{ sourceId: 'lane-budget-1', summary: '结构世界候选'.repeat(500) }],
+            selected: [{ sourceId: 'lane-budget-1', summary: '结构世界候选'.repeat(500) }],
+        },
+        recallPacket,
+    });
+    const prompt = messages.map((message) => message.content).join('');
+    assert.ok(prompt.length <= 40000, `world prompt chars=${prompt.length}`);
+    actorIds.forEach((actorId) => assert.match(prompt, new RegExp(actorId, 'u')));
+    threadIds.forEach((threadId) => assert.match(prompt, new RegExp(threadId, 'u')));
+    assert.match(prompt, /worldbook-authority-digest/u);
+    assert.doesNotMatch(prompt, /must-not-be-sent|hiddenPersistenceDetail|worldbookSourceRefs/u);
 });
 
 test('P3 accepts only current-target P1 actor-registration receipt evolution', () => {
@@ -7604,13 +7758,14 @@ test('P3 preserves complete local worldbook entries and bounds only the model-fa
         'function buildContinuityMessages({',
     );
     assert.match(promptMaterial, /contentDigest: entry\.contentDigest/u);
-    assert.match(promptMaterial, /18000, 'P3世界书取材'/u);
+    assert.match(promptMaterial, /6000, 'P3世界书取材'/u);
     assert.doesNotMatch(promptMaterial.slice(
         promptMaterial.indexOf('const manifest'),
         promptMaterial.indexOf('const evidenceText'),
     ), /content:\s*entry\.content/u);
     const prompt = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
-    assert.match(prompt, /worldbookManifest: worldbookPromptMaterial\.manifest/u);
+    assert.match(prompt, /worldbookAuthority:/u);
+    assert.doesNotMatch(prompt, /worldbookManifest: worldbookPromptMaterial\.manifest/u);
     assert.match(prompt, /worldbookPromptMaterial\.evidenceText/u);
     assert.doesNotMatch(prompt, /recalledWorldbookEntries/u);
 });

@@ -5154,6 +5154,15 @@ function doctorRuntimeCriticalFingerprint() {
         stage3WorldbookEntryKeywordActivated.toString(),
         stage3LocalRecallPacket.toString(),
         stage3WorldbookPromptMaterial.toString(),
+        stage3WorldPromptText.toString(),
+        stage3WorldPromptValue.toString(),
+        stage3WorldProfilePromptView.toString(),
+        stage3WorldActorPromptView.toString(),
+        stage3WorldThreadPromptView.toString(),
+        stage3WorldRecallPromptView.toString(),
+        stage3WorldActorShardPromptView.toString(),
+        stage3WorldPromptInputChars.toString(),
+        'stage3-world-model-input-max:40000',
         usableContinuityWorldEntry.toString(),
         continuityWorldEntryAcquisitionPriority.toString(),
         continuityWorldEntryPhysicalKey.toString(),
@@ -14708,13 +14717,172 @@ function stage3WorldbookPromptMaterial(worldContext, recallPacket) {
         `【世界书：${entry.world || '当前角色卡'} / ${entry.title || entry.id}】`,
         Array.isArray(entry.keys) && entry.keys.length ? `关键词：${entry.keys.join('、')}` : '',
         entry.content,
-    ].filter(Boolean).join('\n'))).join('\n\n'), 18000, 'P3世界书取材');
+    ].filter(Boolean).join('\n'))).join('\n\n'), 6000, 'P3世界书取材');
     return {
         manifest,
         evidenceText,
         evidenceEntryCount: evidenceOrder.length,
         selectedEntryCount: selected.length,
     };
+}
+
+const STAGE3_WORLD_MODEL_INPUT_MAX_CHARS = 40000;
+
+function stage3WorldPromptText(value, limit = 160) {
+    const source = String(value ?? '').trim();
+    const safeLimit = Math.max(0, Number(limit) || 0);
+    if (source.length <= safeLimit) return source;
+    if (safeLimit <= 1) return source.slice(0, safeLimit);
+    const marker = '…';
+    const available = Math.max(0, safeLimit - marker.length);
+    const head = Math.ceil(available * 0.68);
+    const tail = available - head;
+    return `${source.slice(0, head)}${marker}${tail ? source.slice(-tail) : ''}`;
+}
+
+function stage3WorldPromptValue(value, {
+    depth = 0,
+    maxDepth = 3,
+    maxItems = 5,
+    maxKeys = 16,
+    maxText = 140,
+} = {}) {
+    if (typeof value === 'string') return stage3WorldPromptText(value, maxText);
+    if (value == null || typeof value !== 'object') return value;
+    if (depth >= maxDepth) return Array.isArray(value) ? [] : {};
+    if (Array.isArray(value)) {
+        return value.slice(0, maxItems).map((entry) => stage3WorldPromptValue(entry, {
+            depth: depth + 1, maxDepth, maxItems, maxKeys, maxText,
+        }));
+    }
+    return Object.fromEntries(Object.entries(value).slice(0, maxKeys).map(([key, entry]) => [
+        key,
+        stage3WorldPromptValue(entry, {
+            depth: depth + 1, maxDepth, maxItems, maxKeys, maxText,
+        }),
+    ]));
+}
+
+function stage3WorldProfilePromptView(actor, narrativeBudget = 700) {
+    if (!actor?.profileV6) return null;
+    const profile = actorProfileV6View(actor);
+    const sections = Object.entries(profile?.narrativeSections || {});
+    const perSection = Math.max(60, Math.floor(narrativeBudget / Math.max(1, sections.length)));
+    return {
+        preparedForAction: profile.preparedForAction === true,
+        coverage: profile.coverage,
+        backgroundPending: profile.backgroundPending === true,
+        narrativeSections: Object.fromEntries(sections.map(([key, section]) => [key, {
+            title: stage3WorldPromptText(section?.title || key, 36),
+            text: stage3WorldPromptText(section?.text || '', perSection),
+        }])),
+    };
+}
+
+function stage3WorldActorPromptView(actor, narrativeBudget = 700) {
+    const compact = (value, options = {}) => stage3WorldPromptValue(value, {
+        maxItems: 3,
+        maxKeys: 10,
+        maxText: 90,
+        ...options,
+    });
+    return {
+        actorId: actor?.id,
+        name: stage3WorldPromptText(actor?.name || '', 80),
+        aliases: compact(actor?.identity?.aliases || [], { maxItems: 6, maxText: 80 }),
+        status: actor?.status,
+        inactiveReason: stage3WorldPromptText(actor?.inactiveReason || '', 120),
+        role: stage3WorldPromptText(actor?.identity?.role || '', 100),
+        longTermGoals: compact(actor?.longTermGoals || []),
+        currentGoals: compact(actor?.currentGoals || []),
+        commitments: compact(actor?.commitments || []),
+        constraints: compact(actor?.constraints || []),
+        plan: compact(actor?.plan || {}),
+        location: compact(actor?.location || {}),
+        lastAction: compact(actor?.lastAction || null),
+        lastSemanticTurn: actor?.lastSemanticTurn || 0,
+        nextActionTurn: actor?.nextActionTurn || 0,
+        deadlineTurn: actor?.deadlineTurn || 0,
+        stateFacts: compact(actor?.stateFacts || []),
+        capabilities: compact(actor?.capabilities || []),
+        knowledge: compact(actor?.knowledge || []),
+        resources: compact(actor?.resources || []),
+        stimuli: compact(actor?.stimuli || []),
+        hidden: compact(actor?.hidden || {}),
+        evidence: compact(actor?.evidence || []),
+        profile: stage3WorldProfilePromptView(actor, narrativeBudget),
+    };
+}
+
+function stage3WorldThreadPromptView(thread) {
+    const compact = (value, options = {}) => stage3WorldPromptValue(value, {
+        maxItems: 5,
+        maxKeys: 12,
+        maxText: 120,
+        ...options,
+    });
+    return {
+        id: thread?.id,
+        title: stage3WorldPromptText(thread?.title || '', 80),
+        kind: thread?.kind,
+        eventType: thread?.eventType,
+        origin: thread?.origin,
+        relation: thread?.relation,
+        stage: thread?.stage,
+        stageProgress: thread?.stageProgress,
+        evolveResult: thread?.evolveResult,
+        stalled: thread?.stalled === true,
+        outcome: stage3WorldPromptText(thread?.outcome || '', 120),
+        summary: stage3WorldPromptText(thread?.summary || '', 180),
+        offscreenBeat: stage3WorldPromptText(thread?.offscreenBeat || '', 160),
+        nextBeat: stage3WorldPromptText(thread?.nextBeat || '', 160),
+        trigger: stage3WorldPromptText(thread?.trigger || '', 140),
+        intersection: stage3WorldPromptText(thread?.intersection || '', 120),
+        convergence: compact(thread?.convergence || {}),
+        seedBasis: stage3WorldPromptText(thread?.seedBasis || '', 120),
+        causedBy: compact(thread?.causedBy || [], { maxItems: 8, maxText: 100 }),
+        effects: compact(thread?.effects || []),
+        rumors: compact(thread?.rumors || []),
+        propagation: compact(thread?.propagation || []),
+        resolution: stage3WorldPromptText(thread?.resolution || '', 140),
+        actors: compact(thread?.actors || [], { maxItems: 10, maxText: 100 }),
+        locations: compact(thread?.locations || [], { maxItems: 8, maxText: 100 }),
+        knowledge: thread?.knowledge,
+        urgency: thread?.urgency,
+        createdTurn: thread?.createdTurn,
+        lastAdvancedTurn: thread?.lastAdvancedTurn,
+    };
+}
+
+function stage3WorldRecallPromptView(recallPacket) {
+    if (!recallPacket) return null;
+    return {
+        version: recallPacket.version,
+        selection: recallPacket.selection,
+        actorIds: [...(recallPacket.actorIds || [])],
+        threadIds: [...(recallPacket.threadIds || [])],
+        laneIds: [...(recallPacket.laneIds || [])],
+        mustActorIds: [...(recallPacket.mustActorIds || [])],
+        mustThreadIds: [...(recallPacket.mustThreadIds || [])],
+        mustLaneIds: [...(recallPacket.mustLaneIds || [])],
+        worldbookDigest: recallPacket.worldbookDigest,
+        selectedWorldbookCount: recallPacket.selectedWorldbookCount,
+        evidenceEntryIds: [...(recallPacket.worldbookEvidenceEntryIds || [])].slice(0, 16),
+        digest: recallPacket.digest,
+    };
+}
+
+function stage3WorldActorShardPromptView(actorShardPromptPayload) {
+    return stage3WorldPromptValue(actorShardPromptPayload, {
+        maxDepth: 5,
+        maxItems: 12,
+        maxKeys: 20,
+        maxText: 240,
+    });
+}
+
+function stage3WorldPromptInputChars(messages) {
+    return (messages || []).reduce((total, message) => total + String(message?.content || '').length, 0);
 }
 
 function buildContinuityMessages({
@@ -14941,13 +15109,7 @@ function buildContinuityMessages({
             || String(left.id || '').localeCompare(String(right.id || ''))
         ))
         .slice(0, 12)
-        .map((thread) => ({
-            ...thread,
-            sourceRefs: (thread.sourceRefs || []).slice(-4),
-            effects: (thread.effects || []).slice(-6),
-            rumors: (thread.rumors || []).slice(-6),
-            propagation: (thread.propagation || []).slice(-8),
-        }));
+        .map((thread) => stage3WorldThreadPromptView(thread));
     const compactWorld = {
         ...(base.world || {}),
         trends: (base.world?.trends || []).slice(-12),
@@ -14973,73 +15135,42 @@ function buildContinuityMessages({
             omittedThreadsRemainAuthoritative: true,
         },
     };
-    const focusedActorIds = new Set(
-        (actorShardCandidates?.proposals || []).map((proposal) => proposal?.actorId),
-    );
-    const promptActors = [...(actorLedger?.actors || [])]
-        .sort((left, right) => (
-            Number(focusedActorIds.has(right.id)) - Number(focusedActorIds.has(left.id))
-            || Number(left.lastSemanticTurn || 0) - Number(right.lastSemanticTurn || 0)
-            || String(left.id || '').localeCompare(String(right.id || ''))
-        ))
-        .slice(0, 10)
-        .map((actor) => ({
-            actorId: actor.id,
-            name: actor.name,
-            status: actor.status,
-            inactiveReason: actor.inactiveReason || '',
-            role: actor.identity?.role || '',
-            identity: actor.identity || {},
-            longTermGoals: actor.longTermGoals || [],
-            currentGoals: actor.currentGoals || [],
-            constraints: actor.constraints || [],
-            plan: actor.plan || {},
-            location: actor.location || {},
-            lastAction: actor.lastAction || null,
-            lastSemanticTurn: actor.lastSemanticTurn || 0,
-            stateFacts: (actor.stateFacts || []).slice(-8),
-            capabilities: actor.capabilities || [],
-            hidden: actor.hidden || {},
-            evidence: (actor.evidence || []).slice(-8),
-        }));
     const recalledActorIds = new Set(recallPacket?.actorIds || []);
     const recalledThreadIds = new Set(recallPacket?.threadIds || []);
     const recalledLaneIds = new Set(recallPacket?.laneIds || []);
-    const actorPromptView = (actor) => ({
-        actorId: actor.id, name: actor.name, status: actor.status,
-        inactiveReason: actor.inactiveReason || '', role: actor.identity?.role || '',
-        identity: actor.identity || {}, longTermGoals: actor.longTermGoals || [],
-        currentGoals: actor.currentGoals || [], commitments: actor.commitments || [],
-        constraints: actor.constraints || [], plan: actor.plan || {}, location: actor.location || {},
-        lastAction: actor.lastAction || null, lastSemanticTurn: actor.lastSemanticTurn || 0,
-        nextActionTurn: actor.nextActionTurn || 0, deadlineTurn: actor.deadlineTurn || 0,
-        stateFacts: actor.stateFacts || [], capabilities: actor.capabilities || [], hidden: actor.hidden || {},
-        knowledge: actor.knowledge || [], resources: actor.resources || [], stimuli: actor.stimuli || [],
-        evidence: actor.evidence || [],
-        // The full profile owns durable tickets, commit proofs, locks and
-        // version history.  World reasoning needs the canonical read-only
-        // profile view: all natural narrative sections and readiness facts,
-        // without duplicating persistence machinery in every prompt.
-        profile: actor.profileV6 ? actorProfileV6View(actor) : null,
-    });
+    const recalledActorCount = Math.max(1, [...(actorLedger?.actors || [])]
+        .filter((actor) => recalledActorIds.has(actor.id)).length);
+    const actorNarrativeBudget = Math.max(420, Math.floor(5000 / recalledActorCount));
     const recalledActors = [...(actorLedger?.actors || [])]
         .filter((actor) => recalledActorIds.has(actor.id))
-        .map(actorPromptView);
-    const recalledThreads = (base.threads || []).filter((thread) => recalledThreadIds.has(thread.id));
-    const recalledLanes = (worldLaneSchedule?.candidates || []).filter((lane) => recalledLaneIds.has(lane.sourceId));
+        .map((actor) => stage3WorldActorPromptView(actor, actorNarrativeBudget));
+    const promptThreadIds = new Set(promptThreads.map((thread) => thread.id));
+    const recalledThreads = (base.threads || [])
+        .filter((thread) => recalledThreadIds.has(thread.id) && !promptThreadIds.has(thread.id))
+        .map((thread) => stage3WorldThreadPromptView(thread));
+    const recalledLanes = (worldLaneSchedule?.candidates || [])
+        .filter((lane) => recalledLaneIds.has(lane.sourceId))
+        .map((lane) => stage3WorldPromptValue(lane, {
+            maxDepth: 4, maxItems: 8, maxKeys: 16, maxText: 140,
+        }));
     const requiredActorIds = new Set(actorShardCandidates?.scheduledActorIds || []);
     if ([...requiredActorIds].some((actorId) => !recalledActors.some((actor) => actor.actorId === actorId && actor.profile))) {
         throw new Error('world_recall_missing_scheduled_actor_material');
     }
-    // Required material is atomic: never crop through an ActorRef/Profile in
-    // the middle. The configured model connection owns the actual context
-    // capacity; Doctor must not reject a valid turn with a local char ceiling.
+    // Durable authority remains complete in actorLedger/base/worldContext.
+    // The model receives a bounded, entity-complete semantic projection: every
+    // required ID remains present, while persistence history and duplicate
+    // evidence are deliberately kept out of the wire prompt.
     const worldbookPromptMaterial = stage3WorldbookPromptMaterial(worldContext, recallPacket);
     const requiredMaterial = safeJson({
         recalledActors,
         recalledThreads,
         recalledLanes,
-        worldbookManifest: worldbookPromptMaterial.manifest,
+        worldbookAuthority: {
+            digest: recallPacket?.worldbookDigest || '',
+            selectedEntryCount: worldbookPromptMaterial.selectedEntryCount,
+            evidenceEntryCount: worldbookPromptMaterial.evidenceEntryCount,
+        },
     }, 0);
     const actorShardPromptPayload = actorShardCandidates?.actionAttempts?.length
         ? {
@@ -15049,6 +15180,7 @@ function buildContinuityMessages({
             worldMustAdjudicateEveryAttempt: true,
         }
         : actorShardCandidates;
+    const compactActorShardPromptPayload = stage3WorldActorShardPromptView(actorShardPromptPayload);
     const worldCreatesAttempts = !actorShardCandidates?.actionAttempts?.length
         && Array.isArray(actorShardCandidates?.scheduledActorIds)
         && actorShardCandidates.scheduledActorIds.length > 0;
@@ -15142,36 +15274,35 @@ function buildContinuityMessages({
         jsonOnly ? '' : '</ContinuityState>',
     ].filter(Boolean).join('\n');
     */
-    const requiredPrefix = recallPacket
-        ? `=== 本轮只读召回包（召回阶段已验证mustInclude；它选择支持材料，不授予写权限）===\n${safeJson(recallPacket, 0)}\n\n=== 召回的持久材料（Actor/Profile/Thread/Lane完整；世界书清单以digest绑定）===\n${requiredMaterial}\n\n=== 按本轮关键词优先的世界书取材（仅供语义理解；未列正文仍保留在本地权威清单）===\n${worldbookPromptMaterial.evidenceText}\n\n`
-        : '';
-    const compactUser = [
+    const buildRequiredPrefix = (worldbookEvidence) => (recallPacket
+        ? `=== 本轮只读召回包（本地完整计划的模型视图）===\n${safeJson(stage3WorldRecallPromptView(recallPacket), 0)}\n\n=== 召回的持久材料（必需实体完整，字段为有界语义投影）===\n${requiredMaterial}${worldbookEvidence ? `\n\n=== 按关键词优先的世界书取材（本地完整权威不受裁剪）===\n${worldbookEvidence}` : ''}\n\n`
+        : '');
+    const buildCompactUser = (worldbookEvidence = '') => [
         `目标：chat=${captured.chatId} index=${captured.index} swipe=${captured.swipeId}`,
         ...(customActorAdvanceInstruction ? [customActorAdvanceInstruction] : []),
-        requiredPrefix.trim(),
-        `=== 更新前连续性账本 ===\n${cropText(safeJson(promptBase), 5500, '连续性账本')}`,
+        buildRequiredPrefix(worldbookEvidence).trim(),
+        `=== 更新前连续性账本 ===\n${stage3WorldPromptText(safeJson(promptBase), 4000)}`,
         forumSignals.length
-            ? `=== 已形成因果的公共论坛信号 ===\n${cropText(safeJson(forumSignals), 900, '论坛信号')}`
+            ? `=== 已形成因果的公共论坛信号 ===\n${stage3WorldPromptText(safeJson(forumSignals), 600)}`
             : '',
-        `=== MVU主线锚点（只读）===\n${cropText(stateAnchors, 1800, 'MVU主线锚点')}`,
+        `=== MVU主线锚点（只读）===\n${stage3WorldPromptText(stateAnchors, 1000)}`,
         ...(actorShardCandidates ? [
             worldCreatesAttempts
                 ? '下列ready人物各返回一条行动意图和裁决草案；只写NPC想做什么、实际结果、可观察后果与真正发生的状态变化。技术身份和账本字段由医生本地绑定。'
                 : '下列行动尝试已经由医生可靠登记；请按人物逐项判断实际结果与可观察后果，不要抄写或猜测任何内部技术标识。',
-            safeJson(actorShardPromptPayload, 0),
+            safeJson(compactActorShardPromptPayload, 0),
         ] : []),
         ...(worldLaneSchedule?.selected?.length ? [
-            `=== 独立结构世界轨 ===\n${cropText(safeJson(worldLaneSchedule), 1200, '结构世界轨')}`,
+            `=== 独立结构世界轨 ===\n${stage3WorldPromptText(safeJson(worldLaneSchedule), 700)}`,
         ] : []),
-        `=== 最近已接受剧情 ===\n${cropText(
+        `=== 最近已接受剧情 ===\n${stage3WorldPromptText(
             recentTranscriptThrough(
                 context,
                 captured.index,
                 settings.continuityContextMessages,
                 new Set(excludedSourceIndexes),
             ),
-            2600,
-            '剧情上下文',
+            1800,
         )}`,
         '输出最小形状：',
         jsonOnly ? '' : '<ContinuityState>',
@@ -15179,10 +15310,43 @@ function buildContinuityMessages({
         'threads/world/scenarioPlan只返回变化增量；无变化使用空数组或空对象，同时lastTick必须是held并对应具体未满足条件，禁止advanced配空增量。',
         jsonOnly ? '' : '</ContinuityState>',
     ].filter(Boolean).join('\n');
-    return [
+    const withoutWorldbookEvidence = buildCompactUser('');
+    const evidenceBudget = Math.min(
+        6000,
+        Math.max(
+            0,
+            STAGE3_WORLD_MODEL_INPUT_MAX_CHARS
+                - compactSystem.length
+                - withoutWorldbookEvidence.length
+                - 160,
+        ),
+    );
+    let compactUser = buildCompactUser(stage3WorldPromptText(
+        worldbookPromptMaterial.evidenceText,
+        evidenceBudget,
+    ));
+    if (compactSystem.length + compactUser.length > STAGE3_WORLD_MODEL_INPUT_MAX_CHARS) {
+        compactUser = withoutWorldbookEvidence;
+    }
+    const messages = [
         { role: 'system', content: compactSystem },
         { role: 'user', content: compactUser },
     ];
+    if (stage3WorldPromptInputChars(messages) > STAGE3_WORLD_MODEL_INPUT_MAX_CHARS) {
+        const identityFooter = `\n=== 超长投影的完整必需ID索引 ===\n${safeJson({
+            actorIds: [...recalledActorIds],
+            threadIds: [...recalledThreadIds],
+            laneIds: [...recalledLaneIds],
+            worldbookDigest: recallPacket?.worldbookDigest || '',
+        }, 0)}`;
+        const userBudget = Math.max(0, STAGE3_WORLD_MODEL_INPUT_MAX_CHARS - compactSystem.length);
+        compactUser = `${stage3WorldPromptText(
+            withoutWorldbookEvidence,
+            Math.max(0, userBudget - identityFooter.length),
+        )}${identityFooter}`;
+        messages[1] = { role: 'user', content: stage3WorldPromptText(compactUser, userBudget) };
+    }
+    return messages;
 }
 
 async function generateWorldContinuitySingleBatch(messages, {

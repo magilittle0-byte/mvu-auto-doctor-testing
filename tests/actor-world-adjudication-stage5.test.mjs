@@ -1071,9 +1071,9 @@ test('production player identity and adjudicated duration remain hard action aut
         'model prompt must not mirror locally owned action authority fields',
     );
     assert.match(indexSource, /function stage3NormalizeWorldAdjudicationShape/u);
-    assert.match(indexSource, /knowledge: actor\.knowledge/u);
-    assert.match(indexSource, /resources: actor\.resources/u);
-    assert.match(indexSource, /stimuli: actor\.stimuli/u);
+    assert.match(indexSource, /knowledge: compact\(actor\?\.knowledge/u);
+    assert.match(indexSource, /resources: compact\(actor\?\.resources/u);
+    assert.match(indexSource, /stimuli: compact\(actor\?\.stimuli/u);
 });
 
 test('formal profile receipt remains self-consistent after the stage5 action flow', () => {
