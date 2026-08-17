@@ -49,6 +49,7 @@ import {
     attachChangedSourceRefs,
     buildContinuityConsumerPayload,
     buildContinuityInjection,
+    buildContinuityPacketText,
     continuityContentDigest,
     continuityCoreSemanticFingerprint,
     continuityGlobalHoldIsVerifiable,
@@ -5175,6 +5176,7 @@ function doctorRuntimeCriticalFingerprint() {
         commitPreparedWorldCandidate.toString(),
         buildContinuityInjection.toString(),
         buildContinuityConsumerPayload.toString(),
+        buildContinuityPacketText.toString(),
         precomposeNextTurnConsumer.toString(),
         publicContinuityRecordsForForum.toString(),
         constrainForumCausalSignals.toString(),
@@ -21144,7 +21146,7 @@ async function commitPreparedWorldCandidate(captured, {
         version: 1, status: 'pending', producerTarget: stage3AcceptedTarget(captured),
         sourceContinuityDigest: stage3ContinuityDigestWithoutInjection(next),
         payload: {
-            text: buildContinuityInjection(next, { director: 'doctor', maxVisible: settings.continuityMaxVisible }).trim(),
+            text: buildContinuityPacketText(next, { director: 'doctor', maxVisible: settings.continuityMaxVisible }),
             visibleThreadIds: next.threads.filter((thread) => thread.stage !== 'resolved' && thread.relation === 'converging')
                 .slice(0, Math.max(0, Number(settings.continuityMaxVisible) || 0)).map((thread) => thread.id),
         }, settlementProof, createdAt: Date.now(),

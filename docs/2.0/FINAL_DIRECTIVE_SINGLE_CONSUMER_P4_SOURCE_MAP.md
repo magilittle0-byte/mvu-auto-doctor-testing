@@ -39,7 +39,7 @@ world package 与 ticket 不属于同一 producer：前者来自上一 accepted 
 |---|---|---|---|
 | 世界事实与玩家边界 | `continuity-core.mjs:buildContinuityInjection` | 原样复用内层行，最小容器适配 | 不投递旧 bridge 外壳或 fixed director 行 |
 | legacy package | P3 `index.js` 在 world durable readback 前写 `nextTurnInjection.payload.text/visibleThreadIds` | 只读验证 | P4 不覆盖 payload、producerTarget、digest 或 settlementProof |
-| 无桥投影 | `continuity-core.mjs:buildContinuityConsumerPayload` | 必要新胶水 | 原样复用 `normalizeNextTurnInjection` 已使用的 `cleanText(..., 12000)` canonical 形态，对 director x rawMaxVisible 的原 renderer 输出与独立 visible projection 做严格验证；不使用新 parser、正则或 HTML 清洗 |
+| 无桥投影 | `continuity-core.mjs:buildContinuityPacketText/buildContinuityConsumerPayload` | 必要新胶水 | P3/P4 共用同一个结构保全的 12000 字符 canonical renderer，对 director x rawMaxVisible 的输出与独立 visible projection 做严格验证；不使用新 parser、正则或 HTML 清洗 |
 | 人物票据文本 | `index.js:npcDesignTicketPrompt(batch)` | 原样复用 | 禁止另造人格池、票据提示词或二次掷骰 |
 | P5 预设读取 | `fair-director-preset-core.mjs:CHARACTER_DIVERSITY_CONTRACT` | 原样复用 | 读取 `<Original_NPC_Dice_Tickets>`，票据仅在 P2 注册/readback 后逐人消费 |
 | Doctor 自有宿主 slot | SillyTavern `setExtensionPrompt` | 最小适配 | 唯一 key `mvu-auto-doctor-next-turn-consumer`，IN_CHAT/depth 1/system；不接受外部 provider 注册、优先级或 callback |
@@ -61,7 +61,7 @@ threads
   .map(thread => thread.id)
 ```
 
-P3 namespace normalize 与 P4 重演均复用 `cleanText(..., 12000)` 形成同一 canonical 文本；枚举先按 `(canonicalText, visibleProjection)` 去重，再要求 canonical 文本与 `payload.text`、visible projection 与 `payload.visibleThreadIds` 同时精确且唯一匹配，才将旧第一行 bridge 外壳及第二行固定 director 行剥离。`maxVisible=0` 在 renderer 中显式保留为 0，不再被默认值 2 覆盖；当 0/2 因无可见支线而产生完全相同的文本与投影时，它们属于同一 canonical 候选而不是伪歧义。renderer canonical 全文若超过 12000 而在持久化时截断，则投影 fail-closed，禁止从重演全文补回持久包中不存在的尾部。
+P3 namespace normalize 与 P4 重演均复用 `buildContinuityPacketText()` 形成同一 canonical 文本；枚举先按 `(canonicalText, visibleProjection)` 去重，再要求 canonical 文本与 `payload.text`、visible projection 与 `payload.visibleThreadIds` 同时精确且唯一匹配，才从持久包本身剥离固定 director 行。`maxVisible=0` 在 renderer 中显式保留为 0，不再被默认值 2 覆盖；当 0/2 因无可见支线而产生完全相同的文本与投影时，它们属于同一 canonical 候选而不是伪歧义。renderer 全文超过 12000 时，生产端在同一预算内确定性裁剪 canonical 尾部并保留闭合标记；消费端重演同一有界结果，绝不从全文把未持久尾部补入 prompt。任意正文、visible IDs、producer、continuity digest 或 settlement proof 漂移仍 fail-closed。
 
 不匹配、缺闭合、未知版本、多个三元组匹配、callback throw 或 receipt digest 不符，均 release + fail-closed，绝不投 legacy bridge 文本。
 

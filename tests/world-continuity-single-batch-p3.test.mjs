@@ -7234,7 +7234,7 @@ test('production Phase2 zero-model recovery neutralizes a legacy prepared direct
         stage3CanonicalSettlementProof: () => ({ orderedResults: [] }),
         stage3AcceptedTarget: () => structuredClone(producerTarget),
         stage3ContinuityDigestWithoutInjection: () => 'continuity-digest',
-        buildContinuityInjection: (_state, options) => {
+        buildContinuityPacketText: (_state, options) => {
             injectionOptions = structuredClone(options);
             return '';
         },

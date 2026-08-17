@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import {
     buildContinuityConsumerPayload,
     buildContinuityInjection,
+    buildContinuityPacketText,
     normalizeContinuityState,
 } from '../continuity-core.mjs';
 
@@ -62,6 +63,7 @@ function persistedWorldPacket({
     const options = { director: 'standalone' };
     if (maxVisible !== undefined) options.maxVisible = maxVisible;
     const legacyText = buildContinuityInjection(state, options);
+    const packetText = buildContinuityPacketText(state, options);
     const saved = normalizeContinuityState({
         ...state,
         nextTurnInjection: {
@@ -69,7 +71,7 @@ function persistedWorldPacket({
             status: 'pending',
             producerTarget,
             sourceContinuityDigest: 'continuity-before-world-1',
-            payload: { text: legacyText, visibleThreadIds },
+            payload: { text: packetText, visibleThreadIds },
             settlementProof: {
                 producerTarget,
                 actorLedgerDigest: 'empty-actor-ledger',
@@ -165,11 +167,13 @@ test('canonical world projection remains strict about text and visible thread ID
         'fixture must cross the production persistence limit',
     );
     assert.equal(oversized.packet.payload.text.length, 12000);
-    assert.deepEqual(
-        buildContinuityConsumerPayload(oversized.saved, oversized.packet),
-        { ok: false, reason: 'legacy_projection_mismatch' },
-        'a truncated persisted renderer cannot regain an unseen tail during P4 projection',
+    const oversizedConsumer = buildContinuityConsumerPayload(
+        oversized.saved,
+        oversized.packet,
     );
+    assert.equal(oversizedConsumer.ok, true);
+    assert.match(oversized.packet.payload.text, /<\/World_Continuity_Package>$/u);
+    assert.match(oversizedConsumer.text, /<\/World_Continuity_Package>$/u);
 });
 
 test('P3 uses local structured recall then one Advance call; no separate actor proposal model or repair path', async () => {

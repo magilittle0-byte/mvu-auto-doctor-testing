@@ -3064,6 +3064,31 @@ const LEGACY_CONSUMER_DIRECTORS = Object.freeze([
 
 const LEGACY_CONSUMER_RAW_MAX_VISIBLE = Object.freeze([0, 1, 2, 3, 4]);
 
+const CONTINUITY_PACKET_MAX_CHARS = 12000;
+const CONTINUITY_PACKET_OPEN = '<World_Continuity_Package>';
+const CONTINUITY_PACKET_CLOSE = '</World_Continuity_Package>';
+
+/**
+ * Produces the exact bounded text persisted by P3 and reconstructed by P4.
+ * When the legacy renderer exceeds the carrier budget, only its canonical
+ * tail is clipped and the closing marker is restored inside the same budget.
+ * This keeps the packet structurally complete and makes truncation explicit
+ * and deterministic instead of persisting a prefix that P4 can never accept.
+ */
+export function buildContinuityPacketText(state, options = {}) {
+    const full = cleanText(buildContinuityInjection(state, options), Number.MAX_SAFE_INTEGER);
+    const maxChars = Math.max(512, Math.floor(Number(options?.maxChars)
+        || CONTINUITY_PACKET_MAX_CHARS));
+    if (full.length <= maxChars) return full;
+    const suffix = ` ${CONTINUITY_PACKET_CLOSE}`;
+    const prefixLimit = Math.max(
+        CONTINUITY_PACKET_OPEN.length,
+        maxChars - suffix.length,
+    );
+    const prefix = full.slice(0, prefixLimit).trimEnd();
+    return `${prefix}${suffix}`.slice(0, maxChars);
+}
+
 function exactLegacyVisibleProjection(state, rawMaxVisible) {
     const normalized = normalizeContinuityState(state, { maxThreads: 12 });
     return normalized.threads
@@ -3109,11 +3134,10 @@ export function buildContinuityConsumerPayload(state, packet) {
             director: 'doctor',
             maxVisible: rawMaxVisible,
         });
-        const fullCanonicalCurrentText = cleanText(
-            currentText,
-            Number.MAX_SAFE_INTEGER,
-        );
-        const canonicalCurrentText = cleanText(currentText, 12000);
+        const canonicalCurrentText = buildContinuityPacketText(normalizedState, {
+            director: 'doctor',
+            maxVisible: rawMaxVisible,
+        });
         const visibleProjection = exactLegacyVisibleProjection(
             normalizedState,
             rawMaxVisible,
@@ -3124,7 +3148,6 @@ export function buildContinuityConsumerPayload(state, packet) {
             rawMaxVisible,
             legacyText: currentText,
             canonicalLegacyText: canonicalCurrentText,
-            truncated: fullCanonicalCurrentText !== canonicalCurrentText,
             visibleProjection,
         });
     }
@@ -3135,11 +3158,11 @@ export function buildContinuityConsumerPayload(state, packet) {
                 maxVisible: rawMaxVisible,
                 renderLegacyDirector: true,
             });
-            const fullCanonicalLegacyText = cleanText(
-                legacyText,
-                Number.MAX_SAFE_INTEGER,
-            );
-            const canonicalLegacyText = cleanText(legacyText, 12000);
+            const canonicalLegacyText = buildContinuityPacketText(normalizedState, {
+                director,
+                maxVisible: rawMaxVisible,
+                renderLegacyDirector: true,
+            });
             const visibleProjection = exactLegacyVisibleProjection(
                 normalizedState,
                 rawMaxVisible,
@@ -3150,14 +3173,12 @@ export function buildContinuityConsumerPayload(state, packet) {
                 rawMaxVisible,
                 legacyText,
                 canonicalLegacyText,
-                truncated: fullCanonicalLegacyText !== canonicalLegacyText,
                 visibleProjection,
             });
         }
     }
     const matches = [...candidates.values()].filter((candidate) => (
-        !candidate.truncated
-        && candidate.canonicalLegacyText === canonicalText
+        candidate.canonicalLegacyText === canonicalText
         && exactStringListMatches(
             candidate.visibleProjection,
             normalizedPacket.payload.visibleThreadIds,
@@ -3177,18 +3198,21 @@ export function buildContinuityConsumerPayload(state, packet) {
         || lines.at(-1) !== '</World_Continuity_Package>'
     ) return { ok: false, reason: 'legacy_projection_structure_invalid' };
 
-    const expectedDirectorLine = matches[0].legacyText.split('\n')[1];
-    if (!expectedDirectorLine || lines[1] !== expectedDirectorLine) {
+    const expectedDirectorLine = cleanText(lines[1], Number.MAX_SAFE_INTEGER);
+    const canonicalPrefix = `${CONTINUITY_PACKET_OPEN} ${expectedDirectorLine}`;
+    if (
+        !expectedDirectorLine
+        || !canonicalText.startsWith(`${canonicalPrefix} `)
+        || !canonicalText.endsWith(CONTINUITY_PACKET_CLOSE)
+    ) {
         return { ok: false, reason: 'legacy_projection_director_invalid' };
     }
 
+    const canonicalBody = canonicalText.slice(canonicalPrefix.length).trim();
+
     return {
         ok: true,
-        text: cleanText([
-            '<World_Continuity_Package>',
-            ...lines.slice(2, -1),
-            '</World_Continuity_Package>',
-        ].join('\n'), 12000),
+        text: cleanText(`${CONTINUITY_PACKET_OPEN} ${canonicalBody}`, 12000),
         legacy: {
             director: matches[0].director,
             rawMaxVisible: matches[0].rawMaxVisible,
