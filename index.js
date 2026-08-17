@@ -5132,6 +5132,7 @@ function doctorRuntimeCriticalFingerprint() {
         stage3PreparedPhase1StatesMatch.toString(),
         stage3NoSemanticDeltaHeldTerminal.toString(),
         stage3SafeHeldDraftAfterParseFailure.toString(),
+        stage3SafeHeldParsedAfterActorAdmissionFailure.toString(),
         clearContinuityState.toString(),
         stage3ValidateWorldCandidateInMemory.toString(),
         stage3HeldActorProposal.toString(),
@@ -19123,6 +19124,8 @@ async function runContinuityTarget(captured, {
     let output = '';
     let parseFailureSafeHoldRecovery = false;
     let parseFailureDeferredActorCount = 0;
+    let actorAdmissionSafeHoldRecovery = false;
+    let actorAdmissionDeferredActorCount = 0;
     try {
         const validateCandidateInMemory = (candidateOutput) => {
             const parseStartedAt = Date.now();
@@ -19309,6 +19312,25 @@ async function runContinuityTarget(captured, {
     // model shape would reintroduce technical fields that the compact prompt
     // deliberately leaves to Doctor.
     const validatedParsed = draftValidation.parsed;
+    if (draftValidation.deferredActorIds?.length) {
+        actorAdmissionSafeHoldRecovery = true;
+        actorAdmissionDeferredActorCount = draftValidation.deferredActorIds.length;
+        scheduledActorIds = [];
+        scheduledActors = [];
+        proposalValidationCandidates.clear();
+        latestActorShardDiagnostics = {
+            ...latestActorShardDiagnostics,
+            status: 'deferred_to_safe_hold',
+            selected: actorAdmissionDeferredActorCount,
+            completed: 0,
+            succeeded: 0,
+            failed: 0,
+            semanticActions: 0,
+            heldActions: actorAdmissionDeferredActorCount,
+            scheduledWithoutSemanticAction: actorAdmissionDeferredActorCount,
+            failureCodes: ['actor_scheduling.attempt_admission_deferred_to_hold'],
+        };
+    }
     let phase1Persisted = null;
     if (scheduledActorIds.length) {
         const proposals = Array.isArray(validatedParsed.raw?.actionProposals)
@@ -19386,6 +19408,24 @@ async function runContinuityTarget(captured, {
         }
         phase1Persisted = rebased.persisted;
         actionLedger = rebased.persisted.ledger;
+        if (rebased.deferredActorIds?.length) {
+            actorAdmissionSafeHoldRecovery = true;
+            actorAdmissionDeferredActorCount = rebased.deferredActorIds.length;
+            scheduledActorIds = [];
+            scheduledActors = [];
+            latestActorShardDiagnostics = {
+                ...latestActorShardDiagnostics,
+                status: 'deferred_to_safe_hold',
+                selected: actorAdmissionDeferredActorCount,
+                completed: 0,
+                succeeded: 0,
+                failed: 0,
+                semanticActions: 0,
+                heldActions: actorAdmissionDeferredActorCount,
+                scheduledWithoutSemanticAction: actorAdmissionDeferredActorCount,
+                failureCodes: ['actor_scheduling.attempt_admission_deferred_to_hold'],
+            };
+        }
         pendingActions = pendingActorActionAttempts(actionLedger, { target: actionTarget });
         if (pendingActions.attempts.length !== rebased.recordedCount) {
             markActorSchedulingFailure('actor_scheduling.phase1_attempt_readback_incomplete', {
@@ -19470,6 +19510,11 @@ async function runContinuityTarget(captured, {
         committed.recovered = true;
         committed.recoveryReason = 'local_safe_hold_after_parse_failure';
         committed.deferredActorCount = parseFailureDeferredActorCount;
+    }
+    if (actorAdmissionSafeHoldRecovery && committed?.status === 'applied') {
+        committed.recovered = true;
+        committed.recoveryReason = 'local_safe_hold_after_actor_admission_failure';
+        committed.deferredActorCount = actorAdmissionDeferredActorCount;
     }
     return finishWorldResult(committed);
 
@@ -20011,7 +20056,48 @@ async function stage3PersistPreparedActorAttemptsOnFreshLedger(captured, {
         if (
             preparedAttempts.rejected.length
             || preparedAttempts.attempts.length !== activeFrozenIds.length
-        ) return { ok: false, reason: 'actor_attempt_prepare_incomplete' };
+        ) {
+            const safeParsed = stage3SafeHeldParsedAfterActorAdmissionFailure(
+                parsed,
+                scheduledBase,
+                {
+                    nextTurn,
+                    scheduledActorIds: activeFrozenIds,
+                    pendingActorAttempts: [],
+                    maxThreads: settings.continuityMaxThreads,
+                },
+            );
+            if (!safeParsed) return { ok: false, reason: 'actor_attempt_prepare_incomplete' };
+            const freshExpected = {
+                actorLedger: stage3FieldState(freshNamespace, 'actorLedger'),
+                continuity: freshContinuity,
+                continuityCheckpoint: freshCheckpoint,
+            };
+            const deferred = await stage3PersistAttemptlessPreparedWorldCandidate(
+                captured,
+                {
+                    token,
+                    settings,
+                    actionLedger: freshLedger,
+                    parsed: safeParsed,
+                    checkpointBase,
+                    scheduledBase,
+                    director,
+                    nextTurn,
+                    actionTarget,
+                    recallPacket,
+                    worldContext,
+                    phase1Expected: freshExpected,
+                },
+            );
+            if (!deferred.ok) return deferred;
+            return {
+                ...deferred,
+                recordedCount: 0,
+                deferredActorIds: activeFrozenIds,
+                localAttempts: localAttempt + 1,
+            };
+        }
         const recorded = recordActorActionAttempts(
             preparedAttempts.ledger,
             preparedAttempts.attempts,
@@ -20538,6 +20624,35 @@ function stage3HeldActorProposal(actorId) {
     };
 }
 
+function stage3SafeHeldParsedAfterActorAdmissionFailure(parsed, scheduledState, {
+    nextTurn = 0,
+    scheduledActorIds = [],
+    pendingActorAttempts = [],
+    maxThreads = 24,
+} = {}) {
+    if (!scheduledActorIds.length || pendingActorAttempts.length) return null;
+    const safeDraft = stage3SafeHeldDraftAfterParseFailure(scheduledState, {
+        nextTurn,
+        scheduledActorIds,
+        pendingActorAttempts,
+        maxThreads,
+    });
+    if (!safeDraft) return null;
+    safeDraft.lastTick = {
+        ...safeDraft.lastTick,
+        reason: '人物自主行动未通过本地权威校验，本回合保留既有世界状态',
+    };
+    return {
+        ...parsed,
+        state: deepClone(safeDraft),
+        raw: {
+            ...deepClone(safeDraft),
+            actionProposals: [],
+            actionAdjudications: [],
+        },
+    };
+}
+
 function stage3HeldWorldAdjudication(attempt) {
     return {
         actorId: String(attempt?.actorId || attempt?.actorRef?.actorId || ''),
@@ -20679,6 +20794,7 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
     };
     let workingLedger = actionLedger;
     let recorded = { ledger: actionLedger, recorded: [], rejected: [] };
+    let deferredActorIds = [];
     if (scheduledActorIds.length) {
         const suppliedProposals = Array.isArray(workingParsed.raw?.actionProposals)
             ? workingParsed.raw.actionProposals
@@ -20750,30 +20866,53 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
             target: actionTarget,
         });
         if (prepared.rejected.length || prepared.attempts.length !== scheduledActorIds.length) {
-            return { ok: false, validationCode: 'world.actor.attempt_prepare_incomplete' };
-        }
-        recorded = recordActorActionAttempts(prepared.ledger, prepared.attempts, {
-            target: actionTarget,
-        });
-        if (recorded.rejected.length || recorded.recorded.length !== prepared.attempts.length) {
-            return { ok: false, validationCode: 'world.actor.attempt_record_incomplete' };
-        }
-        workingLedger = recorded.ledger;
-        workingParsed.raw.actionAdjudications = stage3WorldAdjudicationsForAttempts(
-            workingParsed.raw?.actionAdjudications,
-            recorded.recorded,
-            { forceHeldActorIds: locallyHeldActorIds },
-        );
-        const adjudications = validateWorldAdjudicationBatch(
-            workingParsed.raw.actionAdjudications,
-            recorded.recorded,
-        );
-        if (!adjudications.valid) {
-            return stage3WorldAdjudicationValidationFailure(
-                adjudications.errors,
-                recorded.recorded,
-                workingParsed.raw.actionAdjudications,
+            // No ATT has been written yet.  A model proposal that cannot be
+            // admitted is therefore safe to defer, but its unpartitioned
+            // world/continuity result is not safe to keep.  Replace the whole
+            // candidate with a local no-change receipt; do not ask the model
+            // again and do not turn an invalid attempt into an outcome.
+            const safeParsed = stage3SafeHeldParsedAfterActorAdmissionFailure(
+                workingParsed,
+                scheduledState,
+                {
+                    nextTurn,
+                    scheduledActorIds,
+                    pendingActorAttempts,
+                    maxThreads: settings.continuityMaxThreads,
+                },
             );
+            if (!safeParsed) {
+                return { ok: false, validationCode: 'world.actor.attempt_prepare_incomplete' };
+            }
+            workingParsed.state = safeParsed.state;
+            workingParsed.raw = safeParsed.raw;
+            workingLedger = actionLedger;
+            recorded = { ledger: actionLedger, recorded: [], rejected: [] };
+            deferredActorIds = [...scheduledActorIds];
+        } else {
+            recorded = recordActorActionAttempts(prepared.ledger, prepared.attempts, {
+                target: actionTarget,
+            });
+            if (recorded.rejected.length || recorded.recorded.length !== prepared.attempts.length) {
+                return { ok: false, validationCode: 'world.actor.attempt_record_incomplete' };
+            }
+            workingLedger = recorded.ledger;
+            workingParsed.raw.actionAdjudications = stage3WorldAdjudicationsForAttempts(
+                workingParsed.raw?.actionAdjudications,
+                recorded.recorded,
+                { forceHeldActorIds: locallyHeldActorIds },
+            );
+            const adjudications = validateWorldAdjudicationBatch(
+                workingParsed.raw.actionAdjudications,
+                recorded.recorded,
+            );
+            if (!adjudications.valid) {
+                return stage3WorldAdjudicationValidationFailure(
+                    adjudications.errors,
+                    recorded.recorded,
+                    workingParsed.raw.actionAdjudications,
+                );
+            }
         }
     } else if (pendingActorAttempts.length) {
         workingParsed.raw.actionAdjudications = stage3WorldAdjudicationsForAttempts(
@@ -20826,6 +20965,7 @@ function stage3ValidateWorldDraftInMemory(captured, settings, actionLedger, pars
         ledger: workingLedger,
         recorded,
         candidate,
+        deferredActorIds,
     };
 }
 

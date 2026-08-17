@@ -1023,7 +1023,7 @@ function loadAttemptlessPhase1RebaseHarness({
     };
 }
 
-function loadScheduledPhase1RebaseHarness() {
+function loadScheduledPhase1RebaseHarness({ rejectPreparedAttempt = false } = {}) {
     const unchangedGate = sourceSection(
         'function stage3FieldStateCanRebaseUnchanged(expected, actual) {',
         'function stage3PreparedWorldCheckpoint({',
@@ -1060,6 +1060,7 @@ function loadScheduledPhase1RebaseHarness() {
     const scheduledRef = { actorId: 'actor-old', identityHash: 'stable-ref' };
     let actorRevision = 2;
     let persistCalls = 0;
+    let attemptlessCalls = 0;
     const freshLedger = () => ({
         chatId: target.chatId,
         actorRegistry: { scopeDigest: target.scopeDigest, registered: {} },
@@ -1106,15 +1107,20 @@ function loadScheduledPhase1RebaseHarness() {
         }),
         normalizeActorLedger: (value) => structuredClone(value),
         actorActionCandidatesFromShard: (_ledger, proposals) => structuredClone(proposals),
-        prepareActorActionAttempts: (ledger, candidates) => ({
-            ledger: structuredClone(ledger), rejected: [],
-            attempts: candidates.map((candidate) => ({
-                id: `attempt-${candidate.actorId}`,
-                actorId: candidate.actorId,
-                actorRef: structuredClone(scheduledRef),
-                target: structuredClone(actionTarget),
-            })),
-        }),
+        prepareActorActionAttempts: (ledger, candidates) => rejectPreparedAttempt
+            ? {
+                ledger: structuredClone(ledger), attempts: [],
+                rejected: [{ actorId: 'actor-old', reasons: ['capability-out-of-bounds'] }],
+            }
+            : ({
+                ledger: structuredClone(ledger), rejected: [],
+                attempts: candidates.map((candidate) => ({
+                    id: `attempt-${candidate.actorId}`,
+                    actorId: candidate.actorId,
+                    actorRef: structuredClone(scheduledRef),
+                    target: structuredClone(actionTarget),
+                })),
+            }),
         recordActorActionAttempts: (ledger, attempts) => ({
             ledger: { ...structuredClone(ledger), actionAttempts: structuredClone(attempts) },
             recorded: structuredClone(attempts), rejected: [],
@@ -1147,6 +1153,29 @@ function loadScheduledPhase1RebaseHarness() {
             };
         },
         stage3PreparedWorldCheckpointMatches: () => true,
+        stage3SafeHeldDraftAfterParseFailure: (scheduledState, { nextTurn }) => ({
+            ...structuredClone(scheduledState),
+            turn: nextTurn,
+            lastTick: {
+                turn: nextTurn, action: 'held', threadId: 'WORLD',
+                reason: '模型输出格式无法安全恢复，本回合保留既有世界状态',
+            },
+            threads: [], scenarioPlan: {}, world: {},
+        }),
+        stage3PersistAttemptlessPreparedWorldCandidate: async (_captured, options) => {
+            attemptlessCalls += 1;
+            assert.deepEqual(Array.from(options.parsed.raw.actionProposals), []);
+            assert.deepEqual(Array.from(options.parsed.raw.actionAdjudications), []);
+            assert.equal(JSON.stringify(options.parsed.raw.world), '{}');
+            assert.match(options.parsed.state.lastTick.reason, /本地权威校验/u);
+            return {
+                ok: true,
+                persisted: {
+                    ledger: structuredClone(options.actionLedger),
+                    checkpoint: { stage3Phase: 'world_candidate_prepared' },
+                },
+            };
+        },
     };
     vm.runInNewContext(
         `${unchangedGate}\n${readbackCode}\n${profileEvolutionCode}\n${adjudicationCode}\n${code}\n`
@@ -1185,6 +1214,7 @@ function loadScheduledPhase1RebaseHarness() {
             playerNames: [],
         }),
         persistCalls: () => persistCalls,
+        attemptlessCalls: () => attemptlessCalls,
     };
 }
 
@@ -2201,6 +2231,144 @@ test('production draft validator exposes only fixed invalid proposal ActorId sub
     assert.deepEqual(Array.from(result.repairContext.allowedActorIds), ['actor-a', 'actor-b']);
     assert.equal(result.repairContext.targets[0].validationCode, 'actor_shard.capability_invalid');
     assert.equal(JSON.stringify(result.repairContext).includes('Actor B'), false);
+});
+
+test('production draft validator locally defers an unadmitted actor batch without keeping model outcomes', () => {
+    const code = sourceSection(
+        'function stage3HeldActorProposal(',
+        'function stage3WorldAdjudicationRepairFields(validationCodes = [])',
+    );
+    let validatedEnvelope = null;
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        actorActionTargetOf: () => ({ chatId: 'chat-safe-hold', index: 2 }),
+        parseActorShardProposal: (value, { candidate }) => ({
+            proposal: { ...JSON.parse(value), actorId: candidate.id, actorName: candidate.name },
+        }),
+        actorActionCandidatesFromShard: (_ledger, proposals) => structuredClone(proposals),
+        prepareActorActionAttempts: (ledger) => ({
+            ledger: structuredClone(ledger), attempts: [],
+            rejected: [{ actorId: 'actor-a', reasons: ['capability-out-of-bounds'] }],
+        }),
+        recordActorActionAttempts: () => {
+            throw new Error('an unadmitted proposal must never be recorded');
+        },
+        validateWorldAdjudicationBatch: () => {
+            throw new Error('model adjudications must be discarded with the rejected proposal batch');
+        },
+        stage3ValidateWorldCandidateInMemory: (_captured, _settings, ledger, envelope) => {
+            validatedEnvelope = structuredClone(envelope);
+            return { ok: true, ledger };
+        },
+        stage3SafeHeldDraftAfterParseFailure: (scheduledState, { nextTurn }) => ({
+            ...structuredClone(scheduledState),
+            turn: nextTurn,
+            lastTick: {
+                turn: nextTurn, action: 'held', threadId: 'THREAD-1',
+                reason: '模型输出格式无法安全恢复，本回合保留既有世界状态',
+            },
+            world: {},
+        }),
+    };
+    vm.runInNewContext(`${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
+    const parsed = {
+        state: {
+            turn: 3,
+            threads: [{ id: 'MODEL-SMUGGLED', stage: 'advanced' }],
+            world: { modelOutcome: 'must be discarded' },
+        },
+        raw: {
+            world: { modelOutcome: 'must be discarded' },
+            actionProposals: [{
+                actorId: 'actor-a', intent: 'execute',
+                candidateAction: '使用不存在的能力完成行动',
+                stateChanges: [{ kind: 'plan', summary: '伪造完成结果' }],
+            }],
+            actionAdjudications: [{
+                actorId: 'actor-a', status: 'success',
+                appliedStateChanges: [{ kind: 'plan', summary: '伪造完成结果' }],
+            }],
+        },
+    };
+    const result = sandbox.validateDraft(
+        { chatId: 'chat-safe-hold', index: 2 },
+        { continuityMaxThreads: 24 },
+        { actors: [{ id: 'actor-a' }] },
+        parsed,
+        {
+            scheduledActorIds: ['actor-a'],
+            proposalValidationCandidates: new Map([[
+                'actor-a',
+                {
+                    id: 'actor-a', name: 'Actor A', narrativeProfile: true,
+                    actorState: { location: { name: '原地' } },
+                },
+            ]]),
+            pendingActorAttempts: [],
+            scheduledState: {
+                turn: 2,
+                threads: [{ id: 'THREAD-1', stage: 'advancing' }],
+                scenarioPlan: {}, world: { stable: true },
+            },
+            nextTurn: 3,
+        },
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(Array.from(result.deferredActorIds), ['actor-a']);
+    assert.deepEqual(Array.from(result.parsed.raw.actionProposals), []);
+    assert.deepEqual(Array.from(result.parsed.raw.actionAdjudications), []);
+    assert.equal(JSON.stringify(result.parsed.raw.world), '{}');
+    assert.match(result.parsed.state.lastTick.reason, /本地权威校验/u);
+    assert.deepEqual(Array.from(validatedEnvelope.actionAdjudications), []);
+    assert.equal(JSON.stringify(validatedEnvelope.world), '{}');
+    assert.match(sourceSection(
+        'function doctorRuntimeCriticalFingerprint()',
+        'function diagnosticPayload()',
+    ), /stage3SafeHeldParsedAfterActorAdmissionFailure\.toString\(\)/u);
+});
+
+test('actor-admission safe hold stays fail-closed when a persisted ATT already exists', () => {
+    const code = sourceSection(
+        'function stage3HeldActorProposal(',
+        'function stage3WorldAdjudicationRepairFields(validationCodes = [])',
+    );
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        actorActionTargetOf: () => ({ chatId: 'chat-safe-hold', index: 2 }),
+        parseActorShardProposal: (value, { candidate }) => ({
+            proposal: { ...JSON.parse(value), actorId: candidate.id, actorName: candidate.name },
+        }),
+        actorActionCandidatesFromShard: (_ledger, proposals) => structuredClone(proposals),
+        prepareActorActionAttempts: (ledger) => ({
+            ledger: structuredClone(ledger), attempts: [],
+            rejected: [{ actorId: 'actor-a', reasons: ['capability-out-of-bounds'] }],
+        }),
+        stage3SafeHeldDraftAfterParseFailure: () => {
+            throw new Error('persisted ATT must prevent local draft replacement');
+        },
+    };
+    vm.runInNewContext(`${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
+    const result = sandbox.validateDraft(
+        { chatId: 'chat-safe-hold', index: 2 },
+        { continuityMaxThreads: 24 },
+        { actors: [{ id: 'actor-a' }] },
+        {
+            state: { turn: 3 },
+            raw: { actionProposals: [{ actorId: 'actor-a', intent: 'wait' }] },
+        },
+        {
+            scheduledActorIds: ['actor-a'],
+            proposalValidationCandidates: new Map([[
+                'actor-a',
+                { id: 'actor-a', name: 'Actor A', actorState: { location: { name: '原地' } } },
+            ]]),
+            pendingActorAttempts: [{ id: 'ATT-EXISTING' }],
+            scheduledState: { turn: 2 },
+            nextTurn: 3,
+        },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.validationCode, 'world.actor.attempt_prepare_incomplete');
 });
 
 test('proposal repair rejects missing duplicate or unknown target rows without a third call', async () => {
@@ -7105,6 +7273,16 @@ test('scheduled P3 replays only its frozen actor attempt onto the fresh P1 ledge
         'complete',
         'the concurrent P1 profile commit is retained',
     );
+});
+
+test('scheduled Phase1 locally changes an unadmitted fresh proposal into an attemptless safe hold', async () => {
+    const harness = loadScheduledPhase1RebaseHarness({ rejectPreparedAttempt: true });
+    const result = await harness.run();
+    assert.equal(result.ok, true);
+    assert.equal(result.recordedCount, 0);
+    assert.deepEqual(Array.from(result.deferredActorIds), ['actor-old']);
+    assert.equal(harness.persistCalls(), 0, 'no rejected ATT candidate is written');
+    assert.equal(harness.attemptlessCalls(), 1, 'the safe no-change checkpoint is written once');
 });
 
 test('unresolved attemptless Phase1 CAS drift stays zero-write with a fixed code', async () => {
