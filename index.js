@@ -5114,6 +5114,7 @@ function doctorRuntimeCriticalFingerprint() {
         actorActionTargetOf.toString(),
         persistActorActionAttemptsForTurn.toString(),
         stage3WorldOwnedActorProjection.toString(),
+        stage3ProfileObservationReceiptEvolution.toString(),
         stage3ActorLedgerAfterProfileOnlyEvolution.toString(),
         stage3FieldState.toString(),
         stage3FieldStateCanRebaseUnchanged.toString(),
@@ -5148,7 +5149,9 @@ function doctorRuntimeCriticalFingerprint() {
         stage3WorldbookRegexKey.toString(),
         stage3WorldbookKeyMatches.toString(),
         stage3WorldbookEntryActivated.toString(),
+        stage3WorldbookEntryKeywordActivated.toString(),
         stage3LocalRecallPacket.toString(),
+        stage3WorldbookPromptMaterial.toString(),
         usableContinuityWorldEntry.toString(),
         continuityWorldEntryAcquisitionPriority.toString(),
         continuityWorldEntryPhysicalKey.toString(),
@@ -14525,6 +14528,28 @@ function stage3WorldbookEntryActivated(entry, scanText) {
     }
 }
 
+function stage3WorldbookEntryKeywordActivated(entry, scanText) {
+    const primaryKeys = Array.isArray(entry?.keys) ? entry.keys : [];
+    if (!primaryKeys.length || entry?.vectorized === true) return false;
+    const matches = (key) => stage3WorldbookKeyMatches(
+        scanText,
+        key,
+        entry?.caseSensitive === true,
+        entry?.matchWholeWords === true,
+    );
+    if (!primaryKeys.some(matches)) return false;
+    const secondaryKeys = Array.isArray(entry?.secondaryKeys) ? entry.secondaryKeys : [];
+    if (entry?.selective !== true || !secondaryKeys.length) return true;
+    const anySecondary = secondaryKeys.some(matches);
+    const allSecondary = secondaryKeys.every(matches);
+    switch (Number(entry?.selectiveLogic) || 0) {
+        case 3: return allSecondary;
+        case 1: return !allSecondary;
+        case 2: return !anySecondary;
+        default: return anySecondary;
+    }
+}
+
 function stage3LocalRecallPacket({
     actorLedger,
     base,
@@ -14603,6 +14628,7 @@ function stage3LocalRecallPacket({
             selectiveLogic: Number(entry?.selectiveLogic) || 0,
             caseSensitive: entry?.caseSensitive === true,
             matchWholeWords: entry?.matchWholeWords === true,
+            keywordActivated: stage3WorldbookEntryKeywordActivated(entry, scanText),
             contentDigest: String(entry?.contentDigest || fingerprint(String(entry?.content || ''))),
             sourceRef: {
                 kind: 'worldbook_entry',
@@ -14624,6 +14650,13 @@ function stage3LocalRecallPacket({
         laneIds,
         worldbookKeys: [...new Set(worldbookKeys.map((key) => String(key || '').trim()).filter(Boolean))].sort(),
         worldbookEntryIds: canonicalWorldbookEntries.map((entry) => entry.id),
+        worldbookEvidenceEntryIds: [...canonicalWorldbookEntries]
+            .sort((left, right) => (
+                Number(right.keywordActivated === true) - Number(left.keywordActivated === true)
+                || Number(right.sourceDomain === 'embedded') - Number(left.sourceDomain === 'embedded')
+                || left.id.localeCompare(right.id)
+            ))
+            .map((entry) => entry.id),
         worldbookSourceRefs: canonicalWorldbookEntries.map((entry) => entry.sourceRef),
         worldbookDigest: fingerprint(JSON.stringify(canonicalWorldbookEntries)),
         selectedWorldbookCount: canonicalWorldbookEntries.length,
@@ -14635,6 +14668,36 @@ function stage3LocalRecallPacket({
     };
     packet.digest = fingerprint(JSON.stringify(packet));
     return packet;
+}
+
+function stage3WorldbookPromptMaterial(worldContext, recallPacket) {
+    const selectedIds = new Set(recallPacket?.worldbookEntryIds || []);
+    const selected = (worldContext?.entries || []).filter((entry) => selectedIds.has(entry.id));
+    const byId = new Map(selected.map((entry) => [entry.id, entry]));
+    const evidenceOrder = (recallPacket?.worldbookEvidenceEntryIds || recallPacket?.worldbookEntryIds || [])
+        .map((id) => byId.get(id))
+        .filter(Boolean);
+    const manifest = selected.map((entry) => ({
+        id: entry.id,
+        sourceDomain: entry.sourceDomain,
+        nativeId: entry.nativeId,
+        world: entry.world,
+        title: entry.title,
+        keys: entry.keys,
+        constant: entry.constant === true,
+        contentDigest: entry.contentDigest,
+    }));
+    const evidenceText = cropText(evidenceOrder.map((entry) => ([
+        `【世界书：${entry.world || '当前角色卡'} / ${entry.title || entry.id}】`,
+        Array.isArray(entry.keys) && entry.keys.length ? `关键词：${entry.keys.join('、')}` : '',
+        entry.content,
+    ].filter(Boolean).join('\n'))).join('\n\n'), 18000, 'P3世界书取材');
+    return {
+        manifest,
+        evidenceText,
+        evidenceEntryCount: evidenceOrder.length,
+        selectedEntryCount: selected.length,
+    };
 }
 
 function buildContinuityMessages({
@@ -14954,31 +15017,12 @@ function buildContinuityMessages({
     // Required material is atomic: never crop through an ActorRef/Profile in
     // the middle. The configured model connection owns the actual context
     // capacity; Doctor must not reject a valid turn with a local char ceiling.
-    const recalledWorldbookIds = new Set(recallPacket?.worldbookEntryIds || []);
-    const recalledWorldbookEntries = (worldContext?.entries || [])
-        .filter((entry) => recalledWorldbookIds.has(entry.id))
-        .map((entry) => ({
-        id: entry.id,
-        sourceKind: entry.sourceKind,
-        sourceDomain: entry.sourceDomain,
-        nativeId: entry.nativeId,
-        world: entry.world,
-        title: entry.title,
-        keys: entry.keys,
-        constant: entry.constant === true,
-        content: entry.content,
-        contentDigest: entry.contentDigest,
-        sourceRef: entry.sourceRef || {
-            kind: 'worldbook_entry', id: entry.id,
-            sourceDomain: entry.sourceDomain, nativeId: entry.nativeId,
-            world: entry.world, contentDigest: entry.contentDigest,
-        },
-    }));
+    const worldbookPromptMaterial = stage3WorldbookPromptMaterial(worldContext, recallPacket);
     const requiredMaterial = safeJson({
         recalledActors,
         recalledThreads,
         recalledLanes,
-        recalledWorldbookEntries,
+        worldbookManifest: worldbookPromptMaterial.manifest,
     }, 0);
     const actorShardPromptPayload = actorShardCandidates?.actionAttempts?.length
         ? {
@@ -15082,7 +15126,7 @@ function buildContinuityMessages({
     ].filter(Boolean).join('\n');
     */
     const requiredPrefix = recallPacket
-        ? `=== 本轮只读召回包（召回阶段已验证mustInclude；它选择支持材料，不授予写权限）===\n${safeJson(recallPacket, 0)}\n\n=== 召回的持久材料（只读；必须优先用于推进；必需实体从不截断）===\n${requiredMaterial}\n\n`
+        ? `=== 本轮只读召回包（召回阶段已验证mustInclude；它选择支持材料，不授予写权限）===\n${safeJson(recallPacket, 0)}\n\n=== 召回的持久材料（Actor/Profile/Thread/Lane完整；世界书清单以digest绑定）===\n${requiredMaterial}\n\n=== 按本轮关键词优先的世界书取材（仅供语义理解；未列正文仍保留在本地权威清单）===\n${worldbookPromptMaterial.evidenceText}\n\n`
         : '';
     const compactUser = [
         `目标：chat=${captured.chatId} index=${captured.index} swipe=${captured.swipeId}`,
@@ -18339,6 +18383,10 @@ function stage3WorldFailureValidationCode(reason) {
         world_adjudication_invalid: 'world.actor.adjudication_invalid',
         world_candidate_adjudication_invalid: 'world.actor.adjudication_invalid',
         world_candidate_settlement_failed: 'world.actor.settlement_failed',
+        world_phase1_actor_authority_changed: 'world.phase1.actor_authority_changed',
+        world_phase1_target_authority_changed: 'world.phase1.target_authority_changed',
+        world_actor_schedule_changed_after_model: 'world.phase1.actor_schedule_changed',
+        'action_attempt.actor_ref_mismatch': 'world.phase1.actor_ref_mismatch',
         world_semantic_progress_missing: 'world.semantic_progress_missing',
         world_candidate_prepare_failed: 'world.phase1.candidate_prepare_failed',
         world_candidate_readback_mismatch: 'world.phase1.candidate_readback_mismatch',
@@ -19495,6 +19543,45 @@ function stage3WorldOwnedActorProjection(actor) {
     return projected;
 }
 
+function stage3ProfileObservationReceiptEvolution(baseLedger, freshLedger, actionTarget) {
+    const baseReceipts = Array.isArray(baseLedger?.observationReceipts)
+        ? baseLedger.observationReceipts : [];
+    const freshReceipts = Array.isArray(freshLedger?.observationReceipts)
+        ? freshLedger.observationReceipts : [];
+    const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const remainingBase = new Map();
+    for (const receipt of baseReceipts) {
+        const key = JSON.stringify(receipt);
+        remainingBase.set(key, (remainingBase.get(key) || 0) + 1);
+    }
+    const extras = [];
+    for (const receipt of freshReceipts) {
+        const key = JSON.stringify(receipt);
+        const count = remainingBase.get(key) || 0;
+        if (count > 0) remainingBase.set(key, count - 1);
+        else extras.push(receipt);
+    }
+    if (!same([...baseReceipts, ...extras].slice(-120), freshReceipts)) return false;
+    const baseActorIds = new Set((baseLedger?.actors || []).map((actor) => String(actor?.id || '')));
+    const addedActorIds = new Set((freshLedger?.actors || [])
+        .map((actor) => String(actor?.id || ''))
+        .filter((actorId) => actorId && !baseActorIds.has(actorId)));
+    const coveredActorIds = new Set();
+    for (const receipt of extras) {
+        const actorIds = Array.isArray(receipt?.actorIds)
+            ? [...new Set(receipt.actorIds.map(String).filter(Boolean))] : [];
+        if (
+            receipt?.kind !== 'actor-registration'
+            || !actorActionTargetMatches(receipt?.sourceRef, actionTarget)
+            || !actorIds.length
+            || actorIds.some((actorId) => !addedActorIds.has(actorId))
+        ) return false;
+        actorIds.forEach((actorId) => coveredActorIds.add(actorId));
+    }
+    return addedActorIds.size === coveredActorIds.size
+        && [...addedActorIds].every((actorId) => coveredActorIds.has(actorId));
+}
+
 function stage3ActorLedgerAfterProfileOnlyEvolution({
     baseLedger,
     freshLedger,
@@ -19516,12 +19603,13 @@ function stage3ActorLedgerAfterProfileOnlyEvolution({
         stage3TargetActionAuthorityProjection(base, actionTarget),
         stage3TargetActionAuthorityProjection(fresh, actionTarget),
     )) return { ok: false, reason: 'world_phase1_target_authority_changed' };
-    for (const field of [
-        'actionAttempts', 'actionAttemptBacklog', 'actionReceipts', 'observationReceipts',
-    ]) {
+    for (const field of ['actionAttempts', 'actionAttemptBacklog', 'actionReceipts']) {
         if (!same(base[field], fresh[field])) {
             return { ok: false, reason: 'world_phase1_actor_authority_changed' };
         }
+    }
+    if (!stage3ProfileObservationReceiptEvolution(base, fresh, actionTarget)) {
+        return { ok: false, reason: 'world_phase1_actor_authority_changed' };
     }
     const freshById = new Map(fresh.actors.map((actor) => [actor.id, actor]));
     for (const baseActor of base.actors) {

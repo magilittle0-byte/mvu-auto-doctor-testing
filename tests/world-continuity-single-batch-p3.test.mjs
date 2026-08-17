@@ -21,7 +21,10 @@ import {
     emptyActorLedger,
     normalizeActorLedger,
 } from '../actor-ledger-core.mjs';
-import { validateWorldAdjudicationBatch } from '../actor-authority-core.mjs';
+import {
+    actorActionTargetMatches,
+    validateWorldAdjudicationBatch,
+} from '../actor-authority-core.mjs';
 import { parseActorShardProposal } from '../actor-shard-core.mjs';
 import {
     extractFirstBalancedJsonObject,
@@ -171,13 +174,47 @@ function loadActorSchedulingSettlementDiagnostics() {
 function loadStage3LocalRecallPacket() {
     const code = sourceSection(
         'function stage3WorldbookRegexKey(value) {',
-        'function buildContinuityMessages({',
+        'function stage3WorldbookPromptMaterial(',
     );
     const sandbox = {
         fingerprint: (value) => `test-digest:${String(value).length}`,
     };
     vm.runInNewContext(`${code}\nthis.buildRecall = stage3LocalRecallPacket;`, sandbox);
     return sandbox.buildRecall;
+}
+
+function loadStage3WorldbookPromptMaterial() {
+    const code = sourceSection(
+        'function stage3WorldbookPromptMaterial(',
+        'function buildContinuityMessages({',
+    );
+    const sandbox = {
+        cropText: (value, maxChars) => String(value || '').slice(0, maxChars),
+    };
+    vm.runInNewContext(`${code}\nthis.buildMaterial = stage3WorldbookPromptMaterial;`, sandbox);
+    return sandbox.buildMaterial;
+}
+
+function loadStage3ProfileEvolutionGate() {
+    const code = sourceSection(
+        'function stage3WorldOwnedActorProjection(',
+        'function stage3FieldState(',
+    );
+    const sandbox = {
+        deepClone: (value) => structuredClone(value),
+        normalizeActorLedger,
+        actorActionTargetMatches,
+        stage3TargetActionAuthorityProjection: (ledger, target) => ({
+            target,
+            attempts: ledger?.actionAttempts || [],
+            receipts: ledger?.actionReceipts || [],
+        }),
+    };
+    vm.runInNewContext(
+        `${code}\nthis.profileEvolutionGate = stage3ActorLedgerAfterProfileOnlyEvolution;`,
+        sandbox,
+    );
+    return sandbox.profileEvolutionGate;
 }
 
 function loadContinuityWorldEntryCanonicalizer() {
@@ -966,7 +1003,18 @@ function loadScheduledPhase1RebaseHarness() {
         'function stage3FieldState(namespace, field) {',
     );
     const target = { chatId: 'chat-scheduled-rebase', index: 2, scopeDigest: 'scope-scheduled' };
-    const actionTarget = { chatId: target.chatId, index: 2, generationId: 'generation-2' };
+    const actionTarget = {
+        chatId: target.chatId,
+        logicalIndex: 2,
+        index: 2,
+        messageId: 'message-2',
+        swipeId: 0,
+        generation: 2,
+        generationId: 'generation-2',
+        generationType: 'normal',
+        scopeDigest: target.scopeDigest,
+        contentHash: 'content-2',
+    };
     const scheduledRef = { actorId: 'actor-old', identityHash: 'stable-ref' };
     let actorRevision = 2;
     let persistCalls = 0;
@@ -980,7 +1028,13 @@ function loadScheduledPhase1RebaseHarness() {
         actionAttempts: [],
         actionReceipts: [],
         actionAttemptBacklog: [],
-        observationReceipts: [],
+        observationReceipts: [{
+            receiptId: 'actor-registration:new-ready',
+            kind: 'actor-registration',
+            sourceRef: structuredClone(actionTarget),
+            actorIds: ['actor-new-ready'],
+            settledAt: 2,
+        }],
         profileRevision: actorRevision,
     });
     const namespace = () => ({
@@ -991,6 +1045,7 @@ function loadScheduledPhase1RebaseHarness() {
         fingerprint: (value) => JSON.stringify(value),
         safeJson: (value) => JSON.stringify(value),
         deepClone: (value) => structuredClone(value),
+        actorActionTargetMatches,
         stage3AttemptProjection: (ledger) => structuredClone(ledger.actionAttempts || []),
         stage3TargetActionAuthorityProjection: (ledger) => ({
             attempts: structuredClone(ledger.actionAttempts || []), receipts: [],
@@ -7345,7 +7400,7 @@ test('P3 keeps full persistent thread history while P4 remains a separate visibl
 
 test('P3 source retains every scheduled ActorRef without a Doctor-owned prompt ceiling', () => {
     const advance = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
-    const recall = sourceSection('function stage3LocalRecallPacket({', 'function buildContinuityMessages({');
+    const recall = sourceSection('function stage3LocalRecallPacket({', 'function stage3WorldbookPromptMaterial(');
     assert.match(advance, /recalledActors = \[\.\.\.\(actorLedger\?\.actors \|\| \[\]\)\]/u);
     assert.match(advance, /world_recall_missing_scheduled_actor_material/u);
     assert.doesNotMatch(advance, /world_recall_capacity_unavailable/u);
@@ -7402,6 +7457,11 @@ test('P3 local recall preserves every scheduled ID and adds linked structured su
     assert.deepEqual(Array.from(packet.mustActorIds), ['actor-must']);
     assert.deepEqual(Array.from(packet.worldbookKeys), ['world-a', 'world-b']);
     assert.deepEqual(Array.from(packet.worldbookEntryIds), ['entry-a', 'entry-b']);
+    assert.deepEqual(
+        Array.from(packet.worldbookEvidenceEntryIds),
+        ['entry-a', 'entry-b'],
+        'keyword-activated evidence precedes constant-only baseline material',
+    );
     assert.deepEqual(Array.from(packet.worldbookSourceRefs).map((entry) => entry.id), ['entry-a', 'entry-b']);
     assert.equal(packet.selectedWorldbookCount, 2);
     assert.ok(packet.scanTextChars > 0);
@@ -7409,6 +7469,105 @@ test('P3 local recall preserves every scheduled ID and adds linked structured su
     assert.equal(buildRecall({ ...options, mustActorIds: ['actor-unknown'] }), null);
     assert.equal(buildRecall({ ...options, mustThreadIds: ['thread-unknown'] }), null);
     assert.equal(buildRecall({ ...options, mustLaneIds: ['lane-unknown'] }), null);
+});
+
+test('P3 prompt keeps the full worldbook authority manifest while bounding model-facing evidence', () => {
+    const buildMaterial = loadStage3WorldbookPromptMaterial();
+    const entries = [
+        {
+            id: 'keyword-hit', sourceDomain: 'embedded', nativeId: '1', world: 'card',
+            title: 'hit', keys: ['hit'], content: 'A'.repeat(12000), contentDigest: 'digest-a',
+        },
+        {
+            id: 'constant-only', sourceDomain: 'embedded', nativeId: '2', world: 'card',
+            title: 'constant', keys: [], constant: true,
+            content: 'B'.repeat(12000), contentDigest: 'digest-b',
+        },
+        {
+            id: 'external-constant', sourceDomain: 'external', nativeId: '3', world: 'external',
+            title: 'external', keys: [], constant: true,
+            content: 'C'.repeat(12000), contentDigest: 'digest-c',
+        },
+    ];
+    const material = buildMaterial({ entries }, {
+        worldbookEntryIds: entries.map((entry) => entry.id),
+        worldbookEvidenceEntryIds: ['keyword-hit', 'constant-only', 'external-constant'],
+    });
+    assert.equal(material.manifest.length, 3);
+    assert.equal(material.manifest.every((entry) => !Object.hasOwn(entry, 'content')), true);
+    assert.equal(material.manifest.map((entry) => entry.contentDigest).join(','), 'digest-a,digest-b,digest-c');
+    assert.equal(material.evidenceText.length, 18000);
+    assert.equal(material.evidenceText.includes('A'.repeat(1000)), true);
+    assert.equal(material.evidenceText.includes('C'.repeat(1000)), false);
+});
+
+test('P3 accepts only current-target P1 actor-registration receipt evolution', () => {
+    const gate = loadStage3ProfileEvolutionGate();
+    const target = {
+        chatId: 'chat-profile-observation', logicalIndex: 4, messageId: 'message-4',
+        swipeId: 0, generation: 4, generationId: 'generation-4',
+        generationType: 'normal', scopeDigest: 'scope-profile-observation',
+        contentHash: 'content-4',
+    };
+    const oldRegistration = {
+        receiptId: 'actor-registration:old', kind: 'actor-registration',
+        sourceRef: { ...target }, actorIds: ['actor-old'], settledAt: 1,
+    };
+    const base = normalizeActorLedger({
+        ...emptyActorLedger(target.chatId),
+        actorRegistry: { scopeDigest: target.scopeDigest, registered: {} },
+        actors: [{ id: 'actor-old', name: 'old' }],
+        observationReceipts: [oldRegistration],
+    }, { chatId: target.chatId, scopeDigest: target.scopeDigest });
+    const freshSource = {
+        ...structuredClone(base),
+        actors: [...base.actors, { id: 'actor-new', name: 'new' }],
+        actorRegistry: {
+            ...structuredClone(base.actorRegistry),
+            registered: {
+                ...structuredClone(base.actorRegistry.registered),
+                new: {
+                    actorRef: {
+                        kind: 'actor_ref', actorId: 'actor-new', displayName: 'new', aliases: [],
+                    },
+                    origin: 'accepted_narrative', sourceRefs: [], registeredTurn: 4, updatedTurn: 4,
+                },
+            },
+        },
+        observationReceipts: [...base.observationReceipts, {
+            receiptId: 'actor-registration:new', kind: 'actor-registration',
+            sourceRef: { ...target }, actorIds: ['actor-new'], settledAt: 2,
+        }],
+    };
+    const fresh = normalizeActorLedger(
+        freshSource,
+        { chatId: target.chatId, scopeDigest: target.scopeDigest },
+    );
+    assert.equal(gate({
+        baseLedger: base, freshLedger: fresh, actionTarget: target,
+        chatId: target.chatId, scopeDigest: target.scopeDigest,
+    }).ok, true);
+
+    const wrongTarget = structuredClone(fresh);
+    wrongTarget.observationReceipts.at(-1).sourceRef.messageId = 'other-message';
+    assert.equal(gate({
+        baseLedger: base, freshLedger: wrongTarget, actionTarget: target,
+        chatId: target.chatId, scopeDigest: target.scopeDigest,
+    }).reason, 'world_phase1_actor_authority_changed');
+
+    const wrongKind = structuredClone(fresh);
+    wrongKind.observationReceipts.at(-1).kind = 'accepted-observation';
+    assert.equal(gate({
+        baseLedger: base, freshLedger: wrongKind, actionTarget: target,
+        chatId: target.chatId, scopeDigest: target.scopeDigest,
+    }).reason, 'world_phase1_actor_authority_changed');
+
+    const mutatedOldReceipt = structuredClone(fresh);
+    mutatedOldReceipt.observationReceipts[0].settledAt = 999;
+    assert.equal(gate({
+        baseLedger: base, freshLedger: mutatedOldReceipt, actionTarget: target,
+        chatId: target.chatId, scopeDigest: target.scopeDigest,
+    }).reason, 'world_phase1_actor_authority_changed');
 });
 
 test('P3 local recall is deterministic and adds zero model calls', () => {
@@ -7421,7 +7580,7 @@ test('P3 local recall is deterministic and adds zero model calls', () => {
     assert.equal((run.match(/stage3LocalRecallPacket\(/gu) || []).length, 1);
 });
 
-test('P3 materializes complete content only for locally activated worldbook entries', () => {
+test('P3 preserves complete local worldbook entries and bounds only the model-facing evidence view', () => {
     const collector = sourceSection(
         'function usableContinuityWorldEntry(entry)',
         'function usableForumWorldEntry(entry)',
@@ -7437,11 +7596,20 @@ test('P3 materializes complete content only for locally activated worldbook entr
     assert.match(collection, /__doctorSourceKind: 'external_active'/u);
     assert.match(collection, /entries: canonicalEntries/u);
     assert.doesNotMatch(collection, /worldBlocks\.length >= 12/u);
+    const promptMaterial = sourceSection(
+        'function stage3WorldbookPromptMaterial(',
+        'function buildContinuityMessages({',
+    );
+    assert.match(promptMaterial, /contentDigest: entry\.contentDigest/u);
+    assert.match(promptMaterial, /18000, 'P3世界书取材'/u);
+    assert.doesNotMatch(promptMaterial.slice(
+        promptMaterial.indexOf('const manifest'),
+        promptMaterial.indexOf('const evidenceText'),
+    ), /content:\s*entry\.content/u);
     const prompt = sourceSection('function buildContinuityMessages({', 'async function generateWorldContinuitySingleBatch(');
-    assert.match(prompt, /recalledWorldbookEntries/u);
-    assert.match(prompt, /recalledWorldbookIds/u);
-    assert.match(prompt, /filter\(\(entry\) => recalledWorldbookIds\.has\(entry\.id\)\)/u);
-    assert.match(prompt, /content: entry\.content/u);
+    assert.match(prompt, /worldbookManifest: worldbookPromptMaterial\.manifest/u);
+    assert.match(prompt, /worldbookPromptMaterial\.evidenceText/u);
+    assert.doesNotMatch(prompt, /recalledWorldbookEntries/u);
 });
 
 test('P3 canonicalizes duplicate host acquisition paths by physical worldbook SourceRef', () => {
