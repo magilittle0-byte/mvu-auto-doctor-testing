@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.18（2026-08-19，测试仓候选）
+- rc.17 修复后的完整 Node 套件发现 P1 的 `afterPending` 唤醒会递归重开任意非成功 P3，包括真实语义失败。rc.18 恢复成熟的单 owner join：已有 P3 的 applied/failed/stale/cancelled 结果都原样返回，不在其 promise 链内递归启动第二个世界任务。
+- semantic 人物档案明确 `no_candidates` 时，P1 唤醒现在把同一 exact-source coverage proof 作为 `noActorPermit` 交给 P3；这修复了“合法省略档案块后 P3 仍缺准入证明”的根因，同时不放宽 ready-only 人物调度。
+- rc.18 完整 Node 自动套件为 603/603，通过语法、manifest/配套预设 JSON 与差异检查；这些仍不是实际宿主证据。
+- rc.18 仍需在当前提交、实际 loaded hash 与 runtime fingerprint 下完成新的全新聊天首回合闭环；rc.16/rc.17 证据均不能替代。
+
 ## 2.0.0-rc.17（2026-08-19，测试仓候选）
 - 一次授权的真实首回合在 rc.16 发现：正文模型按“无人物变化可省略”合同没有输出人物档案块，但运行时把 32 张预留可选票误当成已消费票据，错误标记 `profile_persistence_failed`。rc.17 将“块缺失”恢复为 accepted assistant 的明确零变化、零写入语义；只有块已出现但解析、绑定、完整性或持久化失败才进入修复。
 - semantic P1 的成功、无变化和真实失败现在都复用现有恢复状态持久化：无变化保存 exact-source coverage proof；真实失败保存票据批次和 retry receipt。刷新后不会把红色失败重置成“等待”。

@@ -40,7 +40,11 @@ test('P3 starts independently, freezes ready actors, and structure world does no
     assert.match(continuity, /actor set is frozen/iu);
     assert.match(continuity, /stage3AttachMvuProfilesToLedger/u);
     const enqueue = section('async function enqueueContinuity', 'function stage3AttemptProjection');
-    assert.match(enqueue, /afterPending[\s\S]*?stage3AcceptedTargetsMatch[\s\S]*?enqueueContinuity\(targetId/u);
+    assert.doesNotMatch(enqueue, /afterPending[\s\S]*?enqueueContinuity\(targetId/u);
+    assert.match(
+        semanticBranch,
+        /noActorPermit:\s*semanticResult\?\.status === 'no_candidates'[\s\S]*?semanticResult\s*:\s*null/u,
+    );
 });
 
 test('P4 keeps one exact-once consumer while adding only bounded related ready profiles', () => {

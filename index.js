@@ -275,7 +275,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.17';
+const VERSION = '2.0.0-rc.18';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -7937,6 +7937,8 @@ function dispatchAcceptedFinal(envelope) {
                 && target.chatId === getContext()?.chatId) {
                 await enqueueContinuity(envelope.index, {
                     expectedTarget: target,
+                    noActorPermit: semanticResult?.status === 'no_candidates'
+                        ? semanticResult : null,
                     afterPending: true,
                 });
             }
@@ -20750,33 +20752,11 @@ async function enqueueContinuity(targetId, {
                     if (priorResult?.reason === 'foreground_preempted') {
                         return priorResult;
                     }
-                    if (['applied', 'blocked', 'disabled', 'duplicate'].includes(
-                        String(priorResult?.status || ''),
-                    )) {
-                        return priorResult || { status: 'duplicate', reason: 'world_target_joined' };
-                    }
-                    const fresh = captureTarget(getContext(), expected.index, {
-                        frozenScope: expected.actorSovereigntyScope,
-                        unscoped: !expected.scopeDigest,
-                    });
-                    if (!stage3AcceptedTargetsMatch(
-                        stage3AcceptedTarget(expected),
-                        stage3AcceptedTarget(fresh),
-                    )) return priorResult || { status: 'stale', reason: 'current_source_identity_changed' };
-                    // The first independent P3 launch may observe a transient
-                    // host identity window while P1/variable work is starting.
-                    // Once that owned task has fully finalized, retry exactly
-                    // the same accepted target once instead of turning a
-                    // recoverable initial stale into a permanent world stop.
-                    return enqueueContinuity(targetId, {
-                        force,
-                        manualRecovery,
-                        expectedTarget: fresh,
-                        noActorPermit,
-                        profileReadyActorIds,
-                        afterPending: false,
-                        startBarrier: null,
-                    });
+                    // A P1 wake only joins the owned in-flight P3. Failed,
+                    // stale, cancelled, and successful outcomes are returned
+                    // verbatim; the wake must never recursively start a
+                    // second world run behind an existing owner.
+                    return priorResult || { status: 'duplicate', reason: 'world_target_joined' };
                 });
         }
         return { status: 'duplicate', reason: 'world_target_pending' };
