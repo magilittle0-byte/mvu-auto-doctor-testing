@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.19（2026-08-19，测试仓候选）
+- rc.18 当前指纹的真实全新聊天首回合确认：正文、选项和 accepted-final 正常，人物路径按合同形成 durable `no_candidates` 且人物模型调用为 0；但独立 P3 在 P1 写妥该证明前以零模型、零写入进入 `stale`，P1 的 `afterPending` 只 join 了这个结果，结构世界没有终态，候选判失败。
+- rc.19 不恢复 rc.17 的 promise 内递归重开。P1 仍先原样 join 单一 P3 owner；仅当该 owner 明确 `stale + zeroWrite + worldModelCalls=0`、不是前台抢占、且 exact accepted target 仍当前时，才在 owner 完全释放后取得一次新 owner，并携带 durable no-candidates permit。真实语义失败、已发模型调用、swipe/chat/content/scope/epoch 漂移仍不自动重跑。
+- Doctor 总终态会把上述一次安全接棒的最终 committed/readback 结果作为世界终态，不再让已被安全接棒的零写 stale 把整轮伪报失败。runtime fingerprint 已覆盖新接棒适配器。
+- rc.19 的完整 Node 自动套件为 604/604，并通过语法、manifest/配套预设 JSON 与差异检查；仍须推送、重新安装并在新全新聊天完成当前指纹首回合复验，rc.18 失败证据不能替代。
+
 ## 2.0.0-rc.18（2026-08-19，测试仓候选）
 - rc.17 修复后的完整 Node 套件发现 P1 的 `afterPending` 唤醒会递归重开任意非成功 P3，包括真实语义失败。rc.18 恢复成熟的单 owner join：已有 P3 的 applied/failed/stale/cancelled 结果都原样返回，不在其 promise 链内递归启动第二个世界任务。
 - semantic 人物档案明确 `no_candidates` 时，P1 唤醒现在把同一 exact-source coverage proof 作为 `noActorPermit` 交给 P3；这修复了“合法省略档案块后 P3 仍缺准入证明”的根因，同时不放宽 ready-only 人物调度。

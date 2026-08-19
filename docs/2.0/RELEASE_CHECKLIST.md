@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.18 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.19 正式门禁清单
 
-候选：`2.0.0-rc.18`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成新的首回合闭环）
+候选：`2.0.0-rc.19`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成新的首回合闭环）
 
-当前状态：rc.18 已完成语义档案桥、MVU 人物档案折叠前端、迁移与修复，并修正 rc.16 单回合暴露的无变化误报、故障 hydrate 和红色状态。rc.17 修复后的完整套件又发现 P1 wake 会递归重开失败 P3；rc.18 恢复单 owner join，并仅把 exact-source no-candidates 证明交给 P3。rc.18 完整自动套件 603/603；当前指纹真实首回合仍须完成。
+当前状态：rc.19 已完成语义档案桥、MVU 人物档案折叠前端、迁移与修复，并保留 rc.18 的单 owner join。rc.18 当前指纹真实首回合又暴露 P3 零写 stale 与 P1 durable no-candidates 同窗完成时没有结构世界终态；rc.19 只允许该零模型、零写、exact-source 仍当前的 joined owner 在释放后安全接棒一次。完整 Node 自动套件为 604/604；当前指纹仍须推送、重新安装与全新聊天首回合复验。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

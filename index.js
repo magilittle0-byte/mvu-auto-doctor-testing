@@ -275,7 +275,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.18';
+const VERSION = '2.0.0-rc.19';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -5174,6 +5174,7 @@ function doctorRuntimeCriticalFingerprint() {
         acceptFinalGeneration.toString(),
         acceptFinalGenerationUnlocked.toString(),
         dispatchAcceptedFinal.toString(),
+        wakeContinuityAfterProfileTerminal.toString(),
         stage3NoActorPermitMatches.toString(),
         markActorSchedulingSettled.toString(),
         stage3LedgerReadbackGate.toString(),
@@ -7833,11 +7834,46 @@ async function moduleTargetForAcceptedFinal(envelope) {
         : null;
 }
 
+async function wakeContinuityAfterProfileTerminal(envelope, target, profileResult) {
+    const noActorPermit = profileResult?.status === 'no_candidates'
+        ? profileResult : null;
+    const continuityKey = stage3AcceptedTargetKey(target);
+    const joinedPendingOwner = Boolean(
+        continuityKey && continuityPendingKeys.has(continuityKey),
+    );
+    const joined = await enqueueContinuity(envelope.index, {
+        expectedTarget: target,
+        noActorPermit,
+        afterPending: true,
+    });
+    if (
+        !joinedPendingOwner
+        || joined?.status !== 'stale'
+        || joined?.reason === 'foreground_preempted'
+        || joined?.zeroWrite !== true
+        || Math.max(0, Number(joined?.worldModelCalls) || 0) !== 0
+    ) return joined;
+    // The accepted-final P3 owner can finish its zero-write source check in
+    // the same microtask window in which P1 seals its durable terminal proof.
+    // P1 first joins that owner verbatim. Only after the owner has released,
+    // and only while the exact accepted source is still current, may the
+    // caller acquire one fresh owner with the now-durable profile permit.
+    // This is not a recursive queue retry and never repeats a model call.
+    const guard = stage3TargetIsCurrent(target, operationToken(target));
+    if (!guard.ok) return joined;
+    return enqueueContinuity(envelope.index, {
+        expectedTarget: target,
+        noActorPermit,
+        afterPending: false,
+    });
+}
+
 function dispatchAcceptedFinal(envelope) {
     const { continuityStartBarrier = null } = arguments[1] || {};
     const acceptedAt = Math.max(0, Number(envelope?.acceptedFinalAt) || Date.now());
     const moduleTasks = [];
     const launchBarriers = [];
+    let stage3WakeResult = null;
     const trackedLaunch = (runner) => {
         let markLaunched;
         let marked = false;
@@ -7935,12 +7971,11 @@ function dispatchAcceptedFinal(envelope) {
             if (['atomic_readback', 'no_candidates'].includes(semanticResult?.status)
                 && target.epoch === operationEpoch
                 && target.chatId === getContext()?.chatId) {
-                await enqueueContinuity(envelope.index, {
-                    expectedTarget: target,
-                    noActorPermit: semanticResult?.status === 'no_candidates'
-                        ? semanticResult : null,
-                    afterPending: true,
-                });
+                stage3WakeResult = await wakeContinuityAfterProfileTerminal(
+                    envelope,
+                    target,
+                    semanticResult,
+                );
             }
             return semanticResult;
         });
@@ -7959,11 +7994,11 @@ function dispatchAcceptedFinal(envelope) {
             return profileTask.then(async (result) => {
                 if (!['atomic_readback', 'no_candidates'].includes(result?.status)) return result;
                 if (target.epoch !== operationEpoch || target.chatId !== getContext()?.chatId) return result;
-                await enqueueContinuity(envelope.index, {
-                    expectedTarget: target,
-                    noActorPermit: result?.status === 'no_candidates' ? result : null,
-                    afterPending: true,
-                });
+                stage3WakeResult = await wakeContinuityAfterProfileTerminal(
+                    envelope,
+                    target,
+                    result,
+                );
                 return result;
             });
         });
@@ -7971,11 +8006,21 @@ function dispatchAcceptedFinal(envelope) {
     // Observation only: variable, P1, and P3 were launched independently.
     void Promise.allSettled([variableTask, ...moduleTasks]).then((settled) => {
         if (String(getContext()?.chatId || '') !== String(envelope.chatId || '')) return;
+        const recoveredZeroWriteWorld = stage3WakeResult?.status === 'applied';
         const failed = settled.some((entry) => (
             entry.status === 'rejected'
             || !entry.value
-            || ['failed', 'not_completed', 'blocked', 'stale'].includes(
-                String(entry.value?.status || ''),
+            || (
+                ['failed', 'not_completed', 'blocked', 'stale'].includes(
+                    String(entry.value?.status || ''),
+                )
+                && !(
+                    recoveredZeroWriteWorld
+                    && entry.value?.module === 'world'
+                    && entry.value?.status === 'stale'
+                    && entry.value?.zeroWrite === true
+                    && Math.max(0, Number(entry.value?.worldModelCalls) || 0) === 0
+                )
             )
         ));
         recordModelDiagnostic({
@@ -19827,12 +19872,16 @@ async function runContinuityTarget(captured, {
                 reason: 'foreground_preempted',
                 stage3RecoveryTarget: deepClone(captured),
                 module: 'world',
+                zeroWrite: true,
+                worldModelCalls,
                 ...extra,
             }
             : {
                 status: 'stale',
                 reason: String(reason || 'world_target_stale'),
                 module: 'world',
+                zeroWrite: true,
+                worldModelCalls,
                 ...extra,
             };
     };
@@ -20852,7 +20901,13 @@ async function enqueueContinuity(targetId, {
                 stage3AcceptedTarget(expected),
                 stage3AcceptedTarget(fresh),
             )) {
-                return { status: 'stale', reason: 'current_source_identity_changed' };
+                return {
+                    status: 'stale',
+                    reason: 'current_source_identity_changed',
+                    module: 'world',
+                    zeroWrite: true,
+                    worldModelCalls: 0,
+                };
             }
             return runContinuityTarget(fresh, {
                 force,

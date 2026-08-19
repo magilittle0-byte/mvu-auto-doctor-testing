@@ -41,10 +41,17 @@ test('P3 starts independently, freezes ready actors, and structure world does no
     assert.match(continuity, /stage3AttachMvuProfilesToLedger/u);
     const enqueue = section('async function enqueueContinuity', 'function stage3AttemptProjection');
     assert.doesNotMatch(enqueue, /afterPending[\s\S]*?enqueueContinuity\(targetId/u);
-    assert.match(
-        semanticBranch,
-        /noActorPermit:\s*semanticResult\?\.status === 'no_candidates'[\s\S]*?semanticResult\s*:\s*null/u,
+    const wake = section(
+        'async function wakeContinuityAfterProfileTerminal',
+        'function dispatchAcceptedFinal',
     );
+    assert.match(
+        wake,
+        /profileResult\?\.status === 'no_candidates'[\s\S]*?profileResult\s*:\s*null/u,
+    );
+    assert.match(wake, /joinedPendingOwner[\s\S]*?zeroWrite !== true[\s\S]*?worldModelCalls/u);
+    assert.match(wake, /stage3TargetIsCurrent\(target, operationToken\(target\)\)/u);
+    assert.match(wake, /afterPending:\s*false/u);
 });
 
 test('P4 keeps one exact-once consumer while adding only bounded related ready profiles', () => {
@@ -76,6 +83,7 @@ test('runtime fingerprint binds preset bridge, parser/compiler, transaction, P3,
     for (const helper of [
         'actorProfileSemanticRuntimeFingerprint',
         'runSemanticActorProfileTarget',
+        'wakeContinuityAfterProfileTerminal',
         'projectSemanticProfilesToActorLedger',
         'persistSemanticActorLedgerProjection',
         'stage3AttachMvuProfilesToLedger',

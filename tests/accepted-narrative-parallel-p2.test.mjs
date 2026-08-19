@@ -447,6 +447,8 @@ function loadAcceptedFinalRuntimeHarness({
 function loadAcceptedFinalFullDispatchHarness({
     profileResult = { status: 'not_completed' },
     realCleanupFailed = false,
+    zeroWriteWorldRace = false,
+    otherModuleResult = { status: 'not_completed' },
 } = {}) {
     const support = sourceSection(
         'function acceptedFinalScopeDecision(generation, scopeDigest)',
@@ -479,7 +481,11 @@ function loadAcceptedFinalFullDispatchHarness({
         continuityProfileRetrySignals: new Map(),
         worldLaunched: false,
         diagnostics: [],
+        worldStarts: 0,
+        releaseInitialWorld: null,
     };
+    const continuityPendingKeys = new Map();
+    let initialWorldTask = null;
     const message = {
         mes: '<content>真实自然正文：林舟把钥匙放在桌上，转身等候答复。</content>',
         swipe_id: 0,
@@ -497,7 +503,7 @@ function loadAcceptedFinalFullDispatchHarness({
     });
     const captureUse = (target) => {
         state.dispatchedTargets.push(target);
-        return Promise.resolve({ status: 'not_completed' });
+        return Promise.resolve(otherModuleResult);
     };
     const sandbox = {
         currentGenerationEpoch: 7, operationEpoch: 11, lastGeneration: generation,
@@ -536,18 +542,46 @@ function loadAcceptedFinalFullDispatchHarness({
                 noActorPermit: options.noActorPermit || null,
                 startBarrier: options.startBarrier || null,
             });
+            if (zeroWriteWorldRace) {
+                const key = 'stage3-key';
+                if (continuityPendingKeys.has(key)) return continuityPendingKeys.get(key);
+                state.worldStarts += 1;
+                if (!initialWorldTask) {
+                    initialWorldTask = new Promise((resolve) => {
+                        state.releaseInitialWorld = () => resolve({
+                            status: 'stale',
+                            reason: 'current_source_identity_changed',
+                            module: 'world',
+                            zeroWrite: true,
+                            worldModelCalls: 0,
+                        });
+                    }).finally(() => continuityPendingKeys.delete(key));
+                    continuityPendingKeys.set(key, initialWorldTask);
+                    return initialWorldTask;
+                }
+                state.worldModelCalls += 1;
+                state.worldWrites += 1;
+                return Promise.resolve({
+                    status: 'applied', module: 'world', readbackVerified: true,
+                });
+            }
             if (state.worldLaunched) return Promise.resolve({ status: 'duplicate' });
             state.worldLaunched = true;
+            state.worldStarts += 1;
             state.worldModelCalls += 1;
             state.worldWrites += 1;
             return Promise.resolve({ status: 'applied' });
         },
+        continuityPendingKeys,
         continuityProfileRetrySignals: state.continuityProfileRetrySignals,
         stage3AcceptedTargetKey: () => 'stage3-key',
+        stage3TargetIsCurrent: () => ({ ok: true }),
+        operationToken: () => ({ epoch: 11 }),
         safeDiagnosticReason: (value) => String(value || ''),
         recordStage3WorldFinalDiagnostic: () => undefined,
         recordOperation: (...args) => state.errors.push(args),
         setStatus: () => undefined,
+        __doctorDiagnostics: state.diagnostics,
         ...(realCleanupFailed ? {
             activeGenerationSession: generation,
             activeNextTurnConsumer: { generationId: generation.id, cleanupConfirmed: false },
@@ -735,6 +769,7 @@ test('runtime fingerprint binds accepted-final keying, foreground flush, and unl
         'flushAcceptedFinalBeforeForegroundStart',
         'acceptFinalGenerationUnlocked',
         'stage3AwaitAcceptedFinalP4Barrier',
+        'wakeContinuityAfterProfileTerminal',
     ];
     for (const helper of critical) {
         assert.match(runtimeSource, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
@@ -904,6 +939,38 @@ test('a P1 not-completed result grants no retry permit but cannot block independ
     )).length, 1);
     assert.equal(noCandidates.state.worldModelCalls, 1);
     assert.equal(noCandidates.state.worldWrites, 1);
+});
+
+test('a durable no-candidates P1 wake reacquires P3 once after joining a zero-write stale owner', async () => {
+    const runtime = loadAcceptedFinalFullDispatchHarness({
+        profileResult: {
+            status: 'no_candidates',
+            eligible: true,
+            profileBatch: { readbackVerified: true },
+        },
+        zeroWriteWorldRace: true,
+        otherModuleResult: { status: 'applied' },
+    });
+    assert.equal(await runtime.accept(runtime.generation), true);
+    for (let attempt = 0; attempt < 20 && !runtime.state.releaseInitialWorld; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(typeof runtime.state.releaseInitialWorld, 'function');
+    assert.equal(runtime.state.worldStarts, 1);
+    assert.equal(runtime.state.worldModelCalls, 0);
+    assert.equal(runtime.state.worldWrites, 0);
+
+    runtime.state.releaseInitialWorld();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(runtime.state.continuityCalls.length, 3, 'launch, join, then one fresh owner');
+    assert.equal(runtime.state.worldStarts, 2);
+    assert.equal(runtime.state.worldModelCalls, 1);
+    assert.equal(runtime.state.worldWrites, 1);
+    assert.equal(runtime.state.continuityCalls.at(-1).noActorPermit.status, 'no_candidates');
+    assert.equal(runtime.state.diagnostics.at(-1).task, 'doctor_total');
+    assert.equal(runtime.state.diagnostics.at(-1).status, 'succeeded');
 });
 
 test('strict no-candidates proof controls only the P1 wake while accepted-final P3 stays independent', async () => {
@@ -2545,13 +2612,13 @@ test('accepted-final dispatch starts P3 independently and lets P1 readback issue
     const profileAt = handler.indexOf("launchScoped('人物档案'");
     const profileEnqueueAt = handler.indexOf('const profileTask = enqueueActorProfiles', profileAt);
     const profileReadbackAt = handler.indexOf("['atomic_readback', 'no_candidates']", profileEnqueueAt);
-    const profileRetryAt = handler.indexOf('await enqueueContinuity(envelope.index', profileReadbackAt);
+    const profileRetryAt = handler.indexOf('await wakeContinuityAfterProfileTerminal(', profileReadbackAt);
     assert.ok(profileAt >= 0 && profileEnqueueAt > profileAt);
     assert.ok(profileReadbackAt > profileEnqueueAt);
     assert.ok(profileRetryAt > profileReadbackAt);
     assert.match(
         handler.slice(profileAt),
-        /\['atomic_readback', 'no_candidates'\][\s\S]*?await enqueueContinuity\(envelope\.index/u,
+        /\['atomic_readback', 'no_candidates'\][\s\S]*?await wakeContinuityAfterProfileTerminal\(/u,
     );
     assert.match(handler, /launchScoped\('世界连续性'[\s\S]*?enqueueContinuity/u);
     assert.doesNotMatch(
