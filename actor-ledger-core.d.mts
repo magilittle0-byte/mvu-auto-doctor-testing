@@ -165,6 +165,20 @@ export interface ActorLedgerActor {
     lastAction: null | { id: string; turn: number; summary: string; outcome: string };
     actionHistory: Array<Record<string, unknown>>;
     profileV6: Record<string, unknown>;
+    /** Reference-only readiness receipt; MVU owns the complete semantic profile. */
+    profileRef?: {
+        version: number;
+        actorId: string;
+        name: string;
+        profileRoot: string;
+        profileFormat: string;
+        revision: number;
+        digest: string;
+        sourceRefDigest: string;
+        sourceRef: ActorLedgerSourceRef;
+        status: 'ready' | 'pending';
+        readbackVerified: boolean;
+    } | null;
     pendingProfile?: Record<string, unknown> | null;
     nextActionTurn: number;
     deadlineTurn: number;

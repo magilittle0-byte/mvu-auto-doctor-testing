@@ -6,6 +6,8 @@ import vm from 'node:vm';
 
 import {
     buildDoctorRepairPlan,
+    classifyActorProfileRepairFailure,
+    createActorProfileRepairRequest,
     createDoctorRepairCapsules,
     doctorRepairCapsuleProjection,
     doctorRepairCenterSemanticFingerprint,
@@ -15,6 +17,77 @@ import {
 import { createPrivacySafeDiagnosticProjection } from '../v2/surface/diagnostics.mjs';
 
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+const preset = JSON.parse(await readFile(new URL(
+    '../dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json',
+    import.meta.url,
+), 'utf8'));
+
+test('selected preset exposes one accepted-final natural-language profile block after existing control blocks', () => {
+    const prompts = Array.isArray(preset.prompts) ? preset.prompts : [];
+    const profilePrompts = prompts.filter((entry) => (
+        entry?.identifier === '4f2642de-5ef6-4ee4-9e94-2c52dd667a13'
+    ));
+    assert.equal(profilePrompts.length, 1);
+    const [profile] = profilePrompts;
+    assert.equal(profile.enabled, true);
+    assert.match(profile.content, /<!-- 人物档案更新/u);
+    assert.match(profile.content, /accepted assistant/iu);
+    assert.match(profile.content, /完整 ticketId/u);
+    assert.match(profile.content, /ActorId/u);
+    assert.match(profile.content, /JSONPatch/u);
+    assert.match(profile.content, /技术字段/u);
+    assert.match(profile.content, /没有变化时不输出/u);
+});
+
+test('profile repair classification is fixed-code and fail-closed', () => {
+    const privateText = 'PRIVATE-NAME-AND-MODEL-BLOCK';
+    const classified = classifyActorProfileRepairFailure({
+        code: privateText,
+        failureCodes: [
+            'profile_technical_field_model_owned',
+            privateText,
+            { code: 'profile_persistence_failed' },
+        ],
+        commitStatus: 'partial',
+        emptyOperations: true,
+    });
+    assert.equal(classified.status, 'quarantined');
+    assert.equal(classified.code, 'profile_technical_field_model_owned');
+    assert.deepEqual(classified.failureCodes, ['profile_technical_field_model_owned']);
+    assert.doesNotMatch(JSON.stringify(classified), new RegExp(privateText, 'u'));
+    const noWrite = classifyActorProfileRepairFailure({
+        status: 'failed', writeCount: 0, emptyOperations: true,
+    });
+    assert.equal(noWrite.code, 'profile_entry_incomplete');
+    assert.equal(noWrite.zeroWrite, true);
+});
+
+test('targeted profile repair envelope is privacy-safe and only carries bounded fields', () => {
+    const privateText = 'PRIVATE-NAME-AND-PROSE';
+    const request = createActorProfileRepairRequest({
+        actorId: 'NPC-7',
+        ticketId: 'NPC-DICE-3',
+        missingFields: [
+            'person', 'relationshipsMotives', 'not-a-profile-field', 'person',
+        ],
+        failureCodes: [
+            'profile_entry_incomplete', privateText, 'profile_technical_field_model_owned',
+        ],
+        sourceRefDigest: 'source-digest-3',
+        acceptedMessageIndex: 12,
+        rawModelOutput: privateText,
+        personName: privateText,
+    });
+    assert.deepEqual(request.target, { actorId: 'NPC-7', ticketId: 'NPC-DICE-3' });
+    assert.deepEqual(request.missingFields, ['person', 'relationshipsMotives']);
+    assert.deepEqual(request.failure.failureCodes, [
+        'profile_entry_incomplete', 'profile_technical_field_model_owned',
+    ]);
+    assert.equal(request.evidence.acceptedMessageIndex, 12);
+    assert.doesNotMatch(JSON.stringify(request), new RegExp(privateText, 'u'));
+    assert.equal(Object.hasOwn(request, 'rawModelOutput'), false);
+    assert.equal(Object.hasOwn(request, 'personName'), false);
+});
 
 function sourceSection(start, end) {
     const from = source.indexOf(start);

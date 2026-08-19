@@ -576,6 +576,32 @@ function normalizeActorPendingProfile(value, actorId, name) {
     };
 }
 
+// Semantic MVU profiles remain the content authority. ActorLedger stores only
+// this small readiness/identity reference so the scheduler can prove that a
+// registered ActorRef points at a durable MVU profile without duplicating the
+// complete profile body.
+function normalizeActorProfileRef(value, actorId, name) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const refActorId = cleanText(value.actorId || actorId, 120);
+    const refName = cleanText(value.name || name, 160);
+    const digest = cleanText(value.digest || value.profileDigest, 180);
+    const sourceRef = normalizeSourceRef(value.sourceRef);
+    if (!refActorId || !refName || !digest || !sourceRef) return null;
+    return {
+        version: 1,
+        actorId: refActorId,
+        name: refName,
+        profileRoot: cleanText(value.profileRoot, 240),
+        profileFormat: cleanText(value.profileFormat, 80) || 'narrative-v1',
+        revision: integer(value.revision, 1, Number.MAX_SAFE_INTEGER, 1),
+        digest,
+        sourceRefDigest: cleanText(value.sourceRefDigest, 180),
+        sourceRef,
+        status: value.status === 'ready' ? 'ready' : 'pending',
+        readbackVerified: value.readbackVerified === true,
+    };
+}
+
 function normalizeActor(value, index, turn) {
     if (!value || typeof value !== 'object') return null;
     const name = cleanText(value.name || value.id, 160);
@@ -777,6 +803,7 @@ function normalizeActor(value, index, turn) {
             .filter((item) => item.id && item.attempt)
             .slice(-80),
         profileV6: normalizeActorProfileV6(value.profileV6, { id, actorId: id, name }),
+        profileRef: normalizeActorProfileRef(value.profileRef, id, name),
         pendingProfile: normalizeActorPendingProfile(value.pendingProfile, id, name),
         nextActionTurn: integer(value.nextActionTurn, 0, Number.MAX_SAFE_INTEGER, turn + 1),
         deadlineTurn: integer(value.deadlineTurn, 0, Number.MAX_SAFE_INTEGER, 0),
@@ -1891,6 +1918,31 @@ export function actorProfileReadinessInLedger(value, actorId) {
     if (!actor) return { ready: false, reason: 'actor_profile.actor_missing' };
     if (actor.pendingProfile) {
         return { ready: false, reason: 'actor_profile.pending_readback', migrationRequired: false };
+    }
+    const profileRef = actor.profileRef;
+    if (
+        profileRef
+        && profileRef.actorId === actor.id
+        && profileRef.name === actor.name
+        && profileRef.status === 'ready'
+        && profileRef.readbackVerified === true
+        && profileRef.digest
+        && profileRef.sourceRef
+    ) {
+        return {
+            ready: true,
+            reason: '',
+            migrationRequired: false,
+            profileAuthority: {
+                schemaVersion: profileRef.version,
+                profileFormat: profileRef.profileFormat,
+                revision: profileRef.revision,
+                digest: profileRef.digest,
+                sourceRef: clone(profileRef.sourceRef),
+                readbackVerified: true,
+                referenceOnly: true,
+            },
+        };
     }
     const base = actorProfileActionReadiness(actor);
     if (!base.ready) return base;
@@ -3180,10 +3232,13 @@ export function runActorRegistryUpsert(value, candidates, {
             continue;
         }
 
-        const actorId = quarantineReveal?.actor?.id || actorIdFromScopedIdentity(name, {
-            chatId: registry.identityScopeId,
-            identityKey: `name:${name}`,
-        });
+        const explicitActorId = cleanText(raw?.explicitActorId, 120);
+        const actorId = quarantineReveal?.actor?.id
+            || (isActorId(explicitActorId) ? explicitActorId : '')
+            || actorIdFromScopedIdentity(name, {
+                chatId: registry.identityScopeId,
+                identityKey: `name:${name}`,
+            });
         if (
             !actorId
             || [...Object.values(registry.characters), ...Object.values(registry.registered)]
@@ -4033,7 +4088,7 @@ function actorActionEligibilityInLedger(ledger, actorId) {
         reason: '',
         actor,
         actorRef: clone(registryEntry.actorRef),
-        profileAuthority: {
+        profileAuthority: profileReadiness.profileAuthority || {
             schemaVersion: actor.profileV6.baselineCommit.schemaVersion,
             commitId: actor.profileV6.baselineCommit.commitId,
             digest: actor.profileV6.baselineCommit.digest,

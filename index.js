@@ -87,7 +87,11 @@ import {
     normalizeActorActionTarget,
     validateWorldAdjudicationBatch,
 } from './actor-authority-core.mjs';
-import { isActorId } from './actor-ref-core.mjs';
+import {
+    actorIdFromScopedIdentity,
+    actorRefFrom,
+    isActorId,
+} from './actor-ref-core.mjs';
 import {
     actorCandidatesForRegistryPromotion,
     actorActionCandidatesFromShard,
@@ -184,6 +188,22 @@ import {
     prepareActorProfileManualIdentityRetryProgress,
 } from './actor-profile-batch-core.mjs';
 import {
+    ACTOR_PROFILE_MVU_ROOT,
+    actorProfileMvuDigest,
+    actorProfilePromptProjection,
+    actorProfileSemanticRuntimeFingerprint,
+    bindActorProfileUpdateEntries,
+    compileActorProfileMvuPatch,
+    compileLegacyActorProfileMigration,
+    extractActorProfileUpdateBlock,
+    markActorProfileReadback,
+    mergeActorProfileOperationsIntoAcceptedMessage,
+    parseActorProfileUpdateBlock,
+    preserveActorProfileOperationsOnUpdateBlock,
+    profileReadiness,
+    validateActorProfileUpdateEntry,
+} from './actor-profile-mvu-core.mjs';
+import {
     claimDueSovereigntyActorTasks,
     claimNextSovereigntyTask,
     cancelSovereigntyTaskAsStale,
@@ -238,6 +258,8 @@ import {
 } from './v2/repair/variable-repair-center.mjs';
 import {
     buildDoctorRepairPlan,
+    classifyActorProfileRepairFailure,
+    createActorProfileRepairRequest,
     createDoctorRepairCapsules,
     doctorRepairCapsuleProjection,
     doctorRepairCenterSemanticFingerprint,
@@ -246,7 +268,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.14';
+const VERSION = '2.0.0-rc.15';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -359,6 +381,11 @@ const DEFAULTS = Object.freeze({
     actorLedgerCollisionIntensity: 2,
     actorLedgerSettingsVersion: 2,
     actorProfileCompletionMode: 'full',
+    // New chats use the accepted-final semantic bridge. Legacy remains an
+    // explicit per-chat emergency switch; an already persisted `legacy`
+    // value is never rewritten by settings normalization.
+    actorProfilePathMode: 'semantic',
+    actorProfileLegacyFallback: false,
     characterCreationTicketPoolCapacity: 32,
     actorProfileBatchCapacity: 8,
     actorProfileSemanticRetries: 1,
@@ -1592,6 +1619,11 @@ function getSettings({ persistMigrations = true } = {}) {
         settings.actorProfileCompletionMode = DEFAULTS.actorProfileCompletionMode;
         changed = true;
     }
+    if (!['legacy', 'semantic'].includes(settings.actorProfilePathMode)) {
+        settings.actorProfilePathMode = DEFAULTS.actorProfilePathMode;
+        changed = true;
+    }
+    settings.actorProfileLegacyFallback = settings.actorProfileLegacyFallback === true;
     settings.actorProfileSemanticRetries = Math.min(
         1,
         Math.max(0, Math.floor(Number(settings.actorProfileSemanticRetries) || 0)),
@@ -3721,12 +3753,14 @@ async function runDoctorRepairModule(module, captured) {
             const repaired = actorProfileCompletedKeys.has(profileKey)
                 && ['atomic_readback', 'no_candidates'].includes(joined?.status)
                 ? joined
-                : await enqueueActorProfiles(captured.index, {
-                    force: true,
-                    allowIdentityRetry: true,
-                    includeMaintenance: getSettings().actorProfileCompletionMode === 'full_adult',
-                    expectedTarget: captured,
-                });
+                : getSettings().actorProfilePathMode === 'semantic'
+                    ? await runSemanticActorProfileTargetedRepair(captured)
+                    : await enqueueActorProfiles(captured.index, {
+                        force: true,
+                        allowIdentityRetry: true,
+                        includeMaintenance: getSettings().actorProfileCompletionMode === 'full_adult',
+                        expectedTarget: captured,
+                    });
             const applied = repaired?.status === 'atomic_readback';
             const nochange = repaired?.status === 'no_candidates';
             result = {
@@ -4952,6 +4986,20 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileGenerationCriticalFingerprint(),
         actorProfileCommitEvidenceDigest.toString(),
         actorProfileReadinessInLedger.toString(),
+        typeof actorProfileSemanticRuntimeFingerprint === 'function'
+            ? actorProfileSemanticRuntimeFingerprint() : '',
+        typeof runSemanticActorProfileTarget === 'function'
+            ? runSemanticActorProfileTarget.toString() : '',
+        typeof projectSemanticProfilesToActorLedger === 'function'
+            ? projectSemanticProfilesToActorLedger.toString() : '',
+        typeof persistSemanticActorLedgerProjection === 'function'
+            ? persistSemanticActorLedgerProjection.toString() : '',
+        typeof stage3AttachMvuProfilesToLedger === 'function'
+            ? stage3AttachMvuProfilesToLedger.toString() : '',
+        typeof p4RelevantActorIds === 'function' ? p4RelevantActorIds.toString() : '',
+        typeof p4ActorProfileSummary === 'function' ? p4ActorProfileSummary.toString() : '',
+        typeof immutableNextTurnConsumerPayload === 'function'
+            ? immutableNextTurnConsumerPayload.toString() : '',
         actorProfileBatchSemanticFingerprint(),
         actorAuthorityAdjudicationSemanticFingerprint(),
         continuityCoreSemanticFingerprint(),
@@ -7825,31 +7873,83 @@ function dispatchAcceptedFinal(envelope) {
     };
 
     const variableTask = launchVariable();
-    // P3 owns an independent accepted-final trigger. It fresh-reads whatever
-    // ActorRefs are already durable and ready; P1 may still wake it after a
-    // successful readback, but that wake is only an idempotent retry signal.
-    launchScoped('世界连续性', (target) => enqueueContinuity(envelope.index, {
-        expectedTarget: target,
-        startBarrier: continuityStartBarrier,
-    }));
-    launchScoped('人物档案', (target) => {
-        const profileTask = enqueueActorProfiles(envelope.index, {
+    // The production runtime always provides getSettings().  The narrow
+    // accepted-final harnesses intentionally execute this function in
+    // isolation; keep their legacy dispatch contract instead of throwing
+    // before any module can launch.
+    const runtimeSettings = typeof getSettings === 'function'
+        ? getSettings()
+        : { actorProfilePathMode: 'legacy', actorProfileLegacyFallback: false };
+    const semanticPath = runtimeSettings.actorProfilePathMode === 'semantic';
+    // P1 and P3 are independent accepted-final consumers. P3 freezes the
+    // durable-ready ActorRef subset it sees at launch; profiles completed by
+    // this reply become eligible on a later schedule and never join that
+    // already-frozen batch.
+    if (semanticPath) {
+        launchScoped('世界连续性', (target) => enqueueContinuity(envelope.index, {
             expectedTarget: target,
+            startBarrier: continuityStartBarrier,
+        }));
+        launchScoped('人物档案', async (target) => {
+            const semanticResult = await runSemanticActorProfileTarget(target);
+            const fallbackAllowed = (typeof getSettings === 'function'
+                ? getSettings() : runtimeSettings).actorProfileLegacyFallback === true;
+            const fallbackReasons = new Set([
+                'profile_block_missing',
+                'profile_ticket_actor_id_missing',
+                'profile_ticket_unknown',
+                'profile_binding_failed',
+                'profile_mvu_api_unavailable',
+                'profile_mvu_read_failed',
+            ]);
+            if (
+                fallbackAllowed
+                && semanticResult?.status === 'not_completed'
+                && fallbackReasons.has(String(semanticResult.reason || ''))
+            ) {
+                // Emergency compatibility only. A malformed semantic block
+                // is never silently converted into a successful profile;
+                // the mature P1 path is retained as an explicit recovery.
+                return enqueueActorProfiles(envelope.index, {
+                    expectedTarget: target,
+                    force: true,
+                    legacyPath: true,
+                });
+            }
+            if (['atomic_readback', 'no_candidates'].includes(semanticResult?.status)
+                && target.epoch === operationEpoch
+                && target.chatId === getContext()?.chatId) {
+                await enqueueContinuity(envelope.index, {
+                    expectedTarget: target,
+                    afterPending: true,
+                });
+            }
+            return semanticResult;
         });
-        return profileTask.then(async (result) => {
-            if (!['atomic_readback', 'no_candidates'].includes(result?.status)) return result;
-            if (target.epoch !== operationEpoch || target.chatId !== getContext()?.chatId) return result;
-            // P1 may wake the independent world module after a complete
-            // readback/no-candidate proof. Pending/completed target keys make
-            // this idempotent with the accepted-final trigger above.
-            await enqueueContinuity(envelope.index, {
+    } else {
+        // P3 owns an independent accepted-final trigger. It fresh-reads
+        // whatever ActorRefs are already durable and ready; P1 may still wake
+        // it after a successful readback, but that wake is idempotent.
+        launchScoped('世界连续性', (target) => enqueueContinuity(envelope.index, {
+            expectedTarget: target,
+            startBarrier: continuityStartBarrier,
+        }));
+        launchScoped('人物档案', (target) => {
+            const profileTask = enqueueActorProfiles(envelope.index, {
                 expectedTarget: target,
-                noActorPermit: result?.status === 'no_candidates' ? result : null,
-                afterPending: true,
             });
-            return result;
+            return profileTask.then(async (result) => {
+                if (!['atomic_readback', 'no_candidates'].includes(result?.status)) return result;
+                if (target.epoch !== operationEpoch || target.chatId !== getContext()?.chatId) return result;
+                await enqueueContinuity(envelope.index, {
+                    expectedTarget: target,
+                    noActorPermit: result?.status === 'no_candidates' ? result : null,
+                    afterPending: true,
+                });
+                return result;
+            });
         });
-    });
+    }
     // Observation only: variable, P1, and P3 were launched independently.
     void Promise.allSettled([variableTask, ...moduleTasks]).then((settled) => {
         if (String(getContext()?.chatId || '') !== String(envelope.chatId || '')) return;
@@ -12260,7 +12360,8 @@ function applyBlockToCurrentSwipe(message, block, includeBlock, removeBlock = ''
     const before = message.mes;
     let content = message.mes.split(STATUS_PLACEHOLDER).join('').trimEnd();
     if (includeBlock && block) {
-        content = replaceUpdateBlocks(content, block);
+        const preserved = preserveActorProfileOperationsOnUpdateBlock(content, block);
+        content = replaceUpdateBlocks(content, preserved.ok ? preserved.block : block);
     } else if (removeBlock && content.includes(removeBlock)) {
         content = content
             .replace(removeBlock, '')
@@ -12415,14 +12516,15 @@ async function commitCandidateUnlocked(
     captured,
     token,
     recordMeta = {},
-    { precondition = null } = {},
+    { precondition = null, requireExactTarget = false, syncFrontend = true } = {},
 ) {
     let current = targetIsCurrent(captured, token);
     if (!current.ok) {
         return { status: 'stale', reason: `${current.reason}，未写入` };
     }
     const options = { type: 'message', message_id: captured.index };
-    const oldData = await mvuDataAtLatestTarget(Mvu, captured.index);
+    const readTarget = requireExactTarget ? mvuDataAt : mvuDataAtLatestTarget;
+    const oldData = await readTarget(Mvu, captured.index);
     if (!oldData) return { status: 'failed', reason: '提交前无法读取当前 MVU 状态' };
     current = targetIsCurrent(captured, token);
     if (!current.ok) return { status: 'stale', reason: `${current.reason}，未写入` };
@@ -12518,7 +12620,7 @@ async function commitCandidateUnlocked(
             reason: `${current.reason}；精确楼层写入已经完成，写前快照已保存。未读取或刷新新目标；回到原回复/swipe 后可核验并撤销`,
         };
     }
-    const landed = await mvuDataAtLatestTarget(Mvu, captured.index);
+    const landed = await readTarget(Mvu, captured.index);
     const verified = validatePatchResult(oldData, landed, candidate.prepared);
     if (!verified.ok) {
         record.status = 'applied';
@@ -12540,7 +12642,7 @@ async function commitCandidateUnlocked(
                 );
                 if (!rollbackCandidate) throw new Error('无法构造仅恢复本次触碰路径的回滚状态');
                 await Mvu.replaceMvuData(rollbackCandidate, options);
-                const rollbackLanded = await mvuDataAtLatestTarget(Mvu, captured.index);
+                const rollbackLanded = await readTarget(Mvu, captured.index);
                 rollbackVerified = deepSubset(
                     statDataOf(rollbackCandidate),
                     statDataOf(rollbackLanded),
@@ -12554,7 +12656,9 @@ async function commitCandidateUnlocked(
         if (rollbackGuard.ok && rollbackVerified) {
             await discardRepairRecord(record.id, captured.chatId);
         }
-        await refreshMessage(captured.index, '', false, '', captured, token);
+        if (syncFrontend) {
+            await refreshMessage(captured.index, '', false, '', captured, token);
+        }
         if (!rollbackGuard.ok || !rollbackVerified) {
             return {
                 status: 'applied',
@@ -12589,14 +12693,16 @@ async function commitCandidateUnlocked(
     // Always persist the corrective block in the swipe. Updating only the
     // in-memory MVU snapshot is not durable: a reload/reparse would otherwise
     // replay the original faulty block and silently resurrect the error.
-    const refreshed = await refreshMessage(
-        captured.index,
-        candidate.block,
-        true,
-        '',
-        captured,
-        token,
-    );
+    const refreshed = syncFrontend
+        ? await refreshMessage(
+            captured.index,
+            candidate.block,
+            true,
+            '',
+            captured,
+            token,
+        )
+        : true;
     if (!refreshed) {
         return {
             status: 'applied',
@@ -12609,14 +12715,14 @@ async function commitCandidateUnlocked(
                 : '变量已修正，但聊天在日志保存前变化；未改动新回复，请立即检查原楼层',
         };
     }
-    record.frontendSynced = true;
+    record.frontendSynced = syncFrontend;
     await persistRepairRecord(record, captured.chatId);
     lastUndo = record;
     return {
         status: 'applied',
         block: candidate.block,
         readbackVerified: true,
-        frontendSynced: true,
+        frontendSynced: syncFrontend,
     };
 }
 
@@ -13109,8 +13215,12 @@ async function recordActorProfileFinalDiagnostic(captured, result, {
     if (!targetDigest) return false;
     const resultStatus = String(result?.status || 'not_completed');
     const readbackVerified = result?.profileBatch?.readbackVerified === true;
+    const profileFailureCount = (result?.profileBatch?.failed || []).length
+        + (result?.profileBatch?.quarantined || []).length;
     const succeeded = ['atomic_readback', 'no_candidates'].includes(resultStatus)
-        && readbackVerified;
+        && readbackVerified
+        && profileFailureCount === 0
+        && result?.profileBatch?.commitStatus !== 'partial';
     const retryable = resultStatus === 'not_completed' && recoverySaved === true;
     const cancelled = ['stale', 'cancelled', 'disabled', 'duplicate'].includes(resultStatus);
     let validationCode = 'actor_profile.final.not_completed';
@@ -13427,16 +13537,50 @@ function prepareNpcDesignTicketBatch() {
         generationId: lastGeneration.id,
         generationType: lastGeneration.type || 'normal',
     };
-    const tickets = Array.from({ length: capacity }, (_, index) => (
-        issueCharacterCreationTicket({
+    const tickets = Array.from({ length: capacity }, (_, index) => {
+        const ticket = issueCharacterCreationTicket({
             id: `${lastGeneration.id}|ticket:${index + 1}`,
             name: `原创人物骰票${index + 1}`,
         }, {
             entropy: `${chatId}|${lastGeneration.id}|${index + 1}`,
             target,
             order: index + 1,
-        })
-    ));
+        });
+        // A ticket is issued before the model runs, but actor identity must
+        // still be stable at that point.  Derive it only from the scoped
+        // ticket handle; never accept a name or model-supplied ID as an
+        // identity source.  Keep the reservation beside the mature ticket
+        // payload so persistence seals and semantic binding carry it across
+        // accepted-final without pretending ActorRegistry registration has
+        // already happened.
+        const ticketHandle = `${chatId}|${lastGeneration.id}|${ticket.ticketId}`;
+        const reservedActorId = actorIdFromScopedIdentity(`ticket:${ticket.ticketId}`, {
+            chatId,
+            identityKey: `character-creation-ticket:${lastGeneration.id}:${ticket.ticketId}`,
+        });
+        const reservedActorRef = actorRefFrom({
+            actorId: reservedActorId,
+            displayName: '',
+            aliases: [],
+        }, { allowCreate: false });
+        if (!reservedActorRef || !isActorId(reservedActorRef.actorId)) {
+            throw new Error('actor_profile.ticket_reserved_actor_ref_invalid');
+        }
+        return {
+            ...ticket,
+            reservedActorRef,
+            reservation: {
+                status: 'reserved',
+                chatId,
+                generationId: lastGeneration.id,
+                generationSerial,
+                generationType: lastGeneration.type || 'normal',
+                ticketId: ticket.ticketId,
+                ticketHandle,
+                actorId: reservedActorRef.actorId,
+            },
+        };
+    });
     pendingNpcDesignTicketBatch = {
         ...target,
         generationSerial: generationSerial,
@@ -13612,10 +13756,59 @@ function clearNextTurnConsumerFallback() {
     return setNextTurnConsumerFallback('') || setNextTurnConsumerFallback('');
 }
 
-function immutableNextTurnConsumerPayload(worldText, ticketText) {
-    const text = [worldText, ticketText].filter(Boolean).join('\n\n');
+function p4RelevantActorIds(namespace, packet, limit = 6) {
+    const producer = packet?.producerTarget;
+    if (!producer) return [];
+    const ledger = normalizeActorLedger(namespace?.actorLedger, {
+        chatId: producer.chatId,
+        scopeDigest: producer.scopeDigest,
+    });
+    const ids = [];
+    for (const collection of [ledger.actionAttempts, ledger.actionReceipts]) {
+        for (const row of collection || []) {
+            if (!actorActionTargetMatches(row?.target, producer)) continue;
+            const actorId = String(row?.actorId || row?.actorRef?.actorId || '').trim();
+            if (actorId && !ids.includes(actorId)) ids.push(actorId);
+        }
+    }
+    return ids.filter((actorId) => actorProfileReadinessInLedger(ledger, actorId).ready)
+        .slice(0, Math.max(1, Number(limit) || 6));
+}
+
+async function p4ActorProfileSummary(namespace, packet) {
+    const actorIds = p4RelevantActorIds(namespace, packet);
+    if (!actorIds.length) return '';
+    const Mvu = await getMvu();
+    if (!Mvu || typeof Mvu.getMvuData !== 'function') return '';
+    const producerIndex = Number(packet?.producerTarget?.index ?? packet?.producerTarget?.logicalIndex);
+    const data = await mvuDataAt(Mvu, Number.isInteger(producerIndex) ? producerIndex : 'latest');
+    const profiles = actorProfileMvuProfilesFromData(data, ACTOR_PROFILE_MVU_ROOT);
+    const ledger = normalizeActorLedger(namespace?.actorLedger, {
+        chatId: packet?.producerTarget?.chatId,
+        scopeDigest: packet?.producerTarget?.scopeDigest,
+    });
+    const rows = actorIds.map((actorId) => {
+        const actor = ledger.actors.find((entry) => String(entry?.id || '') === actorId);
+        const profile = profiles?.[actorId];
+        const projection = actorProfilePromptProjection(profile, { maxCharacters: 720 });
+        const ref = actor?.profileRef;
+        if (!projection || ref?.readbackVerified !== true
+            || String(ref?.profileDigest || '') !== String(projection.profileDigest || '')) return null;
+        return `- ${projection.name || actorId}（ActorId=${actorId}）：${projection.summary}`;
+    }).filter(Boolean);
+    return rows.length ? [
+        '<Doctor人物档案摘要>',
+        '以下仅是本回合相关、已完成持久回读的人物档案摘要；人物尝试不等于世界已裁决成功。',
+        ...rows,
+        '</Doctor人物档案摘要>',
+    ].join('\n') : '';
+}
+
+function immutableNextTurnConsumerPayload(worldText, ticketText, profileText = '') {
+    const text = [worldText, profileText, ticketText].filter(Boolean).join('\n\n');
     return Object.freeze({
         world: Object.freeze({ text: String(worldText || '') }),
+        profile: Object.freeze({ text: String(profileText || '') }),
         ticket: Object.freeze({ text: String(ticketText || '') }),
         text,
         digest: fingerprint(text),
@@ -14151,6 +14344,11 @@ async function precomposeNextTurnConsumer(session) {
     const ticketBatch = prepareNpcDesignTicketBatch();
     const ticketText = npcDesignTicketPrompt(ticketBatch);
     let payload = immutableNextTurnConsumerPayload(worldText, ticketText);
+    const profileText = typeof p4ActorProfileSummary === 'function'
+        ? await p4ActorProfileSummary(namespace, packet) : '';
+    if (profileText) {
+        payload = immutableNextTurnConsumerPayload(worldText, ticketText, profileText);
+    }
     if (!payload.text) return;
     const lease = packet
         ? await writeNextTurnConsumerLease(
@@ -14184,7 +14382,7 @@ async function precomposeNextTurnConsumer(session) {
         }
         packet = null;
         worldText = '';
-        payload = immutableNextTurnConsumerPayload(worldText, ticketText);
+        payload = immutableNextTurnConsumerPayload(worldText, ticketText, profileText);
         if (!payload.text) return;
     }
     if (activeGenerationSession?.id !== session.id || session.stopped) {
@@ -16910,6 +17108,877 @@ function actorProfileTicketPersistenceFailureCode(failure = {}) {
     return `actor_profile.ticket_persistence.${safe}`;
 }
 
+function actorProfileMvuRootFromData(data) {
+    const stat = statDataOf(data) || {};
+    const root = stat?.['人物档案'];
+    // The semantic bridge has one explicit host schema.  Do not guess among
+    // generic `profiles`/`actorProfiles` variables and thereby create a second
+    // content store.  The host adapter may provision the known root with an
+    // empty `byActorId` object; any other shape fails closed.
+    if (root == null) return ACTOR_PROFILE_MVU_ROOT;
+    if (!isPlainObject(root)) return '';
+    if (Object.hasOwn(root, 'byActorId') && !isPlainObject(root.byActorId)) return '';
+    return ACTOR_PROFILE_MVU_ROOT;
+}
+
+function actorProfileMvuRootPresent(data) {
+    const stat = statDataOf(data) || {};
+    return isPlainObject(stat?.['人物档案'])
+        && isPlainObject(stat['人物档案'].byActorId);
+}
+
+function actorProfileMvuProfilesFromData(data, profileRoot = '/人物档案/byActorId') {
+    const stat = statDataOf(data) || {};
+    const parts = profileRoot.split('/').filter(Boolean);
+    if (parts.length < 2) return {};
+    const root = stat?.[parts[0]];
+    const profiles = root?.[parts[1]];
+    return isPlainObject(profiles) ? profiles : {};
+}
+
+function actorProfileSemanticFailure(captured, reason, extra = {}) {
+    const failure = classifyActorProfileRepairFailure({
+        code: reason,
+        status: 'failed',
+        commitStatus: extra?.commitStatus || '',
+        emptyOperations: extra?.emptyOperations === true,
+        readbackVerified: extra?.readbackVerified === true,
+        writeCount: Array.isArray(extra?.committed) ? extra.committed.length : 0,
+    });
+    const safeReason = failure.code || 'profile_persistence_failed';
+    return actorProfileTransientResult('not_completed', {
+        target: sourceRefOf(captured),
+        eligible: true,
+        modelCalls: 0,
+        reason: safeReason,
+        profileBatch: {
+            initial: 0,
+            maintenance: 0,
+            modelCalls: 0,
+            committed: [],
+            failed: [{ code: safeReason, failureClass: failure.failureClass }],
+            readbackVerified: false,
+            failure,
+            ...extra,
+        },
+    });
+}
+
+function actorProfileSemanticNoChange(captured) {
+    // The semantic block is intentionally omitted when the accepted reply
+    // contains no profile changes.  This is a verified zero-write decision,
+    // not a malformed-output failure and must not wake the legacy P1 model.
+    return actorProfileTransientResult('no_candidates', {
+        target: sourceRefOf(captured),
+        eligible: true,
+        modelCalls: 0,
+        reason: 'profile_block_omitted_no_change',
+        profileBatch: {
+            initial: 0,
+            maintenance: 0,
+            modelCalls: 0,
+            committed: [],
+            failed: [],
+            readbackVerified: true,
+            semantic: true,
+            zeroWrite: true,
+        },
+    });
+}
+
+function reservedTicketMatchesAcceptedTarget(ticket, captured) {
+    const reservation = ticket?.reservation;
+    const ticketId = String(ticket?.ticketId || '').trim();
+    return Boolean(
+        reservation?.status === 'reserved'
+        && ticketId
+        && String(reservation.chatId || '') === String(captured?.chatId || '')
+        && String(reservation.generationId || '') === String(captured?.generationId || '')
+        && Number(reservation.generationSerial) === Number(captured?.generationSerial)
+        && String(reservation.generationType || '') === String(captured?.generationType || '')
+        && String(reservation.ticketId || '') === ticketId
+        && actorRefFrom(ticket?.reservedActorRef, { allowCreate: false })?.actorId
+            === String(reservation.actorId || '')
+    );
+}
+
+function semanticProfileReadinessRef(profile, writeSetEntry, captured, profileRoot) {
+    const metadata = profile?.本地元数据 || profile?.localMetadata || {};
+    const actorId = String(writeSetEntry?.actorId || '').trim();
+    const name = String(profile?.姓名与别名?.姓名 || profile?.name || '').trim();
+    const digest = String(writeSetEntry?.profileDigest || '').trim();
+    if (!actorId || !name || !digest) return null;
+    return {
+        version: 1,
+        actorId,
+        name,
+        profileRoot: String(profileRoot || '').trim(),
+        profileFormat: String(profile?.profileFormat || 'narrative-v1'),
+        revision: Math.max(1, Number(metadata.revision) || Number(writeSetEntry.revision) || 1),
+        digest,
+        sourceRefDigest: String(metadata.sourceRefDigest || '').trim(),
+        sourceRef: deepClone(sourceRefOf(captured)),
+        status: 'ready',
+        readbackVerified: true,
+    };
+}
+
+async function persistSemanticActorLedgerProjection(captured, ledger, actorIds) {
+    const namespace = readChatNamespace(getContext());
+    const currentLedger = normalizeActorLedger(namespace.actorLedger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const candidateLedger = normalizeActorLedger(ledger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const expectedRevision = Math.max(0, Number(namespace.fieldRevisions?.actorLedger) || 0);
+    const expectedDigest = actorLedgerDigest(namespace.actorLedger);
+    const expectedIds = [...new Set((actorIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const failureSink = {};
+    const successSink = {};
+    const saved = await writeChatNamespace(
+        { ...namespace, actorLedger: candidateLedger },
+        captured.chatId,
+        {
+            fields: ['actorLedger'],
+            durable: true,
+            force: true,
+            failureSink,
+            successSink,
+            requireReadback: true,
+            readbackAttempts: 3,
+            expectedFieldStates: {
+                actorLedger: { revision: expectedRevision, digest: expectedDigest },
+            },
+            precondition: () => continuityTargetIsCurrent(captured, operationToken(captured)).ok,
+            contentValidator: (persisted) => {
+                const readback = normalizeActorLedger(persisted?.actorLedger, {
+                    chatId: captured.chatId,
+                    identityScopeId: captured.identityScopeId,
+                    scopeDigest: captured.scopeDigest,
+                });
+                return actorLedgerDigest(readback) === actorLedgerDigest(candidateLedger)
+                    && expectedIds.every((actorId) => (
+                        actorProfileReadinessInLedger(readback, actorId).ready === true
+                    ));
+            },
+        },
+    );
+    return saved
+        ? {
+            ok: true,
+            ledger: normalizeActorLedger(
+                successSink.readbackNamespace?.actorLedger || candidateLedger,
+                { chatId: captured.chatId, scopeDigest: captured.scopeDigest },
+            ),
+        }
+        : { ok: false, reason: failureSink.code || 'actor_profile.registry_projection_readback_failed' };
+}
+
+async function projectSemanticProfilesToActorLedger(captured, entries, profiles, writeSet, profileRoot) {
+    const namespace = readChatNamespace(getContext());
+    const baseLedger = normalizeActorLedger(namespace.actorLedger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const sourceRef = sourceRefOf(captured);
+    const registryRows = [
+        ...Object.values(baseLedger.actorRegistry?.registered || {}),
+        ...Object.values(baseLedger.actorRegistry?.characters || {}),
+    ];
+    for (const entry of entries || []) {
+        const labels = [entry.name, ...(entry.aliases || [])]
+            .map((value) => String(value || '').trim().toLocaleLowerCase('zh-CN'))
+            .filter(Boolean);
+        const collisions = registryRows.filter((row) => (
+            [
+                row?.actorRef?.displayName,
+                ...(row?.actorRef?.aliases || []),
+                row?.name,
+                ...(row?.aliases || []),
+            ]
+                .map((value) => String(value || '').trim().toLocaleLowerCase('zh-CN'))
+                .some((label) => labels.includes(label))
+        ));
+        if (collisions.some((row) => (
+            String(row?.actorRef?.actorId || '') !== String(entry.actorId || '')
+        ))) {
+            return { ok: false, reason: 'actor_profile.registry_identity_conflict' };
+        }
+    }
+    const candidates = (entries || []).map((entry) => ({
+        kind: 'actor_candidate',
+        state: 'discovered',
+        candidateId: `semantic-profile:${entry.actorId}`,
+        chatId: captured.chatId,
+        name: entry.name,
+        aliases: entry.aliases || [],
+        explicitActorId: entry.actorId,
+        identityKey: `semantic-profile:${entry.actorId}`,
+        sourceKind: 'accepted_narrative',
+        sourceRef,
+        evidence: entry.sourceAnchor ? [entry.sourceAnchor] : [],
+        present: true,
+        location: '',
+    }));
+    const upsert = runActorRegistryUpsert(baseLedger, candidates, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+        allowScopeDigestFill: true,
+        expectedSourceRef: sourceRef,
+        turn: Math.max(1, Number(captured.index) + 1),
+    });
+    if (upsert.quarantined?.length) {
+        return { ok: false, reason: 'actor_profile.registry_projection_quarantined' };
+    }
+    const promotable = actorCandidatesForRegistryPromotion(candidates, upsert);
+    const promoted = promotable.length
+        ? promoteActorCandidatesToRegistry(upsert.ledger, promotable, {
+            chatId: captured.chatId,
+            identityScopeId: captured.identityScopeId,
+            scopeDigest: captured.scopeDigest,
+            allowScopeDigestFill: true,
+            expectedSourceRef: sourceRef,
+            turn: Math.max(1, Number(captured.index) + 1),
+        })
+        : { ledger: upsert.ledger, quarantined: [] };
+    if (promoted.quarantined?.length) {
+        return { ok: false, reason: 'actor_profile.registry_promotion_quarantined' };
+    }
+    let projected = normalizeActorLedger(promoted.ledger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const entryById = new Map((entries || []).map((entry) => [String(entry.actorId), entry]));
+    const writeById = new Map((writeSet || []).map((entry) => [String(entry.actorId), entry]));
+    const nextActors = projected.actors.map((actor) => {
+        const entry = entryById.get(String(actor.id));
+        const write = writeById.get(String(actor.id));
+        const profile = profiles?.[actor.id];
+        if (!entry || !write || !profile) return actor;
+        const profileRef = semanticProfileReadinessRef(profile, write, captured, profileRoot);
+        return profileRef ? { ...actor, profileRef } : actor;
+    });
+    projected = normalizeActorLedger({ ...projected, actors: nextActors }, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const actorIds = (writeSet || []).map((entry) => entry.actorId);
+    const persisted = await persistSemanticActorLedgerProjection(captured, projected, actorIds);
+    return persisted.ok
+        ? { ok: true, ledger: persisted.ledger, actorIds }
+        : persisted;
+}
+
+/**
+ * accepted-final adapter for the preset's natural-language profile block.
+ * The block is parsed from the raw accepted assistant message, compiled to a
+ * local UpdateVariable/JSONPatch candidate, then committed through the same
+ * MVU journal/CAS/readback path as other variable writes. No model is called.
+ */
+async function runSemanticActorProfileTargetCore(captured) {
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) return actorProfileTransientResult('stale', { reason: scopeGuard.reason });
+    const token = operationToken(captured);
+    const guard = continuityTargetIsCurrent(captured, token);
+    if (!guard.ok) return actorProfileTransientResult('stale', { reason: guard.reason });
+    const context = getContext();
+    const messageText = String(context?.chat?.[captured.index]?.mes || '');
+    if (!sovereigntyNarrativeEligible(messageText)) {
+        return actorProfileSemanticFailure(captured, 'accepted_narrative_ineligible');
+    }
+    const extracted = extractActorProfileUpdateBlock(messageText);
+    if (!extracted.present) {
+        const reservedTickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
+            .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
+        if (reservedTickets.length) {
+            return actorProfileSemanticFailure(captured, 'profile_block_missing', {
+                repairableActorCount: reservedTickets.length,
+                zeroWrite: true,
+            });
+        }
+        return actorProfileSemanticNoChange(captured);
+    }
+    if (!extracted.ok) {
+        return actorProfileSemanticFailure(captured, extracted.failures?.[0] || 'profile_block_malformed');
+    }
+    const parsed = parseActorProfileUpdateBlock(messageText, { extracted });
+    if (!parsed.ok || parsed.failures?.length) {
+        const first = parsed.failures?.[0] || parsed.quarantined?.[0]?.reason;
+        return actorProfileSemanticFailure(captured, first || 'profile_block_malformed', {
+            quarantined: parsed.quarantined || [],
+        });
+    }
+    const Mvu = await getMvu();
+    if (
+        !Mvu
+        || typeof Mvu.getMvuData !== 'function'
+        || typeof Mvu.parseMessage !== 'function'
+        || typeof Mvu.replaceMvuData !== 'function'
+    ) return actorProfileSemanticFailure(captured, 'profile_mvu_api_unavailable');
+    // Profile commits are accepted-final floor transactions; unlike the
+    // legacy variable path, never fall back to the symbolic latest target.
+    const currentData = await mvuDataAt(Mvu, captured.index);
+    if (!currentData) return actorProfileSemanticFailure(captured, 'profile_mvu_read_failed');
+    const namespace = readChatNamespace(context);
+    const ledger = normalizeActorLedger(namespace.actorLedger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
+        .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
+    const actors = (ledger.actors || []).map((actor) => ({
+        id: actor.id,
+        name: actor.name,
+    }));
+    const bound = bindActorProfileUpdateEntries(parsed, {
+        tickets,
+        actors,
+        acceptedNarrative: acceptedContentText(messageText),
+        acceptedTarget: sourceRefOf(captured),
+    });
+    if (!bound.ok) {
+        const first = bound.failures?.find(Boolean)
+            || bound.quarantined?.find((entry) => entry?.reason)?.reason
+            || 'profile_binding_failed';
+        return actorProfileSemanticFailure(captured, first, {
+            quarantined: bound.quarantined || [],
+        });
+    }
+    if (bound.entries.some((entry) => !String(entry?.actorId || '').trim())) {
+        // Current ticket issuance still has binding=null in some legacy
+        // presets. Never invent an ActorId from a display name; leave the
+        // semantic block uncommitted so the explicit legacy recovery switch
+        // can handle that chat.
+        return actorProfileSemanticFailure(captured, 'profile_ticket_actor_id_missing');
+    }
+    const profileRoot = actorProfileMvuRootFromData(currentData);
+    const profileRootPresent = actorProfileMvuRootPresent(currentData);
+    const compiled = compileActorProfileMvuPatch(bound, {
+        profileRoot,
+        profileRootPresent,
+        existingProfiles: actorProfileMvuProfilesFromData(currentData, profileRoot),
+        sourceRef: sourceRefOf(captured),
+        // Readiness is assigned only after commitCandidate's exact-target
+        // durable write and readback. The model/compiler never gets to claim
+        // a successful host readback.
+        readbackVerified: false,
+    });
+    if (
+        !compiled.operations.length
+        || !['committable', 'partial'].includes(String(compiled.commitStatus || ''))
+    ) {
+        return actorProfileSemanticFailure(
+            captured,
+            compiled.failures?.[0]?.reason || compiled.failures?.[0] || 'profile_entry_incomplete',
+            {
+                missingFields: compiled.failures?.flatMap((entry) => entry?.missingFields || [])
+                    .slice(0, 8),
+                commitStatus: compiled.commitStatus,
+                quarantined: compiled.quarantined,
+            },
+        );
+    }
+    const block = [
+        '<UpdateVariable>',
+        '<Analysis>accepted-final 人物档案语义块由本地脚本编译；模型未提供技术元数据。</Analysis>',
+        '<JSONPatch>',
+        JSON.stringify(compiled.operations),
+        '</JSONPatch>',
+        '</UpdateVariable>',
+    ].join('\n');
+    const candidate = await parseCandidate(Mvu, currentData, block);
+    if (candidate.status !== 'ready') {
+        return actorProfileSemanticFailure(captured, candidate.reason || 'profile_mvu_schema_invalid');
+    }
+    const committed = await commitCandidate(Mvu, candidate, captured, token, {
+        repairKind: 'actor-profile-semantic',
+        source: 'accepted-final',
+        profileSourceRef: sourceRefOf(captured),
+        profileWriteSet: compiled.writeSet,
+    }, { requireExactTarget: true, syncFrontend: false });
+    if (committed.status !== 'applied' || committed.readbackVerified !== true) {
+        return actorProfileSemanticFailure(
+            captured,
+            committed.reason || 'profile_mvu_readback_mismatch',
+            { writeState: committed.status },
+        );
+    }
+    const landed = await mvuDataAt(Mvu, captured.index);
+    const landedProfiles = actorProfileMvuProfilesFromData(landed, profileRoot);
+    const persistedActorIds = compiled.writeSet
+        .map((entry) => entry.actorId)
+        .filter((actorId) => Boolean(landedProfiles?.[actorId]));
+    if (persistedActorIds.length !== compiled.writeSet.length) {
+        return actorProfileSemanticFailure(captured, 'profile_mvu_readback_not_ready', {
+            committed: persistedActorIds,
+            readbackVerified: true,
+        });
+    }
+    // The first exact-target readback proves the semantic profiles landed. A
+    // second local-only finalize writes the readback receipt; this prevents a
+    // model/compiler flag from ever claiming readiness before the host has
+    // returned the persisted value.
+    const finalizedOperations = compiled.writeSet.map((entry) => ({
+        op: 'replace',
+        path: entry.path,
+        value: markActorProfileReadback(landedProfiles[entry.actorId], { verified: true }),
+    }));
+    const finalizeBlock = [
+        '<UpdateVariable>',
+        '<Analysis>本地精确目标回读已验证；写入人物档案就绪收据。</Analysis>',
+        '<JSONPatch>',
+        JSON.stringify(finalizedOperations),
+        '</JSONPatch>',
+        '</UpdateVariable>',
+    ].join('\n');
+    const finalizeCandidate = await parseCandidate(Mvu, landed, finalizeBlock);
+    if (finalizeCandidate.status !== 'ready') {
+        return actorProfileSemanticFailure(
+            captured,
+            'profile_mvu_readback_receipt_prepare_failed',
+            { committed: persistedActorIds },
+        );
+    }
+    const finalized = await commitCandidate(Mvu, finalizeCandidate, captured, token, {
+        repairKind: 'actor-profile-semantic-readback',
+        source: 'accepted-final-readback',
+        profileSourceRef: sourceRefOf(captured),
+        profileWriteSet: compiled.writeSet,
+    }, { requireExactTarget: true, syncFrontend: false });
+    if (finalized.status !== 'applied' || finalized.readbackVerified !== true) {
+        return actorProfileSemanticFailure(
+            captured,
+            finalized.reason || 'profile_mvu_readback_receipt_failed',
+            { committed: persistedActorIds, writeState: finalized.status },
+        );
+    }
+    const finalizedData = await mvuDataAt(Mvu, captured.index);
+    const finalizedProfiles = actorProfileMvuProfilesFromData(finalizedData, profileRoot);
+    const committedActorIds = compiled.writeSet
+        .map((entry) => entry.actorId)
+        .filter((actorId) => profileReadiness(finalizedProfiles?.[actorId]).ready);
+    if (committedActorIds.length !== compiled.writeSet.length) {
+        return actorProfileSemanticFailure(captured, 'profile_mvu_readback_not_ready', {
+            committed: committedActorIds,
+            readbackVerified: true,
+        });
+    }
+    const finalizedByPath = new Map(finalizedOperations.map((operation) => [
+        operation.path,
+        operation.value,
+    ]));
+    const replayOperations = [
+        ...(profileRootPresent ? [] : [{
+            op: 'insert',
+            path: '/人物档案',
+            value: { schemaVersion: 1, byActorId: {} },
+        }]),
+        ...compiled.operations
+            .filter((operation) => operation.path !== '/人物档案')
+            .map((operation) => ({
+                ...operation,
+                value: finalizedByPath.get(operation.path) || operation.value,
+            })),
+    ];
+    const replay = mergeActorProfileOperationsIntoAcceptedMessage(messageText, replayOperations);
+    if (!replay.ok) {
+        return actorProfileSemanticFailure(captured, replay.reason || 'profile_replay_prepare_failed', {
+            committed: committedActorIds,
+            readbackVerified: true,
+        });
+    }
+    const replaySaved = await refreshMessage(
+        captured.index,
+        replay.block,
+        true,
+        '',
+        captured,
+        token,
+    );
+    if (!replaySaved) {
+        return actorProfileSemanticFailure(captured, 'profile_replay_persistence_failed', {
+            committed: committedActorIds,
+            readbackVerified: true,
+        });
+    }
+    const projectionTarget = captureTarget(getContext(), captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    });
+    if (!sameAcceptedNarrativeTarget(captured, projectionTarget)) {
+        return actorProfileTransientResult('stale', { reason: 'profile_source_changed_after_replay' });
+    }
+    const projection = await projectSemanticProfilesToActorLedger(
+        projectionTarget,
+        bound.entries,
+        finalizedProfiles,
+        compiled.writeSet,
+        profileRoot,
+    );
+    if (!projection.ok) {
+        return actorProfileSemanticFailure(
+            captured,
+            projection.reason || 'actor_profile.registry_projection_failed',
+            { committed: committedActorIds, readbackVerified: true },
+        );
+    }
+    return actorProfileTransientResult('atomic_readback', {
+        target: sourceRefOf(projectionTarget),
+        eligible: true,
+        modelCalls: 0,
+        registryReadback: true,
+        profileBatch: {
+            initial: committedActorIds.length,
+            maintenance: 0,
+            modelCalls: 0,
+            committed: committedActorIds,
+            failed: compiled.quarantined || [],
+            readbackVerified: true,
+            semantic: true,
+            commitStatus: compiled.commitStatus,
+            quarantined: compiled.quarantined,
+            writeSet: compiled.writeSet,
+        },
+    });
+}
+
+async function runSemanticActorProfileTarget(captured) {
+    setActorProfileStatus('人物档案：正在本地解析最终回复并核验 MVU 回读…', 'busy');
+    let result;
+    try {
+        result = await runSemanticActorProfileTargetCore(captured);
+    } catch (error) {
+        result = actorProfileSemanticFailure(
+            captured,
+            /^[a-z0-9_.:-]+$/iu.test(String(error?.message || ''))
+                ? String(error.message) : 'profile_persistence_failed',
+        );
+    }
+    const fresh = captureTarget(getContext(), captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    });
+    const diagnosticTarget = sameAcceptedNarrativeTarget(captured, fresh) ? fresh : captured;
+    const committed = result?.profileBatch?.committed?.length || 0;
+    const failed = result?.profileBatch?.failed?.length
+        || result?.profileBatch?.quarantined?.length || 0;
+    const recoverySaved = result?.status === 'not_completed'
+        || failed > 0;
+    result.terminalDiagnosticPersisted = await recordActorProfileFinalDiagnostic(
+        diagnosticTarget,
+        result,
+        { recoverySaved },
+    );
+    latestActorProfileDiagnostic = {
+        status: String(result?.status || 'not_completed'),
+        sourceRef: sourceRefOf(diagnosticTarget),
+        failingModules: failed ? ['profile'] : [],
+        lastFailureCodes: [...new Set([
+            result?.reason,
+            ...(result?.profileBatch?.failed || []).map((row) => row?.code || row?.reason),
+            ...(result?.profileBatch?.quarantined || []).map((row) => row?.reason),
+        ].map(compactActorProfileFailureCode).filter(Boolean))].slice(0, 8),
+        canRetry: recoverySaved,
+        abortCause: '',
+        recoveredFieldCount: 0,
+    };
+    if (result?.status === 'atomic_readback') {
+        setActorProfileStatus(
+            `人物档案：本回合 ${committed} 人已完整原子写入 MVU 并回读；${failed ? `${failed} 人失败并等待单人物修复，` : ''}其他就绪人物与结构世界继续。`,
+            failed ? 'warn' : 'ok',
+        );
+    } else if (result?.status === 'no_candidates') {
+        setActorProfileStatus('人物档案：本回合没有档案变化，已确认零写入；人物与结构世界照常继续。', '');
+    } else if (result?.status === 'stale') {
+        setActorProfileStatus('人物档案：回复、swipe、聊天或作用域已变化，本次零写入。', '');
+    } else {
+        setActorProfileStatus(
+            '人物档案：本回合档案未完成；缺档人物本回合不行动，其他就绪人物和结构世界继续。医生可按单人物定向修复。',
+            'error',
+        );
+    }
+    renderSovereigntyHealth();
+    return result;
+}
+
+function renderSemanticProfileEntries(entries) {
+    const fieldLines = [
+        ['person', '人物信息'],
+        ['physiology', '生理特征'],
+        ['personality', '性格特征'],
+        ['history', '过往经历'],
+        ['currentState', '当前状态'],
+        ['relationshipsMotives', '关系与动机'],
+        ['knowledgeCapabilitiesResources', '知识、能力与资源'],
+    ];
+    const rows = [];
+    for (const entry of entries || []) {
+        const identity = entry.mode === 'existing'
+            ? `已有角色｜ActorId=${entry.actorId}｜姓名：${entry.name}`
+            : `新增人物｜ticket=${entry.ticketId}｜姓名：${entry.name}`;
+        rows.push(identity);
+        if (entry.sourceAnchor) rows.push(`正文锚点：${entry.sourceAnchor}`);
+        if (entry.aliases?.length) rows.push(`别名：${entry.aliases.join('、')}`);
+        for (const [key, label] of fieldLines) {
+            if (entry.fields?.[key]) rows.push(`${label}：${entry.fields[key]}`);
+        }
+    }
+    return `<人物档案更新>\n${rows.join('\n')}\n</人物档案更新>`;
+}
+
+function replaceSemanticProfileBlock(messageText, block) {
+    const source = String(messageText || '');
+    const tagged = /<人物档案更新(?:\s[^>]*)?>[\s\S]*?<\/人物档案更新>/gu;
+    const commented = /<!--[ \t]*人物档案更新(?:[ \t\r\n]|$)[\s\S]*?-->/gu;
+    if (tagged.test(source)) return source.replace(tagged, block);
+    if (commented.test(source)) return source.replace(commented, block);
+    return `${source.trimEnd()}\n\n${block}`;
+}
+
+async function runSemanticActorProfileTargetedRepair(captured) {
+    if (!sameAcceptedNarrativeTarget(captured, captureTarget(getContext(), captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    }))) return { status: 'stale', reason: 'profile_repair_target_changed' };
+    const context = getContext();
+    const messageText = String(context?.chat?.[captured.index]?.mes || '');
+    const parsed = parseActorProfileUpdateBlock(messageText);
+    const namespace = readChatNamespace(context);
+    const ledger = normalizeActorLedger(namespace.actorLedger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const actors = (ledger.actors || []).map((actor) => ({ id: actor.id, name: actor.name }));
+    const tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
+        .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
+    const targets = [];
+    for (const ticket of tickets) {
+        const actorId = actorRefFrom(ticket?.reservedActorRef, { allowCreate: false })?.actorId || '';
+        if (!actorId || actorProfileReadinessInLedger(ledger, actorId).ready) continue;
+        targets.push({
+            mode: 'new', actorId, ticketId: String(ticket.ticketId || ''),
+            name: String(ticket.name || ticket.reservedActorRef?.displayName || ''),
+            missingFields: ['person', 'personality', 'history', 'currentState',
+                'relationshipsMotives', 'knowledgeCapabilitiesResources'],
+        });
+    }
+    for (const row of parsed.quarantined || []) {
+        const entry = row?.entry || {};
+        if (entry.mode !== 'existing' || !entry.actorId
+            || targets.some((target) => target.actorId === entry.actorId)) continue;
+        const validation = validateActorProfileUpdateEntry(entry, { mode: 'existing' });
+        targets.push({
+            mode: 'existing', actorId: entry.actorId, ticketId: '', name: entry.name,
+            missingFields: validation.missingFields.length ? validation.missingFields : ['delta'],
+        });
+    }
+    if (!targets.length) return { status: 'no_candidates', reason: 'profile_repair_no_target' };
+    const worldContext = await collectContinuityWorldContext(context, currentCharacter(context));
+    const repairedEntries = [];
+    for (const target of targets.slice(0, 6)) {
+        const request = createActorProfileRepairRequest({
+            actorId: target.actorId,
+            ticketId: target.ticketId,
+            missingFields: target.missingFields,
+            code: 'profile_entry_incomplete',
+            sourceRefDigest: doctorRepairTargetIdentityDigest(captured),
+            acceptedMessageIndex: captured.index,
+        });
+        const output = await callModel([
+            {
+                role: 'system',
+                content: [
+                    '你只补全一个人物的自然中文档案，不重写正文，不识别其他人物。',
+                    '新增人物必须完整给出：人物信息、性格特征、过往经历、当前状态、关系与动机、知识、能力与资源。',
+                    '已有角色只给出请求缺少的变化字段。不要输出 revision、digest、status、SourceRef、JSONPatch 或任何技术元数据。',
+                    '只输出一个 <人物档案更新> 区块。',
+                ].join('\n'),
+            },
+            {
+                role: 'user',
+                content: [
+                    `修复目标：${safeJson(request, 0)}`,
+                    `目标姓名：${target.name}`,
+                    `最终接受正文：${cropText(acceptedContentText(messageText), 9000, '接受正文')}`,
+                    `世界权威材料：${cropText((worldContext?.entries || []).map((entry) => (
+                        `${entry?.title || ''}\n${entry?.content || ''}`
+                    )).join('\n\n'), 9000, '世界权威')}`,
+                ].join('\n\n'),
+            },
+        ], {
+            maxTokens: 0,
+            task: '人物档案单人物定向补缺',
+            channel: 'fast',
+            instructionModule: 'profile',
+            targetIndex: captured.index,
+            jsonMode: false,
+            failover: true,
+            maxFailovers: 1,
+        });
+        const repairedParsed = parseActorProfileUpdateBlock(output, { requireAcceptedTail: false });
+        const repairedBound = bindActorProfileUpdateEntries(repairedParsed, {
+            tickets, actors,
+            acceptedNarrative: acceptedContentText(messageText),
+            acceptedTarget: sourceRefOf(captured),
+        });
+        const exact = repairedBound.entries?.find((entry) => (
+            entry.actorId === target.actorId
+            && entry.mode === target.mode
+        ));
+        if (!exact || !validateActorProfileUpdateEntry(exact, { mode: target.mode }).ok) continue;
+        repairedEntries.push(exact);
+    }
+    if (!repairedEntries.length) {
+        return { status: 'failed', reason: 'profile_targeted_repair_incomplete', zeroWrite: true };
+    }
+    const repairedBlock = renderSemanticProfileEntries(repairedEntries);
+    const message = context.chat[captured.index];
+    const nextText = replaceSemanticProfileBlock(message.mes, repairedBlock);
+    const strict = targetIsCurrent(captured, operationToken(captured), { requireLatest: false });
+    if (!strict.ok) return { status: 'stale', reason: strict.reason };
+    message.mes = nextText;
+    if (Array.isArray(message.swipes) && typeof message.swipes[message.swipe_id] === 'string') {
+        message.swipes[message.swipe_id] = nextText;
+    }
+    try {
+        await context.saveChat?.();
+    } catch {
+        return { status: 'failed', reason: 'profile_targeted_repair_save_failed' };
+    }
+    const nextTarget = captureTarget(context, captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    });
+    if (!sameAcceptedNarrativeTarget(captured, nextTarget)) {
+        return { status: 'stale', reason: 'profile_targeted_repair_target_changed' };
+    }
+    return runSemanticActorProfileTarget(nextTarget);
+}
+
+async function migrateLegacyProfilesToMvu() {
+    const context = getContext();
+    const latest = latestAiMessage(context);
+    const captured = latest.message ? captureTarget(context, latest.index) : null;
+    if (!captured) return { status: 'failed', reason: 'profile_migration_target_missing' };
+    const scopeGuard = await freshFrozenScopeGuard(captured);
+    if (!scopeGuard.ok) return { status: 'failed', reason: scopeGuard.reason };
+    const token = operationToken(captured);
+    const namespace = readChatNamespace(context);
+    const ledger = normalizeActorLedger(namespace.actorLedger, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
+    const legacyProfiles = Object.fromEntries((ledger.actors || [])
+        .filter((actor) => actor?.profileV6 && !actor?.profileRef)
+        .map((actor) => [actor.id, actor.profileV6]));
+    if (!Object.keys(legacyProfiles).length) {
+        return { status: 'no_candidates', reason: 'profile_migration_no_legacy_profiles' };
+    }
+    const Mvu = await getMvu();
+    if (!Mvu || typeof Mvu.getMvuData !== 'function'
+        || typeof Mvu.parseMessage !== 'function'
+        || typeof Mvu.replaceMvuData !== 'function') {
+        return { status: 'failed', reason: 'profile_mvu_api_unavailable' };
+    }
+    const currentData = await mvuDataAt(Mvu, captured.index);
+    if (!currentData) return { status: 'failed', reason: 'profile_mvu_read_failed' };
+    const root = actorProfileMvuRootFromData(currentData);
+    const rootPresent = actorProfileMvuRootPresent(currentData);
+    const compiled = compileLegacyActorProfileMigration(legacyProfiles, {
+        profileRoot: root,
+        profileRootPresent: rootPresent,
+        existingProfiles: actorProfileMvuProfilesFromData(currentData, root),
+        sourceRef: sourceRefOf(captured),
+        readbackVerified: false,
+    });
+    if (!compiled.operations.length) {
+        return {
+            status: 'failed', reason: 'profile_legacy_migration_incomplete',
+            quarantined: compiled.quarantined, zeroWrite: true,
+        };
+    }
+    const block = [
+        '<UpdateVariable>', '<Analysis>旧档案显式迁移到 MVU；旧副本保持只读。</Analysis>',
+        '<JSONPatch>', JSON.stringify(compiled.operations), '</JSONPatch>', '</UpdateVariable>',
+    ].join('\n');
+    const candidate = await parseCandidate(Mvu, currentData, block);
+    if (candidate.status !== 'ready') return { status: 'failed', reason: 'profile_migration_prepare_failed' };
+    const committed = await commitCandidate(Mvu, candidate, captured, token, {
+        repairKind: 'actor-profile-legacy-migration', source: 'explicit-user-action',
+    }, { requireExactTarget: true, syncFrontend: false });
+    if (committed.status !== 'applied' || committed.readbackVerified !== true) {
+        return { status: 'failed', reason: committed.reason || 'profile_migration_readback_failed' };
+    }
+    const landed = await mvuDataAt(Mvu, captured.index);
+    const landedProfiles = actorProfileMvuProfilesFromData(landed, root);
+    const finalOps = compiled.writeSet.map((write) => ({
+        op: 'replace', path: write.path,
+        value: markActorProfileReadback(landedProfiles[write.actorId], { verified: true }),
+    }));
+    if (finalOps.some((operation) => !operation.value)) {
+        return { status: 'failed', reason: 'profile_migration_readback_failed' };
+    }
+    const finalBlock = [
+        '<UpdateVariable>', '<Analysis>旧档案迁移回读收据。</Analysis>',
+        '<JSONPatch>', JSON.stringify(finalOps), '</JSONPatch>', '</UpdateVariable>',
+    ].join('\n');
+    const finalCandidate = await parseCandidate(Mvu, landed, finalBlock);
+    if (finalCandidate.status !== 'ready') return { status: 'failed', reason: 'profile_migration_finalize_failed' };
+    const finalized = await commitCandidate(Mvu, finalCandidate, captured, token, {
+        repairKind: 'actor-profile-legacy-migration-readback', source: 'explicit-user-action',
+    }, { requireExactTarget: true, syncFrontend: false });
+    if (finalized.status !== 'applied' || finalized.readbackVerified !== true) {
+        return { status: 'failed', reason: finalized.reason || 'profile_migration_finalize_failed' };
+    }
+    const finalData = await mvuDataAt(Mvu, captured.index);
+    const finalProfiles = actorProfileMvuProfilesFromData(finalData, root);
+    const finalizedByPath = new Map(finalOps.map((operation) => [operation.path, operation.value]));
+    const replayOps = [
+        ...(rootPresent ? [] : [{ op: 'insert', path: '/人物档案', value: { schemaVersion: 1, byActorId: {} } }]),
+        ...compiled.operations.filter((operation) => operation.path !== '/人物档案').map((operation) => ({
+            ...operation, value: finalizedByPath.get(operation.path) || operation.value,
+        })),
+    ];
+    const replay = mergeActorProfileOperationsIntoAcceptedMessage(
+        String(context.chat[captured.index]?.mes || ''),
+        replayOps,
+    );
+    if (!replay.ok || !await refreshMessage(captured.index, replay.block, true, '', captured, token)) {
+        return { status: 'failed', reason: 'profile_migration_replay_failed' };
+    }
+    const projectionTarget = captureTarget(getContext(), captured.index, {
+        frozenScope: captured.actorSovereigntyScope,
+        unscoped: !captured.scopeDigest,
+    });
+    if (!sameAcceptedNarrativeTarget(captured, projectionTarget)) {
+        return { status: 'stale', reason: 'profile_migration_target_changed' };
+    }
+    const projection = await projectSemanticProfilesToActorLedger(
+        projectionTarget,
+        compiled.migrationEntries,
+        finalProfiles,
+        compiled.writeSet,
+        root,
+    );
+    if (!projection.ok) return { status: 'failed', reason: projection.reason };
+    return {
+        status: 'atomic_readback', migrated: projection.actorIds,
+        quarantined: compiled.quarantined, legacyPreserved: true,
+    };
+}
+
 async function runActorProfileTarget(captured, {
     force = false,
     includeMaintenance = false,
@@ -18423,7 +19492,7 @@ function stage3NoActorPermitMatches(permit, captured) {
         });
 }
 
-function stage3LedgerReadbackGate(captured, noActorPermit = null) {
+function stage3LedgerReadbackGate(captured, noActorPermit = null, profileReadyActorIds = []) {
     const namespace = readChatNamespace();
     const ledger = normalizeActorLedger(namespace.actorLedger, {
         chatId: captured.chatId,
@@ -18453,6 +19522,11 @@ function stage3LedgerReadbackGate(captured, noActorPermit = null) {
             actorId
             && actorProfileReadinessInLedger(ledger, actorId).ready === true
         ));
+    const semanticReadyActorIds = [...new Set(
+        (Array.isArray(profileReadyActorIds) ? profileReadyActorIds : [])
+            .map((actorId) => String(actorId || '').trim())
+            .filter(Boolean),
+    )];
     const unreadySourceActorIds = sourceActorIds.filter((actorId) => (
         !actorProfileReadinessInLedger(ledger, actorId).ready
     ));
@@ -18470,15 +19544,58 @@ function stage3LedgerReadbackGate(captured, noActorPermit = null) {
             ? 'no_candidates'
             : sourceActorIds.length && !unreadySourceActorIds.length
                 ? 'atomic_readback'
-                : (readyActorIds.length || readySourceActorIds.length)
-                    ? 'ready_subset'
-                    : 'structure_only',
+            : (readyActorIds.length || readySourceActorIds.length)
+                ? 'ready_subset'
+                : 'structure_only',
         actorLedger: ledger,
         noActorPermit: transientNoCandidates,
         persistedNoCandidatesProof,
+        // Do not promote semantic MVU IDs into the action scheduler until a
+        // durable ActorRegistry/readiness-reference projection exists. The
+        // scheduler deliberately consumes only ledger ActorRefs today;
+        // exposing these IDs as ready would claim action readiness without a
+        // valid actorRef/profile authority and could schedule the wrong actor.
         readyActorIds: [...new Set([...readyActorIds, ...readySourceActorIds])],
+        semanticReadyActorIds,
+        semanticProjectionBlocked: semanticReadyActorIds.length > 0,
         unreadySourceActorIds,
     };
+}
+
+async function stage3AttachMvuProfilesToLedger(captured, ledger) {
+    const semanticActors = (ledger?.actors || []).filter((actor) => actor?.profileRef);
+    if (!semanticActors.length) return ledger;
+    let profiles = {};
+    try {
+        const Mvu = await getMvu();
+        const data = Mvu ? await mvuDataAt(Mvu, captured.index) : null;
+        profiles = actorProfileMvuProfilesFromData(data, ACTOR_PROFILE_MVU_ROOT);
+    } catch {
+        profiles = {};
+    }
+    const actors = (ledger.actors || []).map((actor) => {
+        const ref = actor?.profileRef;
+        if (!ref) return actor;
+        const profile = profiles?.[actor.id];
+        const ready = profileReadiness(profile);
+        const digestMatches = profile
+            && String(ref.profileDigest || '') === String(actorProfileMvuDigest(profile) || '');
+        const sourceMatches = String(ref.sourceRefDigest || '')
+            === String(profile?.本地元数据?.sourceRefDigest || '');
+        if (!ready.ready || !digestMatches || !sourceMatches) {
+            return {
+                ...actor,
+                profileRef: { ...ref, status: 'unverified', readbackVerified: false },
+                profileV6: null,
+            };
+        }
+        return { ...actor, profileV6: deepClone(profile) };
+    });
+    return normalizeActorLedger({ ...ledger, actors }, {
+        chatId: captured.chatId,
+        identityScopeId: captured.identityScopeId,
+        scopeDigest: captured.scopeDigest,
+    });
 }
 
 async function recordStage3WorldFinalDiagnostic(captured, result) {
@@ -18626,6 +19743,7 @@ function stage3Phase2ReadbackValidationCode(failureSink) {
 async function runContinuityTarget(captured, {
     force = false,
     noActorPermit = null,
+    profileReadyActorIds = [],
     manualRecovery = false,
 } = {}) {
     const timingStartedAt = Date.now();
@@ -18696,9 +19814,19 @@ async function runContinuityTarget(captured, {
     if (!sovereigntyNarrativeEligible(getContext()?.chat?.[captured.index]?.mes || '')) {
         return { status: 'disabled', reason: 'mechanism_only_narrative' };
     }
-    const profileGate = stage3LedgerReadbackGate(captured, noActorPermit);
+    const profileGate = stage3LedgerReadbackGate(
+        captured,
+        noActorPermit,
+        profileReadyActorIds,
+    );
     if (!profileGate.ok) {
         return { status: 'blocked', reason: profileGate.reason, module: 'world' };
+    }
+    if (typeof stage3AttachMvuProfilesToLedger === 'function') {
+        profileGate.actorLedger = await stage3AttachMvuProfilesToLedger(
+            captured,
+            profileGate.actorLedger,
+        );
     }
     const settings = getSettings();
     const context = getContext();
@@ -19562,6 +20690,7 @@ async function enqueueContinuity(targetId, {
     manualRecovery = false,
     expectedTarget = null,
     noActorPermit = null,
+    profileReadyActorIds = [],
     afterPending = false,
     startBarrier = null,
 } = {}) {
@@ -19685,6 +20814,7 @@ async function enqueueContinuity(targetId, {
             return runContinuityTarget(fresh, {
                 force,
                 noActorPermit: effectiveNoActorPermit,
+                profileReadyActorIds,
                 manualRecovery,
             });
         })
@@ -21648,6 +22778,7 @@ async function enqueueActorProfiles(targetId, {
     includeMaintenance = null,
     expectedTarget = null,
     allowIdentityRetry = false,
+    legacyPath = false,
 } = {}) {
     const context = getContext();
     if (actorWorldManagementWrite?.chatId === String(context?.chatId || '')) {
@@ -21675,6 +22806,17 @@ async function enqueueActorProfiles(targetId, {
         return actorProfileTransientResult('stale', {
             reason: 'current_source_identity_changed',
         });
+    }
+    // Manual retry and the public profile action stay on the semantic
+    // accepted-final bridge by default.  The mature model lane is reachable
+    // only from the explicit legacy path switch or a maintenance request
+    // (for example opt-in adult physiology completion).
+    if (
+        !legacyPath
+        && getSettings().actorProfilePathMode === 'semantic'
+        && includeMaintenance !== true
+    ) {
+        return runSemanticActorProfileTarget(expected);
     }
     // A foreground generation may have preempted the previous accepted
     // target's host generateRaw call. Wait for that task to seal its existing
@@ -25798,6 +26940,20 @@ function buildSettingsPanel() {
                                     <option value="full_adult">完整＋成人生理</option>
                                 </select>
                             </label>
+                            <label class="mvuad-select">
+                                <span>人物档案来源路径</span>
+                                <select class="text_pole mvuad-profile-path-mode">
+                                    <option value="semantic">正文语义块 → MVU（默认）</option>
+                                    <option value="legacy">旧 P1 模型链（显式回滚）</option>
+                                </select>
+                            </label>
+                            <div class="mvuad-description">
+                                新聊天默认使用正文语义块；没有人物变化时可省略区块并零写入。
+                                旧 profileV6 只读保留；点击迁移后逐人物复制并回读，失败人物不会破坏旧档案。
+                            </div>
+                            <div class="mvuad-actions">
+                                <button class="menu_button mvuad-profile-migrate" type="button">迁移旧档案到 MVU</button>
+                            </div>
                             <div class="mvuad-description">
                                 切换到“完整＋成人生理”后，医生会立即为现有缺项人物补全生理档案；
                                 已完成的其他档案模块不会重新生成。
@@ -26152,6 +27308,40 @@ function buildSettingsPanel() {
                 includeMaintenance: true,
             });
         }
+    });
+    const profilePathMode = wrapper.querySelector('.mvuad-profile-path-mode');
+    profilePathMode.value = getSettings().actorProfilePathMode;
+    profilePathMode.addEventListener('change', () => {
+        const nextMode = ['legacy', 'semantic'].includes(profilePathMode.value)
+            ? profilePathMode.value : 'semantic';
+        getSettings().actorProfilePathMode = nextMode;
+        profilePathMode.value = nextMode;
+        saveSettings();
+        setActorProfileStatus(
+            nextMode === 'semantic'
+                ? '人物档案：语义块路径已启用；新回合将先做本地解析与 MVU 回读。'
+                : '人物档案：已切回旧 P1 模型链。',
+            '',
+        );
+    });
+    wrapper.querySelector('.mvuad-profile-migrate')?.addEventListener('click', async () => {
+        setActorProfileStatus('人物档案：正在逐人物迁移并核验 MVU 回读…', 'busy');
+        const result = await migrateLegacyProfilesToMvu();
+        if (result?.status === 'atomic_readback') {
+            setActorProfileStatus(
+                `人物档案：已迁移 ${result.migrated?.length || 0} 人；旧档案保留为只读备份。`,
+                'ok',
+            );
+            return;
+        }
+        if (result?.status === 'no_candidates') {
+            setActorProfileStatus('人物档案：没有需要迁移的旧档案。', '');
+            return;
+        }
+        setActorProfileStatus(
+            '人物档案：迁移未完成；旧档案保持原样，可修复缺项后重试。',
+            'error',
+        );
     });
     const profileSemanticRetries = wrapper.querySelector('.mvuad-profile-semantic-retries');
     profileSemanticRetries.value = String(getSettings().actorProfileSemanticRetries);

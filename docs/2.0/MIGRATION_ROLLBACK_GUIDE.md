@@ -1,15 +1,22 @@
 # MVU Auto Doctor 2.0 迁移与回滚指南
 
-适用候选：`2.0.0-rc.14`
+适用候选：`2.0.0-rc.15`（测试仓；未完成正式门禁）
 
 ## 在线发布通道
 
-`2.0.0-rc.14` 只有通过本轮全部发布门、非草稿 PR 与 CI 后才进入默认分支 `main`，离线候选包保留为手动安装与回滚演练材料。
+`2.0.0-rc.15` 当前只进入独立测试仓 `main`；正式仓和正式 `main` 保持不动。完成真实门禁前只能用于用户自测。
 已有安装只需点击“MVU 自动医生”这一行自己的“更新”并刷新；全新
-安装才使用仓库地址 `https://github.com/magilittle0-byte/mvu-auto-doctor` 并将分支或标签
+安装才使用仓库地址 `https://github.com/magilittle0-byte/mvu-auto-doctor-testing` 并将分支或标签
 留空。
 
 以下备份与向前回滚流程是 rc.1 在线发布留下的历史通道，不是 rc.14 已上线的证明。
+
+### rc.15 人物档案迁移与回滚
+
+- 新聊天默认使用“正文语义块 → MVU”；`/人物档案/byActorId` 是唯一完整内容权威，ActorLedger 只保存引用和 readiness。
+- 旧聊天的 verified profileV6 默认只读可用，不自动重写。设置页“迁移旧档案到 MVU”会逐 Actor 复制、写入、回读，再切换该 Actor 的 profileRef；失败 Actor 保留旧档案且不产生半档案。
+- “人物档案来源路径”切到“旧 P1 模型链”是明确回滚开关。回滚不删除 MVU 档案，也不双向同步两份内容。
+- 迁移后如需回退，只切回旧路径；不要手工删除 `/人物档案`、旧 profileV6、ActorRegistry 或历史回执。
 
 ### rc.14 后台恢复与身份/存储迁移
 
