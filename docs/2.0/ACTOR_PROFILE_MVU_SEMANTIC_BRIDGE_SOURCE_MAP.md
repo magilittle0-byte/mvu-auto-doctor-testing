@@ -1,6 +1,6 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.19` 测试仓候选。状态：rc.18 当前指纹的真实首回合确认 semantic P1 已 durable `no_candidates` 且人物模型调用为 0，但独立 P3 在同一竞态窗零模型、零写入 stale，P1 只 join 该结果后没有结构世界终态。rc.19 保留单 owner join，仅在 joined P3 明确零写、零模型且 exact accepted target 仍当前时，于 owner 释放后安全取得一次新 owner；仍须绑定当前 loaded fingerprint 真实复验，十二回合正式门禁未完成。
+适用版本：`2.0.0-rc.20` 测试仓候选。状态：rc.19 当前指纹的真实首回合确认尾随宿主 start 已被正确识别为 dry-run、semantic P1 已 durable `no_candidates` 且人物模型调用为 0；但 P3 的模型前 stale 没有统一零写收据，P1 的安全接棒门无法识别，结构世界仍无终态。同一正文还出现一次替玩家下主观感受结论。rc.20 统一 fixed-code stale 收据、fresh exact-target 单次接棒，并最小修正配套预设的玩家感受边界；仍须绑定当前 loaded fingerprint 真实复验，十二回合正式门禁未完成。
 
 ## 生产链
 
@@ -9,7 +9,7 @@
 3. accepted-final 适配器只读取当前最终 assistant 的精确 SourceRef；聊天、message、swipe、generation、content、scope 或 epoch 漂移均零写入。格式先本地宽容修复，再按 ticket/ActorId 逐人物绑定和隔离。预留 ticket 只是可选池，不等于已消费；专用块完全省略按预设合同保存 exact-source 零变化证明，块已出现但为空/损坏仍是明确失败。
 4. 编译器在 working clone 上形成 `/人物档案/byActorId/<ActorId>` 操作，复用既有 MVU WAL、selected-field CAS、持久写、readback 与 touched-path rollback。第一次回读证明内容落地，第二次本地写入 ready 收据；最终操作合并回原消息 UpdateVariable，保留主回复原有变量操作。
 5. ActorRegistry 仍是唯一 ActorId/name/aliases 索引。ActorLedger 只保存 profileRef、digest、revision、readiness、ActionAttempt/receipt 和世界字段；完整档案只在 MVU，不再双写稳定/演化副本。
-6. P3 与人物档案事务独立启动，冻结启动时已经 durable-ready 的人物集合。缺档人物不参与该批人物行动，结构世界、其他 ready 人物和支线仍继续；人物尝试必须由世界单批裁决。P1 的 idempotent wake 先原样 join 已有 P3，绝不在 pending owner 链内递归重开；semantic `no_candidates` 会把同一 exact-source coverage proof 作为结构世界准入证明。只有 joined owner 是零写、零模型 stale，且 exact target 在 owner 释放后仍当前，P1 才取得一次新的 P3 owner；任何已调用模型、前台抢占或 SourceRef 漂移都保持零自动重跑。
+6. P3 与人物档案事务独立启动，冻结启动时已经 durable-ready 的人物集合。缺档人物不参与该批人物行动，结构世界、其他 ready 人物和支线仍继续；人物尝试必须由世界单批裁决。P1 的 idempotent wake 先原样 join 已有 P3，绝不在 pending owner 链内递归重开；semantic `no_candidates` 会把同一 exact-source coverage proof 作为结构世界准入证明。所有模型前 stale 都携带 `module=world + zeroWrite=true + worldModelCalls=0` 和固定隐私码；只有 joined owner 满足该证明、不是前台抢占，且重新 fresh-read 后仍是同一 accepted envelope，P1 才取得一次新 owner。任何已调用模型、正文/swipe/generation/scope/epoch 漂移都保持零自动重跑。
 7. P4 仍只有一个 Doctor-owned exact-once 插槽，注入验证过的世界包、相关 ready 人物摘要和本回合票据。数据库仍只从最终正文独立填表，不参与档案事务、P3 或 P4 收据。
 8. 原 Doctor 悬浮面板“人物档案”页从当前楼层 MVU durable 投影 hydrate：默认全折叠、单人展开、列表有界滚动；六段内容分成稳定档案与长期演化，故障分色优先于 busy。即使故障发生在 Actor 绑定前、当前没有卡片，持久 retry receipt 仍会把顶部摘要和空状态显示为红色。折叠偏好只进浏览器 localStorage，不进 MVU 或 Doctor 持久账本。
 
@@ -27,7 +27,7 @@
 ### A：最小适配
 
 - TavernDB 成熟填表结构只复用“有界目标、working clone、整批提交、回读失败不算成功”的事务形状；没有复制其表格、SQL 或内容权威。
-- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设只增加一个尾部隐藏语义域，不改写作者提示词主结构。
+- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设增加尾部隐藏语义域，并只把原“你感到”模板最小修正为客观感官表达与明确的玩家主观感受禁写，不改写作者提示词主结构。
 - 既有 `profileV6` 自然叙事六段和锁/人工覆盖规范作为 MVU schema 内容形状；ActorLedger 改为单向 reference-only 投影。
 - 既有 P3/P4 注入只增加 MVU readback 摘要投影，不新增并行世界状态机或第二插槽。
 
@@ -38,6 +38,7 @@
 - 单人物 AI 定向补缺。原因是旧 P1 会重新识别/生成整批人物，不满足“只修坏人物、不重跑正文和好人物”的边界。
 - 显式旧 profileV6 → MVU 逐 Actor 迁移按钮。原因是自动破坏性迁移和双向维护都不允许。
 - `v2/surface/actor-profile-view.mjs` 的 MVU 投影、状态优先级、紧凑 accordion 与脱敏诊断。旧页面只读取 profileV6，且六段长文会平铺，不能满足当前唯一权威和多人物可读性要求。
+- P3 模型前 stale 的统一 fixed-code 零写收据与 fresh exact-target 单次接棒。旧分支只有泛 `world.stale`，无法区分可安全接棒的零调用竞态与真实失败。
 
 ## 不变量与失败语义
 
@@ -49,4 +50,4 @@
 
 ## 非验收说明
 
-rc.18 的自动套件为 603/603，但其当前指纹真实首回合仍暴露零写 P3 stale 与 P1 durable no-candidates 的单 owner 竞态，故该候选真实失败。rc.19 已增加定向竞态回归、绑定 runtime fingerprint，并通过完整 Node 自动套件 604/604；在推送、实际加载哈希匹配后仍必须使用新的全新聊天取得首回合真实证据。语法检查、JSON 解析、差异检查和合成 DOM 回归都不证明真实可用；正式仓与正式 main 仍须等待完整十二回合协议。
+rc.19 的完整自动套件为 604/604，但其当前指纹真实首回合仍暴露模型前 P3 stale 收据不完整、世界无终态及玩家感受越权，故该候选真实失败。rc.20 已增加定向 stale 收据、fresh exact target、runtime fingerprint 和预设玩家感受边界回归，完整 Node 自动套件 606/606 已通过；推送、实际加载哈希匹配与新全新聊天首回合证据仍待完成。语法检查、JSON 解析、差异检查和合成 DOM 回归都不证明真实可用；正式仓与正式 main 仍须等待完整十二回合协议。

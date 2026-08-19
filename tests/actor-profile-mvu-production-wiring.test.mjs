@@ -50,8 +50,16 @@ test('P3 starts independently, freezes ready actors, and structure world does no
         /profileResult\?\.status === 'no_candidates'[\s\S]*?profileResult\s*:\s*null/u,
     );
     assert.match(wake, /joinedPendingOwner[\s\S]*?zeroWrite !== true[\s\S]*?worldModelCalls/u);
-    assert.match(wake, /stage3TargetIsCurrent\(target, operationToken\(target\)\)/u);
+    assert.match(wake, /freshTarget = await moduleTargetForAcceptedFinal\(envelope\)/u);
+    assert.match(wake, /stage3TargetIsCurrent\(freshTarget, operationToken\(freshTarget\)\)/u);
+    assert.match(wake, /expectedTarget:\s*freshTarget/u);
     assert.match(wake, /afterPending:\s*false/u);
+    const stale = section(
+        'function stage3StaleValidationCode',
+        'function stage3AcceptedTargetIsStrictlyNewer',
+    );
+    assert.match(stale, /world_task_owner_changed:\s*'world\.stale\.owner_changed'/u);
+    assert.match(stale, /module:\s*'world'[\s\S]*?zeroWrite:\s*true[\s\S]*?worldModelCalls:\s*0/u);
 });
 
 test('P4 keeps one exact-once consumer while adding only bounded related ready profiles', () => {
@@ -84,6 +92,8 @@ test('runtime fingerprint binds preset bridge, parser/compiler, transaction, P3,
         'actorProfileSemanticRuntimeFingerprint',
         'runSemanticActorProfileTarget',
         'wakeContinuityAfterProfileTerminal',
+        'stage3StaleValidationCode',
+        'stage3ZeroWriteStaleResult',
         'projectSemanticProfilesToActorLedger',
         'persistSemanticActorLedgerProjection',
         'stage3AttachMvuProfilesToLedger',

@@ -39,6 +39,18 @@ test('selected preset exposes one accepted-final natural-language profile block 
     assert.match(profile.content, /没有变化时不输出/u);
 });
 
+test('selected preset keeps second-person perception without assigning player feelings', () => {
+    const identifier = '82da9596-b36b-47cc-9f77-d91c7fff1919';
+    const perspective = (preset.prompts || []).find((entry) => entry?.identifier === identifier);
+    assert.ok(perspective);
+    assert.match(perspective.content, /你听见、你看见、你触到/u);
+    assert.match(perspective.content, /不得用“你感到\/你觉得\/你认为\/你意识到”/u);
+    assert.match(perspective.content, /把如何理解和感受留给Master/u);
+    assert.doesNotMatch(perspective.content, /你听见、你看见、你感到”等表达/u);
+    const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
+    assert.equal(order.find((entry) => entry?.identifier === identifier)?.enabled, true);
+});
+
 test('profile repair classification is fixed-code and fail-closed', () => {
     const privateText = 'PRIVATE-NAME-AND-MODEL-BLOCK';
     const classified = classifyActorProfileRepairFailure({

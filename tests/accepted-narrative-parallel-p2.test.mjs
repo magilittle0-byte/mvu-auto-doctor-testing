@@ -550,7 +550,8 @@ function loadAcceptedFinalFullDispatchHarness({
                     initialWorldTask = new Promise((resolve) => {
                         state.releaseInitialWorld = () => resolve({
                             status: 'stale',
-                            reason: 'current_source_identity_changed',
+                            reason: 'world_task_owner_changed',
+                            validationCode: 'world.stale.owner_changed',
                             module: 'world',
                             zeroWrite: true,
                             worldModelCalls: 0,
@@ -770,6 +771,8 @@ test('runtime fingerprint binds accepted-final keying, foreground flush, and unl
         'acceptFinalGenerationUnlocked',
         'stage3AwaitAcceptedFinalP4Barrier',
         'wakeContinuityAfterProfileTerminal',
+        'stage3StaleValidationCode',
+        'stage3ZeroWriteStaleResult',
     ];
     for (const helper of critical) {
         assert.match(runtimeSource, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
@@ -969,6 +972,11 @@ test('a durable no-candidates P1 wake reacquires P3 once after joining a zero-wr
     assert.equal(runtime.state.worldModelCalls, 1);
     assert.equal(runtime.state.worldWrites, 1);
     assert.equal(runtime.state.continuityCalls.at(-1).noActorPermit.status, 'no_candidates');
+    assert.notEqual(
+        runtime.state.continuityCalls.at(-1).target,
+        runtime.state.continuityCalls[1].target,
+        'the one fresh owner must use a newly captured exact accepted target',
+    );
     assert.equal(runtime.state.diagnostics.at(-1).task, 'doctor_total');
     assert.equal(runtime.state.diagnostics.at(-1).status, 'succeeded');
 });
@@ -2499,6 +2507,10 @@ function makeTarget(overrides = {}) {
 }
 
 function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = null }) {
+    const staleSupport = sourceSection(
+        'function stage3StaleValidationCode(reason)',
+        'function stage3AcceptedTargetIsStrictlyNewer(currentValue, priorValue)',
+    );
     const code = sourceSection(
         'function sameTargetExceptContent(left, right)',
         'async function confirmDangerousAction(message)',
@@ -2593,7 +2605,7 @@ function loadContinuityQueueHarness({ expected, fresh = expected, worldResult = 
         renderSovereigntyHealth: () => undefined,
         syncTaskCancelButtons: () => undefined,
     };
-    vm.runInNewContext(`${code}\nthis.enqueueContinuity = enqueueContinuity;`, sandbox);
+    vm.runInNewContext(`${staleSupport}\n${code}\nthis.enqueueContinuity = enqueueContinuity;`, sandbox);
     return {
         enqueue: (options = {}) => sandbox.enqueueContinuity(expected.index, {
             expectedTarget: expected,
@@ -2675,6 +2687,31 @@ test('accepted target matcher allows mechanism refresh but fails closed on narra
     assert.equal(changedEpochMatches(target, makeTarget({ epoch: 8 })), false);
 });
 
+test('pre-model P3 stale receipts are fixed-code zero-write evidence for safe P1 handoff', () => {
+    const code = sourceSection(
+        'function stage3StaleValidationCode(reason)',
+        'function stage3AcceptedTargetIsStrictlyNewer(currentValue, priorValue)',
+    );
+    const sandbox = {};
+    vm.runInNewContext(
+        `${code}\nthis.makeStale = stage3ZeroWriteStaleResult;`,
+        sandbox,
+    );
+    const owner = sandbox.makeStale('world_task_owner_changed');
+    assert.deepEqual(JSON.parse(JSON.stringify(owner)), {
+        status: 'stale',
+        reason: 'world_task_owner_changed',
+        validationCode: 'world.stale.owner_changed',
+        module: 'world',
+        zeroWrite: true,
+        worldModelCalls: 0,
+    });
+    const drift = sandbox.makeStale('人物主权作用域已经变化');
+    assert.equal(drift.validationCode, 'world.stale.target_changed');
+    assert.equal(drift.zeroWrite, true);
+    assert.equal(drift.worldModelCalls, 0);
+});
+
 test('existing continuity queue dedupes event storms and performs zero writes for stale targets', async () => {
     const target = makeTarget();
     const storm = loadContinuityQueueHarness({ expected: target });
@@ -2724,6 +2761,10 @@ test('existing continuity queue dedupes event storms and performs zero writes fo
         });
         const result = await stale.enqueue();
         assert.equal(result.status, 'stale', JSON.stringify(changed));
+        assert.equal(result.module, 'world', JSON.stringify(changed));
+        assert.equal(result.zeroWrite, true, JSON.stringify(changed));
+        assert.equal(result.worldModelCalls, 0, JSON.stringify(changed));
+        assert.match(result.validationCode, /^world\.stale\./u, JSON.stringify(changed));
         assert.equal(stale.state.starts, 0, JSON.stringify(changed));
         assert.equal(stale.state.writes, 0, JSON.stringify(changed));
     }

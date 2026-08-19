@@ -3000,6 +3000,10 @@ test('a foreground-preempted P3 target is resumed from the existing serial chain
 });
 
 test('explicit invalidation detaches an unresponsive P3 owner while foreground preemption keeps its chain', async () => {
+    const staleResultSource = sourceSection(
+        'function stage3StaleValidationCode(reason)',
+        'function stage3AcceptedTargetIsStrictlyNewer(currentValue, priorValue)',
+    );
     const queueSource = sourceSection(
         'async function stage3AwaitAcceptedFinalP4Barrier(startBarrier)',
         'function stage3AttemptProjection(ledger, target)',
@@ -3040,7 +3044,7 @@ test('explicit invalidation detaches an unresponsive P3 owner while foreground p
         deepClone: (value) => structuredClone(value),
     };
     vm.runInNewContext(
-        `${queueSource}\n${invalidateSource}\n`
+        `${staleResultSource}\n${queueSource}\n${invalidateSource}\n`
         + 'this.enqueue = enqueueContinuity; this.invalidateWorld = invalidateContinuityQueue;',
         sandbox,
     );
@@ -3086,6 +3090,10 @@ test('explicit invalidation detaches an unresponsive P3 owner while foreground p
 });
 
 test('a detached P3 owner cannot enter the model after prior-chain or start-barrier release', async () => {
+    const staleResultSource = sourceSection(
+        'function stage3StaleValidationCode(reason)',
+        'function stage3AcceptedTargetIsStrictlyNewer(currentValue, priorValue)',
+    );
     const queueSource = sourceSection(
         'async function stage3AwaitAcceptedFinalP4Barrier(startBarrier)',
         'function stage3AttemptProjection(ledger, target)',
@@ -3138,7 +3146,7 @@ test('a detached P3 owner cannot enter the model after prior-chain or start-barr
             deepClone: (value) => structuredClone(value),
         };
         vm.runInNewContext(
-            `${queueSource}\n${invalidateSource}\n`
+            `${staleResultSource}\n${queueSource}\n${invalidateSource}\n`
             + 'this.enqueue = enqueueContinuity; this.invalidateWorld = invalidateContinuityQueue;',
             sandbox,
         );
@@ -3168,6 +3176,10 @@ test('a detached P3 owner cannot enter the model after prior-chain or start-barr
         const oldResult = await oldTask;
         assert.equal(oldResult.status, 'stale');
         assert.equal(oldResult.reason, 'world_task_owner_changed');
+        assert.equal(oldResult.validationCode, 'world.stale.owner_changed');
+        assert.equal(oldResult.module, 'world');
+        assert.equal(oldResult.zeroWrite, true);
+        assert.equal(oldResult.worldModelCalls, 0);
         assert.equal(state.oldModelCalls, 0, `${blockedOn}: detached owner must not call the model`);
         assert.equal(state.oldWrites, 0, `${blockedOn}: detached owner must not write world state`);
         assert.equal(state.terminalWrites, 0, `${blockedOn}: detached owner must not write diagnostics`);
@@ -3183,6 +3195,10 @@ test('a detached P3 owner cannot enter the model after prior-chain or start-barr
 });
 
 test('a P3 owner lost during terminal diagnostic await cannot touch completed cache or UI', async () => {
+    const staleResultSource = sourceSection(
+        'function stage3StaleValidationCode(reason)',
+        'function stage3AcceptedTargetIsStrictlyNewer(currentValue, priorValue)',
+    );
     const queueSource = sourceSection(
         'async function stage3AwaitAcceptedFinalP4Barrier(startBarrier)',
         'function stage3AttemptProjection(ledger, target)',
@@ -3240,7 +3256,7 @@ test('a P3 owner lost during terminal diagnostic await cannot touch completed ca
             deepClone: (value) => structuredClone(value),
         };
         vm.runInNewContext(
-            `${queueSource}\n${invalidateSource}\n`
+            `${staleResultSource}\n${queueSource}\n${invalidateSource}\n`
             + 'this.enqueue = enqueueContinuity; this.invalidateWorld = invalidateContinuityQueue;',
             sandbox,
         );

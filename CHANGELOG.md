@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.20（2026-08-19，测试仓候选）
+- rc.19 当前指纹的真实全新聊天首回合再次确认：正文与选项生成、人物路径 durable `no_candidates`、人物模型调用为 0，尾随宿主事件也被 Doctor 正确识别为 `ignored_start/dry_run`；但 P3 的模型前 stale 分支缺少统一 `module/zeroWrite/worldModelCalls` 收据，P1 无法安全接棒，世界仍无终态。
+- 所有 P3 模型前 stale 现在使用固定隐私码和统一零写收据；P1 仍只 join 单 owner，且仅在 joined 结果明确零写、零模型、非前台抢占时，重新 fresh-read 同一个 accepted envelope 的 exact target 后取得一次新 owner。正文、swipe、generation、scope、content 或 epoch 任一变化仍零写且不重跑。
+- 同一次真实回复还暴露主预设把“你感到”列为普通第二人称表达，与玩家感受自主权冲突。配套最新版预设已把它改为客观感官表达，并明确禁止替玩家下主观情绪/认知结论；不削弱第二人称、NPC 自主性或正文长度合同。
+- 新增模型前 stale 收据、fresh exact target 接棒、runtime fingerprint 与预设玩家感受边界定向回归；rc.20 完整 Node 自动套件为 606/606，并通过语法、manifest/配套预设 JSON 与差异检查。当前指纹真实复验仍待执行，不能用 rc.19 失败证据替代。
+
 ## 2.0.0-rc.19（2026-08-19，测试仓候选）
 - rc.18 当前指纹的真实全新聊天首回合确认：正文、选项和 accepted-final 正常，人物路径按合同形成 durable `no_candidates` 且人物模型调用为 0；但独立 P3 在 P1 写妥该证明前以零模型、零写入进入 `stale`，P1 的 `afterPending` 只 join 了这个结果，结构世界没有终态，候选判失败。
 - rc.19 不恢复 rc.17 的 promise 内递归重开。P1 仍先原样 join 单一 P3 owner；仅当该 owner 明确 `stale + zeroWrite + worldModelCalls=0`、不是前台抢占、且 exact accepted target 仍当前时，才在 owner 完全释放后取得一次新 owner，并携带 durable no-candidates permit。真实语义失败、已发模型调用、swipe/chat/content/scope/epoch 漂移仍不自动重跑。

@@ -275,7 +275,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.19';
+const VERSION = '2.0.0-rc.20';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -5007,6 +5007,10 @@ function doctorRuntimeCriticalFingerprint() {
             ? persistSemanticActorLedgerProjection.toString() : '',
         typeof stage3AttachMvuProfilesToLedger === 'function'
             ? stage3AttachMvuProfilesToLedger.toString() : '',
+        typeof stage3StaleValidationCode === 'function'
+            ? stage3StaleValidationCode.toString() : '',
+        typeof stage3ZeroWriteStaleResult === 'function'
+            ? stage3ZeroWriteStaleResult.toString() : '',
         typeof p4RelevantActorIds === 'function' ? p4RelevantActorIds.toString() : '',
         typeof p4ActorProfileSummary === 'function' ? p4ActorProfileSummary.toString() : '',
         typeof immutableNextTurnConsumerPayload === 'function'
@@ -7859,10 +7863,12 @@ async function wakeContinuityAfterProfileTerminal(envelope, target, profileResul
     // and only while the exact accepted source is still current, may the
     // caller acquire one fresh owner with the now-durable profile permit.
     // This is not a recursive queue retry and never repeats a model call.
-    const guard = stage3TargetIsCurrent(target, operationToken(target));
+    const freshTarget = await moduleTargetForAcceptedFinal(envelope);
+    if (!freshTarget) return joined;
+    const guard = stage3TargetIsCurrent(freshTarget, operationToken(freshTarget));
     if (!guard.ok) return joined;
     return enqueueContinuity(envelope.index, {
-        expectedTarget: target,
+        expectedTarget: freshTarget,
         noActorPermit,
         afterPending: false,
     });
@@ -19153,6 +19159,31 @@ function stage3AcceptedTargetsMatch(left, right) {
     );
 }
 
+function stage3StaleValidationCode(reason) {
+    return ({
+        world_task_owner_changed: 'world.stale.owner_changed',
+        current_source_identity_changed: 'world.stale.source_identity_changed',
+        management_write_pending: 'world.stale.management_write_pending',
+        current_source_unavailable: 'world.stale.source_unavailable',
+        current_source_key_missing: 'world.stale.source_key_missing',
+        world_recovery_target_changed: 'world.stale.recovery_target_changed',
+        foreground_preempted: 'world.foreground_preempted',
+    })[String(reason || '')] || 'world.stale.target_changed';
+}
+
+function stage3ZeroWriteStaleResult(reason, extra = {}) {
+    const safeReason = String(reason || 'world_target_stale');
+    return {
+        status: 'stale',
+        reason: safeReason,
+        validationCode: stage3StaleValidationCode(safeReason),
+        module: 'world',
+        zeroWrite: true,
+        worldModelCalls: 0,
+        ...extra,
+    };
+}
+
 function stage3AcceptedTargetIsStrictlyNewer(currentValue, priorValue) {
     const current = stage3AcceptedTarget(currentValue);
     const prior = stage3AcceptedTarget(priorValue);
@@ -19867,23 +19898,15 @@ async function runContinuityTarget(captured, {
             && String(lastGeneration.id) !== String(captured.generationId),
         );
         return foregroundReplaced
-            ? {
-                status: 'stale',
-                reason: 'foreground_preempted',
+            ? stage3ZeroWriteStaleResult('foreground_preempted', {
                 stage3RecoveryTarget: deepClone(captured),
-                module: 'world',
-                zeroWrite: true,
                 worldModelCalls,
                 ...extra,
-            }
-            : {
-                status: 'stale',
-                reason: String(reason || 'world_target_stale'),
-                module: 'world',
-                zeroWrite: true,
+            })
+            : stage3ZeroWriteStaleResult(reason, {
                 worldModelCalls,
                 ...extra,
-            };
+            });
     };
     const acceptedTarget = stage3AcceptedTarget(captured);
     if (!acceptedTarget) {
@@ -19895,7 +19918,7 @@ async function runContinuityTarget(captured, {
     }
     const token = operationToken(captured);
     if (!stage3TaskOwnsCurrent(captured, token)) {
-        return { status: 'stale', reason: 'world_task_owner_changed' };
+        return staleWorldResult('world_task_owner_changed');
     }
     let guard = stage3TargetIsCurrent(captured, token);
     if (!guard.ok) return staleWorldResult(guard.reason);
@@ -19940,7 +19963,7 @@ async function runContinuityTarget(captured, {
             };
         }
         if (!stage3TaskOwnsCurrent(captured, token)) {
-            return { status: 'stale', reason: 'world_task_owner_changed' };
+            return staleWorldResult('world_task_owner_changed');
         }
         guard = stage3TargetIsCurrent(captured, token);
         if (!guard.ok) return staleWorldResult(guard.reason);
@@ -20330,7 +20353,7 @@ async function runContinuityTarget(captured, {
         scanTextChars: Math.max(0, Number(recallPacket.scanTextChars) || 0),
     };
     if (!stage3TaskOwnsCurrent(captured, token)) {
-        return { status: 'stale', reason: 'world_task_owner_changed' };
+        return staleWorldResult('world_task_owner_changed');
     }
     guard = stage3TargetIsCurrent(captured, token);
     if (!guard.ok) return staleWorldResult(guard.reason);
@@ -20784,14 +20807,14 @@ async function enqueueContinuity(targetId, {
 } = {}) {
     const context = getContext();
     if (actorWorldManagementWrite?.chatId === String(context?.chatId || '')) {
-        return { status: 'stale', reason: 'management_write_pending', module: 'world' };
+        return stage3ZeroWriteStaleResult('management_write_pending');
     }
     const latest = latestAiMessage(context);
     const resolved = targetId == null || targetId < 0 ? latest.index : targetId;
     const expected = expectedTarget || captureTarget(context, resolved);
-    if (!expected) return { status: 'stale', reason: 'current_source_unavailable' };
+    if (!expected) return stage3ZeroWriteStaleResult('current_source_unavailable');
     const dedupeKey = stage3AcceptedTargetKey(expected);
-    if (!dedupeKey) return { status: 'stale', reason: 'current_source_key_missing' };
+    if (!dedupeKey) return stage3ZeroWriteStaleResult('current_source_key_missing');
     const pendingOwner = continuityPendingKeys.get(dedupeKey) || null;
     if (pendingOwner) {
         if (afterPending) {
@@ -20814,7 +20837,7 @@ async function enqueueContinuity(targetId, {
         return { status: 'duplicate', reason: 'world_target_completed' };
     }
     if (actorWorldManagementWrite?.chatId === String(getContext()?.chatId || '')) {
-        return { status: 'stale', reason: 'management_write_pending', module: 'world' };
+        return stage3ZeroWriteStaleResult('management_write_pending');
     }
     const taskEpoch = expected.epoch;
     const taskChatId = expected.chatId;
@@ -20838,11 +20861,7 @@ async function enqueueContinuity(targetId, {
         .then(async (priorResult) => {
             await stage3AwaitAcceptedFinalP4Barrier(startBarrier);
             if (!taskOwnerIsCurrent()) {
-                return {
-                    status: 'stale',
-                    reason: 'world_task_owner_changed',
-                    zeroWrite: true,
-                };
+                return stage3ZeroWriteStaleResult('world_task_owner_changed');
             }
             // The existing serialized continuity chain carries the exact
             // accepted target that a foreground generation preempted. Resume
@@ -20863,7 +20882,7 @@ async function enqueueContinuity(targetId, {
                     stage3AcceptedTarget(recoveryExpected),
                     stage3AcceptedTarget(recoveryTarget),
                 )) {
-                    return { status: 'stale', reason: 'world_recovery_target_changed' };
+                    return stage3ZeroWriteStaleResult('world_recovery_target_changed');
                 }
                 const recovered = await runContinuityTarget(recoveryTarget, {
                     force: true,
@@ -20871,19 +20890,11 @@ async function enqueueContinuity(targetId, {
                     manualRecovery: false,
                 });
                 if (!taskOwnerIsCurrent()) {
-                    return {
-                        status: 'stale',
-                        reason: 'world_task_owner_changed',
-                        zeroWrite: true,
-                    };
+                    return stage3ZeroWriteStaleResult('world_task_owner_changed');
                 }
                 await recordStage3WorldFinalDiagnostic(recoveryTarget, recovered);
                 if (!taskOwnerIsCurrent()) {
-                    return {
-                        status: 'stale',
-                        reason: 'world_task_owner_changed',
-                        zeroWrite: true,
-                    };
+                    return stage3ZeroWriteStaleResult('world_task_owner_changed');
                 }
                 if (recovered?.status !== 'applied') {
                     return recovered?.reason === 'foreground_preempted'
@@ -20901,13 +20912,7 @@ async function enqueueContinuity(targetId, {
                 stage3AcceptedTarget(expected),
                 stage3AcceptedTarget(fresh),
             )) {
-                return {
-                    status: 'stale',
-                    reason: 'current_source_identity_changed',
-                    module: 'world',
-                    zeroWrite: true,
-                    worldModelCalls: 0,
-                };
+                return stage3ZeroWriteStaleResult('current_source_identity_changed');
             }
             return runContinuityTarget(fresh, {
                 force,
