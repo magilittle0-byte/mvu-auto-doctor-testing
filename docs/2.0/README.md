@@ -1,6 +1,6 @@
 # MVU Auto Doctor 2.0 权威规格索引
 
-状态：`2.0.0-rc.15-semantic-profile-bridge / testing-main / formal-gates-pending`
+状态：`2.0.0-rc.16-semantic-profile-surface / testing-main / formal-gates-pending`
 
 适用范围：2.0 产品、数据协议、事务协议、真实故障回放与阶段交接
 

@@ -5255,15 +5255,20 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileFunction, /persistFinalizedBatch/u);
     assert.doesNotMatch(profileFunction, /Promise\.all\(candidates\.map|parallelLane|actorShardMaxTokens/u);
     const profileRender = source.slice(
-        source.indexOf('function renderActorProfiles'),
+        source.indexOf('function renderActorProfileSurfaceState'),
         source.indexOf('function renderContinuityLedger'),
     );
-    assert.match(profileRender, /if \(profile\.profileFormat !== 'narrative-v1'\) \{\s*const actorLock[\s\S]*?applyActorProfileUiMutation/u);
-    const narrativeRender = profileRender.slice(profileRender.indexOf("if (profile.profileFormat === 'narrative-v1')"));
-    assert.doesNotMatch(narrativeRender, /mvuad-profile-actor-lock|applyActorProfileUiMutation|regenerateActorProfileV6Module/u);
-    assert.match(profileRender, /const narrativeCount = actors\.filter/u);
-    assert.match(profileRender, /叙事档案 \$\{narrativeCount\} 人/u);
-    assert.match(profileRender, /平均覆盖 \$\{coverage\}%/u);
+    const mvuSurface = await readFile(
+        new URL('../v2/surface/actor-profile-view.mjs', import.meta.url), 'utf8',
+    );
+    assert.match(profileRender, /mvuDataAt\(Mvu, latest\.index\)/u);
+    assert.match(profileRender, /actorProfileMvuProfilesFromData\(data, ACTOR_PROFILE_MVU_ROOT\)/u);
+    assert.match(profileRender, /createActorProfileSurfaceView/u);
+    assert.doesNotMatch(profileRender, /applyActorProfileUiMutation|regenerateActorProfileV6Module|TavernDB|tableEdit/iu);
+    assert.match(mvuSurface, /profileReadiness\(profile\)/u);
+    assert.match(mvuSurface, /profileRefReady\(actor, profile\)/u);
+    assert.match(mvuSurface, /status\.repairable/u);
+    assert.match(mvuSurface, /status\.migratable/u);
     const transaction = source.slice(source.indexOf('const promotedActorIds = actorRegistration.promoted'));
     assert.match(transaction, /actorRegistration\.promoted\s*\.map\(\(entry\) => entry\.actorRef\.actorId\)/u);
     assert.match(transaction, /initialActorIds: promotedActorIds/u);

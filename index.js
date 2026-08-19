@@ -246,6 +246,12 @@ import {
     createPrivacySafeDiagnosticProjection,
 } from './v2/surface/diagnostics.mjs';
 import {
+    actorProfileSurfaceRuntimeFingerprint,
+    collapseActorProfileAccordion,
+    createActorProfileSurfaceView,
+    renderActorProfileAccordion,
+} from './v2/surface/actor-profile-view.mjs';
+import {
     buildContinuitySourcePlan,
 } from './v2/runtime/continuity-receipts.mjs';
 import {
@@ -268,7 +274,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.15';
+const VERSION = '2.0.0-rc.16';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -1030,6 +1036,10 @@ let latestActorProfileKind = '';
 let latestActorProfileDiagnostic = {
     status: 'waiting', failingModules: [], lastFailureCodes: [], canRetry: false,
 };
+let actorProfileSurfaceReadSerial = 0;
+let actorProfileSurfaceCache = { key: '', profiles: null, readError: '' };
+const actorProfileSurfaceBusy = new Map();
+const actorProfileSurfaceFailures = new Map();
 
 function hydratedActorProfileDiagnostic(
     namespace = readChatNamespace(),
@@ -5000,6 +5010,11 @@ function doctorRuntimeCriticalFingerprint() {
         typeof p4ActorProfileSummary === 'function' ? p4ActorProfileSummary.toString() : '',
         typeof immutableNextTurnConsumerPayload === 'function'
             ? immutableNextTurnConsumerPayload.toString() : '',
+        actorProfileSurfaceRuntimeFingerprint.toString(),
+        actorProfileSurfaceRuntimeFingerprint(),
+        renderActorProfiles.toString(),
+        repairActorProfileFromSurface.toString(),
+        migrateActorProfileFromSurface.toString(),
         actorProfileBatchSemanticFingerprint(),
         actorAuthorityAdjudicationSemanticFingerprint(),
         continuityCoreSemanticFingerprint(),
@@ -17745,7 +17760,7 @@ function replaceSemanticProfileBlock(messageText, block) {
     return `${source.trimEnd()}\n\n${block}`;
 }
 
-async function runSemanticActorProfileTargetedRepair(captured) {
+async function runSemanticActorProfileTargetedRepair(captured, { actorId: requestedActorId = '' } = {}) {
     if (!sameAcceptedNarrativeTarget(captured, captureTarget(getContext(), captured.index, {
         frozenScope: captured.actorSovereigntyScope,
         unscoped: !captured.scopeDigest,
@@ -17783,10 +17798,24 @@ async function runSemanticActorProfileTargetedRepair(captured) {
             missingFields: validation.missingFields.length ? validation.missingFields : ['delta'],
         });
     }
-    if (!targets.length) return { status: 'no_candidates', reason: 'profile_repair_no_target' };
+    const requested = String(requestedActorId || '').trim();
+    if (requested && !targets.some((target) => target.actorId === requested)) {
+        const actor = actors.find((entry) => entry.id === requested);
+        if (actor) {
+            targets.push({
+                mode: 'existing', actorId: requested, ticketId: '', name: actor.name,
+                missingFields: ['person', 'personality', 'history', 'currentState',
+                    'relationshipsMotives', 'knowledgeCapabilitiesResources'],
+            });
+        }
+    }
+    const selectedTargets = requested
+        ? targets.filter((target) => target.actorId === requested).slice(0, 1)
+        : targets.slice(0, 6);
+    if (!selectedTargets.length) return { status: 'no_candidates', reason: 'profile_repair_no_target' };
     const worldContext = await collectContinuityWorldContext(context, currentCharacter(context));
     const repairedEntries = [];
-    for (const target of targets.slice(0, 6)) {
+    for (const target of selectedTargets) {
         const request = createActorProfileRepairRequest({
             actorId: target.actorId,
             ticketId: target.ticketId,
@@ -17866,7 +17895,7 @@ async function runSemanticActorProfileTargetedRepair(captured) {
     return runSemanticActorProfileTarget(nextTarget);
 }
 
-async function migrateLegacyProfilesToMvu() {
+async function migrateLegacyProfilesToMvu({ actorId: requestedActorId = '' } = {}) {
     const context = getContext();
     const latest = latestAiMessage(context);
     const captured = latest.message ? captureTarget(context, latest.index) : null;
@@ -17880,8 +17909,10 @@ async function migrateLegacyProfilesToMvu() {
         identityScopeId: captured.identityScopeId,
         scopeDigest: captured.scopeDigest,
     });
+    const requested = String(requestedActorId || '').trim();
     const legacyProfiles = Object.fromEntries((ledger.actors || [])
         .filter((actor) => actor?.profileV6 && !actor?.profileRef)
+        .filter((actor) => !requested || actor.id === requested)
         .map((actor) => [actor.id, actor.profileV6]));
     if (!Object.keys(legacyProfiles).length) {
         return { status: 'no_candidates', reason: 'profile_migration_no_legacy_profiles' };
@@ -24802,32 +24833,53 @@ function buildActorProfileHistory(profile) {
     return details;
 }
 
-function renderActorProfiles(namespace = null) {
-    if (!ui?.floatingActorPage) return;
+const ACTOR_PROFILE_FOLD_STORAGE_KEY = 'mvu-auto-doctor-profile-fold-v1';
+
+function actorProfileFoldScopeKey(chatId) {
+    return `${ACTOR_PROFILE_FOLD_STORAGE_KEY}:${fingerprint(String(chatId || 'no-chat'))}`;
+}
+
+function actorProfileExpandedPreference(chatId) {
+    const key = actorProfileFoldScopeKey(chatId);
+    if (ui.actorProfileFoldScopeKey === key) return String(ui.expandedActorProfileId || '');
+    ui.actorProfileFoldScopeKey = key;
+    try {
+        ui.expandedActorProfileId = String(localStorage.getItem(key) || '');
+    } catch {
+        ui.expandedActorProfileId = '';
+    }
+    return ui.expandedActorProfileId;
+}
+
+function setActorProfileExpandedPreference(chatId, actorId) {
+    const key = actorProfileFoldScopeKey(chatId);
+    ui.actorProfileFoldScopeKey = key;
+    ui.expandedActorProfileId = String(actorId || '');
+    try {
+        if (ui.expandedActorProfileId) localStorage.setItem(key, ui.expandedActorProfileId);
+        else localStorage.removeItem(key);
+    } catch {
+        // Local-only visual preference is optional and never enters MVU/Doctor persistence.
+    }
+}
+
+function renderActorProfileSurfaceState(state, profiles, currentTarget, readError = '') {
     const context = getContext();
-    const state = namespace || readChatNamespace(context);
-    const ledger = normalizeActorLedger(state.actorLedger, { chatId: context?.chatId || '' });
-    const actors = ledger.actors;
-    if (ui.floatingActorTabCount) ui.floatingActorTabCount.textContent = String(actors.length);
+    const ledger = normalizeActorLedger(state?.actorLedger, { chatId: context?.chatId || '' });
+    const view = createActorProfileSurfaceView({
+        profiles,
+        actors: ledger.actors,
+        currentTarget,
+        completionMode: getSettings().actorProfileCompletionMode,
+        busyByActorId: Object.fromEntries(actorProfileSurfaceBusy),
+        failureByActorId: Object.fromEntries(actorProfileSurfaceFailures),
+        readError,
+    });
+    if (ui.floatingActorTabCount) ui.floatingActorTabCount.textContent = String(view.counts.total);
     if (ui.floatingActorSummary) {
-        const ready = actors.filter((actor) => (
-            actorProfileReadinessInLedger(ledger, actor.id).ready
-        )).length;
-        const narrativeCount = actors.filter((actor) => (
-            actor?.profileV6?.profileFormat === 'narrative-v1'
-        )).length;
-        const coverage = actors.length
-            ? Math.round(actors.reduce((sum, actor) => (
-                sum + actorProfileV6View(actor).coverage
-            ), 0) / actors.length)
-            : 100;
-        ui.floatingActorSummary.textContent = actors.length
-            ? (narrativeCount
-                ? `叙事档案 ${narrativeCount} 人 · 已登记 ${actors.length} 人 · ${ready} 人真实行动就绪 · 身份隔离 ${ledger.identityQuarantine.length} · 账本第 ${ledger.turn} 轮`
-                : `${actors.length} 人 · ${ready} 人真实行动就绪 · 平均覆盖 ${coverage}% · 身份隔离 ${ledger.identityQuarantine.length} · 账本第 ${ledger.turn} 轮`)
-            : ledger.identityQuarantine.length
-                ? `当前没有可行动人物；${ledger.identityQuarantine.length} 项内部身份引用仍在隔离，不会补造人物历史。`
-                : '当前聊天还没有登记人物。人物被正文、角色卡或世界书识别后会出现在这里。';
+        ui.floatingActorSummary.textContent = view.summary;
+        ui.floatingActorSummary.dataset.healthColor = view.counts.failed > 0 || readError
+            ? 'red' : view.counts.pending > 0 ? 'yellow' : view.counts.total ? 'green' : 'blue';
     }
     if (ui.floatingIdentityQuarantine) {
         const quarantine = ledger.identityQuarantine || [];
@@ -24837,204 +24889,150 @@ function renderActorProfiles(namespace = null) {
         for (const entry of quarantine) {
             const item = document.createElement('li');
             const identity = document.createElement('b');
-            identity.textContent = entry.actor?.name || entry.id;
+            identity.textContent = entry.actor?.name || '未绑定身份';
             const detail = document.createElement('span');
-            detail.textContent = `原因 ${entry.reason || 'unresolved_internal_id_as_name'} · 隔离于账本第 ${entry.quarantinedTurn} 轮 · 未参与行动`;
+            detail.textContent = '身份尚未安全绑定；该项不会参与人物行动，也不会补造历史。';
             item.append(identity, detail);
             ui.floatingIdentityQuarantineList.appendChild(item);
         }
     }
-
-    const select = ui.floatingActorSelect;
-    const previousSelection = ui.selectedActorId || select?.value || '';
-    select?.replaceChildren();
-    for (const actor of actors) {
-        const profileView = actorProfileV6View(actor);
-        const ledgerReadiness = actorProfileReadinessInLedger(ledger, actor.id);
-        const option = document.createElement('option');
-        option.value = actor.id;
-        option.textContent = profileView.profileFormat === 'narrative-v1'
-            ? `${actor.name} · ${ACTOR_PROFILE_STATUS_LABELS[actor.status] || actor.status} · ${ledgerReadiness.ready ? '叙事档案已行动就绪' : '叙事档案等待原子读回'}`
-            : `${actor.name} · ${ACTOR_PROFILE_STATUS_LABELS[actor.status] || actor.status} · ${profileView.coverage}% · ${ledgerReadiness.ready ? '已就绪' : '未就绪'}`;
-        select.appendChild(option);
+    if (ui.floatingActorEmpty) {
+        ui.floatingActorEmpty.hidden = view.cards.length > 0;
+        ui.floatingActorEmpty.textContent = readError
+            ? '无法读取当前楼层的 MVU 人物档案；未使用数据库或旧账本代填。'
+            : '当前聊天还没有 MVU 人物档案。新人物完成持久回读后会出现在这里。';
     }
-    const selectedActor = actors.find((actor) => actor.id === previousSelection) || actors[0] || null;
-    ui.selectedActorId = selectedActor?.id || '';
-    if (select && selectedActor) select.value = selectedActor.id;
-    if (select) select.disabled = actors.length === 0;
-    if (ui.floatingActorEmpty) ui.floatingActorEmpty.hidden = actors.length > 0;
-    const host = ui.floatingActorCard;
-    host.replaceChildren();
-    host.hidden = !selectedActor;
-    if (!selectedActor) return;
+    if (ui.floatingActorList) {
+        ui.floatingActorList.hidden = view.cards.length === 0;
+        ui.floatingActorList.setAttribute('aria-busy', 'false');
+        const expanded = actorProfileExpandedPreference(context?.chatId || '');
+        renderActorProfileAccordion(document, ui.floatingActorList, view, {
+            expandedActorId: expanded,
+            onExpanded: (actorId) => setActorProfileExpandedPreference(
+                context?.chatId || '', actorId,
+            ),
+            onRepair: repairActorProfileFromSurface,
+            onMigrate: migrateActorProfileFromSurface,
+        });
+    }
+    if (ui.floatingActorCollapseAll) ui.floatingActorCollapseAll.disabled = view.cards.length === 0;
+}
 
-    const profile = selectedActor.profileV6;
-    const profileView = actorProfileV6View(selectedActor);
-    const selectedReadiness = actorProfileReadinessInLedger(ledger, selectedActor.id);
-    const runtime = normalizeSovereigntyRuntime(state.sovereigntyRuntime, {
-        chatId: context?.chatId || '',
-    });
-    const actorTasks = runtime.backlog.filter((task) => (
-        task?.module === 'actor'
-        && task?.metadata?.actorId === selectedActor.id
-        && task.status !== 'committed'
-        && !(
-            task.status === 'cancelled_stale'
-            && task.metadata?.cancelReason === 'latest_state_superseded'
-            && task.metadata?.supersededByTaskId
-        )
-    ));
-    const taskCount = (status) => actorTasks.filter((task) => task.status === status).length;
-    const actorReceipts = ledger.actionReceipts.filter((receipt) => (
-        receipt.actorId === selectedActor.id
-    ));
-    const latestSettlement = [...actorReceipts].reverse().find((receipt) => (
-        receipt.stage === 'world_settled'
-    ));
-    const latestAttempt = [...actorReceipts].reverse().find((receipt) => (
-        receipt.stage === 'attempted'
-    ));
-    const latestNarrativeReceipt = latestSettlement
-        ? [...actorReceipts].reverse().find((receipt) => (
-            receipt.actionId === latestSettlement.actionId
-            && ['injected', 'response_settled'].includes(receipt.stage)
-        ))
+function renderActorProfiles(namespace = null) {
+    if (!ui?.floatingActorPage) return;
+    const context = getContext();
+    const state = namespace || readChatNamespace(context);
+    const latest = latestAiMessage(context);
+    const currentTarget = latest.index >= 0
+        ? captureDoctorRepairTargetReadOnly(context, latest.index, { allowOpening: true })
         : null;
-    const header = document.createElement('div');
-    header.className = 'mvuad-profile-header';
-    const identity = document.createElement('div');
-    const name = document.createElement('b');
-    name.textContent = selectedActor.name;
-    const id = document.createElement('span');
-    id.textContent = selectedActor.id;
-    identity.append(name, id);
-    const badges = document.createElement('div');
-    badges.className = 'mvuad-profile-header-badges';
-    for (const text of [
-        ACTOR_PROFILE_STATUS_LABELS[selectedActor.status] || selectedActor.status,
-        profile.profileFormat === 'narrative-v1' ? '叙事档案' : `覆盖 ${profileView.coverage}%`,
-        selectedReadiness.ready ? '行动前真实就绪' : '未达到行动就绪',
-        `V${profile.version}`,
-    ]) {
-        const badge = document.createElement('span');
-        badge.textContent = text;
-        badges.appendChild(badge);
-    }
-    header.append(identity, badges);
-
-    const progress = document.createElement('div');
-    progress.className = 'mvuad-profile-progress';
-    if (profile.profileFormat !== 'narrative-v1') {
-        progress.setAttribute('role', 'progressbar');
-        progress.setAttribute('aria-valuemin', '0');
-        progress.setAttribute('aria-valuemax', '100');
-        progress.setAttribute('aria-valuenow', String(profileView.coverage));
-    }
-    const progressBar = document.createElement('span');
-    if (profile.profileFormat !== 'narrative-v1') {
-        progressBar.style.setProperty('--mvuad-profile-progress', `${profileView.coverage}%`);
-    }
-    const progressText = document.createElement('b');
-    progressText.textContent = profile.profileFormat === 'narrative-v1'
-        ? (selectedReadiness.ready ? '叙事档案已原子读回，可进入行动调度' : '叙事档案尚未完成原子读回')
-        : selectedReadiness.ready
-            ? `档案覆盖 ${profileView.coverage}% · 可进入行动调度`
-            : `档案覆盖 ${profileView.coverage}% · 空值或 unknown 不算就绪`;
-    if (profile.profileFormat !== 'narrative-v1') progress.append(progressBar);
-    progress.append(progressText);
-
-    const overview = document.createElement('div');
-    overview.className = 'mvuad-profile-overview';
-    appendLedgerField(overview, '当前位置', selectedActor.location?.name, '未知');
-    appendLedgerField(overview, '当前计划', selectedActor.plan?.summary, '尚无有效个人计划');
-    appendLedgerField(
-        overview,
-        '下一行动窗口',
-        selectedActor.plan?.nextWindow || `账本第 ${selectedActor.nextActionTurn} 轮`,
-    );
-    appendLedgerField(overview, '最近行动', selectedActor.lastAction?.summary, '尚无已结算行动');
-    appendLedgerField(
-        overview,
-        '后台持久任务',
-        actorTasks.length
-            ? `共 ${actorTasks.length} · 待执行 ${taskCount('pending')} · 运行 ${taskCount('running')} · 可重试 ${taskCount('retryable_failed')} · 延后 ${taskCount('deferred')} · 取消未完成 ${taskCount('cancelled_stale')}`
-            : '当前没有未完成的逐人物任务',
-    );
-    appendLedgerField(
-        overview,
-        '人物尝试 / 世界裁决',
-        latestSettlement
-            ? `${latestAttempt ? '已记录人物尝试' : '未找到尝试回执'} · 世界结果 ${latestSettlement.status || 'settled'} · ${latestSettlement.resultSummary || latestSettlement.observableConsequence || '已持久化裁决结果'}`
-            : latestAttempt
-                ? '已记录人物尝试，仍待世界裁决；不能当作行动成功'
-                : '尚无人物行动尝试',
-    );
-    appendLedgerField(
-        overview,
-        '裁决成本 / 时间 / 风险',
-        latestSettlement
-            ? `成本 ${(latestSettlement.costs || []).join('、') || '无'} · 耗时 ${latestSettlement.durationTurns || 0} 回合 · 风险 ${latestSettlement.risk || '无'} `
-            : '',
-        '尚无世界裁决成本记录',
-    );
-    appendLedgerField(
-        overview,
-        '正文回执',
-        latestNarrativeReceipt
-            ? `${latestNarrativeReceipt.stage} · ${latestNarrativeReceipt.status}`
-            : latestSettlement
-                ? '世界已裁决，但没有要求写入正文的可观察后果'
-                : '',
-        '尚无正文回执',
-    );
-
-    const actorToolbar = document.createElement('div');
-    actorToolbar.className = 'mvuad-profile-actor-toolbar';
-    if (profile.profileFormat !== 'narrative-v1') {
-    const actorLock = document.createElement('button');
-    actorLock.type = 'button';
-    actorLock.className = 'menu_button mvuad-profile-actor-lock';
-    actorLock.textContent = profile.locks.actor ? '解锁整个人物' : '锁定整个人物';
-    actorToolbar.appendChild(actorLock);
-    actorLock.addEventListener('click', async () => {
-        const locked = profile.locks.actor === true;
-        await applyActorProfileUiMutation(
-            selectedActor.id,
-            (currentProfile) => ({
-                profile: setActorProfileV6Lock(currentProfile, { path: 'actor', locked: !locked }),
-                applied: true,
-            }),
-            `${selectedActor.name}的整个人物档案已${locked ? '解锁' : '锁定'}`,
+    const key = [
+        String(context?.chatId || ''), latest.index,
+        String(currentTarget?.messageId || ''), String(currentTarget?.contentFingerprint || ''),
+    ].join('|');
+    const serial = ++actorProfileSurfaceReadSerial;
+    if (actorProfileSurfaceCache.key === key && actorProfileSurfaceCache.profiles) {
+        renderActorProfileSurfaceState(
+            state, actorProfileSurfaceCache.profiles, currentTarget,
+            actorProfileSurfaceCache.readError,
         );
-    });
-    }
-
-    const modules = document.createElement('div');
-    modules.className = 'mvuad-profile-modules';
-    if (profile.profileFormat === 'narrative-v1') {
-        Object.values(profile.narrativeSections || {}).forEach((section) => {
-            const block = document.createElement('section');
-            block.className = 'mvuad-profile-module';
-            const title = document.createElement('h4');
-            title.textContent = section.title;
-            const text = document.createElement('p');
-            text.textContent = section.text;
-            block.append(title, text);
-            modules.appendChild(block);
-        });
     } else {
-        Object.entries(profile.modules).forEach(([moduleKey, module], index) => {
-            modules.appendChild(buildActorProfileModule(
-                selectedActor,
-                profile,
-                moduleKey,
-                module,
-                { open: index === 0 || moduleKey === 'personality' },
-            ));
-        });
+        if (ui.floatingActorSummary) {
+            ui.floatingActorSummary.textContent = '人物档案：正在从当前楼层 MVU 持久状态读取…';
+            ui.floatingActorSummary.dataset.healthColor = 'blue';
+        }
+        if (ui.floatingActorList) {
+            ui.floatingActorList.hidden = false;
+            ui.floatingActorList.setAttribute('aria-busy', 'true');
+            ui.floatingActorList.replaceChildren();
+            const loading = document.createElement('div');
+            loading.className = 'mvuad-mvu-profile-loading';
+            loading.textContent = '正在载入已保存的人物档案…';
+            ui.floatingActorList.appendChild(loading);
+        }
     }
+    void (async () => {
+        let profiles = {};
+        let readError = '';
+        try {
+            const Mvu = await getMvu();
+            if (!Mvu || typeof Mvu.getMvuData !== 'function') {
+                readError = 'profile_mvu_api_unavailable';
+            } else if (latest.index >= 0) {
+                const data = await mvuDataAt(Mvu, latest.index);
+                if (!data) readError = 'profile_mvu_read_failed';
+                else profiles = actorProfileMvuProfilesFromData(data, ACTOR_PROFILE_MVU_ROOT);
+            }
+        } catch {
+            readError = 'profile_mvu_read_failed';
+        }
+        if (serial !== actorProfileSurfaceReadSerial) return;
+        const freshContext = getContext();
+        if (String(freshContext?.chatId || '') !== String(context?.chatId || '')) return;
+        actorProfileSurfaceCache = { key, profiles, readError };
+        renderActorProfileSurfaceState(
+            readChatNamespace(freshContext), profiles, currentTarget, readError,
+        );
+    })();
+}
 
-    host.append(header, progress, overview, actorToolbar, modules, buildActorProfileHistory(profile));
+async function repairActorProfileFromSurface(actorId) {
+    const context = getContext();
+    const latest = latestAiMessage(context);
+    const captured = latest.message ? captureTarget(context, latest.index) : null;
+    if (!captured) {
+        toast('warning', '当前没有可修复的最终回复。');
+        return;
+    }
+    actorProfileSurfaceBusy.set(actorId, 'repairing');
+    actorProfileSurfaceFailures.delete(actorId);
+    actorProfileSurfaceCache.key = '';
+    renderActorProfiles();
+    setActorProfileStatus('人物档案：正在定向修复这一人物；不会重跑正文或其他人物。', 'busy');
+    let result;
+    try {
+        result = await runSemanticActorProfileTargetedRepair(captured, { actorId });
+    } catch {
+        result = { status: 'failed', reason: 'profile_targeted_repair_adapter_failed' };
+    } finally {
+        actorProfileSurfaceBusy.delete(actorId);
+        actorProfileSurfaceCache.key = '';
+    }
+    if (result?.status === 'atomic_readback') {
+        actorProfileSurfaceFailures.delete(actorId);
+        setActorProfileStatus('人物档案：该人物已修复并完成 MVU 持久回读。', 'ok');
+        return;
+    }
+    actorProfileSurfaceFailures.set(actorId, compactActorProfileFailureCode(
+        result?.reason || 'profile_targeted_repair_incomplete',
+    ));
+    setActorProfileStatus('人物档案：该人物仍未修复；其他人物和结构世界不受影响。', 'error');
+}
+
+async function migrateActorProfileFromSurface(actorId) {
+    actorProfileSurfaceBusy.set(actorId, 'migrating');
+    actorProfileSurfaceFailures.delete(actorId);
+    actorProfileSurfaceCache.key = '';
+    renderActorProfiles();
+    setActorProfileStatus('人物档案：正在迁移这一人物并核验 MVU 回读…', 'busy');
+    let result;
+    try {
+        result = await migrateLegacyProfilesToMvu({ actorId });
+    } catch {
+        result = { status: 'failed', reason: 'profile_migration_adapter_failed' };
+    } finally {
+        actorProfileSurfaceBusy.delete(actorId);
+        actorProfileSurfaceCache.key = '';
+    }
+    if (result?.status === 'atomic_readback') {
+        actorProfileSurfaceFailures.delete(actorId);
+        setActorProfileStatus('人物档案：该人物已迁移到 MVU；旧档案保留为只读备份。', 'ok');
+        return;
+    }
+    actorProfileSurfaceFailures.set(actorId, compactActorProfileFailureCode(
+        result?.reason || 'profile_legacy_migration_incomplete',
+    ));
+    setActorProfileStatus('人物档案：该人物迁移失败；旧档案保持不变。', 'error');
 }
 
 function renderContinuityLedger() {
@@ -25919,19 +25917,19 @@ function buildFloatingUi() {
                     </div>
                 </section>
                 <section class="mvuad-floating-page mvuad-floating-actor-page" data-page="actors" hidden>
-                    <div class="mvuad-floating-page-heading"><b>人物档案</b><span>V6 持久档案 · 来源、锁定与版本历史</span></div>
+                    <div class="mvuad-floating-page-heading"><b>人物档案</b><span>MVU 持久档案 · 默认折叠 · 单卡展开</span></div>
                     <div class="mvuad-actor-profile-summary" role="status"></div>
                     <details class="mvuad-identity-quarantine" hidden>
                         <summary class="mvuad-identity-quarantine-summary">身份隔离（0）</summary>
                         <div class="mvuad-identity-quarantine-note">内部人物引用尚未安全绑定到真实人物；隔离项不会参与行动，也不会补造历史。</div>
                         <ul class="mvuad-identity-quarantine-list"></ul>
                     </details>
-                    <label class="mvuad-actor-profile-picker">
-                        <span>查看人物</span>
-                        <select class="text_pole mvuad-actor-profile-select" aria-label="选择人物档案"></select>
-                    </label>
-                    <div class="mvuad-actor-profile-empty">当前聊天还没有登记人物。人物被正文、角色卡或世界书识别后会出现在这里。</div>
-                    <article class="mvuad-actor-profile-card" hidden></article>
+                    <div class="mvuad-mvu-profile-toolbar">
+                        <span>点击人物行展开；同一时间只展开一人。</span>
+                        <button class="menu_button mvuad-mvu-profile-collapse-all" type="button">全部折叠</button>
+                    </div>
+                    <div class="mvuad-actor-profile-empty">当前聊天还没有 MVU 人物档案。新人物完成持久回读后会出现在这里。</div>
+                    <div class="mvuad-mvu-profile-list" role="list" aria-live="polite" aria-busy="true"></div>
                 </section>
                 <section class="mvuad-floating-page" data-page="threads" hidden>
                     <div class="mvuad-ledger-header"><b>事件账本</b><button class="menu_button mvuad-ledger-refresh" type="button">刷新显示</button></div>
@@ -26003,9 +26001,9 @@ function buildFloatingUi() {
         floatingIdentityQuarantine: panel.querySelector('.mvuad-identity-quarantine'),
         floatingIdentityQuarantineSummary: panel.querySelector('.mvuad-identity-quarantine-summary'),
         floatingIdentityQuarantineList: panel.querySelector('.mvuad-identity-quarantine-list'),
-        floatingActorSelect: panel.querySelector('.mvuad-actor-profile-select'),
         floatingActorEmpty: panel.querySelector('.mvuad-actor-profile-empty'),
-        floatingActorCard: panel.querySelector('.mvuad-actor-profile-card'),
+        floatingActorList: panel.querySelector('.mvuad-mvu-profile-list'),
+        floatingActorCollapseAll: panel.querySelector('.mvuad-mvu-profile-collapse-all'),
         floatingThreadTabCount: panel.querySelector('.mvuad-floating-thread-tab-count'),
         floatingWorldDigest: panel.querySelector('.mvuad-world-digest'),
         floatingWorldSummary: panel.querySelector('.mvuad-world-summary'),
@@ -26038,9 +26036,10 @@ function buildFloatingUi() {
     for (const tab of ui.floatingTabs) {
         tab.addEventListener('click', () => switchFloatingPage(tab.dataset.page));
     }
-    ui.floatingActorSelect.addEventListener('change', () => {
-        ui.selectedActorId = ui.floatingActorSelect.value;
-        renderActorProfiles();
+    ui.floatingActorCollapseAll.addEventListener('click', () => {
+        collapseActorProfileAccordion(ui.floatingActorList, () => (
+            setActorProfileExpandedPreference(getContext()?.chatId || '', '')
+        ));
     });
     panel.querySelector('.mvuad-floating-repair').addEventListener(
         'click',

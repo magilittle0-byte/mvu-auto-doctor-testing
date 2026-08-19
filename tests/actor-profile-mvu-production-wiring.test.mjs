@@ -70,6 +70,10 @@ test('runtime fingerprint binds preset bridge, parser/compiler, transaction, P3,
         'p4RelevantActorIds',
         'p4ActorProfileSummary',
         'immutableNextTurnConsumerPayload',
+        'actorProfileSurfaceRuntimeFingerprint',
+        'renderActorProfiles',
+        'repairActorProfileFromSurface',
+        'migrateActorProfileFromSurface',
     ]) assert.match(fingerprint, new RegExp(helper, 'u'));
 });
 
