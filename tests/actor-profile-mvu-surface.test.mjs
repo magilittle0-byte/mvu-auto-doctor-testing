@@ -191,6 +191,24 @@ test('surface runtime fingerprint changes under a real mutation probe', () => {
     );
 });
 
+test('unbound persisted profile failure stays red instead of becoming a blue empty state', () => {
+    const view = createActorProfileSurfaceView({
+        profiles: {},
+        actors: [],
+        diagnostic: {
+            status: 'not_completed',
+            canRetry: true,
+            lastFailureCodes: ['profile_block_malformed'],
+        },
+    });
+    assert.equal(view.cards.length, 0);
+    assert.equal(view.batchFailure, true);
+    assert.equal(view.counts.unboundFailed, 1);
+    assert.match(view.summary, /未完成/u);
+    assert.match(view.summary, /医生修复中心/u);
+    assert.doesNotMatch(view.summary, /profile_block|ActorId|SourceRef|digest/iu);
+});
+
 test('production surface reads exact MVU projection, stores only fold preference locally, and is height-bounded', async () => {
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const css = await readFile(new URL('../style.css', import.meta.url), 'utf8');
@@ -203,6 +221,12 @@ test('production surface reads exact MVU projection, stores only fold preference
     assert.match(indexSource, /localStorage\.(?:getItem|setItem|removeItem)/u);
     assert.match(surface, /runSemanticActorProfileTargetedRepair\(captured, \{ actorId \}\)/u);
     assert.match(surface, /migrateLegacyProfilesToMvu\(\{ actorId \}\)/u);
+    const surfaceStateStart = indexSource.indexOf('function renderActorProfileSurfaceState');
+    const surfaceStateEnd = indexSource.indexOf('function renderActorProfiles', surfaceStateStart);
+    const surfaceState = indexSource.slice(surfaceStateStart, surfaceStateEnd);
+    assert.match(surfaceState, /hydratedActorProfileDiagnostic\(state, \{ currentTarget \}\)/u);
+    assert.match(surfaceState, /view\.batchFailure/u);
+    assert.match(surface, /persistedProfileFailure[\s\S]*?healthColor = persistedProfileFailure \? 'red' : 'blue'/u);
     assert.match(css, /\.mvuad-mvu-profile-list\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto/iu);
     assert.match(css, /@media \(max-width: 600px\)[\s\S]*?\.mvuad-mvu-profile-row[\s\S]*?flex-direction:\s*column/iu);
 });

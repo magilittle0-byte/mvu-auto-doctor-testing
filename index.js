@@ -155,6 +155,7 @@ import {
 import {
     ACTOR_PROFILE_IDENTITY_REVEAL_REFRESH_MODULES,
     actorProfileCompletionGroupPlan,
+    actorProfileDiscoveryCoveragePlan,
     actorProfileNoCandidatesTerminalProofMatches,
     actorProfileDiscoveryCoverageProofMatches,
     actorProfileGenerationCriticalFingerprint,
@@ -274,7 +275,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.16';
+const VERSION = '2.0.0-rc.17';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -16888,9 +16889,10 @@ async function persistActorProfileRecoveryState(captured, result) {
             failingModules: [...new Set([
                 ...(result?.profileBatch?.validationDiagnostic?.failingGroups || []),
                 ...(result?.profileBatch?.validationDiagnostic?.missingModules || []),
+                ...((result?.profileBatch?.failed || []).length ? ['profile'] : []),
             ].map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 8),
             failureCodes: (result?.profileBatch?.failed || [])
-                .map((entry) => compactActorProfileFailureCode(entry?.reason))
+                .map((entry) => compactActorProfileFailureCode(entry?.reason || entry?.code))
                 .filter(Boolean).slice(0, 8),
             updatedAt: Date.now(),
         });
@@ -17026,7 +17028,7 @@ function actorProfileTargetStaleAutomaticRecoveryEligible(result, {
     worldPending = false,
 } = {}) {
     const failureCodes = (result?.profileBatch?.failed || [])
-        .map((entry) => compactActorProfileFailureCode(entry?.reason))
+        .map((entry) => compactActorProfileFailureCode(entry?.reason || entry?.code))
         .filter(Boolean);
     const verifiedFieldCount = Math.max(
         0,
@@ -17062,7 +17064,7 @@ function actorProfileAutomaticRecoveryResult(initialResult, recoveredResult) {
         Number(recoveredResult?.profileBatch?.modelCalls) || 0,
     );
     const initialFailureCodes = (initialResult?.profileBatch?.failed || [])
-        .map((entry) => compactActorProfileFailureCode(entry?.reason))
+        .map((entry) => compactActorProfileFailureCode(entry?.reason || entry?.code))
         .filter(Boolean);
     return {
         ...recoveredResult,
@@ -17090,7 +17092,7 @@ async function finalizeUserCancelledActorProfileCompletion(expected, result, {
     }
     userCancelledActorProfileKeys.delete(key);
     const failureCodes = (result?.profileBatch?.failed || [])
-        .map((entry) => compactActorProfileFailureCode(entry?.reason));
+        .map((entry) => compactActorProfileFailureCode(entry?.reason || entry?.code));
     if (!failureCodes.includes('actor_profile.cancelled')) {
         return { handled: false, result, recoverySaved: false };
     }
@@ -17179,10 +17181,14 @@ function actorProfileSemanticFailure(captured, reason, extra = {}) {
     });
 }
 
-function actorProfileSemanticNoChange(captured) {
+function actorProfileSemanticNoChange(captured, acceptedNarrative = '') {
     // The semantic block is intentionally omitted when the accepted reply
     // contains no profile changes.  This is a verified zero-write decision,
     // not a malformed-output failure and must not wake the legacy P1 model.
+    // Generation tickets are a pre-issued optional pool, not evidence that
+    // the reply consumed any ticket.  The accepted assistant contract owns
+    // that decision through presence/absence of the dedicated semantic block.
+    const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
     return actorProfileTransientResult('no_candidates', {
         target: sourceRefOf(captured),
         eligible: true,
@@ -17197,6 +17203,13 @@ function actorProfileSemanticNoChange(captured) {
             readbackVerified: true,
             semantic: true,
             zeroWrite: true,
+            coverageProof: coverage?.unitCount > 0 ? {
+                version: coverage.version,
+                unitCount: coverage.unitCount,
+                unitDigests: [...coverage.unitDigests],
+                unitLengths: [...coverage.unitLengths],
+                coverageDigest: coverage.coverageDigest,
+            } : null,
         },
     });
 }
@@ -17412,15 +17425,7 @@ async function runSemanticActorProfileTargetCore(captured) {
     }
     const extracted = extractActorProfileUpdateBlock(messageText);
     if (!extracted.present) {
-        const reservedTickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
-            .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
-        if (reservedTickets.length) {
-            return actorProfileSemanticFailure(captured, 'profile_block_missing', {
-                repairableActorCount: reservedTickets.length,
-                zeroWrite: true,
-            });
-        }
-        return actorProfileSemanticNoChange(captured);
+        return actorProfileSemanticNoChange(captured, acceptedContentText(messageText));
     }
     if (!extracted.ok) {
         return actorProfileSemanticFailure(captured, extracted.failures?.[0] || 'profile_block_malformed');
@@ -17679,6 +17684,8 @@ async function runSemanticActorProfileTarget(captured) {
                 ? String(error.message) : 'profile_persistence_failed',
         );
     }
+    const recovery = await finalizeActorProfileRecoveryOutcome(captured, result);
+    result = recovery.result;
     const fresh = captureTarget(getContext(), captured.index, {
         frozenScope: captured.actorSovereigntyScope,
         unscoped: !captured.scopeDigest,
@@ -17687,8 +17694,7 @@ async function runSemanticActorProfileTarget(captured) {
     const committed = result?.profileBatch?.committed?.length || 0;
     const failed = result?.profileBatch?.failed?.length
         || result?.profileBatch?.quarantined?.length || 0;
-    const recoverySaved = result?.status === 'not_completed'
-        || failed > 0;
+    const recoverySaved = recovery.recoverySaved === true;
     result.terminalDiagnosticPersisted = await recordActorProfileFinalDiagnostic(
         diagnosticTarget,
         result,
@@ -20744,7 +20750,33 @@ async function enqueueContinuity(targetId, {
                     if (priorResult?.reason === 'foreground_preempted') {
                         return priorResult;
                     }
-                    return priorResult || { status: 'duplicate', reason: 'world_target_joined' };
+                    if (['applied', 'blocked', 'disabled', 'duplicate'].includes(
+                        String(priorResult?.status || ''),
+                    )) {
+                        return priorResult || { status: 'duplicate', reason: 'world_target_joined' };
+                    }
+                    const fresh = captureTarget(getContext(), expected.index, {
+                        frozenScope: expected.actorSovereigntyScope,
+                        unscoped: !expected.scopeDigest,
+                    });
+                    if (!stage3AcceptedTargetsMatch(
+                        stage3AcceptedTarget(expected),
+                        stage3AcceptedTarget(fresh),
+                    )) return priorResult || { status: 'stale', reason: 'current_source_identity_changed' };
+                    // The first independent P3 launch may observe a transient
+                    // host identity window while P1/variable work is starting.
+                    // Once that owned task has fully finalized, retry exactly
+                    // the same accepted target once instead of turning a
+                    // recoverable initial stale into a permanent world stop.
+                    return enqueueContinuity(targetId, {
+                        force,
+                        manualRecovery,
+                        expectedTarget: fresh,
+                        noActorPermit,
+                        profileReadyActorIds,
+                        afterPending: false,
+                        startBarrier: null,
+                    });
                 });
         }
         return { status: 'duplicate', reason: 'world_target_pending' };
@@ -24873,12 +24905,14 @@ function renderActorProfileSurfaceState(state, profiles, currentTarget, readErro
         completionMode: getSettings().actorProfileCompletionMode,
         busyByActorId: Object.fromEntries(actorProfileSurfaceBusy),
         failureByActorId: Object.fromEntries(actorProfileSurfaceFailures),
+        diagnostic: hydratedActorProfileDiagnostic(state, { currentTarget }),
         readError,
     });
     if (ui.floatingActorTabCount) ui.floatingActorTabCount.textContent = String(view.counts.total);
     if (ui.floatingActorSummary) {
         ui.floatingActorSummary.textContent = view.summary;
-        ui.floatingActorSummary.dataset.healthColor = view.counts.failed > 0 || readError
+        ui.floatingActorSummary.dataset.healthColor = view.counts.failed > 0
+            || view.batchFailure || readError
             ? 'red' : view.counts.pending > 0 ? 'yellow' : view.counts.total ? 'green' : 'blue';
     }
     if (ui.floatingIdentityQuarantine) {
@@ -24900,6 +24934,8 @@ function renderActorProfileSurfaceState(state, profiles, currentTarget, readErro
         ui.floatingActorEmpty.hidden = view.cards.length > 0;
         ui.floatingActorEmpty.textContent = readError
             ? '无法读取当前楼层的 MVU 人物档案；未使用数据库或旧账本代填。'
+            : view.batchFailure
+                ? '本回合人物档案处理失败，未留下半张档案；请从医生修复中心恢复。'
             : '当前聊天还没有 MVU 人物档案。新人物完成持久回读后会出现在这里。';
     }
     if (ui.floatingActorList) {
@@ -24926,6 +24962,9 @@ function renderActorProfiles(namespace = null) {
     const currentTarget = latest.index >= 0
         ? captureDoctorRepairTargetReadOnly(context, latest.index, { allowOpening: true })
         : null;
+    const profileDiagnostic = hydratedActorProfileDiagnostic(state, { currentTarget });
+    const persistedProfileFailure = profileDiagnostic.canRetry === true
+        || ['not_completed', 'failed'].includes(String(profileDiagnostic.status || ''));
     const key = [
         String(context?.chatId || ''), latest.index,
         String(currentTarget?.messageId || ''), String(currentTarget?.contentFingerprint || ''),
@@ -24938,8 +24977,10 @@ function renderActorProfiles(namespace = null) {
         );
     } else {
         if (ui.floatingActorSummary) {
-            ui.floatingActorSummary.textContent = '人物档案：正在从当前楼层 MVU 持久状态读取…';
-            ui.floatingActorSummary.dataset.healthColor = 'blue';
+            ui.floatingActorSummary.textContent = persistedProfileFailure
+                ? '人物档案存在待修复故障；正在从当前楼层 MVU 读取已保存内容…'
+                : '人物档案：正在从当前楼层 MVU 持久状态读取…';
+            ui.floatingActorSummary.dataset.healthColor = persistedProfileFailure ? 'red' : 'blue';
         }
         if (ui.floatingActorList) {
             ui.floatingActorList.hidden = false;

@@ -18,7 +18,13 @@ test('accepted-final profile adapter is exact-source, zero-model, and uses exist
     assert.match(semantic, /mergeActorProfileOperationsIntoAcceptedMessage/u);
     assert.match(semantic, /profileRootPresent/u);
     assert.match(semantic, /projectSemanticProfilesToActorLedger/u);
+    assert.match(semantic, /actorProfileSemanticNoChange\(captured, acceptedContentText\(messageText\)\)/u);
+    assert.doesNotMatch(semantic, /reservedTickets\.length[\s\S]*?profile_block_missing/u);
     assert.doesNotMatch(semantic, /callModel|generateRaw|runActorProfileTarget/u);
+
+    const wrapper = section('async function runSemanticActorProfileTarget(captured)', 'function renderSemanticProfileEntries');
+    assert.match(wrapper, /finalizeActorProfileRecoveryOutcome\(captured, result\)/u);
+    assert.match(wrapper, /recovery\.recoverySaved === true/u);
 });
 
 test('P3 starts independently, freezes ready actors, and structure world does not wait for profiles', () => {
@@ -33,6 +39,8 @@ test('P3 starts independently, freezes ready actors, and structure world does no
     assert.match(continuity, /requireProfileReady:\s*true/u);
     assert.match(continuity, /actor set is frozen/iu);
     assert.match(continuity, /stage3AttachMvuProfilesToLedger/u);
+    const enqueue = section('async function enqueueContinuity', 'function stage3AttemptProjection');
+    assert.match(enqueue, /afterPending[\s\S]*?stage3AcceptedTargetsMatch[\s\S]*?enqueueContinuity\(targetId/u);
 });
 
 test('P4 keeps one exact-once consumer while adding only bounded related ready profiles', () => {

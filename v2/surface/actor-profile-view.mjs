@@ -150,6 +150,7 @@ export function createActorProfileSurfaceView({
     completionMode = 'full',
     busyByActorId = {},
     failureByActorId = {},
+    diagnostic = null,
     readError = '',
 } = {}) {
     const actorMap = new Map((actors || []).map((actor) => [String(actor?.id || ''), actor]));
@@ -202,16 +203,27 @@ export function createActorProfileSurfaceView({
     const ready = cards.filter((card) => card.status.ready).length;
     const failed = cards.filter((card) => card.status.color === 'red').length;
     const pending = cards.filter((card) => card.status.color === 'yellow').length;
+    const diagnosticStatus = text(diagnostic?.status, 40);
+    const batchFailure = !readError && (
+        diagnostic?.canRetry === true
+        || ['not_completed', 'failed'].includes(diagnosticStatus)
+    );
     const needsAction = failed + pending;
     const summary = readError
         ? '人物档案读取失败；未用数据库或其他来源填充，请稍后刷新。'
         : cards.length
-        ? `本回合新增 ${added} 人、更新 ${updated} 人、失败 ${failed} 人；${ready}/${cards.length} 人已完整保存。${needsAction ? `有 ${needsAction} 人需要修复或迁移。` : '当前无需操作。'}`
+        ? `本回合新增 ${added} 人、更新 ${updated} 人、失败 ${failed} 人；${ready}/${cards.length} 人已完整保存。${needsAction ? `有 ${needsAction} 人需要修复或迁移。` : batchFailure ? '另有未绑定的档案处理失败，请使用医生修复中心。' : '当前无需操作。'}`
+        : batchFailure
+        ? '本回合人物档案未完成，尚未保存可安全绑定的人物卡；请使用医生修复中心处理。'
         : '当前聊天还没有 MVU 人物档案。新人物完成持久回读后会出现在这里。';
     return Object.freeze({
         cards: Object.freeze(cards),
-        counts: Object.freeze({ total: cards.length, added, updated, ready, failed, pending }),
+        counts: Object.freeze({
+            total: cards.length, added, updated, ready, failed, pending,
+            unboundFailed: batchFailure ? 1 : 0,
+        }),
         summary,
+        batchFailure,
         readError: text(readError, 120),
     });
 }
