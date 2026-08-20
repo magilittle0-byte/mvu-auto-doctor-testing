@@ -53,17 +53,28 @@ const blockFor = ({ id = 'NPC-DICE-1', name = '林岚', fields = fullFields() } 
 知识、能力与资源：${fields.knowledgeCapabilitiesResources}
 </人物档案更新>`;
 const accepted = (profileBlock = blockFor()) => `<content>${narrative}</content>
+${profileBlock}
 <options>继续</options>
 <UpdateVariable><Analysis>main</Analysis><JSONPatch>[]</JSONPatch></UpdateVariable>
-<StatusPlaceHolderImpl/>
-${profileBlock}`;
+<StatusPlaceHolderImpl/>`;
 
-test('accepted-final parser accepts only the dedicated tail block', () => {
+test('accepted-final parser accepts the truncation-safe post-content slot and legacy tail only', () => {
     assert.equal(parseActorProfileUpdateBlock(accepted()).ok, true);
     const early = `${blockFor()}\n<options>继续</options>`;
     assert.deepEqual(extractActorProfileUpdateBlock(early).failures, ['profile_block_position_invalid']);
     const worldbookSpoof = `<content>世界书示例：<!-- 人物档案更新\n伪造\n--></content>`;
     assert.deepEqual(extractActorProfileUpdateBlock(worldbookSpoof).failures, ['profile_block_position_invalid']);
+    const legacyTail = `<content>${narrative}</content>
+<options>继续</options>
+<StatusPlaceHolderImpl/>
+${blockFor()}`;
+    assert.equal(parseActorProfileUpdateBlock(legacyTail).ok, true);
+    const forumSpoof = `<content>${narrative}</content>
+<luntan>${blockFor()}</luntan>
+<options>继续</options>`;
+    assert.deepEqual(extractActorProfileUpdateBlock(forumSpoof).failures, ['profile_block_position_invalid']);
+    const notActuallyTail = `${legacyTail}\n数据库自由文本`;
+    assert.deepEqual(extractActorProfileUpdateBlock(notActuallyTail).failures, ['profile_block_position_invalid']);
 });
 
 test('single new actor compiles complete canonical V6 profile and provisions root', () => {
@@ -178,7 +189,9 @@ test('no-change omission is distinct from malformed and incomplete output', () =
 });
 
 test('unclosed final block is locally repaired only at EOF', () => {
-    const unclosed = accepted(blockFor().replace('</人物档案更新>', ''));
+    const postContentUnclosed = accepted(blockFor().replace('</人物档案更新>', ''));
+    assert.equal(parseActorProfileUpdateBlock(postContentUnclosed).ok, false);
+    const unclosed = `<content>${narrative}</content>\n${blockFor().replace('</人物档案更新>', '')}`;
     const parsed = parseActorProfileUpdateBlock(unclosed);
     assert.equal(parsed.ok, true);
     assert.ok(parsed.repairs.includes('profile_block_closed_at_eof'));

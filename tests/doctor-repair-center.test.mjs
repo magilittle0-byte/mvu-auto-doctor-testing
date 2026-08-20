@@ -22,7 +22,7 @@ const preset = JSON.parse(await readFile(new URL(
     import.meta.url,
 ), 'utf8'));
 
-test('selected preset exposes one accepted-final natural-language profile block after existing control blocks', () => {
+test('selected preset exposes one accepted-final natural-language profile block immediately after content', () => {
     const prompts = Array.isArray(preset.prompts) ? preset.prompts : [];
     const profilePrompts = prompts.filter((entry) => (
         entry?.identifier === '4f2642de-5ef6-4ee4-9e94-2c52dd667a13'
@@ -36,7 +36,10 @@ test('selected preset exposes one accepted-final natural-language profile block 
     assert.match(profile.content, /ActorId/u);
     assert.match(profile.content, /JSONPatch/u);
     assert.match(profile.content, /技术字段/u);
-    assert.match(profile.content, /没有变化时不输出/u);
+    assert.match(profile.content, /<\/content> 一闭合就立刻输出/u);
+    assert.match(profile.content, /然后才继续 <luntan>、<options>、<UpdateVariable>/u);
+    assert.match(profile.content, /不得把回执拖到可能被输出截断的回复最末尾/u);
+    assert.match(profile.content, /没有变化时只输出 <!-- 人物档案无变化 -->/u);
 });
 
 test('selected preset closes every ticket turn with one explicit hidden profile receipt', () => {
@@ -49,6 +52,10 @@ test('selected preset closes every ticket turn with one explicit hidden profile 
     assert.match(terminal[0].content, /<!-- 人物档案无变化 -->/u);
     assert.match(terminal[0].content, /不得两者都省略/u);
     assert.match(terminal[0].content, /不得让它出现在可见正文/u);
+    assert.match(terminal[0].content, /<\/content> 闭合后/u);
+    assert.match(terminal[0].content, /<StatusPlaceHolderImpl\/> 或其他大型辅助域开始前立即完成/u);
+    assert.match(terminal[0].content, /不得把回执拖到可能截断的回复末尾/u);
+    assert.match(terminal[0].content, /人物档案回执终检_V4/u);
     const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
     assert.equal(order.filter((entry) => entry?.identifier === identifier).length, 1);
     assert.equal(order.find((entry) => entry?.identifier === identifier)?.enabled, true);

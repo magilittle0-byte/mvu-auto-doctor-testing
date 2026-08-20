@@ -20,6 +20,7 @@ function acceptedFinalLaunchPromise(generation) {
     const key = acceptedFinalDispatchKey(generation);
     return key ? acceptedFinalLaunchPromises.get(key) || null : null;
 }
+function acceptedFinalContinuityStartBarrier(_session, task) { return task; }
 function acceptedFinalSessionIsCurrent(generation) {
     const context = getContext();
     return !!generation
@@ -428,6 +429,7 @@ function loadAcceptedFinalRuntimeHarness({
             }
             return true;
         },
+        acceptedFinalContinuityStartBarrier: (_session, task) => task,
         releaseNextTurnConsumer: async (_session, reason, options) => {
             state.releases.push({ reason, options });
             return true;
@@ -450,6 +452,7 @@ function loadAcceptedFinalFullDispatchHarness({
     zeroWriteWorldRace = false,
     settledZeroWriteWorldStaleStarts = 0,
     otherModuleResult = { status: 'not_completed' },
+    ticketOnlyP4Pending = false,
 } = {}) {
     const support = sourceSection(
         'function acceptedFinalScopeDecision(generation, scopeDigest)',
@@ -462,6 +465,10 @@ function loadAcceptedFinalFullDispatchHarness({
     const accept = sourceSection(
         'async function acceptFinalGeneration(generation)',
         'function frozenIdentityScopeId(scope)',
+    );
+    const barrierChoice = sourceSection(
+        'function acceptedFinalContinuityStartBarrier(session, p4SettleTask)',
+        'function continuityStateForInjection(namespace, { isReroll = false } = {})',
     );
     const ensureCleanup = realCleanupFailed ? sourceSection(
         'async function ensureNextTurnConsumerSlotCleaned(session, active, reason)',
@@ -485,6 +492,7 @@ function loadAcceptedFinalFullDispatchHarness({
         worldStarts: 0,
         releaseInitialWorld: null,
         settledZeroWriteWorldStaleStarts,
+        releaseTicketOnlyP4: null,
     };
     const continuityPendingKeys = new Map();
     let initialWorldTask = null;
@@ -603,6 +611,10 @@ function loadAcceptedFinalFullDispatchHarness({
         recordOperation: (...args) => state.errors.push(args),
         setStatus: () => undefined,
         __doctorDiagnostics: state.diagnostics,
+        activeNextTurnConsumer: {
+            generationId: generation.id,
+            worldPackage: !ticketOnlyP4Pending,
+        },
         ...(realCleanupFailed ? {
             activeGenerationSession: generation,
             activeNextTurnConsumer: { generationId: generation.id, cleanupConfirmed: false },
@@ -616,11 +628,16 @@ function loadAcceptedFinalFullDispatchHarness({
             }),
             nextTurnLeaseCleanupBlocked: () => true,
         } : {
-            commitNextTurnConsumer: async () => true,
+            commitNextTurnConsumer: () => {
+                if (!ticketOnlyP4Pending) return Promise.resolve(true);
+                return new Promise((resolve) => {
+                    state.releaseTicketOnlyP4 = (value = true) => resolve(value);
+                });
+            },
         }),
     };
     vm.runInNewContext(
-        `${lifecycleVmStubs}\n${support}\n${dispatch}\n${accept}\n${ensureCleanup}\n${commitConsumer}\nthis.acceptFinalGeneration = acceptFinalGeneration;`,
+        `${lifecycleVmStubs}\n${support}\n${dispatch}\n${barrierChoice}\n${accept}\n${ensureCleanup}\n${commitConsumer}\nthis.acceptFinalGeneration = acceptFinalGeneration;`,
         sandbox,
     );
     return { state, generation, accept: sandbox.acceptFinalGeneration };
@@ -787,6 +804,7 @@ test('runtime fingerprint binds accepted-final keying, foreground flush, and unl
     const critical = [
         'acceptedFinalDispatchKey',
         'acceptedFinalLaunchPromise',
+        'acceptedFinalContinuityStartBarrier',
         'flushAcceptedFinalBeforeForegroundStart',
         'acceptFinalGenerationUnlocked',
         'stage3AwaitAcceptedFinalP4Barrier',
@@ -853,6 +871,40 @@ test('P3 production start barrier waits for accepted-final P4 settlement before 
     gate.resolve(false);
     await waiting;
     assert.equal(passed, true, 'P3 proceeds after either P4 success or isolated P4 failure settles');
+});
+
+test('accepted-final P3 barrier is required only for a verified prior world package', () => {
+    const helperSource = sourceSection(
+        'function acceptedFinalContinuityStartBarrier(session, p4SettleTask)',
+        'function continuityStateForInjection(namespace, { isReroll = false } = {})',
+    );
+    const settle = Promise.resolve(true);
+    const sandbox = {
+        activeNextTurnConsumer: {
+            generationId: 'generation-a',
+            worldPackage: false,
+        },
+    };
+    vm.runInNewContext(
+        `${helperSource}\nthis.choose = acceptedFinalContinuityStartBarrier;`,
+        sandbox,
+    );
+    assert.equal(
+        sandbox.choose({ id: 'generation-a' }, settle),
+        null,
+        'ticket-only cleanup cannot block P3',
+    );
+    sandbox.activeNextTurnConsumer.worldPackage = true;
+    assert.equal(
+        sandbox.choose({ id: 'generation-a' }, settle),
+        settle,
+        'a verified prior world package keeps the consume-before-produce barrier',
+    );
+    assert.equal(
+        sandbox.choose({ id: 'generation-b' }, settle),
+        null,
+        'a foreign generation never owns the current P3 barrier',
+    );
 });
 
 test('provider error placeholders release P4 and never become accepted narrative', async () => {
@@ -962,6 +1014,32 @@ test('a P1 not-completed result grants no retry permit but cannot block independ
     )).length, 1);
     assert.equal(noCandidates.state.worldModelCalls, 1);
     assert.equal(noCandidates.state.worldWrites, 1);
+});
+
+test('ticket-only P4 cleanup may remain pending while a not-completed P1 still launches structural P3', async () => {
+    const runtime = loadAcceptedFinalFullDispatchHarness({
+        profileResult: {
+            status: 'not_completed',
+            persistenceStatus: 'not_completed',
+            readbackVerified: false,
+            reason: 'profile_block_missing',
+        },
+        ticketOnlyP4Pending: true,
+        otherModuleResult: { status: 'applied' },
+    });
+    let acceptedSettled = false;
+    const accepting = runtime.accept(runtime.generation)
+        .finally(() => { acceptedSettled = true; });
+    for (let attempt = 0; attempt < 20 && runtime.state.worldModelCalls === 0; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(acceptedSettled, false, 'the synthetic ticket-only cleanup is intentionally still pending');
+    assert.equal(runtime.state.continuityCalls[0].startBarrier, null);
+    assert.equal(runtime.state.worldModelCalls, 1);
+    assert.equal(runtime.state.worldWrites, 1);
+    assert.equal(typeof runtime.state.releaseTicketOnlyP4, 'function');
+    runtime.state.releaseTicketOnlyP4(true);
+    assert.equal(await accepting, true);
 });
 
 test('a durable no-candidates P1 wake reacquires P3 once after joining a zero-write stale owner', async () => {

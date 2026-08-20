@@ -27,6 +27,7 @@ export interface ActorProfileUpdateParseResult {
     repairs: string[];
 }
 export function extractActorProfileUpdateBlock(output: unknown, options?: object): ActorProfileUpdateParseResult;
+export function actorProfileReceiptPlacementAccepted(source: unknown, receiptIndex: number, receiptEnd?: number): boolean;
 export function parseActorProfileUpdateBlock(output: unknown, options?: object): ActorProfileUpdateParseResult;
 export function bindActorProfileUpdateEntries(parsed: unknown, options?: {
     tickets?: unknown[];

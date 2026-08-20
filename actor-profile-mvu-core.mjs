@@ -250,10 +250,38 @@ function structuredEntries(block) {
 
 function acceptedProfileBlockFloor(source) {
     const tokens = [
-        '</content>', '</options>', '</updatevariable>', '<statusplaceholderimpl',
+        '</luntan>', '</options>', '</choice>', '</branches>', '</updatevariable>',
+        '</tucao>', '<statusplaceholderimpl',
     ];
     const lower = String(source || '').toLocaleLowerCase();
     return tokens.reduce((floor, token) => Math.max(floor, lower.lastIndexOf(token)), -1);
+}
+
+function actorProfileReceiptPlacementKind(source, receiptIndex) {
+    const textSource = String(source || '');
+    const index = Math.max(0, Number(receiptIndex) || 0);
+    const lower = textSource.toLocaleLowerCase();
+    const contentEnd = lower.lastIndexOf('</content>', index);
+    if (contentEnd < 0) return '';
+    const between = textSource.slice(contentEnd + '</content>'.length, index);
+    // The new truncation-safe slot is deliberately narrow: the receipt must
+    // immediately follow the accepted visible content. A marker inside
+    // content/worldbook/database prose or after another auxiliary block cannot
+    // claim this exception. Legacy receipts are accepted only after every
+    // recognized auxiliary domain and, once their end is known, at true EOF.
+    if (between.trim().length === 0) return 'post_content';
+    const auxiliaryFloor = acceptedProfileBlockFloor(textSource);
+    return auxiliaryFloor > contentEnd && index >= auxiliaryFloor ? 'legacy_tail' : '';
+}
+
+export function actorProfileReceiptPlacementAccepted(source, receiptIndex, receiptEnd = -1) {
+    const textSource = String(source || '');
+    const placement = actorProfileReceiptPlacementKind(textSource, receiptIndex);
+    if (!placement) return false;
+    if (placement !== 'legacy_tail' || !Number.isFinite(Number(receiptEnd)) || Number(receiptEnd) < 0) {
+        return true;
+    }
+    return textSource.slice(Number(receiptEnd)).trim().length === 0;
 }
 
 export function extractActorProfileUpdateBlock(output, {
@@ -271,7 +299,7 @@ export function extractActorProfileUpdateBlock(output, {
     };
     if (matches.length !== 1) return { ok: false, present: true, block: '', entries: [], failures: [FIXED_FAILURES.DUPLICATE_BLOCK] };
     const opener = matches[0][0];
-    if (requireAcceptedTail && matches[0].index < acceptedProfileBlockFloor(source)) {
+    if (requireAcceptedTail && !actorProfileReceiptPlacementAccepted(source, matches[0].index)) {
         return {
             ok: false,
             present: true,
@@ -294,6 +322,17 @@ export function extractActorProfileUpdateBlock(output, {
         }
     }
     if (end < 0) return { ok: false, present: true, block: '', entries: [], failures: [FIXED_FAILURES.UNCLOSED_BLOCK], repairs };
+    const receiptEnd = end < source.length ? end + endToken.length : end;
+    if (requireAcceptedTail && !actorProfileReceiptPlacementAccepted(source, matches[0].index, receiptEnd)) {
+        return {
+            ok: false,
+            present: true,
+            block: '',
+            entries: [],
+            failures: [FIXED_FAILURES.BLOCK_POSITION],
+            repairs,
+        };
+    }
     const block = source.slice(start, end).trim();
     if (block.length > maxCharacters) return { ok: false, present: true, block: '', entries: [], failures: [FIXED_FAILURES.TOO_LARGE] };
     return { ok: true, present: true, block, entries: [], failures: [], repairs };
@@ -779,6 +818,8 @@ export function actorProfileSemanticRuntimeFingerprint(mutationProbe = '') {
     const contract = [
         ACTOR_PROFILE_MVU_SCHEMA_VERSION,
         ACTOR_PROFILE_UPDATE_BLOCK.schemaVersion,
+        actorProfileReceiptPlacementKind,
+        actorProfileReceiptPlacementAccepted,
         extractActorProfileUpdateBlock,
         parseActorProfileUpdateBlock,
         bindActorProfileUpdateEntries,

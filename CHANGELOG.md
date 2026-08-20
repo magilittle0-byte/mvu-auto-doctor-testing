@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.23（2026-08-20，测试仓候选）
+- rc.22 在唯一测试聊天的同一首回合第三次直接 reroll 后得到正常正文和选项，accepted-final 精确读回且人物模型调用为 0；但主输出在大型辅助域尾部被截断，严格尾部人物档案回执因此完全缺失。P1 正确以 `profile_block_missing` fail-closed、零半档案并留下 durable repair receipt；同时，ticket-only P4 清理被误当成上一回合世界包屏障，使独立 P3 始终未启动。
+- 最新配套预设的终检升级为 V4：完整 `<人物档案更新>` 或 `<!-- 人物档案无变化 -->` 必须紧接 `</content>`，位于论坛、选项、UpdateVariable、吐槽和状态块之前。解析器只接受该严格 post-content 插槽或旧聊天的 legacy tail；只有真正位于 EOF 的未闭合块可本地补闭合，辅助域前未闭合则拒绝，避免吞并其他域。
+- P4 active consumer 现在显式区分 `worldPackage` 与 ticket-only 载荷；accepted-final 仅在同 generation 的真实世界包仍待清理时让 P3 等待，ticket-only pending 不阻断 P3。`not_completed` 仍不授予人物准入，但结构世界可与 P1 独立运行；SourceRef、operation epoch、ready-only 人物调度和旧 swipe 零写边界不变。
+- runtime fingerprint 新覆盖档案回执位置判定与 P3 世界包屏障 helper；新增 post-content/legacy tail/EOF 修复、ticket-only pending 与真实世界包 barrier 回归。定向自动测试 137/137、rc.23 唯一一次有效完整 Node 自动套件 612/612 均通过，并通过语法、manifest/配套预设 JSON 与差异检查；实际 loaded hash 和同一聊天当前 swipe 真实复验仍待完成，十二回合正式门禁未完成。
+
 ## 2.0.0-rc.22（2026-08-20，测试仓候选）
 - rc.21 在唯一测试聊天的同一首回合直接 reroll 后，正文与选项正常、玩家边界正常且人物模型调用为 0，但主模型仍没有交回人物档案块；运行时把“整份回执缺失”误判为 durable `no_candidates`，随后 P3 在 P1 唤醒前后均以零模型 stale 结束，P4 未准备。旧 swipe 保持零档案、零 Registry、零 P3/P4 消费，reroll 隔离本身通过。
 - 当前票据合同改为显式二选一：回复末尾必须是完整隐藏人物档案更新，或严格尾部 `<!-- 人物档案无变化 -->`。精确 SourceRef 上存在预留票据但两种回执都缺失时，P1 现在以 `profile_block_missing`、`emptyOperations` 和 repairable 缺项收据失败，不再伪装成功；无票据旧聊天仍兼容原省略语义。

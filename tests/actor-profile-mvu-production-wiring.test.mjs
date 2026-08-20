@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import { actorProfileReceiptPlacementAccepted } from '../actor-profile-mvu-core.mjs';
+
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 
@@ -89,22 +91,29 @@ test('semantic repair is single-person targeted and legacy migration is explicit
     assert.match(source, /actorProfilePathMode === 'semantic'/u);
 });
 
-test('contracted receipt omission fails closed while an explicit tail no-change receipt is valid', () => {
+test('contracted receipt omission fails closed while post-content and legacy tail no-change receipts are valid', () => {
     const helperSource = section(
         'function actorProfileExplicitNoChangeReceipt',
         'function actorProfileSemanticNoChange',
     );
     const helpers = new Function(
+        'actorProfileReceiptPlacementAccepted',
         `${helperSource}\nreturn { actorProfileExplicitNoChangeReceipt, actorProfileReceiptOmissionDecision };`,
-    )();
+    )(actorProfileReceiptPlacementAccepted);
     assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
         '<content>正文</content>\n<!-- 人物档案无变化 -->',
+    ), true);
+    assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
+        '<content>正文</content>\n<!-- 人物档案无变化 -->\n<options>1. 继续</options>',
     ), true);
     assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
         '<content><!-- 人物档案无变化 --></content>',
     ), false);
     assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
         '<!-- 人物档案无变化 -->\n<options>1. 继续</options>',
+    ), false);
+    assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
+        '<content>正文</content>\n<options>1. 继续</options>\n<!-- 人物档案无变化 -->\n数据库自由文本',
     ), false);
     assert.equal(helpers.actorProfileReceiptOmissionDecision({
         exactTicketCount: 32,

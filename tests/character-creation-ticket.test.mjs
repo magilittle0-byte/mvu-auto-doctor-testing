@@ -634,6 +634,14 @@ test('generation-near ticket prompt binds every consumed ticket to one hidden si
     ]) assert.match(prompt, new RegExp(`${section}：自然完整句`, 'u'));
     assert.match(prompt, /不得出现在 <content> 或 <options> 的可见正文中/u);
     assert.match(prompt, /人物档案无变化/u);
+    assert.match(prompt, /紧接 <\/content> 二选一/u);
+    assert.match(prompt, /先完成这个短回执，再输出论坛、选项、变量、吐槽和状态栏/u);
+    assert.match(prompt, /不得等到回复末尾/u);
+    assert.ok(
+        prompt.indexOf('紧接 </content> 二选一')
+            < prompt.indexOf('不得等到回复末尾'),
+        '档案回执必须先于可能被截断的大型辅助域',
+    );
     assert.match(prompt, /两者都不输出[\s\S]*不会伪装成成功/u);
     assert.ok(prompt.indexOf('NPC-DICE-FULL-1') < ticketsEnd);
     assert.ok(prompt.indexOf('NPC-DICE-FULL-2') < ticketsEnd);

@@ -192,6 +192,7 @@ import {
     ACTOR_PROFILE_MVU_ROOT,
     actorProfileMvuDigest,
     actorProfilePromptProjection,
+    actorProfileReceiptPlacementAccepted,
     actorProfileSemanticRuntimeFingerprint,
     bindActorProfileUpdateEntries,
     compileActorProfileMvuPatch,
@@ -5186,6 +5187,7 @@ function doctorRuntimeCriticalFingerprint() {
         moduleTargetForAcceptedFinal.toString(),
         acceptFinalGeneration.toString(),
         acceptFinalGenerationUnlocked.toString(),
+        acceptedFinalContinuityStartBarrier.toString(),
         dispatchAcceptedFinal.toString(),
         wakeContinuityAfterProfileTerminal.toString(),
         stage3NoActorPermitMatches.toString(),
@@ -8204,14 +8206,21 @@ async function acceptFinalGenerationUnlocked(generation) {
         return false;
     }
     // Start P4 settlement and synchronously attach every accepted-final module
-    // to its existing queue. P3 carries the P4 promise as a start barrier, so
-    // it cannot race the consume-proof write on continuity. A following host
-    // STARTED waits only for these launch barriers, never for durable P4 I/O.
+    // to its existing queue. P3 carries the P4 promise only when the active
+    // consumer owns a prior durable world package, so it cannot race that
+    // consume-proof write; ticket-only cleanup is independent. A following
+    // host STARTED waits only for launch barriers, never for durable P4 I/O.
     const p4SettleTask = Promise.resolve()
         .then(() => commitNextTurnConsumer(generation, envelope))
         .then((value) => value === true, () => false);
+    // Production always defines the selector below. Narrow lifecycle VM
+    // harnesses may execute only this accepted-final slice; retain their
+    // conservative barrier instead of throwing before module dispatch.
+    const continuityStartBarrier = typeof acceptedFinalContinuityStartBarrier === 'function'
+        ? acceptedFinalContinuityStartBarrier(generation, p4SettleTask)
+        : p4SettleTask;
     await dispatchAcceptedFinal(envelope, {
-        continuityStartBarrier: p4SettleTask,
+        continuityStartBarrier,
     });
     settleLaunch(true);
     generation.acceptedFinalOutcome = 'accepted';
@@ -13718,7 +13727,7 @@ function npcDesignTicketPrompt(batch) {
         ...rows,
         '</Original_NPC_Dice_Tickets>',
         '<Actor_Profile_Update_Receipt>',
-        '这是上述骰票在同一条 accepted assistant 回复中的必要语义回执，不是第二次人物识别。只要正文实际创建并消费了任一骰票，就不得把该人物误判成“没有变化”，必须在既有正文、选项、UpdateVariable 与 <StatusPlaceHolderImpl/> 全部结束后，为每个已消费票据追加同一个隐藏注释。',
+        '这是上述骰票在同一条 accepted assistant 回复中的必要语义回执，不是第二次人物识别。只要正文实际创建并消费了任一骰票，就不得把该人物误判成“没有变化”；必须在可见 <content> 正文闭合后立刻输出回执，再继续 <luntan>、<options>、<UpdateVariable>、<tucao>、<StatusPlaceHolderImpl> 或其他大型辅助域，禁止把人物回执拖到可能被截断的回复最末尾。',
         '隐藏注释严格使用以下行序；多人物在同一注释内逐人重复，某一人物失败不得删掉其他完整人物：',
         '<!-- 人物档案更新',
         '新增人物｜ticket=对应完整ticketId｜姓名：正文自然姓名｜正文锚点：同一可定位称谓',
@@ -13730,7 +13739,7 @@ function npcDesignTicketPrompt(batch) {
         '知识、能力与资源：自然完整句',
         '-->',
         '完整 ticketId 必须从上方已消费的骰票逐字复制，不得写骰票序号、简称、ActorId、revision、digest、status、SourceRef、readback、JSONPatch 或数据库字段。该注释是机器读取域，不得出现在 <content> 或 <options> 的可见正文中。',
-        '本轮收到骰票后必须在回复末尾二选一：实际消费票据就输出完整“人物档案更新”注释；确实没有新人物且没有已有人物档案变化，就只输出 <!-- 人物档案无变化 -->。两者都不输出会被本地 Doctor 视为缺失回执并进入修复，而不会伪装成成功。',
+        '本轮收到骰票后必须紧接 </content> 二选一：实际消费票据就输出完整“人物档案更新”注释；确实没有新人物且没有已有人物档案变化，就只输出 <!-- 人物档案无变化 -->。先完成这个短回执，再输出论坛、选项、变量、吐槽和状态栏；不得等到回复末尾。两者都不输出会被本地 Doctor 视为缺失回执并进入修复，而不会伪装成成功。',
         '</Actor_Profile_Update_Receipt>',
     ].join('\n');
 }
@@ -14493,6 +14502,7 @@ async function precomposeNextTurnConsumer(session) {
         providerId: DOCTOR_NEXT_TURN_PROVIDER_ID,
         slotId: NEXT_TURN_CONSUMER_INJECTION_NAME,
         fallback: true,
+        worldPackage: !!packet,
     };
     // Ticket-only fallback is deliberately not a world-package lease.  It
     // must not turn a P4 downgrade into an accepted-final scope barrier.
@@ -14597,6 +14607,18 @@ async function commitNextTurnConsumer(session, envelope) {
     }
     if (activeNextTurnConsumer === active) activeNextTurnConsumer = null;
     return true;
+}
+
+function acceptedFinalContinuityStartBarrier(session, p4SettleTask) {
+    const active = activeNextTurnConsumer;
+    // Ticket-only prompt cleanup does not read or write the durable world
+    // packet that P3 produces for the following turn.  Waiting for that host
+    // slot cleanup can strand structural-world progression behind an
+    // unrelated fallback provider.  Only a verified prior world package owns
+    // continuity state that must settle before P3 starts.
+    return active?.generationId === session?.id && active?.worldPackage === true
+        ? p4SettleTask
+        : null;
 }
 
 function continuityStateForInjection(namespace, { isReroll = false } = {}) {
@@ -17265,7 +17287,7 @@ function actorProfileExplicitNoChangeReceipt(messageText) {
     if (matches.length !== 1) return false;
     const match = matches[0];
     const end = Math.max(0, Number(match.index) || 0) + String(match[0] || '').length;
-    return source.slice(end).trim().length === 0;
+    return actorProfileReceiptPlacementAccepted(source, match.index, end);
 }
 
 function actorProfileReceiptOmissionDecision({
