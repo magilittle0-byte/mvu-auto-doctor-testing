@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.21（2026-08-20，测试仓候选）
+- rc.20 当前指纹的真实全新聊天首回合已从 accepted-final 识别出 3 个新人物目标，但主模型没有输出任何隐藏人物档案块；P1 因 `profile_block_no_entries` 正确零写失败，人物模型调用为 0，P3/P4 随上游硬失败进入 `stale`/未准备。正文、选项和玩家自主权边界本身通过。
+- 根因冻结为生成前票据提示只约束人物塑形，没有在离用户输入最近的同一载荷里把“消费票据”绑定为六段档案的必要回执；长上下文中只靠预设较早位置的通用合同不足以形成逐票闭环。
+- rc.21 在既有唯一 P4 consumer 的票据尾部追加紧凑回执合同：每个正文实际消费的完整 ticketId 都必须在同一 accepted assistant 末尾、可见正文之外交回六段自然中文档案；多人物逐人完整，单个失败不得删除其他人物。没有实际新人物和既有人物变化时仍可省略。
+- runtime fingerprint 现在覆盖真实 `npcDesignTicketPrompt`，并增加动态提示构造、逐票回执、可见域隔离和 fingerprint mutation 回归。rc.21 唯一一次完整 Node 自动套件为 607/607，并通过语法、manifest/配套预设 JSON 与差异检查；仍须完成推送、实际 loaded hash 和新全新聊天首回合闭环，rc.20 失败证据不能替代。
+
 ## 2.0.0-rc.20（2026-08-19，测试仓候选）
 - rc.19 当前指纹的真实全新聊天首回合再次确认：正文与选项生成、人物路径 durable `no_candidates`、人物模型调用为 0，尾随宿主事件也被 Doctor 正确识别为 `ignored_start/dry_run`；但 P3 的模型前 stale 分支缺少统一 `module/zeroWrite/worldModelCalls` 收据，P1 无法安全接棒，世界仍无终态。
 - 所有 P3 模型前 stale 现在使用固定隐私码和统一零写收据；P1 仍只 join 单 owner，且仅在 joined 结果明确零写、零模型、非前台抢占时，重新 fresh-read 同一个 accepted envelope 的 exact target 后取得一次新 owner。正文、swipe、generation、scope、content 或 epoch 任一变化仍零写且不重跑。

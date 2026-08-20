@@ -275,7 +275,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.20';
+const VERSION = '2.0.0-rc.21';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -5013,6 +5013,7 @@ function doctorRuntimeCriticalFingerprint() {
             ? stage3ZeroWriteStaleResult.toString() : '',
         typeof p4RelevantActorIds === 'function' ? p4RelevantActorIds.toString() : '',
         typeof p4ActorProfileSummary === 'function' ? p4ActorProfileSummary.toString() : '',
+        typeof npcDesignTicketPrompt === 'function' ? npcDesignTicketPrompt.toString() : '',
         typeof immutableNextTurnConsumerPayload === 'function'
             ? immutableNextTurnConsumerPayload.toString() : '',
         actorProfileSurfaceRuntimeFingerprint.toString(),
@@ -13707,6 +13708,20 @@ function npcDesignTicketPrompt(batch) {
         '人格票只描述稳定基线；本回合紧张、愤怒、冷淡等动态状态不得固化成永久人格。不得输出或保存MBTI、九型、Tritype、依恋类型名或代码。票据耗尽后不得事后重掷人格；医生仍会依据权威事实、已接受正文与不冲突的创意补全，原子生成完整档案。',
         ...rows,
         '</Original_NPC_Dice_Tickets>',
+        '<Actor_Profile_Update_Receipt>',
+        '这是上述骰票在同一条 accepted assistant 回复中的必要语义回执，不是第二次人物识别。只要正文实际创建并消费了任一骰票，就不得把该人物误判成“没有变化”，必须在既有正文、选项、UpdateVariable 与 <StatusPlaceHolderImpl/> 全部结束后，为每个已消费票据追加同一个隐藏注释。',
+        '隐藏注释严格使用以下行序；多人物在同一注释内逐人重复，某一人物失败不得删掉其他完整人物：',
+        '<!-- 人物档案更新',
+        '新增人物｜ticket=对应完整ticketId｜姓名：正文自然姓名｜正文锚点：同一可定位称谓',
+        '人物信息：自然完整句',
+        '性格特征：自然完整句',
+        '过往经历：自然完整句',
+        '当前状态：自然完整句',
+        '关系与动机：自然完整句',
+        '知识、能力与资源：自然完整句',
+        '-->',
+        '完整 ticketId 必须从上方已消费的骰票逐字复制，不得写骰票序号、简称、ActorId、revision、digest、status、SourceRef、readback、JSONPatch 或数据库字段。没有实际创建新人物且没有已有人物档案变化时，才省略整个注释。该注释是机器读取域，不得出现在 <content> 或 <options> 的可见正文中。',
+        '</Actor_Profile_Update_Receipt>',
     ].join('\n');
 }
 

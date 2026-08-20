@@ -607,3 +607,32 @@ test('static production path proves pre-generation injection and forbids doctor 
     assert.match(presetSource, /正文生成前/u);
     assert.match(presetSource, /医生只在最终正文被接受后识别人物/u);
 });
+
+test('generation-near ticket prompt binds every consumed ticket to one hidden six-section receipt', async () => {
+    const runtimeSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const start = runtimeSource.indexOf('function npcDesignTicketPrompt(batch)');
+    const end = runtimeSource.indexOf('\nfunction npcDesignTicketBatchForTarget', start);
+    assert.ok(start >= 0 && end > start);
+    const npcDesignTicketPrompt = new Function(
+        `return (${runtimeSource.slice(start, end)});`,
+    )();
+    const prompt = npcDesignTicketPrompt({
+        tickets: [1, 2].map((order) => ({
+            ticketId: `NPC-DICE-FULL-${order}`,
+            axes: {
+                temperament: { die: 'd6', roll: order, result: `自然倾向${order}` },
+            },
+        })),
+    });
+    const ticketsEnd = prompt.indexOf('</Original_NPC_Dice_Tickets>');
+    const receiptStart = prompt.indexOf('<Actor_Profile_Update_Receipt>');
+    assert.ok(ticketsEnd >= 0 && receiptStart > ticketsEnd, '回执合同必须贴在完整票据池之后');
+    assert.match(prompt, /只要正文实际创建并消费了任一骰票[\s\S]*不得把该人物误判成“没有变化”/u);
+    assert.match(prompt, /新增人物｜ticket=对应完整ticketId/u);
+    for (const section of [
+        '人物信息', '性格特征', '过往经历', '当前状态', '关系与动机', '知识、能力与资源',
+    ]) assert.match(prompt, new RegExp(`${section}：自然完整句`, 'u'));
+    assert.match(prompt, /不得出现在 <content> 或 <options> 的可见正文中/u);
+    assert.ok(prompt.indexOf('NPC-DICE-FULL-1') < ticketsEnd);
+    assert.ok(prompt.indexOf('NPC-DICE-FULL-2') < ticketsEnd);
+});

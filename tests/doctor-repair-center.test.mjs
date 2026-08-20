@@ -366,6 +366,7 @@ test('doctor repair projection changes the semantic and runtime fingerprints', (
         'continuityPendingOwnerRegistryFingerprint',
         'stage3FieldState',
         'actorProfileTargetStaleAutomaticRecoveryEligible',
+        'npcDesignTicketPrompt',
     ]) {
         assert.notEqual(
             makeRuntime({ [helper]: function changedDependency() { return helper; } }),

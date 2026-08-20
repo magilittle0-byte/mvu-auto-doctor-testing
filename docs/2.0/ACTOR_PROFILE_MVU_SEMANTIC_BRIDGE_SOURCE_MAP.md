@@ -1,10 +1,10 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.20` 测试仓候选。状态：rc.19 当前指纹的真实首回合确认尾随宿主 start 已被正确识别为 dry-run、semantic P1 已 durable `no_candidates` 且人物模型调用为 0；但 P3 的模型前 stale 没有统一零写收据，P1 的安全接棒门无法识别，结构世界仍无终态。同一正文还出现一次替玩家下主观感受结论。rc.20 统一 fixed-code stale 收据、fresh exact-target 单次接棒，并最小修正配套预设的玩家感受边界；仍须绑定当前 loaded fingerprint 真实复验，十二回合正式门禁未完成。
+适用版本：`2.0.0-rc.21` 测试仓候选。状态：rc.20 当前指纹的真实首回合从 accepted-final 识别出 3 个新人物目标，但主模型漏掉整个隐藏档案块；P1 以 `profile_block_no_entries` 零写失败，人物模型调用为 0，P3/P4 随上游硬失败进入 stale/未准备。rc.21 在原唯一生成前票据载荷末尾增加逐票六段档案回执，并把该真实提示构造纳入 runtime fingerprint；仍须绑定当前 loaded fingerprint 真实复验，十二回合正式门禁未完成。
 
 ## 生产链
 
-1. 生成前继续复用现有 `characterCreationTicket` 和稳定 ActorId。P4 的唯一 next-turn consumer 同时承载本回合票据、上一回合世界事件/可见后果及最多六个相关 durable-ready MVU 档案摘要；不发送全部历史档案。
+1. 生成前继续复用现有 `characterCreationTicket` 和稳定 ActorId。P4 的唯一 next-turn consumer 同时承载本回合票据、上一回合世界事件/可见后果及最多六个相关 durable-ready MVU 档案摘要；不发送全部历史档案。票据载荷末尾把每个实际消费的完整 ticketId 就近绑定到同一 accepted assistant 的隐藏六段回执，避免正文创建人物后漏交档案。
 2. 配套预设 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json` 在既有正文、选项、UpdateVariable 和状态块全部结束后输出唯一隐藏 `<人物档案更新>` 语义域。新人物给齐六段 V6 自然叙事档案，已有角色只给变化段。
 3. accepted-final 适配器只读取当前最终 assistant 的精确 SourceRef；聊天、message、swipe、generation、content、scope 或 epoch 漂移均零写入。格式先本地宽容修复，再按 ticket/ActorId 逐人物绑定和隔离。预留 ticket 只是可选池，不等于已消费；专用块完全省略按预设合同保存 exact-source 零变化证明，块已出现但为空/损坏仍是明确失败。
 4. 编译器在 working clone 上形成 `/人物档案/byActorId/<ActorId>` 操作，复用既有 MVU WAL、selected-field CAS、持久写、readback 与 touched-path rollback。第一次回读证明内容落地，第二次本地写入 ready 收据；最终操作合并回原消息 UpdateVariable，保留主回复原有变量操作。
@@ -27,7 +27,7 @@
 ### A：最小适配
 
 - TavernDB 成熟填表结构只复用“有界目标、working clone、整批提交、回读失败不算成功”的事务形状；没有复制其表格、SQL 或内容权威。
-- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设增加尾部隐藏语义域，并只把原“你感到”模板最小修正为客观感官表达与明确的玩家主观感受禁写，不改写作者提示词主结构。
+- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设增加尾部隐藏语义域，并只把原“你感到”模板最小修正为客观感官表达与明确的玩家主观感受禁写，不改写作者提示词主结构。rc.21 只在 Doctor 已有票据载荷尾部追加逐票回执，未新建提示词通道。
 - 既有 `profileV6` 自然叙事六段和锁/人工覆盖规范作为 MVU schema 内容形状；ActorLedger 改为单向 reference-only 投影。
 - 既有 P3/P4 注入只增加 MVU readback 摘要投影，不新增并行世界状态机或第二插槽。
 
@@ -39,6 +39,7 @@
 - 显式旧 profileV6 → MVU 逐 Actor 迁移按钮。原因是自动破坏性迁移和双向维护都不允许。
 - `v2/surface/actor-profile-view.mjs` 的 MVU 投影、状态优先级、紧凑 accordion 与脱敏诊断。旧页面只读取 profileV6，且六段长文会平铺，不能满足当前唯一权威和多人物可读性要求。
 - P3 模型前 stale 的统一 fixed-code 零写收据与 fresh exact-target 单次接棒。旧分支只有泛 `world.stale`，无法区分可安全接棒的零调用竞态与真实失败。
+- 生成前票据的逐票隐藏档案回执及其 runtime fingerprint。rc.20 真实证据证明通用预设合同在长上下文中可能与具体已消费票据脱节；新合同只闭合既有同一载荷，不引入第二识别器或第二档案权威。
 
 ## 不变量与失败语义
 
@@ -50,4 +51,4 @@
 
 ## 非验收说明
 
-rc.19 的完整自动套件为 604/604，但其当前指纹真实首回合仍暴露模型前 P3 stale 收据不完整、世界无终态及玩家感受越权，故该候选真实失败。rc.20 已增加定向 stale 收据、fresh exact target、runtime fingerprint 和预设玩家感受边界回归，完整 Node 自动套件 606/606 已通过；推送、实际加载哈希匹配与新全新聊天首回合证据仍待完成。语法检查、JSON 解析、差异检查和合成 DOM 回归都不证明真实可用；正式仓与正式 main 仍须等待完整十二回合协议。
+rc.20 的完整自动套件为 606/606，但当前指纹真实首回合识别出 3 个目标而主模型漏掉整个隐藏档案块，P1/P3/P4 因而真实失败。rc.21 已增加生成前逐票六段回执、可见域隔离及 runtime fingerprint mutation 回归；唯一一次完整 Node 自动套件 607/607、语法、JSON 和差异检查已通过，推送、实际加载哈希匹配与新全新聊天首回合证据仍待完成。自动检查和合成 DOM 回归都不证明真实可用；正式仓与正式 main 仍须等待完整十二回合协议。
