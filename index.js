@@ -276,7 +276,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.25';
+const VERSION = '2.0.0-rc.26';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v5';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
@@ -5011,6 +5011,8 @@ function doctorRuntimeCriticalFingerprint() {
             ? runSemanticActorProfileTarget.toString() : '',
         typeof runSemanticActorProfileTargetCore === 'function'
             ? runSemanticActorProfileTargetCore.toString() : '',
+        typeof settleSemanticActorProfileTransactionTarget === 'function'
+            ? settleSemanticActorProfileTransactionTarget.toString() : '',
         typeof actorProfileExplicitNoChangeReceipt === 'function'
             ? actorProfileExplicitNoChangeReceipt.toString() : '',
         typeof actorProfileReceiptOmissionDecision === 'function'
@@ -17261,6 +17263,69 @@ function actorProfileMvuProfilesFromData(data, profileRoot = '/人物档案/byAc
     return isPlainObject(profiles) ? profiles : {};
 }
 
+async function settleSemanticActorProfileTransactionTarget(captured, expectedBlock, {
+    stableReads = 5,
+    intervalMs = 250,
+    maxWaitMs = 8000,
+} = {}) {
+    const Mvu = await getMvu();
+    if (
+        !Mvu
+        || typeof Mvu.getMvuData !== 'function'
+        || typeof Mvu.parseMessage !== 'function'
+        || typeof Mvu.replaceMvuData !== 'function'
+    ) return { ok: false, reason: 'profile_mvu_api_unavailable' };
+    const attempts = Math.max(1, Math.ceil(
+        Math.max(intervalMs, Number(maxWaitMs) || 0)
+            / Math.max(1, Number(intervalMs) || 250),
+    ));
+    const requiredStableReads = Math.max(2, Math.floor(Number(stableReads) || 5));
+    let previousSignature = '';
+    let repeats = 0;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const context = getContext();
+        const fresh = captureTarget(context, captured?.index, {
+            frozenScope: captured?.actorSovereigntyScope,
+            unscoped: !captured?.scopeDigest,
+        });
+        if (!sameAcceptedNarrativeTarget(captured, fresh)) {
+            return { ok: false, reason: 'profile_source_changed_before_commit' };
+        }
+        const messageText = String(context?.chat?.[captured.index]?.mes || '');
+        const extracted = extractActorProfileUpdateBlock(messageText);
+        if (
+            !extracted.ok
+            || !extracted.present
+            || String(extracted.block || '') !== String(expectedBlock || '')
+        ) return { ok: false, reason: 'profile_source_changed_before_commit' };
+        const data = await mvuDataAt(Mvu, captured.index);
+        const stat = statDataOf(data);
+        if (data && stat) {
+            const signature = `${fresh.fingerprint}|${fingerprint(safeJson(stat, 0))}`;
+            if (signature === previousSignature) repeats += 1;
+            else {
+                previousSignature = signature;
+                repeats = 1;
+            }
+            if (repeats >= requiredStableReads) {
+                return {
+                    ok: true,
+                    Mvu,
+                    data,
+                    target: fresh,
+                    messageText,
+                    extracted,
+                };
+            }
+        } else {
+            previousSignature = '';
+            repeats = 0;
+        }
+        if (attempt + 1 < attempts) await sleep(intervalMs);
+    }
+    return { ok: false, reason: 'profile_mvu_read_failed' };
+}
+
 function actorProfileSemanticFailure(captured, reason, extra = {}) {
     const failure = classifyActorProfileRepairFailure({
         code: reason,
@@ -17544,13 +17609,13 @@ async function runSemanticActorProfileTargetCore(captured) {
     const guard = continuityTargetIsCurrent(captured, token);
     if (!guard.ok) return actorProfileTransientResult('stale', { reason: guard.reason });
     const context = getContext();
-    const messageText = String(context?.chat?.[captured.index]?.mes || '');
+    let messageText = String(context?.chat?.[captured.index]?.mes || '');
     if (!sovereigntyNarrativeEligible(messageText)) {
         return actorProfileSemanticFailure(captured, 'accepted_narrative_ineligible');
     }
-    const tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
+    let tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
         .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
-    const extracted = extractActorProfileUpdateBlock(messageText);
+    let extracted = extractActorProfileUpdateBlock(messageText);
     if (!extracted.present) {
         const omission = actorProfileReceiptOmissionDecision({
             exactTicketCount: tickets.length,
@@ -17572,6 +17637,23 @@ async function runSemanticActorProfileTargetCore(captured) {
     if (!extracted.ok) {
         return actorProfileSemanticFailure(captured, extracted.failures?.[0] || 'profile_block_malformed');
     }
+    const settled = await settleSemanticActorProfileTransactionTarget(
+        captured,
+        extracted.block,
+    );
+    if (!settled.ok) {
+        return actorProfileSemanticFailure(captured, settled.reason || 'profile_mvu_read_failed');
+    }
+    // The host may normalize MVU/mechanism tails after GENERATION_ENDED.  The
+    // settle gate permits only that full-message hash change: accepted
+    // narrative, dedicated profile block, swipe/generation/scope and epoch
+    // remain exact.  From here onward every transaction/readiness SourceRef
+    // uses the same stable, post-normalization target.
+    captured = settled.target;
+    messageText = settled.messageText;
+    extracted = settled.extracted;
+    tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
+        .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
     const parsed = parseActorProfileUpdateBlock(messageText, { extracted });
     if (!parsed.ok || parsed.failures?.length) {
         const first = parsed.failures?.[0] || parsed.quarantined?.[0]?.reason;
@@ -17579,7 +17661,7 @@ async function runSemanticActorProfileTargetCore(captured) {
             quarantined: parsed.quarantined || [],
         });
     }
-    const Mvu = await getMvu();
+    const Mvu = settled.Mvu;
     if (
         !Mvu
         || typeof Mvu.getMvuData !== 'function'
@@ -17588,7 +17670,7 @@ async function runSemanticActorProfileTargetCore(captured) {
     ) return actorProfileSemanticFailure(captured, 'profile_mvu_api_unavailable');
     // Profile commits are accepted-final floor transactions; unlike the
     // legacy variable path, never fall back to the symbolic latest target.
-    const currentData = await mvuDataAt(Mvu, captured.index);
+    const currentData = settled.data;
     if (!currentData) return actorProfileSemanticFailure(captured, 'profile_mvu_read_failed');
     const namespace = readChatNamespace(context);
     const ledger = normalizeActorLedger(namespace.actorLedger, {
@@ -21777,11 +21859,10 @@ function stage3NoSemanticDeltaHeldTerminal(scheduledBase, next, {
     if (Array.isArray(settlement?.worldEvents) && settlement.worldEvents.length) return null;
     const before = normalizeContinuityState(scheduledBase, { maxThreads: 24, maxResolved: 24 });
     const after = normalizeContinuityState(next, { maxThreads: 24, maxResolved: 24 });
+    const lifecycle = continuityLifecycleStats(before, after);
     if (
-        after.turn !== before.turn
-        || continuityLifecycleStats(before, after).changedExisting !== 0
-        || continuityLifecycleStats(before, after).added !== 0
-        || continuityLifecycleStats(before, after).removed !== 0
+        lifecycle.changedExisting !== 0
+        || lifecycle.added !== 0
         || continuityWorldDigest(before) !== continuityWorldDigest(after)
         || continuityScenarioDigest(before) !== continuityScenarioDigest(after)
     ) return null;
@@ -21930,6 +22011,7 @@ function stage3ValidateWorldCandidateInMemory(captured, settings, ledger, {
         && continuityWorldDigest(scheduledBase) === continuityWorldDigest(next)
         && continuityScenarioDigest(scheduledBase) === continuityScenarioDigest(next);
     const progressed = lifecycle.changedExisting > 0 || lifecycle.added > 0
+        || Boolean(noSemanticDeltaTerminal)
         || specificHoldTerminal
         || globalHoldTerminal
         || continuityWorldDigest(scheduledBase) !== continuityWorldDigest(next);

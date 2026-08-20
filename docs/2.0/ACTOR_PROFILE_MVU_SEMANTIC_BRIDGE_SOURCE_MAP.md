@@ -1,6 +1,6 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.25` 测试仓候选。状态：rc.24 已在唯一测试聊天同一首回合的 direct reroll 中验证终检 V5 把显式无变化回执放到 `</content>` 后、options 前，且人物正常路径额外模型调用为 0；但真实新聊天的空 ActorRegistry 缺少 scopeDigest，使 P3 三次 fresh owner 都被误判为 `world.stale.actor_ledger_changed`。rc.25 只修正 P3 的空/旧 Registry 比较投影，仍须提交、重新加载并在同一聊天同一用户消息继续 reroll；十二回合正式门禁未完成。
+适用版本：`2.0.0-rc.26` 测试仓候选。状态：rc.25 已按测试仓提交与 loaded fingerprint 匹配加载，并在唯一测试聊天同一首回合 direct reroll 到 swipe 7。主模型实际交回单新人物、同票唯一绑定、正文锚点命中且六段完整的隐藏块，parser/binder/compiler 与只读 MVU parse 全通过；宿主随后规范化 MVU/机制尾使整条消息哈希变化，旧事务门因此零写。P3 已越过空 Registry 缺陷，但 fresh-chat 的机械 nextTurn 让 safe-held 判定不可达。rc.26 只修正 stable accepted-final floor 与可验证本地 held；仍须提交、重新加载并在同一聊天同一用户消息继续 reroll，十二回合正式门禁未完成。
 
 ## 生产链
 
@@ -42,6 +42,8 @@
 - 生成前票据的逐票隐藏档案回执及其 runtime fingerprint。rc.20 真实证据证明通用预设合同在长上下文中可能与具体已消费票据脱节；新合同只闭合既有同一载荷，不引入第二识别器或第二档案权威。
 - 严格 post-content/legacy-tail 位置判定、票据回合缺失回执 fail-closed、P3 settled-before-wake 单次接棒和 `worldPackage` 屏障判定。rc.21 证明“完全省略等于成功”会掩盖主模型漏交；rc.22 又证明严格尾部会被大型辅助域截断，ticket-only P4 不能代表必须阻塞 P3 的世界包。旧路径没有这些本地证明。
 - P3 空/旧 ActorRegistry 的 scoped comparison projection。rc.24 真实新聊天证明：没有任何人物时 Registry 尚未持久化 scopeDigest，直接拿它与已验证 scope 比较会把稳定空账本永久误报成 `actor_ledger_changed`；rc.25 只在只读比较投影中补齐该 scope，真实 chat/scope 冲突仍 fail-closed。
+- accepted-final 后宿主机制尾规范化的静稳地板。rc.25 真实 swipe 7 证明：人物块和 accepted 正文不变时，宿主仍会重写 MVU/辅助尾，使“整条消息哈希”不是可直接写入的稳定 floor。rc.26 等待 accepted content、专用人物块和精确 MVU 基线连续稳定，再把规范化后的同一 SourceRef 交给既有事务；人物块、正文、swipe、generation、scope 或 epoch 变化仍 fail-closed。
+- fresh-chat 机械时钟 safe-held 适配。`turn 0 → nextTurn 1` 本身不是世界语义进展；rc.26 仅在线程/world/scenario 无变化、所有 ATT 已裁决或不存在时把 turn 降回基线并写可验证 held 收据，绝不制造人物行动结果。
 
 ## 不变量与失败语义
 
@@ -53,4 +55,4 @@
 
 ## 非验收说明
 
-rc.24 的提交、loaded hash 与 runtime fingerprint 均匹配，真实 swipe 6 证明 V5 回执顺序、正文/选项和隐藏隔离正确；P1 以 durable no-candidates 零写终态结束，额外人物模型调用为 0。随后 P3 因空 Registry scope 未投影而三次零模型 stale，未产生 world/P4。rc.25 已补该局部根因；定向 P3 100/100、accepted-final/P1→P3 53/53 与唯一一次有效完整套件 614/614 通过。当前自动和旧真实证据都不能替代 rc.25 重新加载后的同聊天 reroll。正式仓与正式 main 仍须等待完整十二回合协议。
+rc.25 的提交、loaded hash 与 runtime fingerprint 均匹配；真实 swipe 7 证明最新版预设会交回同票、六段完整且不可见的人物档案块，正常人物档案模型调用为 0。脱敏重放又证明 parser、绑定、compiler 和 MVU parse 都成功；生产失败来自事务开始前的宿主尾部规范化竞态，且 P3 在结构世界 safe-held 条件上存在 fresh turn 不可达。rc.26 已修复两处局部根因；定向 153/153、accepted-final/parser 66/66 与本候选唯一一次完整自动套件 616/616 均通过。自动检查和旧指纹证据都不能替代 rc.26 重新加载后的同聊天 reroll；正式仓与正式 main 仍须等待完整十二回合协议。

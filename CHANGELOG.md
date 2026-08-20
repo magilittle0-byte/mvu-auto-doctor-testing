@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2.0.0-rc.26（2026-08-20，测试仓候选）
+- 修复 rc.25 同聊天 swipe 7 的真实人物档案零写：模型交回的隐藏块实际为单新人物、同票唯一绑定、正文锚点命中且 V6 六段完整，parser/binder/compiler 与只读 MVU parse 全通过；失败来自 accepted-final 后宿主继续规范化 MVU/机制尾部，整条消息哈希变化触发旧写前门。新适配器要求 accepted 正文、专用人物块、swipe/generation/scope/epoch 与精确 MVU 基线连续稳定，再用规范化后的同一 SourceRef 进入现有 CAS/readback；正文或人物块变化仍零写。
+- 修复 fresh chat `turn 0 → nextTurn 1` 的结构世界 safe-held 不可达：只把机械 turn 差异降回基线 turn，同时要求线程、world、scenario 与已裁决 ATT 均无语义增量；本地生成可验证 held 收据，不把“人物尝试”伪装成世界结果，也不要求第二次世界补缺模型才能保活。
+- 新增人物事务尾部规范化/MVU 静稳与档案块漂移 fail-closed 回归，以及 fresh-chat 机械 nextTurn safe-held 回归；定向 153/153、accepted-final/parser 66/66 与本候选唯一一次完整自动套件 616/616 均通过。推送、重新加载及同一聊天同一首回合 direct reroll 仍待本候选完成；仍为未完成十二回合正式门禁的测试候选。
+
 ## 2.0.0-rc.25（2026-08-20，测试仓候选）
 - 修复真实新聊天空 ActorRegistry 的 P3 永久 stale：P3 在比较只读账本投影时，用已经验证的当前 scope 补齐空/旧 Registry 缺失的 `scopeDigest`，不写人物、不接管 MVU，也不放宽真实聊天或作用域冲突。此前空账本在每次 fresh reacquire 都被误判为 `world.stale.actor_ledger_changed`，导致结构世界和 P4 无法进入终态。
 - 新增真实故障形状回归：空账本、同一 accepted SourceRef、零 ready 人物时，结构世界比较必须继续，同时仍保持零人物调度、零行动收据。rc.24 同聊天 swipe 6 已证明 V5 回执顺序正确但暴露本缺陷；运行代码变化后该旧证据失效，rc.25 必须重新加载后在同一聊天同一用户消息继续 reroll。

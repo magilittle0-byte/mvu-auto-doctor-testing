@@ -30,11 +30,86 @@ test('accepted-final profile adapter is exact-source, zero-model, and uses exist
     assert.match(semantic, /exactTicketCount:\s*tickets\.length/u);
     assert.match(semantic, /omission === 'profile_block_missing'[\s\S]*?emptyOperations:\s*true/u);
     assert.match(semantic, /actorProfileSemanticNoChange\(captured, acceptedContentText\(messageText\)\)/u);
+    assert.match(semantic, /settleSemanticActorProfileTransactionTarget/u);
+    assert.match(semantic, /captured = settled\.target/u);
+    assert.match(semantic, /const currentData = settled\.data/u);
     assert.doesNotMatch(semantic, /callModel|generateRaw|runActorProfileTarget/u);
 
     const wrapper = section('async function runSemanticActorProfileTarget(captured)', 'function renderSemanticProfileEntries');
     assert.match(wrapper, /finalizeActorProfileRecoveryOutcome\(captured, result\)/u);
     assert.match(wrapper, /recovery\.recoverySaved === true/u);
+});
+
+test('profile transaction settle tolerates only host-tail normalization and waits for an exact stable MVU base', async () => {
+    const helperSource = section(
+        'async function settleSemanticActorProfileTransactionTarget',
+        'function actorProfileSemanticFailure',
+    );
+    let messageText = '<content>accepted</content>\n<!-- 人物档案更新\nBLOCK\n-->\n<UpdateVariable>old</UpdateVariable>';
+    let mvuVersion = 1;
+    let sleeps = 0;
+    const context = { chat: [{}, {}, { mes: messageText }] };
+    const captured = {
+        chatId: 'chat-stable', index: 2, messageId: 'message-2', swipeId: 7,
+        generationId: 'generation-8', generationSerial: 8, generationType: 'swipe',
+        contentFingerprint: 'accepted-content', fingerprint: 'full-old',
+        actorSovereigntyScope: { chatId: 'chat-stable' }, scopeDigest: 'scope-stable',
+    };
+    const getContext = () => context;
+    const captureTarget = () => ({
+        ...captured,
+        fingerprint: context.chat[2].mes.includes('normalized') ? 'full-normalized' : 'full-old',
+    });
+    const sameAcceptedNarrativeTarget = (left, right) => Boolean(
+        right
+        && left.chatId === right.chatId
+        && left.messageId === right.messageId
+        && left.swipeId === right.swipeId
+        && left.generationId === right.generationId
+        && left.contentFingerprint === right.contentFingerprint
+    );
+    const extractActorProfileUpdateBlock = (value) => ({
+        ok: true, present: true,
+        block: value.includes('BLOCK-CHANGED') ? 'BLOCK-CHANGED' : 'BLOCK',
+    });
+    const Mvu = { getMvuData() {}, parseMessage() {}, replaceMvuData() {} };
+    const dependencies = {
+        getMvu: async () => Mvu,
+        getContext,
+        captureTarget,
+        sameAcceptedNarrativeTarget,
+        extractActorProfileUpdateBlock,
+        mvuDataAt: async () => ({ stat_data: { version: mvuVersion } }),
+        statDataOf: (value) => value?.stat_data,
+        fingerprint: (value) => String(value),
+        safeJson: (value) => JSON.stringify(value),
+        sleep: async () => {
+            sleeps += 1;
+            if (sleeps === 1) {
+                messageText = '<content>accepted</content>\n<!-- 人物档案更新\nBLOCK\n-->\n<UpdateVariable>normalized</UpdateVariable>';
+                context.chat[2].mes = messageText;
+            }
+            if (sleeps === 2) mvuVersion = 2;
+        },
+    };
+    const names = Object.keys(dependencies);
+    const settle = new Function(...names, `${helperSource}\nreturn settleSemanticActorProfileTransactionTarget;`)(
+        ...Object.values(dependencies),
+    );
+    const result = await settle(captured, 'BLOCK', {
+        stableReads: 3, intervalMs: 1, maxWaitMs: 20,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.target.fingerprint, 'full-normalized');
+    assert.equal(result.data.stat_data.version, 2);
+    assert.ok(sleeps >= 4, 'both host tail and MVU base must remain quiet across repeated reads');
+
+    context.chat[2].mes = context.chat[2].mes.replace('BLOCK', 'BLOCK-CHANGED');
+    const changed = await settle(captured, 'BLOCK', {
+        stableReads: 2, intervalMs: 1, maxWaitMs: 4,
+    });
+    assert.equal(changed.ok, false);
+    assert.equal(changed.reason, 'profile_source_changed_before_commit');
 });
 
 test('P3 starts independently, freezes ready actors, and structure world does not wait for profiles', () => {
@@ -143,6 +218,7 @@ test('runtime fingerprint binds preset bridge, parser/compiler, transaction, P3,
         'actorProfileSemanticRuntimeFingerprint',
         'runSemanticActorProfileTarget',
         'runSemanticActorProfileTargetCore',
+        'settleSemanticActorProfileTransactionTarget',
         'actorProfileExplicitNoChangeReceipt',
         'actorProfileReceiptOmissionDecision',
         'runSemanticActorProfileTargetedRepair',

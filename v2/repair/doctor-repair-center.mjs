@@ -37,6 +37,7 @@ const PROFILE_FAILURE_CODES = Object.freeze(new Set([
     'accepted_narrative_ineligible',
     'profile_mvu_api_unavailable',
     'profile_mvu_read_failed',
+    'profile_source_changed_before_commit',
     'profile_mvu_schema_invalid',
     'profile_mvu_readback_mismatch',
     'profile_mvu_readback_not_ready',
@@ -75,7 +76,7 @@ function profileFailureClass(code) {
     if (/^profile_block_|^profile_entry_(?:name|ticket|actor_id|incomplete)/u.test(code)) {
         return 'format_or_completeness';
     }
-    if (/^profile_(?:ticket|actor_|source_anchor|binding)/u.test(code)) {
+    if (/^profile_(?:ticket|actor_|source_anchor|source_changed|binding)/u.test(code)) {
         return 'identity_binding';
     }
     if (code === 'profile_technical_field_model_owned') return 'model_control_field';

@@ -144,13 +144,15 @@ function loadStage3WorldCandidateValidator({
         `${code}\nthis.validateWorldCandidate = stage3ValidateWorldCandidateInMemory;`
         + '\nthis.normalizeAdjudication = stage3NormalizeWorldAdjudicationShape;'
         + '\nthis.adjudicationsForAttempts = stage3WorldAdjudicationsForAttempts;'
-        + '\nthis.heldProposal = stage3HeldActorProposal;',
+        + '\nthis.heldProposal = stage3HeldActorProposal;'
+        + '\nthis.noSemanticDeltaHeldTerminal = stage3NoSemanticDeltaHeldTerminal;',
         sandbox,
     );
     const validator = sandbox.validateWorldCandidate;
     validator.normalizeAdjudication = sandbox.normalizeAdjudication;
     validator.adjudicationsForAttempts = sandbox.adjudicationsForAttempts;
     validator.heldProposal = sandbox.heldProposal;
+    validator.noSemanticDeltaHeldTerminal = sandbox.noSemanticDeltaHeldTerminal;
     return validator;
 }
 
@@ -273,7 +275,7 @@ test('P3 binds a brand-new empty ActorRegistry to the verified scope before drif
         chatId: target.chatId,
         scopeDigest: target.scopeDigest,
     });
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.ledger.actorRegistry.scopeDigest, target.scopeDigest);
     assert.equal(result.ledger.actors.length, 0);
     assert.equal(result.ledger.actionAttempts.length, 0);
@@ -1811,6 +1813,48 @@ test('production P3 validator accepts WORLD-held only after all ATT are adjudica
         false,
     );
     assert.equal(acceptedAdjacentHold.next.lastTick.threadId, 'THREAD-ACTIVE');
+});
+
+test('fresh-chat mechanical nextTurn drift can settle as a validator-proven local WORLD hold', () => {
+    const before = normalizeContinuityState({
+        chatId: 'chat-fresh-hold', turn: 0, threads: [], world: {}, scenarioPlan: {},
+    }, { chatId: 'chat-fresh-hold' });
+    const modelCandidate = normalizeContinuityState({
+        ...structuredClone(before),
+        turn: 1,
+        lastTick: {
+            turn: 1,
+            action: 'held',
+            threadId: 'WORLD',
+            reason: '本回合没有足够权威依据形成可持久化的世界变化',
+        },
+    }, { chatId: 'chat-fresh-hold' });
+    const validator = loadStage3WorldCandidateValidator();
+    const directHold = validator.noSemanticDeltaHeldTerminal(before, modelCandidate, {
+        actionAttemptsFullyAdjudicated: true,
+        nextTurn: 1,
+    });
+    assert.ok(directHold, JSON.stringify({ before, modelCandidate }));
+    const result = validator(
+        { chatId: 'chat-fresh-hold' },
+        { continuityMaxThreads: 24, continuityAutonomy: 'living' },
+        {},
+        {
+            scheduledState: before,
+            continuityState: modelCandidate,
+            world: {},
+            actionAdjudications: [],
+            nextTurn: 1,
+            worldContextAvailable: true,
+        },
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.next.turn, 0, 'a safe hold must not fabricate a world-turn advance');
+    assert.equal(result.next.lastTick.turn, 1);
+    assert.equal(result.next.lastTick.action, 'held');
+    assert.equal(result.next.lastTick.threadId, 'WORLD');
+    assert.equal(continuityWorldDigest(result.next), continuityWorldDigest(before));
+    assert.equal(continuityScenarioDigest(result.next), continuityScenarioDigest(before));
 });
 
 test('world local adapter supplies technical defaults and safely holds omitted actor rows', () => {

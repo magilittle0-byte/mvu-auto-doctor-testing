@@ -109,6 +109,14 @@ test('profile repair classification is fixed-code and fail-closed', () => {
     assert.equal(omittedContract.failureClass, 'format_or_completeness');
     assert.equal(omittedContract.status, 'repairable');
     assert.equal(omittedContract.zeroWrite, true);
+    const sourceChanged = classifyActorProfileRepairFailure({
+        code: 'profile_source_changed_before_commit',
+        status: 'failed',
+        writeCount: 0,
+    });
+    assert.equal(sourceChanged.code, 'profile_source_changed_before_commit');
+    assert.equal(sourceChanged.failureClass, 'identity_binding');
+    assert.equal(sourceChanged.zeroWrite, true);
 });
 
 test('targeted profile repair envelope is privacy-safe and only carries bounded fields', () => {
