@@ -756,7 +756,6 @@ function loadStage3LegacyManualReconciliationRunner(state) {
             delayed: [], retained: [], receipts: [],
         }),
         actorLedgerOperationalCandidateView: () => null,
-        recalledActorIds: new Set(),
         composeActorOperationalState: (actor) => ({
             actorId: actor?.id || '', actionable: false, profileReady: false,
             cooldownUntilTurn: 0, openThreads: [],
@@ -7687,6 +7686,18 @@ test('P3 normal path writes nothing before Recall, Advance, parse, and full in-m
     assert.match(source, /async function commitPreparedWorldCandidate/u);
     assert.match(source, /expectedFieldStates/u);
     assert.doesNotMatch(source, /collectActorShardProposals/u);
+});
+
+test('P3 derives interaction actor ids from the current frozen schedule without a harness-only global', () => {
+    const run = sourceSection(
+        'async function runContinuityTarget(captured, {',
+        'function sameTargetExceptContent(left, right)',
+    );
+    assert.doesNotMatch(run, /\brecalledActorIds\b/u);
+    assert.match(
+        run,
+        /const mustActorIds = \[\.\.\.new Set\(\[[\s\S]*?\.\.\.scheduledActorIds,[\s\S]*?\.\.\.modelPendingActions\.attempts[\s\S]*?const recalledInteractionActorIds = new Set\(mustActorIds\)/u,
+    );
 });
 
 test('production Phase2 zero-model recovery neutralizes a legacy prepared director and reaches committed readback', async () => {

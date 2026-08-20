@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2.0.0-rc.33（2026-08-21，测试仓候选）
+- rc.32 首个真实酒馆 accepted 回复证明正文、变量事务和 `no_candidates` 人物终态正常，但 P3 在任何世界模型调用前以 `world.unexpected_failure` 终止，内置“修复世界连续性”也因复走同一路径返回 `doctor.repair.world.adapter_failed`。根因是生产 `runContinuityTarget()` 在本地 Recall 前引用未声明的 `recalledActorIds`，而 VM 夹具曾手工注入同名全局并遮住浏览器 `ReferenceError`。
+- 当前候选从本回合冻结的 `scheduledActorIds` 与已持久化待裁决尝试构造唯一 `mustActorIds`，同一集合同时用于关系目标和本地 Recall；测试夹具不再补生产全局，并新增未声明引用回归。定向检查 158/158、唯一一次完整自动套件 666/666 通过，0 fail，duration `13520.7757 ms`。此修复不改变人物档案、MVU、数据库、预设或 P4 的权威边界。rc.32 的真实失败证据不能续接 rc.33，必须重新加载当前指纹并从一个全新聊天重新执行十二回合门禁。
+
 ## 2.0.0-rc.32（2026-08-21，测试仓候选）
 - 真实宿主预检发现同名 IZUMI 配套预设仍载入旧内容；导入当前仓库文件后进一步证明 `Doctor_Profile_Context_Separation_V6` 虽存在于 `prompts`，却未进入 `prompt_order`，因此不会实际送入正文模型。当前候选把该条目唯一启用在人物语义块之前，同时保持 V5 回执终检为最后一项；合同明确 Doctor 先读取 accepted-final 原始 assistant 回执，后续正文模型只获得有界相关摘要且不重放历史隐藏档案块。
 - 新增配套预设生产顺序回归，要求 V6 隔离条目存在、启用、只排序一次且早于人物语义块。更新后的精确预设 SHA-256 为 `CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4`；129/129 定向检查和本候选唯一一次完整自动套件 665/665 通过，0 fail，duration `13485.5111 ms`。测试候选已推送 testing `main`，仍须从扩展管理器加载 rc.32 并完成同一全新聊天十二个有效回复及恢复门禁。

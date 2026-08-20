@@ -1,6 +1,6 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.32` 测试仓候选。下文保留 rc.27/rc.28/rc.29/rc.30/rc.31 的真实失败说明，但它们属于旧指纹，不能证明当前候选。rc.29 把 MVU durable semantic profile、A/B/C/D 四项长期优化和新的 projection recovery 接到同一候选；rc.30/rc.31 修复真实宿主暴露的入口解析和默认开场初始化阻断；rc.32 修复配套预设 V6 上下文隔离对象存在却未进入启用 `prompt_order` 的生产缺口。当前完整自动套件为 665/665；十二回合真实门禁须在 rc.32 指纹下执行。运行代码或配套预设变化后须重新加载当前提交，旧真实证据立即失效。
+适用版本：`2.0.0-rc.33` 测试仓候选。rc.32 首个真实 accepted 回复暴露 P3 在本地 Recall 前读取未声明的 `recalledActorIds`，任何世界模型调用前即失败；VM 夹具曾注入同名全局而遮住生产错误。rc.33 从冻结的 `scheduledActorIds` 与 durable pending attempts 构造一次 `mustActorIds`，同时用于关系目标和 Recall，夹具不再补生产变量。定向检查 158/158、唯一一次完整自动套件 666/666 通过；运行代码变化使 rc.32 真实证据失效，十二回合门禁须在 rc.33 当前指纹下从零执行。
 
 ## 生产链
 
@@ -48,7 +48,7 @@
 - 成功终态与前端故障摘要的双重收口。rc.27 真实第二个 accepted 回复证明 `atomic_readback` 后若曾保存恢复材料，旧语义适配器仍可能留下 `canRetry`，使绿色 durable 卡片与红色顶部摘要冲突。rc.28 在生产适配器清除此成功态标志，并在纯视图层拒绝把成功状态的过期 `canRetry` 当故障；真实 `not_completed/failed` 仍保持红色和单人物修复入口。
 - `full_adult` 仍直接复用 `actor-profile-v6-core.mjs` 的六项生理覆盖合同与本地规范化器；语义桥只做最小接线。生成前票据提示与配套预设写自然中文语义，本地编译器传入当前完成模式、生成合同版本并把 physiology 纳入 ready/readback；前端只展示通过本地合同版本的自然段，空 legacy 模块和布尔开关绝不充数。AI 只在真实缺项时由已有单人物 repair adapter 定向补该人物，之后仍使用同一 MVU 事务。
 
-## rc.29/rc.30/rc.31/rc.32 A/B/C/D production map
+## rc.29 至 rc.33 A/B/C/D production map
 
 | Contract | Production path and owner | T/A/X decision |
 | --- | --- | --- |
@@ -57,9 +57,9 @@
 | C three world lanes | `scheduleWorldLanes`, `classifyWorldPressureCandidate`, `admitDoctorWorldCandidates`, `stage3StructuralLaneRowSafe`, `stage3PositiveStructuralWorldDelta`, `stage3IsolateHeldActorWorldDelta`, `compressResolvedContinuityHistory` in `continuity-core.mjs`/`index.js`; one CAS/readback batch owns actor, faction and environment receipts. | T reuses the mature single-batch scheduler, held fallback, continuity CAS/readback and undo/checkpoint path. A adds lane-keyed positive provenance admission, pressure budgeting, actor-dependent delta isolation and newly-resolved-only compaction. X is only the missing structural admission/compaction adapter; it does not create a second world model or state machine. |
 | D operational state | `composeActorOperationalState`, `operationalActorEligible`, `actorOperationalPromptProjection` in `actor-operational-state-core.mjs`, consumed by `scheduleActorTurns`, P3 recall and P4 summary. MVU runtime is read only through configured ActorId JSON-Pointer rules. | T reuses ActorLedger action receipts/history and the MVU current-state authority. A adds the bounded ephemeral projection, attemptId-aware pending gate and explicit `unbound` diagnostics. X is the configurable runtime adapter because the controlled host supplied no universal character-card runtime schema; no Doctor-owned location/resource mirror is written. |
 
-Projection recovery is also part of the rc.29/rc.30/rc.31/rc.32 transaction path: `recoverSemanticProfileRegistryProjection()` derives a new or existing Registry candidate from the exact receipt SourceRef, stable ActorId, MVU natural identity, local readback metadata and committed profile digest. It may replace an old ledger `profileRef`; it does not require the ref to match before recovery. It removes only recovered `registry_projection_pending:*` codes and preserves same-batch `failedActorTargets`/ticket owners. Any digest, source, identity or save/readback mismatch remains repairable and zero-write where rollback is verified.
+Projection recovery is also part of the rc.29 through rc.33 transaction path: `recoverSemanticProfileRegistryProjection()` derives a new or existing Registry candidate from the exact receipt SourceRef, stable ActorId, MVU natural identity, local readback metadata and committed profile digest. It may replace an old ledger `profileRef`; it does not require the ref to match before recovery. It removes only recovered `registry_projection_pending:*` codes and preserves same-batch `failedActorTargets`/ticket owners. Any digest, source, identity or save/readback mismatch remains repairable and zero-write where rollback is verified.
 
-The current exact paired preset is the IZUMI file named above; its candidate SHA-256 is recorded in `TESTING_CHANNEL.md` and bound into `doctorRuntimeCriticalFingerprint()`. Historical rc.27/rc.28/rc.29/rc.30/rc.31 observations and suites do not substitute for rc.32 current-fingerprint evidence.
+The current exact paired preset is the IZUMI file named above; its candidate SHA-256 is recorded in `TESTING_CHANNEL.md` and bound into `doctorRuntimeCriticalFingerprint()`. Historical rc.27 through rc.32 observations and suites do not substitute for rc.33 current-fingerprint evidence.
 
 ## 不变量与失败语义
 

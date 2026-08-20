@@ -310,7 +310,7 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.32';
+const VERSION = '2.0.0-rc.33';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v6';
 const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = 'CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
@@ -22621,9 +22621,13 @@ async function runContinuityTarget(captured, {
         ...scheduled,
         actorName: actorNameById.get(scheduled.actorId) || scheduled.actorName,
     }));
-    const recalledInteractionActorIds = new Set(
-        [...recalledActorIds].map((actorId) => String(actorId || '').trim()).filter(Boolean),
-    );
+    const mustActorIds = [...new Set([
+        ...scheduledActorIds,
+        ...modelPendingActions.attempts
+            .map((attempt) => String(attempt?.actorId || ''))
+            .filter(Boolean),
+    ])].sort();
+    const recalledInteractionActorIds = new Set(mustActorIds);
     const registeredInteractionTargets = (actionLedger?.actors || []).map((entry) => ({
         actorId: String(entry?.id || ''),
         actorName: String(entry?.name || ''),
@@ -22649,10 +22653,6 @@ async function runContinuityTarget(captured, {
     // Build the read-only recall packet locally, preserving every mustInclude
     // item and its linked threads, instead of asking a second model to reselect
     // targets that the local schedulers have already made authoritative.
-    const mustActorIds = [...new Set([
-        ...scheduledActorIds,
-        ...modelPendingActions.attempts.map((attempt) => String(attempt?.actorId || '')).filter(Boolean),
-    ])].sort();
     const recallLaneCandidates = worldLaneSchedule?.candidates || [];
     const mustLaneIds = [...new Set(recallLaneCandidates
         .filter((lane) => lane?.due === true)
