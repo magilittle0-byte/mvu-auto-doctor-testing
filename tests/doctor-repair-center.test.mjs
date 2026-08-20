@@ -40,6 +40,11 @@ test('selected preset exposes one accepted-final natural-language profile block 
     assert.match(profile.content, /然后才继续 <luntan>、<options>、<UpdateVariable>/u);
     assert.match(profile.content, /不得把回执拖到可能被输出截断的回复最末尾/u);
     assert.match(profile.content, /没有变化时只输出 <!-- 人物档案无变化 -->/u);
+    for (const key of [
+        'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
+        'reproductiveFunction', 'sexualResponse', 'limitations',
+    ]) assert.match(profile.content, new RegExp(key, 'u'));
+    assert.match(profile.content, /六项缺一不可/u);
 });
 
 test('selected preset closes every ticket turn with one explicit hidden profile receipt', () => {
@@ -60,6 +65,8 @@ test('selected preset closes every ticket turn with one explicit hidden profile 
     assert.match(terminal[0].content, /<\/content> → 恰好一个隐藏人物档案回执 → <options>/u);
     assert.match(terminal[0].content, /下一个非空内容必须立即是回执/u);
     assert.match(terminal[0].content, /禁止选择“人物档案无变化”/u);
+    assert.match(terminal[0].content, /启用 full_adult/u);
+    assert.match(terminal[0].content, /limitations/u);
     const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
     assert.equal(order.filter((entry) => entry?.identifier === identifier).length, 1);
     assert.equal(order.find((entry) => entry?.identifier === identifier)?.enabled, true);

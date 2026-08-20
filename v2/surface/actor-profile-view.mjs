@@ -4,6 +4,7 @@ import {
     actorProfileMvuDigest,
     profileReadiness,
 } from '../../actor-profile-mvu-core.mjs';
+import { ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION } from '../../actor-profile-v6-core.mjs';
 
 export const ACTOR_PROFILE_SURFACE_GROUPS = Object.freeze([
     Object.freeze({
@@ -56,11 +57,17 @@ function sectionOf(profile, key) {
 function physiologyOf(profile, enabled) {
     if (!enabled) return null;
     const narrative = sectionOf(profile, 'physiology');
-    if (narrative && !/^不适用(?:$|[：:])/u.test(narrative.text)) return narrative;
+    const narrativeContract = Number(profile?.narrativeSections?.physiology?.contractVersion || 0);
+    if (narrative
+        && narrativeContract >= ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION
+        && !/^不适用(?:$|[：:])/u.test(narrative.text)) return narrative;
     const module = profile?.modules?.physiology;
     const body = module?.data;
     const value = body && typeof body === 'object'
-        ? Object.values(body).map((entry) => text(entry, 800)).filter(Boolean).join('；')
+        ? module?.status === 'ready' ? Object.entries(body)
+            .filter(([key]) => !['enabled', 'adultEnabled'].includes(key))
+            .map(([, entry]) => text(entry, 800)).filter(Boolean).join('；')
+            : ''
         : text(body, 1600);
     if (!value || /^不适用(?:$|[：:])/u.test(value)) return null;
     return Object.freeze({
@@ -189,8 +196,10 @@ export function createActorProfileSurfaceView({
                 sections: group.sectionKeys.map((key) => sections[key]).filter(Boolean),
             })),
             physiology,
-            missingSectionCount: Object.values(sections).filter((section) => !section).length,
-            sourceLegal: Object.values(sections).filter(Boolean).every((section) => Boolean(section.source)),
+            missingSectionCount: Object.values(sections).filter((section) => !section).length
+                + (completionMode === 'full_adult' && !physiology ? 1 : 0),
+            sourceLegal: [...Object.values(sections), physiology]
+                .filter(Boolean).every((section) => Boolean(section.source)),
             legacyOnly: !profile && legacyVerified(actor),
         });
     }).sort((left, right) => {
@@ -204,8 +213,11 @@ export function createActorProfileSurfaceView({
     const failed = cards.filter((card) => card.status.color === 'red').length;
     const pending = cards.filter((card) => card.status.color === 'yellow').length;
     const diagnosticStatus = text(diagnostic?.status, 40);
+    const diagnosticSucceeded = [
+        'atomic_readback', 'no_candidates', 'completed', 'ready',
+    ].includes(diagnosticStatus);
     const batchFailure = !readError && (
-        diagnostic?.canRetry === true
+        (diagnostic?.canRetry === true && !diagnosticSucceeded)
         || ['not_completed', 'failed'].includes(diagnosticStatus)
     );
     const needsAction = failed + pending;

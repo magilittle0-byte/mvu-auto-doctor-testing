@@ -43,6 +43,14 @@ const fullFields = (suffix = '') => ({
     relationshipsMotives: `希望与玩家建立谨慎合作${suffix}`,
     knowledgeCapabilitiesResources: `熟悉旧港地图，但不能凭空预知${suffix}`,
 });
+const physiologyFields = () => [
+    ['generalBaseline', '一般生理基线稳定，日常活动与恢复能力符合当前物种与年龄。'],
+    ['reproductiveAnatomy', '生殖解剖结构符合当前物种的成年个体特征，没有额外异常设定。'],
+    ['secondaryTraits', '第二性征与当前外观、年龄和物种一致，不覆盖正文已确认事实。'],
+    ['reproductiveFunction', '生殖功能处于正常成年基线，具体变化仍以后续权威事实为准。'],
+    ['sexualResponse', '性反应基线遵循自主、情境与边界，不把意图或感受预写成事实。'],
+    ['limitations', '当前没有额外生理限制；未知细节保持可修订且不得凭空扩大。'],
+].map(([key, value]) => `<field key="${key}">${value}</field>`).join('');
 const blockFor = ({ id = 'NPC-DICE-1', name = '林岚', fields = fullFields() } = {}) => `<人物档案更新>
 新增人物｜ticket=${id}｜姓名：${name}｜正文锚点：${name}
 人物信息：${fields.person}
@@ -106,6 +114,50 @@ test('single new actor compiles complete canonical V6 profile and provisions roo
     assert.equal(Object.hasOwn(profile, '稳定档案'), false);
     assert.equal(Object.hasOwn(profile, '演化档案'), false);
     assert.equal(profileReadiness(markActorProfileReadback(profile)).ready, true);
+});
+
+test('full-adult semantic profile is zero-write without all six physiology fields', () => {
+    const generic = {
+        entries: [{
+            mode: 'new', actorId: 'NPC-adult-bad', ticketId: 'T-adult-bad',
+            name: '合成人物', aliases: [], fields: { ...fullFields(), physiology: '成年，状态正常。' },
+        }],
+        failures: [], quarantined: [],
+    };
+    const rejected = compileActorProfileMvuPatch(generic, {
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        sourceRef: sourceRef(), completionMode: 'full_adult',
+    });
+    assert.equal(rejected.operations.length, 0);
+    assert.equal(rejected.commitStatus, 'quarantined');
+    assert.ok(rejected.quarantined[0].missingFields.includes('physiology.generalBaseline'));
+    assert.ok(rejected.quarantined[0].missingFields.includes('physiology.limitations'));
+});
+
+test('full-adult semantic profile canonicalizes six physiology fields and gates ready on readback', () => {
+    const compiled = compileActorProfileMvuPatch({
+        entries: [{
+            mode: 'new', actorId: 'NPC-adult-ready', ticketId: 'T-adult-ready',
+            name: '合成人物', aliases: [], fields: { ...fullFields(), physiology: physiologyFields() },
+        }],
+        failures: [], quarantined: [],
+    }, {
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        sourceRef: sourceRef(), completionMode: 'full_adult',
+    });
+    assert.equal(compiled.commitStatus, 'committable');
+    const profile = compiled.profiles['NPC-adult-ready'];
+    assert.equal(profile.completionMode, 'full_adult');
+    assert.equal(profile.narrativeSections.physiology.contractVersion, 2);
+    assert.match(profile.narrativeSections.physiology.text, /一般生理基线/u);
+    assert.match(profile.narrativeSections.physiology.text, /生理限制/u);
+    assert.equal(profileReadiness(profile).complete, true);
+    assert.equal(profileReadiness(profile).ready, false);
+    assert.equal(profileReadiness(markActorProfileReadback(profile)).ready, true);
+    const forged = structuredClone(markActorProfileReadback(profile));
+    delete forged.narrativeSections.physiology.contractVersion;
+    assert.equal(profileReadiness(forged).ready, false);
+    assert.ok(profileReadiness(forged).missingFields.includes('physiology.sexualResponse'));
 });
 
 test('multi-person batch quarantines one bad person without blocking complete peers', () => {

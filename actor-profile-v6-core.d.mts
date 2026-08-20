@@ -6,6 +6,12 @@ export const ACTOR_PROFILE_MODULES: readonly string[];
 export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS: readonly string[];
 export const ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION: number;
 export const ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS: readonly string[];
+export function validateActorProfilePhysiologyCoverage(value: unknown): {
+    ok: boolean;
+    prose: string;
+    missingFields: string[];
+    locallyRecovered?: boolean;
+};
 export const ACTOR_PROFILE_COMPLETION_GROUPS: readonly {
     key: string;
     modules: readonly string[];

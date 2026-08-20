@@ -617,6 +617,7 @@ test('generation-near ticket prompt binds every consumed ticket to one hidden si
         `return (${runtimeSource.slice(start, end)});`,
     )();
     const prompt = npcDesignTicketPrompt({
+        completionMode: 'full_adult',
         tickets: [1, 2].map((order) => ({
             ticketId: `NPC-DICE-FULL-${order}`,
             axes: {
@@ -633,6 +634,11 @@ test('generation-near ticket prompt binds every consumed ticket to one hidden si
         '人物信息', '性格特征', '过往经历', '当前状态', '关系与动机', '知识、能力与资源',
     ]) assert.match(prompt, new RegExp(`${section}：自然完整句`, 'u'));
     assert.match(prompt, /不得出现在 <content> 或 <options> 的可见正文中/u);
+    for (const key of [
+        'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
+        'reproductiveFunction', 'sexualResponse', 'limitations',
+    ]) assert.match(prompt, new RegExp(`<field key="${key}">`, 'u'));
+    assert.match(prompt, /六项缺一不可/u);
     assert.match(prompt, /人物档案无变化/u);
     assert.match(prompt, /输出 <\/content> 后，下一个非空内容必须立即是回执/u);
     assert.match(prompt, /明确覆盖预设 Four_Options_Output_Contract/u);

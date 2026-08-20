@@ -276,7 +276,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.27';
+const VERSION = '2.0.0-rc.28';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v5';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
@@ -13682,6 +13682,7 @@ function prepareNpcDesignTicketBatch() {
         ...target,
         generationSerial: generationSerial,
         capacity,
+        completionMode: getSettings().actorProfileCompletionMode,
         tickets,
     };
     npcDesignTicketBatches.set(lastGeneration.id, pendingNpcDesignTicketBatch);
@@ -13726,6 +13727,13 @@ function npcDesignTicketPrompt(batch) {
         });
         return `骰票${index + 1}[${ticket.ticketId}]：${axes.join('｜')}`;
     });
+    const physiologyInstructions = batch.completionMode === 'full_adult' ? [
+        '当前已启用 full_adult；每个适用的新成人物还必须增加一行生理特征，并把以下六项自然完整地写在该行内：',
+        '六项缺一不可；不适用项也必须自然说明原因。标签只用于本地可靠拆分，MVU 与前端保存和展示的是自然中文，不展示这些标签。',
+    ] : [];
+    const physiologyReceipt = batch.completionMode === 'full_adult'
+        ? '生理特征：<field key="generalBaseline">一般生理基线完整句</field><field key="reproductiveAnatomy">生殖解剖完整句</field><field key="secondaryTraits">第二性征完整句</field><field key="reproductiveFunction">生殖功能完整句</field><field key="sexualResponse">性反应基线完整句</field><field key="limitations">限制与不适用说明完整句</field>'
+        : '';
     return [
         '<Original_NPC_Dice_Tickets>',
         '这些骰票由医生脚本在正文生成前实际掷出，不是让模型自行挑选。只有本回复自然需要创建“没有数据库、角色卡、原著或既有正文人格设定”的原创NPC时才使用；没有新人物就全部忽略，禁止为了消费骰票强行加人。',
@@ -13737,6 +13745,7 @@ function npcDesignTicketPrompt(batch) {
         '</Original_NPC_Dice_Tickets>',
         '<Actor_Profile_Update_Receipt>',
         '这是上述骰票在同一条 accepted assistant 回复中的必要语义回执，不是第二次人物识别。只要正文实际创建并消费了任一骰票，就不得把该人物误判成“没有变化”；必须在可见 <content> 正文闭合后立刻输出回执，再继续 <luntan>、<options>、<UpdateVariable>、<tucao>、<StatusPlaceHolderImpl> 或其他大型辅助域，禁止把人物回执拖到可能被截断的回复最末尾。',
+        ...physiologyInstructions,
         '隐藏注释严格使用以下行序；多人物在同一注释内逐人重复，某一人物失败不得删掉其他完整人物：',
         '<!-- 人物档案更新',
         '新增人物｜ticket=对应完整ticketId｜姓名：正文自然姓名｜正文锚点：同一可定位称谓',
@@ -13746,6 +13755,7 @@ function npcDesignTicketPrompt(batch) {
         '当前状态：自然完整句',
         '关系与动机：自然完整句',
         '知识、能力与资源：自然完整句',
+        ...(physiologyReceipt ? [physiologyReceipt] : []),
         '-->',
         '完整 ticketId 必须从上方已消费的骰票逐字复制，不得写骰票序号、简称、ActorId、revision、digest、status、SourceRef、readback、JSONPatch 或数据库字段。该注释是机器读取域，不得出现在 <content> 或 <options> 的可见正文中。',
         '本段是最终输出顺序的最高优先级补丁，并明确覆盖预设 Four_Options_Output_Contract 与 Final_Four_Options_Gate 中漏写人物回执的旧“唯一顺序”。唯一合法顺序是：<konatan_planning~> → <content>…</content> → 恰好一个人物档案回执 → <options> → <UpdateVariable> → 其他收尾。输出 </content> 后，下一个非空内容必须立即是回执；回执前不得出现选项、变量、论坛外置块、吐槽、状态栏、数据库标记、解释文字或其他标签。',
@@ -17714,6 +17724,7 @@ async function runSemanticActorProfileTargetCore(captured) {
         // durable write and readback. The model/compiler never gets to claim
         // a successful host readback.
         readbackVerified: false,
+        completionMode: getSettings().actorProfileCompletionMode,
     });
     if (
         !compiled.operations.length
@@ -17931,7 +17942,10 @@ async function runSemanticActorProfileTarget(captured) {
             ...(result?.profileBatch?.failed || []).map((row) => row?.code || row?.reason),
             ...(result?.profileBatch?.quarantined || []).map((row) => row?.reason),
         ].map(compactActorProfileFailureCode).filter(Boolean))].slice(0, 8),
-        canRetry: recoverySaved,
+        // Recovery material may have existed transiently before this exact
+        // accepted-final transaction completed.  A durable success must not
+        // keep advertising an unbound failure/repair action to the surface.
+        canRetry: result?.status === 'not_completed' && recoverySaved,
         abortCause: '',
         recoveredFieldCount: 0,
     };
@@ -18003,6 +18017,20 @@ async function runSemanticActorProfileTargetedRepair(captured, { actorId: reques
         scopeDigest: captured.scopeDigest,
     });
     const actors = (ledger.actors || []).map((actor) => ({ id: actor.id, name: actor.name }));
+    const completionMode = getSettings().actorProfileCompletionMode;
+    let currentProfiles = {};
+    try {
+        const Mvu = await getMvu();
+        const currentData = Mvu ? await mvuDataAt(Mvu, captured.index) : null;
+        currentProfiles = actorProfileMvuProfilesFromData(currentData, ACTOR_PROFILE_MVU_ROOT);
+    } catch {
+        currentProfiles = {};
+    }
+    const physiologyFields = completionMode === 'full_adult' ? [
+        'physiology.generalBaseline', 'physiology.reproductiveAnatomy',
+        'physiology.secondaryTraits', 'physiology.reproductiveFunction',
+        'physiology.sexualResponse', 'physiology.limitations',
+    ] : [];
     const tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
         .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
     const targets = [];
@@ -18013,14 +18041,16 @@ async function runSemanticActorProfileTargetedRepair(captured, { actorId: reques
             mode: 'new', actorId, ticketId: String(ticket.ticketId || ''),
             name: String(ticket.name || ticket.reservedActorRef?.displayName || ''),
             missingFields: ['person', 'personality', 'history', 'currentState',
-                'relationshipsMotives', 'knowledgeCapabilitiesResources'],
+                'relationshipsMotives', 'knowledgeCapabilitiesResources', ...physiologyFields],
         });
     }
     for (const row of parsed.quarantined || []) {
         const entry = row?.entry || {};
         if (entry.mode !== 'existing' || !entry.actorId
             || targets.some((target) => target.actorId === entry.actorId)) continue;
-        const validation = validateActorProfileUpdateEntry(entry, { mode: 'existing' });
+        const validation = validateActorProfileUpdateEntry(entry, {
+            mode: 'existing', completionMode,
+        });
         targets.push({
             mode: 'existing', actorId: entry.actorId, ticketId: '', name: entry.name,
             missingFields: validation.missingFields.length ? validation.missingFields : ['delta'],
@@ -18030,10 +18060,13 @@ async function runSemanticActorProfileTargetedRepair(captured, { actorId: reques
     if (requested && !targets.some((target) => target.actorId === requested)) {
         const actor = actors.find((entry) => entry.id === requested);
         if (actor) {
+            const readiness = profileReadiness(currentProfiles?.[requested]);
             targets.push({
                 mode: 'existing', actorId: requested, ticketId: '', name: actor.name,
-                missingFields: ['person', 'personality', 'history', 'currentState',
-                    'relationshipsMotives', 'knowledgeCapabilitiesResources'],
+                missingFields: readiness.missingFields.length
+                    ? readiness.missingFields
+                    : ['person', 'personality', 'history', 'currentState',
+                        'relationshipsMotives', 'knowledgeCapabilitiesResources', ...physiologyFields],
             });
         }
     }
@@ -18058,6 +18091,10 @@ async function runSemanticActorProfileTargetedRepair(captured, { actorId: reques
                 content: [
                     '你只补全一个人物的自然中文档案，不重写正文，不识别其他人物。',
                     '新增人物必须完整给出：人物信息、性格特征、过往经历、当前状态、关系与动机、知识、能力与资源。',
+                    ...(completionMode === 'full_adult' ? [
+                        '当前启用 full_adult。若请求缺少 physiology.*，只在“生理特征”一行内补齐六项：generalBaseline、reproductiveAnatomy、secondaryTraits、reproductiveFunction、sexualResponse、limitations。',
+                        '每项使用 <field key="对应英文键">自然完整中文句</field>；不适用项也自然说明原因，六项缺一不可。',
+                    ] : []),
                     '已有角色只给出请求缺少的变化字段。不要输出 revision、digest、status、SourceRef、JSONPatch 或任何技术元数据。',
                     '只输出一个 <人物档案更新> 区块。',
                 ].join('\n'),
@@ -18093,7 +18130,9 @@ async function runSemanticActorProfileTargetedRepair(captured, { actorId: reques
             entry.actorId === target.actorId
             && entry.mode === target.mode
         ));
-        if (!exact || !validateActorProfileUpdateEntry(exact, { mode: target.mode }).ok) continue;
+        if (!exact || !validateActorProfileUpdateEntry(exact, {
+            mode: target.mode, completionMode,
+        }).ok) continue;
         repairedEntries.push(exact);
     }
     if (!repairedEntries.length) {
@@ -18161,6 +18200,7 @@ async function migrateLegacyProfilesToMvu({ actorId: requestedActorId = '' } = {
         existingProfiles: actorProfileMvuProfilesFromData(currentData, root),
         sourceRef: sourceRefOf(captured),
         readbackVerified: false,
+        completionMode: getSettings().actorProfileCompletionMode,
     });
     if (!compiled.operations.length) {
         return {

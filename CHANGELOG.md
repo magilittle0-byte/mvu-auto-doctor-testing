@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.28（2026-08-20，测试仓候选）
+- 修复 rc.27 真实第二个 accepted 回复暴露的前端终态矛盾：MVU 卡片已经六段完整且 `atomic_readback`，但语义路径把曾经存在的恢复材料继续投影为 `canRetry`，导致顶部摘要错误变红并提示未绑定失败。成功终态现在明确清除可重试标记；前端也只在非成功终态采信 `canRetry`，真正的 `not_completed/failed` 仍保持红色。
+- 修复同一真实回复暴露的 `full_adult` 假绿：语义编译器不再硬编码 `basic`，而是读取当前人物档案完成模式；启用成人生理档案时，复用 V6 成熟的六项生理覆盖校验，缺任一项整个人物零写/不 ready。短摘要、空的旧 physiology 模块和缺少本地合同版本都不会显示绿色；单人物修复只补该人物缺失生理项，再走同一 MVU CAS 与 durable readback。
+- 配套最新版预设和生成前票据提示同步要求 `full_adult` 的六项自然中文生理语义；模型不写 revision、digest、SourceRef 或合同版本。runtime fingerprint 现在直接覆盖生理校验、ready 门和当前完成模式接线。
+- 新增“完整绿色卡 + atomic_readback + 过期 canRetry”合成回归，要求摘要显示已保存且无需操作；原有零卡片持久失败仍须红色并保留修复中心入口。运行时代码变化使 rc.27 真实证据失效，rc.28 必须重新加载后在同一已接受正文上恢复并继续单聊天十二个有效回复。
+
 ## 2.0.0-rc.27（2026-08-20，测试仓候选）
 - 修复 rc.26 同一测试聊天 swipe 19 的真实轻微格式偏差：当前 accepted assistant 只有一个隐藏人物回执，但主模型把它紧贴在 `</content>` 内侧；旧解析器只接受外侧插槽，因而正确零写却把可本地恢复的格式问题记为 `profile_block_missing`。解析器现在只额外接受“回执结束后仅有空白并立即关闭 `</content>`”的唯一内侧尾注释，并记录本地 relocation；正常 post-content 与旧聊天 true-EOF legacy tail 仍保留。
 - 内侧兼容不扫描数据库、世界书或正文自由 JSON：仍只处理当前 accepted assistant 的专用注释，重复块、注释后继续正文、论坛/选项内伪块、无条目、错误 ticket/ActorId、六段缺失和精确 SourceRef 漂移继续 fail-closed；人物模型调用仍为 0，MVU CAS/readback、P3/P4 与前端权威不变。

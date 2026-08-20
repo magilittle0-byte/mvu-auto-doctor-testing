@@ -165,8 +165,10 @@ test('fault and legacy cards expose only their scoped repair or migration action
 
 test('physiology is shown only in full-adult mode and applicable content', () => {
     const profile = completeProfile('actor-one', '人物一');
+    profile.completionMode = 'full_adult';
     profile.narrativeSections.physiology = {
-        title: '生理档案', text: '合成且适用的生理资料', source: 'hypothesis',
+        title: '生理档案', text: '六项完整覆盖后的合成且适用生理资料', source: 'hypothesis',
+        contractVersion: 2,
     };
     const actor = actorFor(profile);
     const basic = createActorProfileSurfaceView({
@@ -176,12 +178,36 @@ test('physiology is shown only in full-adult mode and applicable content', () =>
         profiles: { 'actor-one': profile }, actors: [actor], completionMode: 'full_adult',
     });
     assert.equal(basic.cards[0].physiology, null);
-    assert.equal(adult.cards[0].physiology.text, '合成且适用的生理资料');
+    assert.equal(adult.cards[0].physiology.text, '六项完整覆盖后的合成且适用生理资料');
     profile.narrativeSections.physiology.text = '不适用：非生物实体';
     const inapplicable = createActorProfileSurfaceView({
         profiles: { 'actor-one': profile }, actors: [actor], completionMode: 'full_adult',
     });
     assert.equal(inapplicable.cards[0].physiology, null);
+});
+
+test('full-adult short physiology or empty legacy module is red and never false-green', () => {
+    const profile = completeProfile('actor-physiology-missing', '待补生理人物');
+    profile.completionMode = 'full_adult';
+    profile.narrativeSections.physiology = {
+        title: '生理档案', text: '成年，状态正常。', source: 'hypothesis',
+    };
+    profile.modules = {
+        physiology: {
+            status: 'missing', source: 'confirmed',
+            data: { enabled: true, adultEnabled: true, body: '', reproductive: '' },
+        },
+    };
+    const view = createActorProfileSurfaceView({
+        profiles: { 'actor-physiology-missing': profile },
+        actors: [actorFor(profile)], completionMode: 'full_adult',
+    });
+    assert.equal(view.cards[0].status.color, 'red');
+    assert.equal(view.cards[0].status.label, '档案不完整');
+    assert.equal(view.cards[0].status.repairable, true);
+    assert.equal(view.cards[0].physiology, null);
+    assert.equal(view.cards[0].missingSectionCount, 1);
+    assert.match(view.summary, /失败 1 人/u);
 });
 
 test('surface runtime fingerprint changes under a real mutation probe', () => {
@@ -209,6 +235,27 @@ test('unbound persisted profile failure stays red instead of becoming a blue emp
     assert.doesNotMatch(view.summary, /profile_block|ActorId|SourceRef|digest/iu);
 });
 
+test('durable success cannot stay red because transient recovery material once existed', () => {
+    const profile = completeProfile('actor-ready', '已保存人物');
+    const view = createActorProfileSurfaceView({
+        profiles: { 'actor-ready': profile },
+        actors: [actorFor(profile)],
+        currentTarget: target,
+        diagnostic: {
+            status: 'atomic_readback',
+            canRetry: true,
+            lastFailureCodes: ['stale-transient-recovery-marker'],
+        },
+    });
+    assert.equal(view.cards.length, 1);
+    assert.equal(view.cards[0].status.color, 'green');
+    assert.equal(view.batchFailure, false);
+    assert.equal(view.counts.unboundFailed, 0);
+    assert.match(view.summary, /1\/1 人已完整保存/u);
+    assert.match(view.summary, /当前无需操作/u);
+    assert.doesNotMatch(view.summary, /另有未绑定|修复中心/u);
+});
+
 test('production surface reads exact MVU projection, stores only fold preference locally, and is height-bounded', async () => {
     const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const css = await readFile(new URL('../style.css', import.meta.url), 'utf8');
@@ -227,6 +274,7 @@ test('production surface reads exact MVU projection, stores only fold preference
     assert.match(surfaceState, /hydratedActorProfileDiagnostic\(state, \{ currentTarget \}\)/u);
     assert.match(surfaceState, /view\.batchFailure/u);
     assert.match(surface, /persistedProfileFailure[\s\S]*?healthColor = persistedProfileFailure \? 'red' : 'blue'/u);
+    assert.match(indexSource, /canRetry:\s*result\?\.status === 'not_completed' && recoverySaved/u);
     assert.match(css, /\.mvuad-mvu-profile-list\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto/iu);
     assert.match(css, /@media \(max-width: 600px\)[\s\S]*?\.mvuad-mvu-profile-row[\s\S]*?flex-direction:\s*column/iu);
 });

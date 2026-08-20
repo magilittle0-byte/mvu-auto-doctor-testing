@@ -6,9 +6,12 @@ import {
 } from './core.mjs';
 import { actorRefFrom } from './actor-ref-core.mjs';
 import {
+    ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
     ACTOR_PROFILE_NARRATIVE_SECTION_KEYS,
+    ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
     normalizeActorProfileV6,
     actorProfileBaselineDigest,
+    validateActorProfilePhysiologyCoverage,
     validateActorProfileInsertCandidate,
 } from './actor-profile-v6-core.mjs';
 
@@ -523,7 +526,10 @@ export function bindActorProfileUpdateEntries(parsed, { tickets = [], actors = [
     };
 }
 
-export function validateActorProfileUpdateEntry(entry, { mode = entry?.mode || 'new' } = {}) {
+export function validateActorProfileUpdateEntry(entry, {
+    mode = entry?.mode || 'new',
+    completionMode = 'full',
+} = {}) {
     const rawFields = entry?.fields || {};
     const technical = containsTechnicalField(rawFields)
         || Object.entries(rawFields).some(([key, value]) => (
@@ -534,10 +540,19 @@ export function validateActorProfileUpdateEntry(entry, { mode = entry?.mode || '
     const missingFields = mode === 'new'
         ? NARRATIVE_KEYS.filter((field) => fieldMissing(normalized.fields[field]))
         : Object.keys(normalized.fields).length ? [] : ['delta'];
+    const physiologyProvided = !fieldMissing(normalized.fields.physiology);
+    const physiology = physiologyProvided
+        ? validateActorProfilePhysiologyCoverage(normalized.fields.physiology)
+        : { ok: false, prose: '', missingFields: ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => `physiology.${key}`) };
+    if (completionMode === 'full_adult' && (mode === 'new' || physiologyProvided) && !physiology.ok) {
+        missingFields.push(...physiology.missingFields);
+    }
     return {
         ok: !technical && missingFields.length === 0,
-        entry: normalized,
-        missingFields,
+        entry: physiology.ok
+            ? { ...normalized, fields: { ...normalized.fields, physiology: physiology.prose } }
+            : normalized,
+        missingFields: [...new Set(missingFields)],
         failures: technical ? [TECHNICAL_FAILURE] : [],
         complete: missingFields.length === 0 && !technical,
     };
@@ -549,6 +564,15 @@ export function profileReadiness(profile) {
     const sections = source.narrativeSections || {};
     const missingFields = NARRATIVE_KEYS.filter((key) => fieldMissing(sections[key]?.text || sections[key])
         || !['confirmed', 'designed_seed', 'hypothesis'].includes(text(sections[key]?.source, 40)));
+    if (source.completionMode === 'full_adult') {
+        const physiology = sections.physiology;
+        const physiologyReady = !fieldMissing(physiology?.text || physiology)
+            && ['confirmed', 'designed_seed', 'hypothesis'].includes(text(physiology?.source, 40))
+            && Number(physiology?.contractVersion || 0) >= ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION;
+        if (!physiologyReady) {
+            missingFields.push(...ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => `physiology.${key}`));
+        }
+    }
     const meta = source.本地元数据 || source.localMetadata || {};
     const readbackReady = meta.readbackVerified === true;
     const complete = missingFields.length === 0;
@@ -571,7 +595,7 @@ function sourceRefComplete(value) {
         && text(value.generationType, 80) && text(value.scopeDigest, 180)
         && text(value.contentFingerprint || value.contentHash || value.hash, 180));
 }
-function profileSections(entry, old = null) {
+function profileSections(entry, old = null, { completionMode = 'full' } = {}) {
     const oldSections = old?.narrativeSections || {};
     const value = (key, fallback = '') => text(entry.fields[key] || fallback, 4000);
     const combined = (a, b) => [a, b].filter(Boolean).join('；');
@@ -619,7 +643,12 @@ function profileSections(entry, old = null) {
                     : key === 'currentState'
                         ? value('currentState', fallback[key]) || value('longTermPsychologicalChanges', fallback[key])
                     : direct;
-        sections[key] = { key, title: key, text: mappedValue, source: 'hypothesis', evidence: [] };
+        sections[key] = {
+            key, title: key, text: mappedValue, source: 'hypothesis', evidence: [],
+            ...(key === 'physiology' && completionMode === 'full_adult' && mappedValue
+                ? { contractVersion: ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION }
+                : {}),
+        };
     }
     return sections;
 }
@@ -651,6 +680,7 @@ export function compileActorProfileMvuPatch(bound, {
     sourceRef = {},
     now = Date.now(),
     readbackVerified = false,
+    completionMode = 'full',
 } = {}) {
     const source = bound && Array.isArray(bound.entries) ? bound : { entries: [], failures: ['profile_binding_missing'] };
     const failures = [...(source.failures || [])];
@@ -672,7 +702,7 @@ export function compileActorProfileMvuPatch(bound, {
         });
     }
     for (const [index, raw] of source.entries.entries()) {
-        const validation = validateActorProfileUpdateEntry(raw);
+        const validation = validateActorProfileUpdateEntry(raw, { completionMode });
         if (!validation.ok) {
             const reason = validation.failures[0] || FIXED_FAILURES.INCOMPLETE;
             failures.push(reason); quarantined.push({ index, actorId: text(raw?.actorId, 160), reason, missingFields: validation.missingFields.slice(0, 12) });
@@ -698,7 +728,7 @@ export function compileActorProfileMvuPatch(bound, {
             quarantined.push({ index, actorId, reason: FIXED_FAILURES.LOCKED, lockedField: lockedKey });
             continue;
         }
-        const sections = profileSections(entry, old);
+        const sections = profileSections(entry, old, { completionMode });
         const candidate = {
             profileFormat: 'narrative-v1',
             actorRef: { kind: 'actor_ref', actorId, name: entry.name },
@@ -706,9 +736,14 @@ export function compileActorProfileMvuPatch(bound, {
             locks: old?.locks || {},
             manualOverrides: old?.manualOverrides || {},
         };
-        const checked = validateActorProfileInsertCandidate(candidate, { actorRef: { actorId, name: entry.name }, completionMode: 'basic' });
+        const checked = validateActorProfileInsertCandidate(candidate, {
+            actorRef: { actorId, name: entry.name }, completionMode,
+        });
         if (!checked.ok) { failures.push(FIXED_FAILURES.INCOMPLETE); quarantined.push({ index, actorId, reason: FIXED_FAILURES.INCOMPLETE, missingFields: checked.missingFields?.slice(0, 12) || [] }); continue; }
-        const profile = normalizeActorProfileV6({ ...checked.candidate, actorId, name: entry.name, completionMode: 'basic' }, { actorId, name: entry.name, mode: 'basic' });
+        const profile = normalizeActorProfileV6(
+            { ...checked.candidate, actorId, name: entry.name, completionMode },
+            { actorId, name: entry.name, mode: completionMode },
+        );
         profile.actorRef = { kind: 'actor_ref', actorId, name: entry.name, aliases: entry.aliases };
         profile.姓名与别名 = { 姓名: entry.name, 别名: [...new Set([...(old?.姓名与别名?.别名 || []), ...entry.aliases])] };
         profile.本地元数据 = {
@@ -719,6 +754,15 @@ export function compileActorProfileMvuPatch(bound, {
             revision: Number.isInteger(old?.本地元数据?.revision) ? old.本地元数据.revision + 1 : 1,
             status: 'complete', readbackVerified: Boolean(readbackVerified), inferredFields: [], updatedAt: new Date(now).toISOString(),
         };
+        const readiness = profileReadiness(profile);
+        if (!readiness.complete) {
+            failures.push(FIXED_FAILURES.INCOMPLETE);
+            quarantined.push({
+                index, actorId, reason: FIXED_FAILURES.INCOMPLETE,
+                missingFields: readiness.missingFields.slice(0, 12),
+            });
+            continue;
+        }
         const path = actorProfileMvuPath(actorId, profileRoot);
         if (!path) { failures.push(FIXED_FAILURES.PATH_INVALID); quarantined.push({ index, actorId, reason: FIXED_FAILURES.PATH_INVALID }); continue; }
         operations.push({ op: old ? 'replace' : 'insert', path, value: profile }); profiles[actorId] = profile;
@@ -796,12 +840,14 @@ export function actorProfilePromptProjection(profile, { maxCharacters = 900 } = 
 export function compileLegacyActorProfileMigration(legacyProfiles, options = {}) {
     const entries = [];
     const quarantined = [];
+    const completionMode = options.completionMode === 'full_adult' ? 'full_adult' : 'full';
     for (const [actorId, raw] of Object.entries(legacyProfiles || {})) {
         const profile = normalizeActorProfileV6(raw, { actorId, name: raw?.name || raw?.actorRef?.name, mode: 'basic' });
         const verified = raw?.baselineCommit?.readbackVerified === true
             || raw?.本地元数据?.readbackVerified === true;
         const sections = profile.narrativeSections || {};
-        const missing = NARRATIVE_KEYS.filter((key) => fieldMissing(sections[key]?.text || sections[key]));
+        const readiness = profileReadiness({ ...profile, completionMode });
+        const missing = readiness.missingFields;
         if (!verified || profile.profileFormat !== 'narrative-v1' || missing.length) {
             quarantined.push({ actorId, reason: FIXED_FAILURES.MIGRATION_INCOMPLETE, missingFields: missing });
             continue;
@@ -809,7 +855,10 @@ export function compileLegacyActorProfileMigration(legacyProfiles, options = {})
         entries.push({
             mode: 'existing', actorId, name: profile.name || raw?.name || raw?.actorRef?.name,
             aliases: raw?.actorRef?.aliases || [],
-            fields: Object.fromEntries(NARRATIVE_KEYS.map((key) => [key, sections[key]?.text || sections[key]])),
+            fields: Object.fromEntries([
+                ...NARRATIVE_KEYS,
+                ...(completionMode === 'full_adult' ? ['physiology'] : []),
+            ].map((key) => [key, sections[key]?.text || sections[key]])),
             legacyProfile: raw,
         });
     }
@@ -821,11 +870,16 @@ export function actorProfileSemanticRuntimeFingerprint(mutationProbe = '') {
     const contract = [
         ACTOR_PROFILE_MVU_SCHEMA_VERSION,
         ACTOR_PROFILE_UPDATE_BLOCK.schemaVersion,
+        ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
+        ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
         actorProfileReceiptPlacementKind,
         actorProfileReceiptPlacementAccepted,
         extractActorProfileUpdateBlock,
         parseActorProfileUpdateBlock,
         bindActorProfileUpdateEntries,
+        validateActorProfilePhysiologyCoverage,
+        validateActorProfileUpdateEntry,
+        profileReadiness,
         compileActorProfileMvuPatch,
         markActorProfileReadback,
         mergeActorProfileOperationsIntoAcceptedMessage,

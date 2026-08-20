@@ -63,6 +63,7 @@ export function compileActorProfileMvuPatch(bound: unknown, options: {
     sourceRef: Record<string, unknown>;
     now?: number;
     readbackVerified?: boolean;
+    completionMode?: string;
 }): {
     ok: boolean;
     operations: Array<{ op: 'insert' | 'replace'; path: string; value: unknown }>;

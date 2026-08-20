@@ -655,6 +655,13 @@ function validatePhysiologyCoverage(value) {
     };
 }
 
+// Public semantic-bridge adapter.  The implementation stays shared with the
+// mature V6 completion path so the preset/Doctor bridge cannot silently invent
+// a weaker second definition of an adult physiology profile.
+export function validateActorProfilePhysiologyCoverage(value) {
+    return validatePhysiologyCoverage(value);
+}
+
 export function parseActorProfileModuleGroupOutput(output, group, {
     acceptedNarrative = '',
     registeredActorIndex = [],

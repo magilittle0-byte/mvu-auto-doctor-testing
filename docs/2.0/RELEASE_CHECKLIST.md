@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.27 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.28 正式门禁清单
 
-候选：`2.0.0-rc.27`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成同一测试聊天、同一首回合消息的 reroll 闭环）
+候选：`2.0.0-rc.28`（当前仅测试仓；须在当前 loaded fingerprint 下完成同一聊天连续十二个有效回复。正常正文不得 reroll；仅正文硬失败可替换当前回复，Doctor/MVU/P3/P4 故障必须在已接受正文的精确 SourceRef 上修复。）
 
-当前状态：rc.26 已实际加载到测试仓提交 `f3889a9` 与 runtime fingerprint `runtime-critical:939029:a8ae46c4`。同一测试聊天 swipe 19 的当前 accepted assistant 发行了同源票据，但唯一隐藏 no-change 回执紧贴在 `</content>` 内侧，旧严格位置门以 `profile_block_missing` 正确零写；旧 swipe 世界/P4 和人物状态均未污染当前源。rc.27 只增加该唯一 inner-tail 注释的本地 relocation，定向 262/262 与唯一一次完整自动套件 616/616 已通过；仍须推送、重新加载和同聊天 reroll。
+当前状态：rc.27 提交 `0f1083c` 已按 runtime fingerprint `runtime-critical:939029:83b91472` 实际加载。真实第二个 accepted 回复形成一张六段基础 MVU 档案，人物档案模型调用为 0，世界与 P4 收束；但 `full_adult` 生理详细字段为空，编译/ready/前端三层误判为绿色，顶部摘要又被成功事务遗留的 `canRetry` 错误染红。rc.28 同时修复生理合同与终态投影后仍须完成一次完整套件、测试仓 main 推送、重新加载、同一已接受正文单人物修复与回读/刷新核验；旧指纹证据不算 rc.28 通过。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

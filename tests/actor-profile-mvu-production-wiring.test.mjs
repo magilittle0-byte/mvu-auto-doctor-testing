@@ -163,6 +163,9 @@ test('semantic repair is single-person targeted and legacy migration is explicit
     assert.match(repair, /人物档案单人物定向补缺/u);
     assert.match(repair, /targets\.slice\(0, 1\)/u);
     assert.match(repair, /只补全一个人物/u);
+    assert.match(repair, /profileReadiness\(currentProfiles\?\.\[requested\]\)/u);
+    assert.match(repair, /physiology\.generalBaseline/u);
+    assert.match(repair, /六项缺一不可/u);
     assert.doesNotMatch(repair, /runActorProfileTarget|completeActorProfilesForTurn/u);
     const migration = section('async function migrateLegacyProfilesToMvu', 'async function runActorProfileTarget');
     assert.match(migration, /compileLegacyActorProfileMigration/u);
@@ -170,6 +173,12 @@ test('semantic repair is single-person targeted and legacy migration is explicit
     assert.match(migration, /syncFrontend:\s*false/u);
     assert.match(source, /mvuad-profile-migrate/u);
     assert.match(source, /actorProfilePathMode === 'semantic'/u);
+});
+
+test('semantic compiler receives the live completion mode instead of hard-coded basic readiness', () => {
+    const semantic = section('async function runSemanticActorProfileTargetCore', 'async function runSemanticActorProfileTarget(');
+    assert.match(semantic, /compileActorProfileMvuPatch\(bound,[\s\S]*?completionMode:\s*getSettings\(\)\.actorProfileCompletionMode/u);
+    assert.doesNotMatch(semantic, /completionMode:\s*'basic'/u);
 });
 
 test('contracted receipt omission fails closed while dedicated tail no-change receipts are valid', () => {

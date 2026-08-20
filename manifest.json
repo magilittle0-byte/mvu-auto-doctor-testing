@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Codex",
-  "version": "2.0.0-rc.27",
+  "version": "2.0.0-rc.28",
   "homePage": "https://github.com/magilittle0-byte/mvu-auto-doctor-testing",
   "auto_update": true
 }

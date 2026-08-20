@@ -1,6 +1,6 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.26` 测试仓候选。状态：rc.25 已按测试仓提交与 loaded fingerprint 匹配加载，并在唯一测试聊天同一首回合 direct reroll 到 swipe 7。主模型实际交回单新人物、同票唯一绑定、正文锚点命中且六段完整的隐藏块，parser/binder/compiler 与只读 MVU parse 全通过；宿主随后规范化 MVU/机制尾使整条消息哈希变化，旧事务门因此零写。P3 已越过空 Registry 缺陷，但 fresh-chat 的机械 nextTurn 让 safe-held 判定不可达。rc.26 只修正 stable accepted-final floor 与可验证本地 held；仍须提交、重新加载并在同一聊天同一用户消息继续 reroll，十二回合正式门禁未完成。
+适用版本：`2.0.0-rc.28` 测试仓候选。rc.27 当前指纹的真实第二个 accepted 回复已生成单人物六段基础档案并通过 MVU durable readback，但 `full_adult` 的详细 physiology 模块仍为空；编译器硬编码 `basic`、ready 只数六段、前端又采信短生理摘要，因而错误显示绿色。顶部摘要同时因成功事务曾保存过恢复材料而错误保留 `canRetry` 红色。rc.28 同时收紧生理完整度与成功终态投影；票据、MVU、P3/P4 与数据库边界不变。运行代码与配套预设变化后须重新加载当前提交，在同一已接受正文上定向恢复核验，再继续同一聊天十二个有效回复；正式门禁尚未完成。
 
 ## 生产链
 
@@ -45,6 +45,8 @@
 - accepted-final 后宿主机制尾规范化的静稳地板。rc.25 真实 swipe 7 证明：人物块和 accepted 正文不变时，宿主仍会重写 MVU/辅助尾，使“整条消息哈希”不是可直接写入的稳定 floor。rc.26 等待 accepted content、专用人物块和精确 MVU 基线连续稳定，再把规范化后的同一 SourceRef 交给既有事务；人物块、正文、swipe、generation、scope 或 epoch 变化仍 fail-closed。
 - fresh-chat 机械时钟 safe-held 适配。`turn 0 → nextTurn 1` 本身不是世界语义进展；rc.26 仅在线程/world/scenario 无变化、所有 ATT 已裁决或不存在时把 turn 降回基线并写可验证 held 收据，绝不制造人物行动结果。
 - 当前 accepted assistant 的唯一 inner-tail 人物回执本地 relocation。rc.26 真实 swipe 19 证明模型可能遵守“隐藏且紧邻正文末尾”却把注释放在 `</content>` 内侧；rc.27 只接受注释后没有任何正文、紧接容器关闭的形状，并继续用完整解析、ticket/ActorId、六段、SourceRef 与 MVU readback 门阻止数据库/世界书相似标记取得权威。
+- 成功终态与前端故障摘要的双重收口。rc.27 真实第二个 accepted 回复证明 `atomic_readback` 后若曾保存恢复材料，旧语义适配器仍可能留下 `canRetry`，使绿色 durable 卡片与红色顶部摘要冲突。rc.28 在生产适配器清除此成功态标志，并在纯视图层拒绝把成功状态的过期 `canRetry` 当故障；真实 `not_completed/failed` 仍保持红色和单人物修复入口。
+- `full_adult` 仍直接复用 `actor-profile-v6-core.mjs` 的六项生理覆盖合同与本地规范化器；语义桥只做最小接线。生成前票据提示与配套预设写自然中文语义，本地编译器传入当前完成模式、生成合同版本并把 physiology 纳入 ready/readback；前端只展示通过本地合同版本的自然段，空 legacy 模块和布尔开关绝不充数。AI 只在真实缺项时由已有单人物 repair adapter 定向补该人物，之后仍使用同一 MVU 事务。
 
 ## 不变量与失败语义
 
@@ -56,4 +58,4 @@
 
 ## 非验收说明
 
-rc.26 的提交、loaded hash 与 runtime fingerprint 均匹配；真实 swipe 19 证明当前模型会把唯一隐藏 no-change 回执紧贴在 `</content>` 内侧，旧解析器正确零写但把轻微格式偏差记为 `profile_block_missing`。rc.27 已增加有界 inner-tail relocation，并保留完整 ticket/六段/SourceRef/MVU/readback 门；定向 262/262 与本候选唯一一次完整自动套件 616/616 已通过。自动检查和旧指纹证据不能替代 rc.27 重新加载后的同聊天 reroll。正式仓与正式 main 仍须等待完整十二回合协议。
+rc.27 的提交、loaded hash 与 runtime fingerprint 均匹配，并在真实第二个 accepted 回复完成一张六段基础 MVU 档案；真实取证随后证明其 `full_adult` 生理内容未完成，绿色无效，同时顶部摘要被过期 `canRetry` 染红。rc.28 的自动检查只能证明代码回归，不能替代新 loaded fingerprint 在同一接受正文上的单人物恢复、durable readback、刷新 hydrate 与后续单聊天十二个有效回复。正式仓与正式 main 仍须等待完整协议。
