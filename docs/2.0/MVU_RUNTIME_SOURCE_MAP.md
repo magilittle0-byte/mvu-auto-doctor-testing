@@ -6,6 +6,11 @@ SillyTavern/Tauri run and is not evidence for the twelve-turn acceptance gate.
 
 ## Prompt-ready host evidence
 
+- The paired IZUMI preset now places `mvu-auto-doctor-profile-context-separation-v6`
+  exactly once in the enabled `prompt_order`, before the natural profile receipt
+  contract while leaving the V5 terminal receipt gate last. A prompt object that
+  exists only in `prompts` is not treated as active production evidence.
+
 - Controlled host: TavernHelper `4.8.19`.
 - Relative resource: `extensions/TavernHelper/dist/index.js.map`.
 - Source-map SHA-256: `7989FC1B3A47978526D63FD63C9DCB5ED68B534523BD24C223FF0B82C7A1D961`.

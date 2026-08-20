@@ -1,6 +1,6 @@
 # MVU Auto Doctor 2.0 权威规格索引
 
-状态：`2.0.0-rc.31-mvu-optimization-candidate / testing-main / complete-suite-and-formal-gates-pending`
+状态：`2.0.0-rc.32-mvu-optimization-candidate / testing-main / complete-suite-and-formal-gates-pending`
 
 适用范围：2.0 产品、数据协议、事务协议、真实故障回放与阶段交接
 
@@ -15,7 +15,7 @@
 - [`ACTOR_IDENTITY_REGISTRY_SOURCE_MAP.md`](ACTOR_IDENTITY_REGISTRY_SOURCE_MAP.md)：P0 身份 candidate/registered 双表、明确分隔符别名、accepted narrative 晋升触发与本地 Gate 的 A/T/X 来源映射。
 - [`CHARACTER_CREATION_TICKET_SOURCE_MAP.md`](CHARACTER_CREATION_TICKET_SOURCE_MAP.md)：阶段4生成前人物票据、权威来源占轴和同票绑定的实际来源映射。
 - [`ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md`](ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md)：最新版预设语义域、accepted-final MVU 原子提交、ready-only P3、P4 摘要、修复与旧档案迁移的 T/A/X 来源映射。
-- [`MVU_RUNTIME_SOURCE_MAP.md`](MVU_RUNTIME_SOURCE_MAP.md)：rc.29/rc.30/rc.31 的宿主静态事件证据、A/B/C/D 运行时所有权、存储边界、可配置 runtime binding 与验证边界。
+- [`MVU_RUNTIME_SOURCE_MAP.md`](MVU_RUNTIME_SOURCE_MAP.md)：rc.29/rc.30/rc.31/rc.32 的宿主静态事件证据、A/B/C/D 运行时所有权、存储边界、可配置 runtime binding 与验证边界。
 - [`ACTOR_ACTION_WORLD_ADJUDICATION_SOURCE_MAP.md`](ACTOR_ACTION_WORLD_ADJUDICATION_SOURCE_MAP.md)：阶段5人物行动就绪、尝试先持久化、世界裁决和双轨独立性的实际来源映射。
 - [`ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md`](ACTOR_COMPATIBILITY_MIGRATION_SOURCE_MAP.md)：“旧路径与迁移收敛”的 v4 确定性兼容升级、pre-Registry 身份边界、作用域隔离、旧入口停用与来源映射；历史 `phase6Runtime`/阶段6文件名只作兼容旧名。
 

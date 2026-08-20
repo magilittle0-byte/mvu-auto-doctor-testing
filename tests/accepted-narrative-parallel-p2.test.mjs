@@ -877,7 +877,7 @@ test('runtime fingerprint binds accepted-final keying, foreground flush, and unl
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
         'test-version', 'prompt-context-core-v1', 'post-content-before-options-v6',
-        '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+        'CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4',
         64, 64, 'doctor-chat-scope-core-v1', 'actor-operational-state-core-v1', digest,
         () => 'recovery', () => 'generation', () => 'batch', () => 'authority',
         () => 'continuity', () => 'variable-repair', () => 'doctor-repair',

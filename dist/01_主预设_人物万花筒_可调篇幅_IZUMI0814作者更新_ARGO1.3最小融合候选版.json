@@ -1589,6 +1589,10 @@
         },
         {
           "enabled": true,
+          "identifier": "mvu-auto-doctor-profile-context-separation-v6"
+        },
+        {
+          "enabled": true,
           "identifier": "4f2642de-5ef6-4ee4-9e94-2c52dd667a13"
         },
         {
@@ -4884,7 +4888,7 @@
       "system_prompt": false
     },
     {
-      "content": "<Doctor_Profile_Context_Separation_V6>\n人物档案隐藏回执只作为本回合 accepted assistant 的语义资料：正文结束后按既有格式自然填写即可，不要输出任何 revision、digest、SourceRef、MVU 路径或JSONPatch。未来回合收到的人物摘要只用于当前相关人物，不要复述、重放或扩写历史隐藏回执；不相关人物不要带入上下文。Doctor先读取当前 accepted assistant 原始回执并完成校验与持久读回，随后模型输入只保留有界人物摘要。\n</Doctor_Profile_Context_Separation_V6>",
+      "content": "<Doctor_Profile_Context_Separation_V6>\n人物档案隐藏回执只作为本回合 accepted-final 原始 assistant 消息中的语义资料：正文结束后按既有格式自然填写即可，不要输出任何 revision、digest、SourceRef、MVU 路径或JSONPatch。未来回合收到的人物摘要只用于当前相关人物，不要复述、重放或扩写历史隐藏回执；不相关人物不要带入上下文。Doctor先读取当前 accepted-final 原始 assistant 回执并完成校验与持久读回，随后正文模型输入只保留有界人物摘要，不得把历史隐藏档案块重新送入模型。\n</Doctor_Profile_Context_Separation_V6>",
       "enabled": true,
       "forbid_overrides": false,
       "identifier": "mvu-auto-doctor-profile-context-separation-v6",

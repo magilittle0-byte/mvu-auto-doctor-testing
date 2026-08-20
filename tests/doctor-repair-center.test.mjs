@@ -60,6 +60,25 @@ test('selected preset exposes one accepted-final natural-language profile block 
     assert.match(profile.content, /六项缺一不可/u);
 });
 
+test('selected preset enables the V6 profile context separation contract in production prompt order', () => {
+    const identifier = 'mvu-auto-doctor-profile-context-separation-v6';
+    const prompts = (preset.prompts || []).filter((entry) => entry?.identifier === identifier);
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0].enabled, true);
+    assert.match(prompts[0].content, /accepted-final 原始 assistant 消息/u);
+    assert.match(prompts[0].content, /随后正文模型输入只保留有界人物摘要/u);
+    assert.match(prompts[0].content, /不得把历史隐藏档案块重新送入模型/u);
+    const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
+    const ordered = order.filter((entry) => entry?.identifier === identifier);
+    assert.equal(ordered.length, 1);
+    assert.equal(ordered[0].enabled, true);
+    assert.ok(
+        order.findIndex((entry) => entry?.identifier === identifier)
+            < order.findIndex((entry) => entry?.identifier === '4f2642de-5ef6-4ee4-9e94-2c52dd667a13'),
+        'context separation must be active before the semantic receipt contract',
+    );
+});
+
 test('selected preset closes every ticket turn with one explicit hidden profile receipt', () => {
     const identifier = 'b222c3a4-6979-4dbd-a8ce-5fe4112a1c24';
     const terminal = (preset.prompts || []).filter((entry) => entry?.identifier === identifier);
@@ -435,7 +454,7 @@ test('doctor repair projection changes the semantic and runtime fingerprints', (
             'test-version',
             'prompt-context-core-v1',
             'post-content-before-options-v6',
-            '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+            'CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4',
             64,
             64,
             'doctor-chat-scope-core-v1',
