@@ -1,6 +1,6 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.23` 测试仓候选。状态：rc.22 在唯一测试聊天的同一首回合 reroll 后得到正常正文与选项，但大型辅助域在输出尾部被截断，位于严格尾部的人物档案回执随之缺失；P1 正确以 `profile_block_missing` fail-closed，ticket-only P4 清理却被当成上一回合世界包屏障而阻断独立 P3。rc.23 将回执前移到正文后第一专用槽，并让 P3 只等待真实 prior-world-package P4；仍须绑定当前 loaded fingerprint 在同一聊天复验，十二回合正式门禁未完成。
+适用版本：`2.0.0-rc.23` 测试仓候选。状态：rc.22 在唯一测试聊天的同一首回合 reroll 后得到正常正文与选项，但大型辅助域在输出尾部被截断，位于严格尾部的人物档案回执随之缺失；P1 正确以 `profile_block_missing` fail-closed，ticket-only P4 清理却被当成上一回合世界包屏障而阻断独立 P3。rc.23 将回执前移到正文后第一专用槽，并让 P3 只等待真实 prior-world-package P4；首次加载探针还发现诊断 `VERSION` 常量滞后于 manifest，最终候选已统一并加入精确一致回归。仍须绑定最终 loaded fingerprint 在同一聊天复验，十二回合正式门禁未完成。
 
 ## 生产链
 

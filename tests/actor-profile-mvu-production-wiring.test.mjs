@@ -5,7 +5,13 @@ import test from 'node:test';
 import { actorProfileReceiptPlacementAccepted } from '../actor-profile-mvu-core.mjs';
 
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+
+test('runtime diagnostic version exactly matches the install manifest', () => {
+    const runtimeVersion = source.match(/const VERSION = '([^']+)'/u)?.[1];
+    assert.equal(runtimeVersion, manifest.version);
+});
 
 test('accepted-final profile adapter is exact-source, zero-model, and uses existing MVU transaction', () => {
     const target = section('async function moduleTargetForAcceptedFinal', 'function dispatchAcceptedFinal');
