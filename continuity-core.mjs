@@ -922,6 +922,7 @@ function normalizeNextTurnInjection(value) {
         payload: {
             text: cleanText(payload.text, 12000),
             visibleThreadIds: cleanList(payload.visibleThreadIds, 4, 90),
+            visibleWorldIds: cleanList(payload.visibleWorldIds, 16, 120),
         },
         payloadFormat: source.payloadFormat === 'canonical-bounded-v1'
             ? 'canonical-bounded-v1'
@@ -973,6 +974,11 @@ export function continuityCoreSemanticFingerprint(overrides = {}) {
         continuityState: String(
             overrides?.normalizeContinuityState || normalizeContinuityState,
         ),
+        resolvedArchiveCompaction: String(
+            overrides?.compressResolvedContinuityHistory || compressResolvedContinuityHistory,
+        ),
+        resolvedArchiveRollup: String(mergeResolvedArchiveRollup),
+        resolvedTombstones: String(mergeMarkerRecords),
         globalHoldTerminal: String(
             overrides?.continuityGlobalHoldIsVerifiable
                 || continuityGlobalHoldIsVerifiable,
@@ -1151,11 +1157,12 @@ function normalizeTick(value, turn) {
 
 export function normalizeContinuityState(value, {
     chatId = '',
-    // Persistent continuity is canonical history, not a display list.  UI/P4
-    // callers may project a bounded view afterwards, but normalization must
-    // never demote or discard an offscreen thread.
+    // Active/dormant continuity is canonical history and is never display-
+    // truncated. Resolved history has a separate bounded archive so old
+    // process logs cannot grow forever while durable effects/source evidence
+    // remain recoverable.
     maxThreads = null,
-    maxResolved = null,
+    maxResolved = 24,
 } = {}) {
     const source = value && typeof value === 'object' ? value : {};
     const turn = boundedInteger(source.turn, 0, Number.MAX_SAFE_INTEGER, 0);
@@ -1167,26 +1174,224 @@ export function normalizeContinuityState(value, {
         used.add(thread.id);
         allThreads.push(thread);
     }
-    // `maxThreads` and `maxResolved` remain accepted for old callers, but are
-    // deliberately not applied to durable state.  A bounded renderer is the
-    // only place a display budget is allowed to hide a thread.
+    const resolvedLimit = Number.isInteger(Number(maxResolved))
+        ? Math.max(0, Number(maxResolved))
+        : 24;
+    const existingArchive = (Array.isArray(source.resolvedArchive)
+        ? source.resolvedArchive : [])
+        .map((entry) => compactResolvedHistoryEntry(entry))
+        .filter(Boolean);
+    const resolvedThreads = allThreads.filter((thread) => thread.stage === 'resolved');
+    const retainedResolved = new Set(resolvedThreads
+        .map((thread, index) => ({ thread, index }))
+        .sort((left, right) => (
+            (Number(left.thread.resolvedTurn) || 0) - (Number(right.thread.resolvedTurn) || 0)
+            || left.index - right.index
+        ))
+        .slice(-resolvedLimit)
+        .map(({ thread }) => thread.id));
+    const archivedFromThreads = resolvedThreads
+        .filter((thread) => !retainedResolved.has(thread.id))
+        .map(compactResolvedHistoryEntry)
+        .filter(Boolean);
+    const archiveById = new Map();
+    for (const entry of [...existingArchive, ...archivedFromThreads]) {
+        if (entry?.id) archiveById.set(entry.id, entry);
+    }
+    for (const id of retainedResolved) archiveById.delete(id);
+    const archiveLimit = Math.max(32, Math.min(128, resolvedLimit * 4 || 32));
+    const archiveCandidates = [...archiveById.values()]
+        .sort((left, right) => (
+            (Number(left.resolvedTurn) || 0) - (Number(right.resolvedTurn) || 0)
+        ));
+    const archiveOverflow = archiveCandidates.length > archiveLimit
+        ? archiveCandidates.slice(0, archiveCandidates.length - archiveLimit)
+        : [];
+    const resolvedArchive = archiveCandidates.slice(-archiveLimit);
+    const resolvedArchiveRollup = mergeResolvedArchiveRollup(
+        source.resolvedArchiveRollup,
+        archiveOverflow,
+    );
+    const retainedThreads = allThreads.filter((thread) => (
+        thread.stage !== 'resolved' || retainedResolved.has(thread.id)
+    ));
+    // maxThreads remains accepted for compatibility and is intentionally not
+    // applied: an active/dormant thread is never discarded as a display item.
     void maxThreads;
-    void maxResolved;
-    const dormant = allThreads.filter((thread) => thread.stage === 'dormant');
+    const dormant = retainedThreads.filter((thread) => thread.stage === 'dormant');
     return {
         version: 6,
         chatId: cleanText(chatId || source.chatId, 180),
         turn,
         lastTick: normalizeTick(source.lastTick, turn),
         lastSource: normalizeSourceRef(source.lastSource),
-        threads: allThreads,
+        threads: retainedThreads,
+        resolvedArchive,
+        resolvedArchiveRollup,
         world: normalizeWorldState(source.world, { turn }),
         scenarioPlan: normalizeScenarioPlan(source.scenarioPlan, { turn }),
         nextTurnInjection: normalizeNextTurnInjection(source.nextTurnInjection),
-        droppedCount: 0,
+        droppedCount: resolvedArchive.length,
         deferredCount: dormant.length,
         updatedAt: boundedInteger(source.updatedAt, 0, Number.MAX_SAFE_INTEGER, 0),
     };
+}
+
+function compactResolvedHistoryEntry(thread) {
+    if (!thread || typeof thread !== 'object') return null;
+    const refs = Array.isArray(thread.sourceRefs) ? thread.sourceRefs.filter(Boolean) : [];
+    const sourceRefs = refs.length <= 2
+        ? refs
+        : [refs[0], refs.at(-1)].filter((ref, index, list) => (
+            ref && list.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(ref)) === index
+        ));
+    return {
+        id: cleanText(thread.id, 120),
+        title: cleanText(thread.title, 240),
+        origin: cleanText(thread.origin, 80),
+        relation: cleanText(thread.relation, 80),
+        resolution: cleanText(thread.resolution, 1200),
+        effects: clone(Array.isArray(thread.effects) ? thread.effects : []),
+        rumors: clone(Array.isArray(thread.rumors) ? thread.rumors : []),
+        trigger: cleanText(thread.trigger || thread.futureTrigger, 800),
+        futureTrigger: cleanText(thread.futureTrigger || thread.trigger, 800),
+        actors: clone(Array.isArray(thread.actors) ? thread.actors : []),
+        actorRefs: clone(Array.isArray(thread.actorRefs) ? thread.actorRefs : []),
+        locations: clone(Array.isArray(thread.locations) ? thread.locations : []),
+        causedBy: clone(Array.isArray(thread.causedBy) ? thread.causedBy : []),
+        resolvedTurn: boundedInteger(thread.resolvedTurn, 0, Number.MAX_SAFE_INTEGER, 0),
+        sourceRefs: clone(sourceRefs),
+    };
+}
+
+function mergeResolvedArchiveRollup(previous, entries) {
+    const source = previous && typeof previous === 'object' ? previous : {};
+    const unique = (values, max) => [...new Set((Array.isArray(values) ? values : [])
+        .map((value) => cleanText(value, 700)).filter(Boolean))].slice(-max);
+    const compact = (entry) => ({
+        id: cleanText(entry?.id, 120),
+        resolvedTurn: boundedInteger(entry?.resolvedTurn, 0, Number.MAX_SAFE_INTEGER, 0),
+        effects: unique(entry?.effects, 16),
+        rumors: unique(entry?.rumors, 12),
+        triggers: unique([entry?.trigger, entry?.futureTrigger], 8),
+        causedBy: unique(entry?.causedBy, 12),
+        actors: unique([
+            ...(Array.isArray(entry?.actors) ? entry.actors : []),
+            ...(Array.isArray(entry?.actorRefs) ? entry.actorRefs.map((ref) => ref?.actorId) : []),
+        ], 12),
+        locations: unique(entry?.locations, 12),
+        sourceRefs: Array.isArray(entry?.sourceRefs) ? clone(entry.sourceRefs).slice(0, 2) : [],
+    });
+    const records = [...(Array.isArray(source.records) ? source.records : []),
+        ...(entries || []).map(compact)]
+        .filter((entry) => entry.id);
+    const byId = new Map(records.map((entry) => [entry.id, entry]));
+    const boundedRecords = [...byId.values()].sort((left, right) => (
+        (Number(left.resolvedTurn) || 0) - (Number(right.resolvedTurn) || 0)
+    ));
+    const tombstoneThroughTurn = Math.max(
+        Number(source.tombstoneThroughTurn) || 0,
+        ...boundedRecords.map((entry) => Number(entry.resolvedTurn) || 0),
+    );
+    const mergeFacts = (key, max) => unique([
+        ...(Array.isArray(source[key]) ? source[key] : []),
+        ...boundedRecords.flatMap((entry) => entry[key] || []),
+    ], max);
+    return {
+        version: 1,
+        overflowCount: Math.max(0, Number(source.overflowCount) || 0) + entries.length,
+        tombstoneThroughTurn,
+        threadIds: unique([
+            ...(Array.isArray(source.threadIds) ? source.threadIds : []),
+            ...boundedRecords.map((entry) => entry.id),
+        ], 256),
+        effects: mergeFacts('effects', 512),
+        rumors: mergeFacts('rumors', 512),
+        triggers: mergeFacts('triggers', 512),
+        causedBy: mergeFacts('causedBy', 512),
+        actors: mergeFacts('actors', 512),
+        locations: mergeFacts('locations', 512),
+        sourceRefs: [
+            ...(Array.isArray(source.sourceRefs) ? source.sourceRefs : []),
+            ...boundedRecords.flatMap((entry) => entry.sourceRefs || []),
+        ].filter(Boolean).slice(0, 256),
+    };
+}
+
+function resolvedTombstoneGuard(state) {
+    const source = state && typeof state === 'object' ? state : {};
+    return {
+        archivedIds: new Set([
+            ...(Array.isArray(source.resolvedArchive)
+                ? source.resolvedArchive.map((entry) => entry?.id)
+                : []),
+            ...(Array.isArray(source.resolvedArchiveRollup?.threadIds)
+                ? source.resolvedArchiveRollup.threadIds
+                : []),
+        ].map((id) => cleanText(id, 120)).filter(Boolean)),
+        tombstoneThroughTurn: Number(
+            source.resolvedArchiveRollup?.tombstoneThroughTurn,
+        ) || 0,
+    };
+}
+
+function resolvedCandidateIsBlocked(thread, guard) {
+    if (!thread || typeof thread !== 'object') return true;
+    if (guard.archivedIds.has(thread.id)) return true;
+    if (thread.stage === 'resolved') return false;
+    const candidateTurns = [
+        Number(thread.lastAdvancedTurn) || 0,
+        Number(thread.createdTurn) || 0,
+    ].filter((turn) => turn > 0);
+    return guard.tombstoneThroughTurn > 0
+        && candidateTurns.length > 0
+        && candidateTurns.some((turn) => turn <= guard.tombstoneThroughTurn);
+}
+
+export function compressResolvedContinuityHistory(previous, next = null, {
+    maxResolved = 24,
+    explicitMigration = false,
+} = {}) {
+    const before = normalizeContinuityState(previous, { maxResolved });
+    const after = normalizeContinuityState(next == null ? previous : next, { maxResolved });
+    const beforeById = new Map(before.threads.map((thread) => [thread.id, thread]));
+    const newlyResolved = new Set(after.threads
+        .filter((thread) => (
+            thread.stage === 'resolved'
+            && beforeById.get(thread.id)?.stage !== 'resolved'
+        ))
+        .map((thread) => thread.id));
+    const compact = (thread) => ({
+        ...thread,
+        // Keep durable meaning and source evidence; discard only process
+        // narration/convergence diagnostics from this newly resolved turn.
+        offscreenBeat: '',
+        nextBeat: '',
+        intersection: '',
+        propagation: [],
+        convergence: {
+            score: 0,
+            channels: [],
+            evidence: [],
+            entryBeat: '',
+            lastCheckedTurn: 0,
+        },
+        consecutiveFails: 0,
+        evolveResult: '',
+        stalled: false,
+        sourceRefs: compactResolvedHistoryEntry(thread)?.sourceRefs || [],
+    });
+    const compacted = {
+        ...after,
+        threads: after.threads.map((thread) => (
+            newlyResolved.has(thread.id) ? compact(thread) : thread
+        )),
+    };
+    // Ordinary settlement compacts only newly resolved rows. Older resolved
+    // rows are moved to the durable bounded archive by normalization; their
+    // effects/rumors/triggers/source endpoints remain available there.
+    void explicitMigration;
+    return normalizeContinuityState(compacted, { maxResolved });
 }
 
 function advanceThreadClock(thread, random) {
@@ -2187,6 +2392,7 @@ export function enforceContinuityPolicy(previous, candidate, {
 } = {}) {
     const before = normalizeContinuityState(previous, { maxThreads });
     const after = normalizeContinuityState(candidate, { maxThreads });
+    const resolvedGuard = resolvedTombstoneGuard(before);
     const validThreadIds = new Set([
         ...before.threads.map((thread) => thread.id),
         ...after.threads.map((thread) => thread.id),
@@ -2248,7 +2454,9 @@ export function enforceContinuityPolicy(previous, candidate, {
     const changedExisting = [...newById.values()]
         .filter((thread) => {
             const old = oldById.get(thread.id);
-            return old && stableThreadContent(old) !== stableThreadContent(thread);
+            return old
+                && old.stage !== 'resolved'
+                && stableThreadContent(old) !== stableThreadContent(thread);
         })
         .sort((left, right) => (
             Number(right.id === requestedTickId) - Number(left.id === requestedTickId)
@@ -2261,7 +2469,9 @@ export function enforceContinuityPolicy(previous, candidate, {
     const selectedChangedIdSet = new Set(selectedChangedIds);
     const selectedChangedId = selectedChangedIds[0] || '';
     const threads = before.threads.map((old) => {
-        if (!selectedChangedIdSet.has(old.id)) return clone(old);
+        if (old.stage === 'resolved' || !selectedChangedIdSet.has(old.id)) {
+            return clone(old);
+        }
         const proposed = gateUnmanifestedKnowledge(old, newById.get(old.id));
         proposed.origin = old.origin;
         proposed.createdTurn = old.createdTurn;
@@ -2277,7 +2487,10 @@ export function enforceContinuityPolicy(previous, candidate, {
     });
 
     const newCandidates = [...newById.values()]
-        .filter((thread) => !oldById.has(thread.id));
+        .filter((thread) => (
+            !oldById.has(thread.id)
+            && !resolvedCandidateIsBlocked(thread, resolvedGuard)
+        ));
     const autonomousBefore = before.threads.filter((thread) => (
         thread.origin !== 'main_derivative'
         && thread.stage !== 'resolved'
@@ -2780,9 +2993,18 @@ export function mergeMarkerRecords(state, records, {
 } = {}) {
     const normalized = normalizeContinuityState(state, { chatId, maxThreads });
     const byId = new Map(normalized.threads.map((thread) => [thread.id, thread]));
+    const resolvedGuard = resolvedTombstoneGuard(normalized);
     for (const raw of records || []) {
         const incoming = normalizeThread(raw, byId.size, normalized.turn);
         if (!incoming) continue;
+        // A compacted resolved event is a tombstone: a late marker may add
+        // evidence/effects, but it may not reopen the event as active.
+        // When the bounded ID list has rolled over, the monotonic resolved
+        // turn floor is the fail-closed fallback for old IDs that are no
+        // longer individually enumerable.
+        if (!byId.has(incoming.id) && resolvedCandidateIsBlocked(incoming, resolvedGuard)) {
+            continue;
+        }
         const old = byId.get(incoming.id);
         if (!old) {
             byId.set(incoming.id, incoming);
@@ -2852,12 +3074,20 @@ export function buildContinuityInjection(state, {
     director = 'doctor',
     maxVisible = 2,
     selectedThreadIds = null,
+    selectedWorldIds = null,
     renderLegacyDirector = false,
 } = {}) {
     const normalized = normalizeContinuityState(state, { maxThreads: 12 });
     const selectedThreads = Array.isArray(selectedThreadIds)
         ? new Set(selectedThreadIds.map((id) => cleanText(id)).filter(Boolean))
         : null;
+    const selectedWorld = Array.isArray(selectedWorldIds)
+        ? new Set(selectedWorldIds.map((id) => cleanText(id)).filter(Boolean))
+        : null;
+    const worldSelected = (item, fallbackId = '') => (
+        selectedWorld === null
+        || selectedWorld.has(cleanText(item?.id || item?.sourceId || fallbackId))
+    );
     const canReachMain = (thread) => !!thread
         && (
             thread.origin === 'main_derivative'
@@ -2895,20 +3125,23 @@ export function buildContinuityInjection(state, {
         : [];
     const visibleWorldRows = [
         ...normalized.world.trends
-            .filter((item) => item.status === 'active' && item.knowledge !== 'hidden')
+            .filter((item) => item.status === 'active' && item.knowledge !== 'hidden'
+                && worldSelected(item, `trend:${item.name}`))
             .map((item) => (
                 `长期趋势[${item.name}]：${item.summary}`
                 + `${item.scope ? `；范围=${item.scope}` : ''}`
             )),
         ...normalized.world.factions
-            .filter((item) => item.knowledge !== 'hidden')
+            .filter((item) => item.knowledge !== 'hidden'
+                && worldSelected(item, `faction:${item.name}`))
             .map((item) => (
                 `势力[${item.name}]：${WORLD_FACTION_RELATION_LABELS[item.relation]}／`
                 + `${WORLD_FACTION_CONDITION_LABELS[item.condition]}；`
                 + `${item.summary || item.lastChange || item.goal || '暂无公开变化'}`
             )),
         ...normalized.world.winds
-            .filter((item) => item.knowledge !== 'hidden')
+            .filter((item) => item.knowledge !== 'hidden'
+                && worldSelected(item, `wind:${item.topic}`))
             .map((item) => (
                 `风声[${WORLD_WIND_TYPE_LABELS[item.type]}·${item.strength}级·${item.topic}]：`
                 + `${item.content}${item.scope ? `；范围=${item.scope}` : ''}`
@@ -2917,28 +3150,35 @@ export function buildContinuityInjection(state, {
             .filter((key) => (
                 normalized.world.reputation[key].level !== 0
                 || normalized.world.reputation[key].summary
-            ))
+            ) && worldSelected(normalized.world.reputation[key], `reputation:${key}`))
             .map((key) => {
                 const item = normalized.world.reputation[key];
                 return `声誉[${WORLD_REPUTATION_LABELS[key]}]：${item.level >= 0 ? '+' : ''}${item.level}；${item.summary || '评价发生变化'}`;
             }),
-        normalized.world.environment.summary
+        normalized.world.environment.summary && worldSelected(
+            normalized.world.environment,
+            'environment:summary',
+        )
             ? `环境[经济·${WORLD_ECONOMY_LABELS[normalized.world.environment.economy]}]：${normalized.world.environment.summary}`
             : '',
         ...normalized.world.environment.incidents
-            .filter((item) => item.knowledge !== 'hidden' && item.status !== 'resolved')
+            .filter((item) => item.knowledge !== 'hidden' && item.status !== 'resolved'
+                && worldSelected(item, `incident:${item.title}`))
             .map((item) => `环境[${item.title}]：${item.summary || item.lastChange}`),
         ...normalized.world.shadows.enemies
-            .filter((item) => item.knowledge !== 'hidden' && item.status !== 'resolved')
+            .filter((item) => item.knowledge !== 'hidden' && item.status !== 'resolved'
+                && worldSelected(item, `enemy:${item.name}`))
             .map((item) => `敌情[${item.name}]：${item.summary || item.lastChange}`),
         ...normalized.world.shadows.secrets
             .filter((item) => (
                 item.knowledge !== 'hidden'
                 && ['leaking', 'exposed'].includes(item.status)
+                && worldSelected(item, `secret:${item.title}`)
             ))
             .map((item) => `隐秘[${item.title}]：${item.summary || item.lastChange}`),
         ...normalized.world.influences
-            .filter((item) => item.knowledge !== 'hidden')
+            .filter((item) => item.knowledge !== 'hidden'
+                && worldSelected(item, `influence:${item.trigger}`))
             .map((item) => (
                 `因果联动[${item.trigger}]：${item.impact}`
                 + `${item.fallout ? `；余波=${item.fallout}` : ''}`
@@ -3086,6 +3326,7 @@ export function continuityPacketPayloadDigest(payload) {
     const normalized = {
         text: cleanText(source.text, CONTINUITY_PACKET_MAX_CHARS),
         visibleThreadIds: cleanList(source.visibleThreadIds, 4, 90),
+        visibleWorldIds: cleanList(source.visibleWorldIds, 16, 120),
     };
     return `continuity-payload:${fingerprint(JSON.stringify(normalized))}`;
 }

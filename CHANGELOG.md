@@ -1,5 +1,12 @@
 # 更新日志
 
+## 2.0.0-rc.29（2026-08-20，测试仓候选）
+- 完成 MVU durable semantic profile 前移与四项长期优化：accepted-final 原始 SourceRef 事务、assistant outgoing prompt 隔离、Doctor-owned 聊天清理、人物/势力/环境三 lane、有限 resolved 压缩和临时 actorOperationalState；数据库、预设、MVU、Doctor/P3/P4 所有权保持独立，语义档案不双写 legacy `profileV6`。
+- prompt-ready 过滤按宿主实际静态事件负载接线，支持 string/content[]/四种回执包装并对 system/user 同文碰撞 fail-closed；CHAT_DELETED/GROUP_CHAT_DELETED 只接受已证明的 chat_file_name 位置参数，不能权威枚举 chat IDs 时不自动 GC。
+- P3/P4 只召回当前相关人物和可感知结构后果；pending/坏人物不会阻塞 ready 人物或结构 lane。运行态按 MVU 可选 JSON Pointer 绑定、attemptId 与 world-adjudicated receipt 投影，缺绑定明确显示 unbound。
+- 新增 projection recovery：当新 Actor 的 MVU 档案已持久化但 Registry/ledger 投影失败时，恢复链从当前 MVU 自然身份、稳定 ActorId、exact SourceRef 与 committed profile digest 重建候选；ledger 尚无该 Actor 不再永久阻塞，来源或档案篡改仍保留 receipt 并零写。
+- 候选预设固定为 IZUMI 文件，V4 停用，V5/V6 采用唯一输出顺序，并要求消费票据但缺项的人物保留 ticketId/姓名/正文锚点/已有段供单人物修复；当前 SHA-256 为 `5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487`。首轮完整自动套件为 658 项中 626 通过、32 项失败；修复旧 VM fixture 合同漂移与 resolved 重开 P1 后，经用户明确授权运行的最终完整自动套件为 662/662，通过 0 项失败，duration `13499.7558 ms`。真实宿主/模型或十二回合正式门禁尚未运行。
+
 ## 2.0.0-rc.28（2026-08-20，测试仓候选）
 - 修复 rc.27 真实第二个 accepted 回复暴露的前端终态矛盾：MVU 卡片已经六段完整且 `atomic_readback`，但语义路径把曾经存在的恢复材料继续投影为 `canRetry`，导致顶部摘要错误变红并提示未绑定失败。成功终态现在明确清除可重试标记；前端也只在非成功终态采信 `canRetry`，真正的 `not_completed/failed` 仍保持红色。
 - 修复同一真实回复暴露的 `full_adult` 假绿：语义编译器不再硬编码 `basic`，而是读取当前人物档案完成模式；启用成人生理档案时，复用 V6 成熟的六项生理覆盖校验，缺任一项整个人物零写/不 ready。短摘要、空的旧 physiology 模块和缺少本地合同版本都不会显示绿色；单人物修复只补该人物缺失生理项，再走同一 MVU CAS 与 durable readback。

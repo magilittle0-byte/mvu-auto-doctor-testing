@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > 这是供用户直接试用最新候选代码的独立测试仓库，不代表正式发布质量。
-> 当前候选尚未完成静默 Tauri 与三轮连续真实全链门禁。请先备份聊天，
+> 当前候选已通过完整自动套件，但尚未完成静默 Tauri 与三轮连续真实全链门禁。请先备份聊天，
 > 并且不要与稳定仓库版本同时启用。正式稳定版仍以
 > [`mvu-auto-doctor`](https://github.com/magilittle0-byte/mvu-auto-doctor) 的 `main` 为准。
 
@@ -21,7 +21,7 @@ https://github.com/magilittle0-byte/mvu-auto-doctor-testing
 
 这是一个独立的 SillyTavern / TauriTavern 扩展。它包含通用 MVU 审计修复、人物动机与关系证据守卫、分类活世界与事件连续性账本，以及不占正文的内置世界论坛，不会修改角色卡、SP·数据库、预设、缝合怪或其他扩展文件。
 
-2.0.0-rc.28 测试候选把人物档案语义生成前移到配套最新版预设：正文模型输出隐藏的自然中文增量，accepted-final 后由本地脚本绑定同一 characterCreationTicket/ActorId、逐人物编译并通过现有 MVU 事务原子写入与回读。MVU 是完整档案唯一内容权威；Doctor 正常路径零人物模型调用，只在修复中心定向补一个失败人物。P3 只读取 MVU durable-ready 档案，P4 在唯一插槽中追加相关人物摘要；数据库继续从最终正文独立填表。紧凑人物档案 accordion 默认全折叠、单人展开、六段分区、故障分色、单人物修复和旧档案迁移。启用 `full_adult` 时，六段之外还必须通过一般基线、生殖解剖、第二性征、生殖功能、性反应基线和限制/不适用说明六项成熟生理合同；短摘要或空模块不会再假绿。rc.28 还保证 `atomic_readback` 成功后不会因旧恢复材料残留而把顶部摘要误报为红色；真正的未完成和持久失败仍保持红色。配套预设终检 V5 与 rc.27 的有界 inner-tail relocation 均保持不变。它仍是测试候选，不能视为正式发布。来源映射见 [`docs/2.0/ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md`](docs/2.0/ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md)。
+2.0.0-rc.29 测试候选把人物档案语义生成前移到精确 IZUMI 配套预设：正文模型输出自然中文专用回执，accepted-final 后由本地脚本绑定同一 characterCreationTicket/ActorId、逐人物编译并通过现有 MVU 事务原子写入与回读。MVU 是完整档案唯一内容权威；Doctor 正常路径零人物模型调用，只在修复中心定向补一个失败人物。P3 只读取 MVU durable-ready 档案，P4 在唯一插槽中追加当前相关人物摘要；数据库继续从最终正文独立填表。人物上下文由 prompt-ready outgoing 副本过滤，显示正则不承担 prompt 过滤；删除聊天只清 Doctor-owned 数据，无法权威枚举聊天时不自动 GC。P3 的人物、势力、环境三 lane 共享一次模型批次但独立准入、CAS/readback 与收据；人物当前运行态是临时投影，MVU 实时字段优先，不建立 Doctor runtime mirror。启用 `full_adult` 时，六项生理合同缺一不可；短摘要或空模块不会再假绿。P4 只注入当前可感知/相关的结构后果和有界档案投影。配套文件为 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json`，实际 SHA-256 为 `5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487`。它仍是测试候选，不能视为正式发布。来源映射见 [`docs/2.0/MVU_RUNTIME_SOURCE_MAP.md`](docs/2.0/MVU_RUNTIME_SOURCE_MAP.md)。
 
 “通用”指核心只依赖当前 MVU 数据、动态 JSON Pointer、实际 Schema/规则和 SillyTavern
 生命周期，不依赖某张角色卡、某组表名/列名、骰子 DOM 或缝合怪品牌。装备、骰子和
@@ -32,13 +32,13 @@ TavernDB 检测也不读取表格内容、不调用数据库 API；真实表格 
 
 ## 安装
 
-> `2.0.0-rc.28` 尚未完成真实门禁；正式发布前仍必须完成独立自动回归、真实目标模型生产全链、真实 SillyTavern、作者版
+> `2.0.0-rc.29` 已通过完整自动套件，但尚未完成真实门禁，且当前候选尚未推送 testing `main`；正式发布前仍必须完成真实目标模型生产全链、真实 SillyTavern、作者版
 > TavernDB、隐藏 TauriTavern 和 CI 后才会合并默认 `main`。是否已经可在线更新，以远程
 > `main` 的 `manifest.json` 与本版 QC 报告为准；离线候选包仍用于手动更新或回滚演练。具体步骤见
 > [`2.0 RC 使用说明`](docs/2.0/USER_GUIDE_2.0_RC.md)。
 
 已有安装：先备份当前聊天并等待自动医生任务结束，然后只点击自动医生这一行自己的“更新”并刷新。
-从测试仓更新后扩展信息应显示 `2.0.0-rc.28`。不要点“全部更新”，
+从测试仓更新后扩展信息应显示 `2.0.0-rc.29`。不要点“全部更新”，
 也不要操作数据库、骰子前端、缝合怪、推进重roll助手或其他脚本的更新、分支、删除或重装按钮。
 当前源码以自动测试强制运行时诊断版本与 `manifest.json` 完全一致；若刷新后仍显示旧版，应先核对实际加载哈希，不要把旧标签当作新代码已加载的证据。
 
@@ -49,7 +49,7 @@ TavernDB 检测也不读取表格内容、不调用数据库 API；真实表格 
 分支或标签：留空（默认 main）
 ```
 
-只有测试仓远程 `main` 的 `manifest.json` 已是 rc.28 时，测试安装后刷新页面才应显示 `2.0.0-rc.28`。更新或安装只改变自动医生自己的
+只有测试仓远程 `main` 的 `manifest.json` 已是 rc.29 时，测试安装后刷新页面才应显示 `2.0.0-rc.29`。更新或安装只改变自动医生自己的
 扩展代码，不会替换数据库、骰子前端、缝合怪、推进重roll助手或其他脚本。
 
 每次收到新的 AI 回复后，扩展会：

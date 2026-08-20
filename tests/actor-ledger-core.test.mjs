@@ -1423,6 +1423,55 @@ test('optional exploration stays bounded while all due actors bypass that budget
     assert.equal(due.deferredActorIds.length, 0);
 });
 
+test('production scheduler consumes operational pending, cooldown, outcome, blocker and open-thread state', () => {
+    const turn = 20;
+    const ledger = scopedLedger('chat-operational-scheduler', {
+        turn,
+        actors: [
+            readyActor('NPC-PENDING', { nextActionTurn: turn, attentionScore: 50 }),
+            readyActor('NPC-COOLDOWN', { nextActionTurn: turn, attentionScore: 49 }),
+            readyActor('NPC-REPLAN', { nextActionTurn: turn, attentionScore: 10 }),
+            readyActor('NPC-NORMAL', { nextActionTurn: turn, attentionScore: 9 }),
+        ],
+    });
+    const schedule = scheduleActorTurns(ledger, {
+        turn, maxActors: 2, explorationSlots: 0,
+        operationalStatesByActorId: {
+            'NPC-PENDING': {
+                actionable: true, profileReady: true, lastAttempt: { id: 'ATT-PENDING' },
+                lastAttemptTurn: turn, lastAction: null, lastOutcome: '',
+                lastOutcomeStatus: '', lastAttemptPending: true,
+                blocker: '', openThreads: [], cooldownUntilTurn: turn,
+            },
+            'NPC-COOLDOWN': {
+                actionable: true, profileReady: true, lastAttempt: null,
+                lastAttemptTurn: 0, lastAction: null, lastOutcome: '', lastOutcomeStatus: '',
+                blocker: '', openThreads: [], cooldownUntilTurn: turn + 2,
+            },
+            'NPC-REPLAN': {
+                actionable: true, profileReady: true, lastAttempt: null,
+                lastAttemptTurn: turn - 3,
+                lastAction: '旧行动', lastOutcome: '受阻', lastOutcomeStatus: 'blocked',
+                blocker: '北门封锁', openThreads: [{ id: 'THREAD-OPEN' }],
+                cooldownUntilTurn: turn,
+            },
+            'NPC-NORMAL': {
+                actionable: true, profileReady: true, lastAttempt: null,
+                lastAttemptTurn: 0, lastAction: null, lastOutcome: '', lastOutcomeStatus: '',
+                blocker: '', openThreads: [], cooldownUntilTurn: turn,
+            },
+        },
+    });
+    const ids = schedule.selected.map((entry) => entry.actorId);
+    assert.deepEqual(new Set(ids), new Set(['NPC-REPLAN', 'NPC-NORMAL']));
+    const replan = schedule.selected.find((entry) => entry.actorId === 'NPC-REPLAN');
+    assert.equal(replan.reasons.includes('operational-blocker-replan'), true);
+    assert.equal(replan.reasons.includes('operational-open-thread'), true);
+    assert.equal(replan.reasons.includes('operational-last-outcome-replan'), true);
+    assert.equal(ids.includes('NPC-PENDING'), false);
+    assert.equal(ids.includes('NPC-COOLDOWN'), false);
+});
+
 test('an all-worker technical failure leaves character silence plans and failure counters untouched', () => {
     let ledger = scopedLedger('chat-failed-workers', {
         turn: 20,

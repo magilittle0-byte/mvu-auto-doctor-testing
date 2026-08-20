@@ -225,7 +225,7 @@ test('recovery receipt survives refresh only for the exact accepted target and i
     }), false);
 });
 
-test('current retry receipt seals diagnostic arrays while bounded V2 compatibility rejects missing fields', () => {
+test('current V4 retry receipt seals diagnostic arrays while bounded V2 compatibility rejects missing fields', () => {
     const current = recoverySource();
     const receipt = createActorProfileRetryReceipt({
         sourceRef: current,
@@ -237,7 +237,7 @@ test('current retry receipt seals diagnostic arrays while bounded V2 compatibili
         ],
         updatedAt: 456,
     });
-    assert.equal(receipt.version, 3);
+    assert.equal(receipt.version, 4);
     assert.deepEqual(receipt.failingModules, ['identity_bootstrap', 'person']);
     assert.deepEqual(receipt.failureCodes, [
         'actor_candidate.identity_excluded',
@@ -278,7 +278,7 @@ test('current retry receipt seals diagnostic arrays while bounded V2 compatibili
     }), true, 'canonical V2 receipt remains refresh-compatible');
     assert.equal(actorProfileRetryReceiptMatches(oldified, {
         currentSourceRef: current, ticketBatch: null, expectedReceipt: receipt,
-    }), false, 'host oldification cannot satisfy a current V3 write readback');
+    }), false, 'host oldification cannot satisfy a current V4 write readback');
     for (const field of ['failingModules', 'failureCodes']) {
         const incompleteV2 = structuredClone(oldified);
         delete incompleteV2[field];
@@ -830,6 +830,13 @@ test('prompt context and ticket normalizer implementations change generation and
         authorityFingerprint = 'authority-fingerprint',
     ) => Function(
         'VERSION',
+        'PROMPT_PROFILE_SANITIZER_VERSION',
+        'ACTOR_PROFILE_PRESET_CONTRACT_VERSION',
+        'ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256',
+        'ACTOR_PROFILE_MAX_TRANSACTION_ACTORS',
+        'ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY',
+        'DOCTOR_CHAT_SCOPE_CORE_VERSION',
+        'ACTOR_OPERATIONAL_STATE_CORE_VERSION',
         'fingerprint',
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
@@ -842,6 +849,10 @@ test('prompt context and ticket normalizer implementations change generation and
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
         'test-version',
+        'prompt-context-core-v1',
+        'post-content-before-options-v6',
+        '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+        64, 64, 'doctor-chat-scope-core-v1', 'actor-operational-state-core-v1',
         fingerprint,
         () => 'recovery-fingerprint',
         () => generationFingerprint,
@@ -911,6 +922,13 @@ test('runtime fingerprint changes with the production profile route planner and 
         .map((match) => match[1]))];
     const runtimeFor = (overrides = {}) => Function(
         'VERSION',
+        'PROMPT_PROFILE_SANITIZER_VERSION',
+        'ACTOR_PROFILE_PRESET_CONTRACT_VERSION',
+        'ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256',
+        'ACTOR_PROFILE_MAX_TRANSACTION_ACTORS',
+        'ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY',
+        'DOCTOR_CHAT_SCOPE_CORE_VERSION',
+        'ACTOR_OPERATIONAL_STATE_CORE_VERSION',
         'fingerprint',
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
@@ -923,6 +941,10 @@ test('runtime fingerprint changes with the production profile route planner and 
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
         'test-version',
+        'prompt-context-core-v1',
+        'post-content-before-options-v6',
+        '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+        64, 64, 'doctor-chat-scope-core-v1', 'actor-operational-state-core-v1',
         fingerprint,
         () => 'recovery-fingerprint',
         () => 'generation-fingerprint',
@@ -983,6 +1005,13 @@ test('continuity recovery normalizer mutations change semantic and runtime finge
         .map((match) => match[1]))];
     const runtimeFor = (continuityFingerprint, helperOverrides = {}) => Function(
         'VERSION',
+        'PROMPT_PROFILE_SANITIZER_VERSION',
+        'ACTOR_PROFILE_PRESET_CONTRACT_VERSION',
+        'ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256',
+        'ACTOR_PROFILE_MAX_TRANSACTION_ACTORS',
+        'ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY',
+        'DOCTOR_CHAT_SCOPE_CORE_VERSION',
+        'ACTOR_OPERATIONAL_STATE_CORE_VERSION',
         'fingerprint',
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
@@ -995,6 +1024,10 @@ test('continuity recovery normalizer mutations change semantic and runtime finge
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
         'test-version',
+        'prompt-context-core-v1',
+        'post-content-before-options-v6',
+        '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+        64, 64, 'doctor-chat-scope-core-v1', 'actor-operational-state-core-v1',
         fingerprint,
         () => 'recovery-fingerprint',
         () => 'generation-fingerprint',
@@ -1106,6 +1139,13 @@ test('resolver closure and group failure attribution helpers change batch and ru
         .map((match) => match[1]))];
     const runtimeFor = (batchFingerprint) => Function(
         'VERSION',
+        'PROMPT_PROFILE_SANITIZER_VERSION',
+        'ACTOR_PROFILE_PRESET_CONTRACT_VERSION',
+        'ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256',
+        'ACTOR_PROFILE_MAX_TRANSACTION_ACTORS',
+        'ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY',
+        'DOCTOR_CHAT_SCOPE_CORE_VERSION',
+        'ACTOR_OPERATIONAL_STATE_CORE_VERSION',
         'fingerprint',
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
@@ -1118,6 +1158,10 @@ test('resolver closure and group failure attribution helpers change batch and ru
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
         'test-version',
+        'prompt-context-core-v1',
+        'post-content-before-options-v6',
+        '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+        64, 64, 'doctor-chat-scope-core-v1', 'actor-operational-state-core-v1',
         fingerprint,
         () => 'recovery-fingerprint',
         () => 'generation-fingerprint',
@@ -1209,7 +1253,7 @@ test('ticket persistence errors become bounded privacy-safe P1 and P3 upstream c
     const helperSource = sourceBetween(
         indexSource,
         'function actorProfileTicketPersistenceFailureCode',
-        'async function runActorProfileTarget',
+        'function actorProfileMvuRootFromData',
     );
     const normalize = Function(`${helperSource}; return actorProfileTicketPersistenceFailureCode;`)();
     for (const raw of [
@@ -1385,7 +1429,7 @@ test('production actor scheduling diagnostics records schedule and pending ATT r
         'async function commitPreparedWorldCandidate',
         'async function enqueueActorProfiles',
     );
-    assert.match(run, /if \(pendingActions\.attempts\.length\) \{[\s\S]*?status: 'attempts_prepared'/u);
+    assert.match(run, /if \(modelPendingActions\.attempts\.length\) \{[\s\S]*?status: 'attempts_prepared'/u);
     assert.match(run, /status: scheduledActorIds\.length \? 'scheduled' : 'idle'/u);
     assert.match(run, /failureKind === 'validation-error'[\s\S]*?actor_scheduling\.advance_proposal_invalid[\s\S]*?actor_scheduling\.advance_transport_failed[\s\S]*?markActorSchedulingFailure\(schedulingFailureCode[^]*?return finishWorldResult\(\{\s*status: 'failed'/u);
     assert.match(run, /if \(!parsed\.state\) \{[\s\S]*?actor_scheduling\.advance_parse_failed[^]*?continuity_output_invalid/u);

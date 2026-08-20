@@ -5,6 +5,7 @@ export const ACTOR_PROFILE_SOURCES: readonly string[];
 export const ACTOR_PROFILE_MODULES: readonly string[];
 export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS: readonly string[];
 export const ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION: number;
+export const ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY: number;
 export const ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS: readonly string[];
 export function validateActorProfilePhysiologyCoverage(value: unknown): {
     ok: boolean;

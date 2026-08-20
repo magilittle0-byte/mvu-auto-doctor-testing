@@ -50,6 +50,7 @@ export const ACTOR_PROFILE_NARRATIVE_SECTION_KEYS = Object.freeze([
 // Versioned locally so a stronger adult-physiology contract can refresh old
 // prose once without guessing at medical keywords in the model's Chinese.
 export const ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION = 2;
+export const ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY = 64;
 export const ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS = Object.freeze([
     'generalBaseline',
     'reproductiveAnatomy',
@@ -574,7 +575,7 @@ function physiologyProse(fields) {
     return ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => {
         const fragment = String(fields.get(key) || '').replace(/[\u3002.!\uff01\uff1f\uff1b;]+$/u, '');
         return `${PHYSIOLOGY_FIELD_TITLES[key]}：${fragment}。`;
-    }).join('');
+    }).join('\n');
 }
 
 function validatePhysiologyCoverage(value) {
@@ -614,10 +615,14 @@ function validatePhysiologyCoverage(value) {
         .replace(/\[\s*(?:physiology[-_ ]?)?field\s*[:=]\s*([^\]]+)\]/giu, '<field key="$1">')
         .replace(/\[\s*\/\s*(?:physiology[-_ ]?)?field\s*\]/giu, '</field>');
     const fields = new Map();
-    const fieldRe = /<(?:physiology[-_ ]?)?field\b([^>]*)>([\s\S]*?)(?:<\/(?:physiology[-_ ]?)?field>|(?=<(?:physiology[-_ ]?)?field\b)|$)/giu;
+    // Each canonical field is a closed, independently parseable unit.  The
+    // previous optional-close/lookahead form could consume adjacent fields as
+    // one match and silently lose four of six fields during compile/readiness.
+    const fieldRe = /<(?:physiology[-_ ]?)?field\b([^>]*)>([\s\S]*?)<\/(?:physiology[-_ ]?)?field>/giu;
     while ((match = fieldRe.exec(normalized))) {
         const rawKey = match[1].match(/\b(?:key|name)\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/iu)?.slice(1).find(Boolean) || '';
-        const key = physiologyFieldKey(rawKey);
+        const key = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.includes(rawKey)
+            ? rawKey : physiologyFieldKey(rawKey);
         const fragment = physiologyFragment(match[2]);
         if (!key || !fragment || fields.has(key) || [...fields.values()].includes(fragment)) {
             invalid = true;
@@ -629,7 +634,9 @@ function validatePhysiologyCoverage(value) {
     // Mechanical format repair only: accept one explicitly labelled field per
     // line (English key or listed Chinese alias).  Do not infer fields from
     // free prose or medical keywords.
-    if (fields.size === 0 && !invalid) {
+    const canonicalLabelCount = Object.values(PHYSIOLOGY_FIELD_TITLES)
+        .filter((label) => normalized.includes(`${label}：`)).length;
+    if (fields.size === 0 && !invalid && canonicalLabelCount <= 1) {
         for (const line of normalized.split(/\r?\n/u)) {
             const labelled = line.match(/^\s*(?:[-*•]\s*)?(?:\[|【)?([^\]】:：=]{1,80})(?:\]|】)?\s*[:：=]\s*(.+?)\s*$/u)
                 || line.match(/^\s*(?:\[|【)([^\]】]{1,80})(?:\]|】)\s*(.+?)\s*$/u);
@@ -642,6 +649,29 @@ function validatePhysiologyCoverage(value) {
                 continue;
             }
             fields.set(key, fragment);
+        }
+    }
+    if (fields.size === 0 && !invalid) {
+        // Older narrative-v1 profiles stored all canonical Chinese-labelled
+        // fragments on one line. Recover those labels explicitly; do not
+        // infer coverage from prose or contractVersion alone.
+        const labels = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => ({
+            key,
+            label: PHYSIOLOGY_FIELD_TITLES[key],
+        }));
+        const escapedLabels = labels.map(({ label }) => label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'));
+        const labelRe = new RegExp(
+            `(?:^|\\s)(${escapedLabels.join('|')})：([\\s\\S]*?)(?=\\s*(?:${escapedLabels.join('|')})：|$)`,
+            'gu',
+        );
+        while ((match = labelRe.exec(normalized))) {
+            const current = labels.find(({ label }) => label === match[1]);
+            const fragment = physiologyFragment(match[2]);
+            if (!current || !fragment || fields.has(current.key) || [...fields.values()].includes(fragment)) {
+                invalid = true;
+                continue;
+            }
+            fields.set(current.key, fragment);
         }
     }
     const missingFields = ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS
@@ -2566,6 +2596,33 @@ function normalizeActorProfileRetryDiagnosticList(value) {
     return cleanList(value, 8, 120);
 }
 
+function normalizeActorProfileProjectionEvidence(value) {
+    const rows = Array.isArray(value) ? value : [];
+    const seen = new Set();
+    const result = [];
+    for (const row of rows) {
+        const actorId = cleanText(row?.actorId, 180);
+        const profileDigest = cleanText(row?.profileDigest, 240);
+        // actorProfileMvuDigest is `profile-v1:<text-length>:<fnv-hex>` in
+        // the current core.  Keep the shape strict so a receipt cannot carry
+        // an arbitrary colon-delimited identity or digest, while accepting
+        // the real production digest rather than a bare hex test double.
+        if (!/^(?:NPC|ACTOR)(?:[-:][\p{L}\p{N}_.]+)+$/iu.test(actorId)
+            || !/^profile-v1:[0-9]+:[0-9a-f]+$/iu.test(profileDigest)) continue;
+        const key = `${actorId}\u0000${profileDigest}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({ actorId, profileDigest });
+        if (result.length >= ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY) break;
+    }
+    return result;
+}
+
+function actorProfileProjectionEvidenceMatch(left, right) {
+    return JSON.stringify(normalizeActorProfileProjectionEvidence(left))
+        === JSON.stringify(normalizeActorProfileProjectionEvidence(right));
+}
+
 function actorProfileRetryDiagnosticListsMatch(left, right) {
     return JSON.stringify(normalizeActorProfileRetryDiagnosticList(left))
         === JSON.stringify(normalizeActorProfileRetryDiagnosticList(right));
@@ -2582,6 +2639,7 @@ function actorProfileRetryReceiptDigestPayload(value) {
         outcomeStatus: cleanText(value?.outcomeStatus, 80),
         failingModules: normalizeActorProfileRetryDiagnosticList(value?.failingModules),
         failureCodes: normalizeActorProfileRetryDiagnosticList(value?.failureCodes),
+        projectionEvidence: normalizeActorProfileProjectionEvidence(value?.projectionEvidence),
         updatedAt: Math.max(0, Number(value?.updatedAt) || 0),
     };
 }
@@ -2597,13 +2655,16 @@ export function createActorProfileRetryReceipt({
     ticketBatch = null,
     failingModules = [],
     failureCodes = [],
+    projectionEvidence = [],
     outcomeStatus = 'not_completed',
     updatedAt = 0,
 } = {}) {
     if (!actorProfileRecoverySourceMatches(sourceRef, sourceRef)) return null;
+    if (Array.isArray(projectionEvidence)
+        && projectionEvidence.length > ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY) return null;
     const normalizedSource = normalizeActorProfileRecoverySourceRef(sourceRef);
     const receipt = {
-        version: 3,
+        version: 4,
         generationId: normalizedSource.generationId,
         sourceRef: normalizedSource,
         sourceDigest: actorProfileRecoverySourceDigest(normalizedSource),
@@ -2614,6 +2675,7 @@ export function createActorProfileRetryReceipt({
         outcomeStatus: cleanText(outcomeStatus, 80) || 'not_completed',
         failingModules: normalizeActorProfileRetryDiagnosticList(failingModules),
         failureCodes: normalizeActorProfileRetryDiagnosticList(failureCodes),
+        projectionEvidence: normalizeActorProfileProjectionEvidence(projectionEvidence),
         updatedAt: Math.max(0, Number(updatedAt) || 0),
     };
     receipt.receiptDigest = actorProfileRetryReceiptDigest(receipt);
@@ -2629,21 +2691,25 @@ export function actorProfileRetryReceiptMatches(value, {
     const failingModules = normalizeActorProfileRetryDiagnosticList(value?.failingModules);
     const failureCodes = normalizeActorProfileRetryDiagnosticList(value?.failureCodes);
     if (
-        ![2, 3].includes(version)
+        ![2, 3, 4].includes(version)
         || value?.status !== 'not_completed'
         || !Array.isArray(value?.failingModules)
         || !Array.isArray(value?.failureCodes)
         || JSON.stringify(value.failingModules) !== JSON.stringify(failingModules)
         || JSON.stringify(value.failureCodes) !== JSON.stringify(failureCodes)
+        || (version >= 4 && !Array.isArray(value?.projectionEvidence))
+        || (version >= 4 && JSON.stringify(value.projectionEvidence)
+            !== JSON.stringify(normalizeActorProfileProjectionEvidence(value.projectionEvidence)))
         || !actorProfileRecoverySourceMatches(value.sourceRef, currentSourceRef)
         || value.sourceDigest !== actorProfileRecoverySourceDigest(value.sourceRef)
     ) return false;
-    // V3 is the current durable format and seals the complete normalized
-    // diagnostic receipt. V2 remains refresh-compatible only when both
-    // diagnostic arrays exist in canonical form; a legacy receipt missing
-    // either field cannot impersonate a current recoverable failure.
+    // V4 is the current durable format and seals the complete normalized
+    // diagnostic receipt plus structured projection evidence. V2/V3 remain
+    // refresh-compatible only under their existing exact boundaries; a
+    // legacy receipt missing either diagnostic array cannot impersonate a
+    // current recoverable failure.
     if (
-        version === 3
+        version >= 3
         && (
             !cleanText(value?.receiptDigest, 240)
             || value.receiptDigest !== actorProfileRetryReceiptDigest(value)
@@ -2660,7 +2726,11 @@ export function actorProfileRetryReceiptMatches(value, {
                 failureCodes,
                 expectedReceipt?.failureCodes,
             )
-            || (version === 3 && value.receiptDigest !== expectedReceipt?.receiptDigest)
+            || (version >= 4 && !actorProfileProjectionEvidenceMatch(
+                value.projectionEvidence,
+                expectedReceipt?.projectionEvidence,
+            ))
+            || (version >= 3 && value.receiptDigest !== expectedReceipt?.receiptDigest)
         ) return false;
     }
     if (!value.ticketBatchDigest) return ticketBatch == null;

@@ -14,6 +14,10 @@ import {
     validateActorProfileDiscoveryAnchor,
 } from './actor-profile-v6-core.mjs';
 import {
+    ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
+    profileReadiness,
+} from './actor-profile-mvu-core.mjs';
+import {
     actorActionTargetMatches,
     actorActionNarrativeInjection,
     actorRefsMatch,
@@ -24,6 +28,7 @@ import {
     validateWorldAdjudicationBatch,
     worldEventFromSettledActionReceipt,
 } from './actor-authority-core.mjs';
+import { operationalActorEligible } from './actor-operational-state-core.mjs';
 
 export const ACTOR_LEDGER_VERSION = 8;
 export const ACTOR_REGISTRY_VERSION = 1;
@@ -593,6 +598,8 @@ function normalizeActorProfileRef(value, actorId, name) {
         name: refName,
         profileRoot: cleanText(value.profileRoot, 240),
         profileFormat: cleanText(value.profileFormat, 80) || 'narrative-v1',
+        completionMode: cleanText(value.completionMode, 40),
+        physiologyContractVersion: integer(value.physiologyContractVersion, 0, Number.MAX_SAFE_INTEGER, 0),
         revision: integer(value.revision, 1, Number.MAX_SAFE_INTEGER, 1),
         digest,
         sourceRefDigest: cleanText(value.sourceRefDigest, 180),
@@ -1911,15 +1918,36 @@ export function actorProfileCommitMatchesLedger(value, expected = {}) {
     return { ok: mismatches.length === 0, mismatches };
 }
 
-export function actorProfileReadinessInLedger(value, actorId) {
+export function actorProfileReadinessInLedger(value, actorId, {
+    requiredCompletionMode = '',
+    profileOverride = null,
+    requireProfileOverride = false,
+} = {}) {
     const ledger = normalizeActorLedger(value, { chatId: value?.chatId || '' });
     const id = cleanText(actorId, 120);
     const actor = ledger.actors.find((entry) => entry.id === id);
     if (!actor) return { ready: false, reason: 'actor_profile.actor_missing' };
+    if (requireProfileOverride && (!profileOverride || typeof profileOverride !== 'object')) {
+        return { ready: false, reason: 'actor_profile.strict_mvu_projection_missing' };
+    }
     if (actor.pendingProfile) {
         return { ready: false, reason: 'actor_profile.pending_readback', migrationRequired: false };
     }
     const profileRef = actor.profileRef;
+    const narrativeProfile = profileOverride?.profileFormat === 'narrative-v1'
+        ? profileOverride
+        : actor.profileV6?.profileFormat === 'narrative-v1' ? actor.profileV6 : null;
+    if (narrativeProfile && requiredCompletionMode) {
+        const strict = profileReadiness(narrativeProfile, { requiredCompletionMode });
+        if (strict.ready !== true) return strict;
+    }
+    if (requiredCompletionMode === 'full_adult' && !profileOverride
+        && (profileRef?.completionMode !== 'full_adult'
+            || Number(profileRef?.physiologyContractVersion || 0)
+                < ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION
+            || !profileRef?.sourceRefDigest)) {
+        return { ready: false, reason: 'actor_profile.strict_adult_reference_missing' };
+    }
     if (
         profileRef
         && profileRef.actorId === actor.id
@@ -4107,6 +4135,7 @@ export function scheduleActorTurns(value, {
     explorationSlots = 1,
     excludedActorNames = [],
     requireProfileReady: _requireProfileReady = true,
+    operationalStatesByActorId = {},
 } = {}) {
     const excluded = normalizeExcludedActorNames(excludedActorNames);
     const ledger = normalizeActorLedger(value, { excludedActorNames });
@@ -4122,8 +4151,40 @@ export function scheduleActorTurns(value, {
         .filter((actor) => (
             isActorName(actor.name, excluded)
             && actorActionEligibilityInLedger(ledger, actor.id).ready
+            && (!operationalStatesByActorId?.[actor.id]
+                || operationalActorEligible(
+                    operationalStatesByActorId[actor.id],
+                    currentTurn,
+                ))
         ))
-        .map((actor) => ({ actor, ...schedulingScore(actor, currentTurn) }))
+        .map((actor) => {
+            const operationalState = operationalStatesByActorId?.[actor.id] || null;
+            const base = schedulingScore(actor, currentTurn);
+            const reasons = [...(base.reasons || [])];
+            // A blocker changes/replans intent; it is not a blanket veto.
+            // Open threads raise priority so the state is actually consumed.
+            const blockerPenalty = operationalState?.blocker ? 2 : 0;
+            const openThreadBonus = Math.min(2, operationalState?.openThreads?.length || 0);
+            const recentAttemptPenalty = operationalState?.lastAttempt
+                && Number(operationalState?.lastAttemptTurn || 0) >= currentTurn
+                ? 4 : 0;
+            const noProgressOutcomePenalty = [
+                'blocked', 'delayed', 'failure', 'failed',
+            ].includes(String(operationalState?.lastOutcomeStatus || '').toLowerCase())
+                ? 3 : 0;
+            if (blockerPenalty) reasons.push('operational-blocker-replan');
+            if (openThreadBonus) reasons.push('operational-open-thread');
+            if (recentAttemptPenalty) reasons.push('operational-recent-attempt-replan');
+            if (noProgressOutcomePenalty) reasons.push('operational-last-outcome-replan');
+            return {
+                actor,
+                ...base,
+                score: base.score - blockerPenalty - recentAttemptPenalty
+                    - noProgressOutcomePenalty + openThreadBonus,
+                reasons,
+                operationalState,
+            };
+        })
         .filter((item) => Number.isFinite(item.score))
         .sort((left, right) => (
             Number(right.starved) - Number(left.starved)

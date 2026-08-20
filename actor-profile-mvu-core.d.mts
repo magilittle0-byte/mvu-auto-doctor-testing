@@ -5,6 +5,7 @@ export const ACTOR_PROFILE_UPDATE_BLOCK: Readonly<{
 }>;
 export const ACTOR_PROFILE_MVU_FIELDS: Readonly<Record<string, string>>;
 export const ACTOR_PROFILE_MVU_ROOT: string;
+export const ACTOR_PROFILE_BATCH_CAPACITY: number;
 export const ACTOR_PROFILE_MVU_SCHEMA_VERSION: number;
 export const ACTOR_PROFILE_FAILURE_CODES: Readonly<Record<string, string>>;
 
@@ -58,7 +59,8 @@ export function profileReadiness(profile: unknown): {
 export function actorProfileMvuPath(actorId: string, profileRoot: string): string;
 export function compileActorProfileMvuPatch(bound: unknown, options: {
     profileRoot: string;
-    profileRootPresent?: boolean | null;
+    /** Explicit host shape: missing_root, root_without_byActorId, ready, or invalid/unknown (which fails closed). */
+    profileRootPresent?: 'missing_root' | 'root_without_byActorId' | 'ready' | 'invalid' | null;
     existingProfiles?: Record<string, unknown>;
     sourceRef: Record<string, unknown>;
     now?: number;

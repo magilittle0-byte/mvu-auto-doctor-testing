@@ -1,11 +1,11 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.28` 测试仓候选。rc.27 当前指纹的真实第二个 accepted 回复已生成单人物六段基础档案并通过 MVU durable readback，但 `full_adult` 的详细 physiology 模块仍为空；编译器硬编码 `basic`、ready 只数六段、前端又采信短生理摘要，因而错误显示绿色。顶部摘要同时因成功事务曾保存过恢复材料而错误保留 `canRetry` 红色。rc.28 同时收紧生理完整度与成功终态投影；票据、MVU、P3/P4 与数据库边界不变。运行代码与配套预设变化后须重新加载当前提交，在同一已接受正文上定向恢复核验，再继续同一聊天十二个有效回复；正式门禁尚未完成。
+适用版本：`2.0.0-rc.29` 测试仓候选。下文保留 rc.27/rc.28 的真实失败说明，但它们属于旧指纹，不能证明当前候选。rc.29 把 MVU durable semantic profile、A/B/C/D 四项长期优化和新的 projection recovery 接到同一候选；当前只完成 Node 定向检查，未运行真实宿主、模型或十二回合正式门禁。运行代码或配套预设变化后须重新加载当前提交，旧真实证据立即失效。
 
 ## 生产链
 
 1. 生成前继续复用现有 `characterCreationTicket` 和稳定 ActorId。P4 的唯一 next-turn consumer 同时承载本回合票据、上一回合世界事件/可见后果及最多六个相关 durable-ready MVU 档案摘要；不发送全部历史档案。票据载荷把每个实际消费的完整 ticketId 就近绑定到同一 accepted assistant 的隐藏六段回执；未消费任何票据且没有既有人物变化时也必须交回 `<!-- 人物档案无变化 -->`。
-2. 配套预设 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json` 使用终检 V5，明确取代旧四选项合同中遗漏回执的“唯一顺序”，将唯一隐藏 `<人物档案更新>` 语义域或无变化收据固定为 `</content>` 后的第一个非空内容，再继续论坛/选项/UpdateVariable/吐槽/状态等辅助域。新人物给齐六段 V6 自然叙事档案，已有角色只给变化段；该位置让档案回执不再依赖长回复尾部是否被模型截断，也不会被旧 options 顺序推迟。
+2. 配套预设 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json` 与 `npcDesignTicketPrompt()` 使用同一顺序：唯一 `<content>` 内先完成空的 `<luntan></luntan>`，闭合 `</content>`，随后恰好一个隐藏人物档案/无变化收据，再继续 options/UpdateVariable/其他辅助域。V4 已停用；V5/V6 不再声明“回执后再继续论坛”。新人物给齐六段 V6 自然叙事档案，`full_adult` 六个 physiology field 缺一不可。
 3. accepted-final 适配器只读取当前最终 assistant 的精确 SourceRef；聊天、message、swipe、generation、content、scope 或 epoch 漂移均零写入。格式先本地宽容修复，再按 ticket/ActorId 逐人物绑定和隔离。解析器优先接受严格 whitespace-only post-content 插槽，也兼容旧聊天 true-EOF legacy tail；rc.27 额外把“唯一专用注释结束后只剩空白并立即 `</content>`”识别为可恢复 inner-tail 并本地 relocation。注释后继续正文、重复块、论坛/选项内伪块和语义校验失败仍 fail-closed。预留 ticket 只是可选池，不等于已消费；完整专用块和无变化收据都缺失时记录 `profile_block_missing + emptyOperations + repairable`，绝不伪装成功。无精确票据的旧聊天仍保留省略兼容。
 4. 编译器在 working clone 上形成 `/人物档案/byActorId/<ActorId>` 操作，复用既有 MVU WAL、selected-field CAS、持久写、readback 与 touched-path rollback。第一次回读证明内容落地，第二次本地写入 ready 收据；最终操作合并回原消息 UpdateVariable，保留主回复原有变量操作。
 5. ActorRegistry 仍是唯一 ActorId/name/aliases 索引。ActorLedger 只保存 profileRef、digest、revision、readiness、ActionAttempt/receipt 和世界字段；完整档案只在 MVU，不再双写稳定/演化副本。
@@ -48,6 +48,19 @@
 - 成功终态与前端故障摘要的双重收口。rc.27 真实第二个 accepted 回复证明 `atomic_readback` 后若曾保存恢复材料，旧语义适配器仍可能留下 `canRetry`，使绿色 durable 卡片与红色顶部摘要冲突。rc.28 在生产适配器清除此成功态标志，并在纯视图层拒绝把成功状态的过期 `canRetry` 当故障；真实 `not_completed/failed` 仍保持红色和单人物修复入口。
 - `full_adult` 仍直接复用 `actor-profile-v6-core.mjs` 的六项生理覆盖合同与本地规范化器；语义桥只做最小接线。生成前票据提示与配套预设写自然中文语义，本地编译器传入当前完成模式、生成合同版本并把 physiology 纳入 ready/readback；前端只展示通过本地合同版本的自然段，空 legacy 模块和布尔开关绝不充数。AI 只在真实缺项时由已有单人物 repair adapter 定向补该人物，之后仍使用同一 MVU 事务。
 
+## rc.29 A/B/C/D production map
+
+| Contract | Production path and owner | T/A/X decision |
+| --- | --- | --- |
+| A context isolation | `prompt-context-core.mjs` (`sanitizeOutgoingChatCopy`, `sanitizeFlatPromptByExactAssistantSource`, `inspectFlatPromptAfterAssistantChatSanitized`, `selectBoundedRelevantActorIds`) plus `bindEvents()` in `index.js`; Doctor reads the raw accepted assistant, while the host receives only an outgoing copy. | T reuses the mature prompt-ready event boundary and existing mechanism sanitizer. A adds exact assistant-role/source ownership, multimodal text normalization, residual fail-closed checks and bounded projection. X is the semantic receipt parser because no prior path owned this accepted-final domain. Display regexes never substitute for prompt filtering. |
+| B chat disposal/GC | `doctor-chat-scope-core.mjs` plans exact Doctor-owned keys; `disposeDoctorChatScope()` in `index.js` performs epoch invalidation, owner-scoped task/UI/repair cleanup and exact hashed localStorage cleanup. It does not perform durable readback or write MVU/chat namespace. | T reuses the existing namespace/write-chain and repair-center lifecycle. A adds precise owner records, preview/confirm cleanup and host `CHAT_DELETED(chat_file_name)` glue. X is the safe non-current Doctor cache preview because no authoritative host chat-ID enumeration was available; it is not proof that a chat is orphaned. No database, MVU, chatMetadata, IndexedDB, external file or third-party settings are touched. |
+| C three world lanes | `scheduleWorldLanes`, `classifyWorldPressureCandidate`, `admitDoctorWorldCandidates`, `stage3StructuralLaneRowSafe`, `stage3PositiveStructuralWorldDelta`, `stage3IsolateHeldActorWorldDelta`, `compressResolvedContinuityHistory` in `continuity-core.mjs`/`index.js`; one CAS/readback batch owns actor, faction and environment receipts. | T reuses the mature single-batch scheduler, held fallback, continuity CAS/readback and undo/checkpoint path. A adds lane-keyed positive provenance admission, pressure budgeting, actor-dependent delta isolation and newly-resolved-only compaction. X is only the missing structural admission/compaction adapter; it does not create a second world model or state machine. |
+| D operational state | `composeActorOperationalState`, `operationalActorEligible`, `actorOperationalPromptProjection` in `actor-operational-state-core.mjs`, consumed by `scheduleActorTurns`, P3 recall and P4 summary. MVU runtime is read only through configured ActorId JSON-Pointer rules. | T reuses ActorLedger action receipts/history and the MVU current-state authority. A adds the bounded ephemeral projection, attemptId-aware pending gate and explicit `unbound` diagnostics. X is the configurable runtime adapter because the controlled host supplied no universal character-card runtime schema; no Doctor-owned location/resource mirror is written. |
+
+Projection recovery is also part of the rc.29 transaction path: `recoverSemanticProfileRegistryProjection()` derives a new or existing Registry candidate from the exact receipt SourceRef, stable ActorId, MVU natural identity, local readback metadata and committed profile digest. It may replace an old ledger `profileRef`; it does not require the ref to match before recovery. It removes only recovered `registry_projection_pending:*` codes and preserves same-batch `failedActorTargets`/ticket owners. Any digest, source, identity or save/readback mismatch remains repairable and zero-write where rollback is verified.
+
+The current exact paired preset is the IZUMI file named above; its candidate SHA-256 is recorded in `TESTING_CHANNEL.md` and bound into `doctorRuntimeCriticalFingerprint()`. The current direct Node selection is documented there without claiming the one-time complete-suite result before that gate is authorized. Historical rc.27/rc.28 real observations below are retained as evidence of earlier failures only and do not apply to rc.29.
+
 ## 不变量与失败语义
 
 - 新人物六段完整且一次提交；已有角色仅 delta；坏人物不能留下半档案，也不能拖垮其他人物或结构世界。
@@ -55,6 +68,23 @@
 - `emptyOperations`、partial、unverified 和 readback mismatch 都不算完整成功。partial 中已读回的好人物可 ready，坏人物保持 repairable。
 - 初次解析、绑定、完整性、持久化、readback、消息 replay、Registry projection 和旧迁移失败均使用固定码；诊断不保存姓名、正文、模型原文或凭据。
 - 旧 verified profileV6 可只读；显式迁移失败保留旧副本。成功后 MVU 是权威，旧副本只作兼容备份；来源路径设置可显式回滚。
+
+## Storage inventory and retention boundary
+
+| Storage | Doctor ownership | Delete/GC boundary |
+| --- | --- | --- |
+| `chatMetadata[mvu_auto_doctor]` | Host chat metadata and Doctor durable namespace | Follows host chat deletion; Doctor does not clear it during disposal and never deletes MVU or database data. |
+| Per-chat hashed fold `localStorage` keys | Doctor-owned UI fold/temporary cache | Exact key only on matching `CHAT_DELETED`; manual non-current cleanup is preview/confirmation and is not proof that a chat is deleted. |
+| Global floating page/position and extension settings | User/extension preference, not per-chat Doctor ownership | Never removed by chat disposal or non-current cache cleanup. |
+| Doctor memory maps, queues, timers, controllers, P4 leases, repair/UI owners | Doctor-owned with exact `chatId`/scope owner | Matching scope is invalidated and removed; late callbacks fail their owner/epoch guard. |
+| IndexedDB and external files | No Doctor-owned namespace found in this candidate (0 items) | No guessing, enumeration-based deletion, or cleanup. |
+
+Diagnostics and repairJournal keep bounded fixed-code projections; checkpoints
+keep bounded undo/readback records. Newly resolved detail is compacted on the
+transition and older detail rolls into a bounded effects/rumors/triggers/source
+tombstone rollup. Active and dormant threads are not display-truncated, and
+the rollup prevents a resolved event from being reopened after its individual
+ID leaves the bounded list.
 
 ## 非验收说明
 

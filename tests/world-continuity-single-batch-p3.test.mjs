@@ -10,6 +10,7 @@ import {
     continuityLifecycleStats,
     continuityScenarioDigest,
     continuityWorldDigest,
+    buildContinuityPacketText,
     enforceContinuityPolicy,
     mergeMarkerRecords,
     normalizeContinuityState,
@@ -30,6 +31,7 @@ import {
     extractFirstBalancedJsonObject,
     sovereigntySourceKey,
 } from '../sovereignty-runtime-core.mjs';
+import { normalizeStoredAssistantMessage } from '../prompt-context-core.mjs';
 import {
     actorProfileNoCandidatesTerminalProofMatches,
     actorProfileDiscoveryCoveragePlan,
@@ -110,6 +112,13 @@ function sourceSection(start, end) {
     assert.ok(from >= 0, `missing source marker: ${start}`);
     assert.ok(to > from, `missing source marker: ${end}`);
     return source.slice(from, to);
+}
+
+function structuralLaneSource() {
+    return sourceSection(
+        'function stage3StructuralLaneRowSafe',
+        'function stage3ValidateWorldDraftInMemory',
+    );
 }
 
 function loadStage3WorldCandidateValidator({
@@ -222,6 +231,10 @@ function loadBuildContinuityMessages() {
         fastApiJsonMode: true,
     };
     const sandbox = {
+        ACTOR_PROFILE_NARRATIVE_SECTION_KEYS: [
+            'person', 'personality', 'history', 'currentState',
+            'relationshipsMotives', 'knowledgeCapabilitiesResources', 'physiology',
+        ],
         actorActionAttemptWorldView: (value) => structuredClone(value),
         actorProfileV6View: (actor) => structuredClone(actor.profileV6View),
         constrainForumCausalSignals: (value) => value,
@@ -238,6 +251,67 @@ function loadBuildContinuityMessages() {
     vm.runInNewContext(`${code}\nthis.buildMessages = buildContinuityMessages;`, sandbox);
     return sandbox.buildMessages;
 }
+
+test('P3 production messages omit unrelated ledger ActorIds and names from the actual build output', () => {
+    const buildMessages = loadBuildContinuityMessages();
+    const actors = Array.from({ length: 12 }, (_, index) => ({
+        id: `actor-sentinel-${index + 1}`,
+        name: `唯一哨兵人物${index + 1}`,
+        status: 'active',
+        identity: { aliases: [`哨兵别名${index + 1}`] },
+        currentGoals: [], longTermGoals: [], knowledge: [], capabilities: [], resources: [],
+    }));
+    const semanticProfile = (actorId, name) => ({
+        profileFormat: 'narrative-v1', completionMode: 'full',
+        actorRef: { actorId, name },
+        narrativeSections: Object.fromEntries([
+            ['person', '人物身份'], ['personality', '性格边界'], ['history', '过往经历'],
+            ['currentState', '长期状态'], ['relationshipsMotives', '关系动机'],
+            ['knowledgeCapabilitiesResources', '知识能力资源'],
+        ].map(([key, text]) => [key, { text, source: 'hypothesis' }])),
+    });
+    const related = actors.slice(0, 2);
+    const messages = buildMessages({
+        context: { chatId: 'chat-related-only' },
+        captured: { chatId: 'chat-related-only', index: 8, swipeId: 0 },
+        settings: {
+            continuityAutonomy: 'normal', continuityPromptAddon: '', actorShardPromptAddon: '',
+            continuityContextMessages: 4, forumMaxPosts: 20, forumMaxComments: 20, fastApiJsonMode: true,
+        },
+        base: {
+            version: 1, chatId: 'chat-related-only', turn: 8,
+            lastTick: { turn: 7, action: 'held', threadId: 'WORLD', reason: '等待结构条件' },
+            scenarioPlan: {}, world: { digest: '', trends: [], factions: [], winds: [], influences: [] }, threads: [],
+        },
+        worldContext: { entries: [], hasSetting: false, sourceCount: 0, text: '' },
+        stateAnchors: '只读锚点',
+        actorLedger: { actors },
+        mvuProfilesByActorId: Object.fromEntries(related.map((actor) => [
+            actor.id, semanticProfile(actor.id, actor.name),
+        ])),
+        operationalStatesByActorId: {},
+        actorShardCandidates: {
+            scheduledActorIds: related.map((actor) => actor.id),
+            proposals: related.map((actor) => ({ actorId: actor.id, intent: 'observe', candidateAction: '观察当前局势' })),
+            actionAttempts: [], rejectedActions: [],
+        },
+        recallPacket: {
+            version: 2, selection: 'local_structured_schedule',
+            actorIds: related.map((actor) => actor.id), threadIds: [], laneIds: [],
+            mustActorIds: related.map((actor) => actor.id), mustThreadIds: [], mustLaneIds: [],
+            worldbookEntryIds: [], worldbookEvidenceEntryIds: [], worldbookSourceRefs: [],
+            worldbookDigest: 'empty-worldbook', selectedWorldbookCount: 0, digest: 'recall-related-only',
+        },
+        worldLaneSchedule: { candidates: [], selected: [] },
+    });
+    const prompt = messages.map((message) => String(message.content || '')).join('\n');
+    related.forEach((actor) => assert.match(prompt, new RegExp(actor.id, 'u')));
+    actors.slice(2).forEach((actor) => {
+        assert.doesNotMatch(prompt, new RegExp(actor.id, 'u'));
+        assert.doesNotMatch(prompt, new RegExp(actor.name, 'u'));
+        assert.doesNotMatch(prompt, new RegExp(actor.identity.aliases[0], 'u'));
+    });
+});
 
 function loadStage3ProfileEvolutionGate() {
     const code = sourceSection(
@@ -661,11 +735,42 @@ function loadStage3LegacyManualReconciliationRunner(state) {
     );
     const sandbox = {
         operationEpoch: 4,
+        lastGeneration: null,
         stage3AcceptedTarget: (target) => target?.generationId && target?.generationType ? target : null,
         operationToken: () => ({ epoch: 4 }),
         stage3TaskOwnsCurrent: () => true,
         stage3TargetIsCurrent: () => ({ ok: true }),
         sovereigntyNarrativeEligible: () => true,
+        normalizedStoredAssistantMessage: (message) => ({
+            ok: true,
+            text: typeof message?.mes === 'string' ? message.mes : 'natural narrative',
+        }),
+        acceptedContentText: (value) => String(value || ''),
+        stripAssistantAcceptedMechanism: (value) => String(value || ''),
+        observeAcceptedContentPressure: () => ({}),
+        classifyWorldPressureCandidate: (lane) => ({
+            id: String(lane?.sourceId || lane?.id || ''),
+        }),
+        admitDoctorWorldCandidates: (state, candidates) => ({
+            state: structuredClone(state), admitted: structuredClone(candidates),
+            delayed: [], retained: [], receipts: [],
+        }),
+        actorLedgerOperationalCandidateView: () => null,
+        recalledActorIds: new Set(),
+        composeActorOperationalState: (actor) => ({
+            actorId: actor?.id || '', actionable: false, profileReady: false,
+            cooldownUntilTurn: 0, openThreads: [],
+        }),
+        stage3WorldPromptText: (value) => String(value || ''),
+        safeJson: (value) => JSON.stringify(value),
+        stage3ZeroWriteStaleResult: (reason, extra = {}) => ({
+            status: 'stale',
+            reason,
+            validationCode: String(reason) === 'world_target_generation_identity_manual_reconciliation'
+                ? 'world_target_generation_identity_manual_reconciliation'
+                : 'world.stale.target_changed',
+            module: 'world', zeroWrite: true, worldModelCalls: 0, ...extra,
+        }),
         stage3LedgerReadbackGate: () => ({ ok: true, actorLedger: {} }),
         stage3LocalRecallPacket: () => ({
             version: 2, actorIds: [], threadIds: [], laneIds: [],
@@ -696,6 +801,18 @@ function loadStage3LegacyManualReconciliationRunner(state) {
         actorProfileChain: Promise.resolve(),
         ...state.spies,
     };
+    const suppliedDraftValidator = sandbox.stage3ValidateWorldDraftInMemory;
+    if (typeof suppliedDraftValidator === 'function') {
+        sandbox.stage3ValidateWorldDraftInMemory = (...args) => {
+            const result = suppliedDraftValidator(...args);
+            if (result?.ok === true && !result.parsed) {
+                throw new Error(
+                    'stage3ValidateWorldDraftInMemory returned ok=true without parsed',
+                );
+            }
+            return result;
+        };
+    }
     sandbox.stage3PersistAttemptlessPreparedWorldCandidate = async (captured, args) => {
         const preparedCheckpoint = sandbox.stage3PreparedWorldCheckpoint?.({
             captured,
@@ -1218,9 +1335,18 @@ function loadScheduledPhase1RebaseHarness({ rejectPreparedAttempt = false } = {}
                 observationReceipts: [],
             },
             parsed: {
-                state: { turn: 2 },
+                state: {
+                    turn: 2,
+                    lastTick: {
+                        turn: 2,
+                        action: 'held',
+                        threadId: 'WORLD',
+                        reason: '本地权威校验拒绝人物尝试，结构世界保留并继续验证',
+                    },
+                },
                 raw: {
                     world: {},
+                    actionProposals: [],
                     actionAdjudications: [{ actorId: 'actor-old', status: 'held' }],
                 },
             },
@@ -1673,7 +1799,7 @@ test('production P3 validator accepts WORLD-held only after all ATT are adjudica
         args,
     );
     assert.equal(unadjudicated.ok, false);
-    assert.equal(unadjudicated.reason, 'world_candidate_settlement_failed');
+    assert.equal(unadjudicated.reason, 'world_semantic_progress_missing');
 
     const adjudicatedWithoutWorldDelta = loadStage3WorldCandidateValidator({
         pendingAttempts: [pendingAttempt],
@@ -1960,10 +2086,10 @@ test('P3 settlement diagnostics distinguish semantic, held, and pending attempts
     });
     const attemptsPrepared = [...source.matchAll(/status: 'attempts_prepared'[\s\S]{0,360}?failureCodes: \[\]/gu)]
         .map((match) => match[0]);
-    assert.equal(attemptsPrepared.length, 2);
+    assert.equal(attemptsPrepared.length, 1);
     for (const block of attemptsPrepared) {
         assert.match(block, /completed: 0, succeeded: 0, failed: 0, semanticActions: 0/u);
-        assert.match(block, /scheduledWithoutSemanticAction: pending(?:Actions)?\.attempts\.length/u);
+        assert.match(block, /scheduledWithoutSemanticAction: (?:modelPendingActions|pending)\.attempts\.length/u);
     }
 });
 
@@ -2251,10 +2377,38 @@ test('production draft validator exposes only fixed invalid proposal ActorId sub
     );
     const sandbox = {
         deepClone: (value) => structuredClone(value),
+        normalizeContinuityState,
         actorActionTargetOf: (value) => structuredClone(value),
-        parseActorShardProposal,
+        parseActorShardProposal: (value, { candidate }) => {
+            const proposal = JSON.parse(value);
+            if (
+                proposal.capabilityUsed
+                && !(candidate?.actorState?.capabilities || []).includes(proposal.capabilityUsed)
+            ) return { proposal: null, error: 'actor_shard.capability_invalid' };
+            return { proposal: { ...proposal, actorId: candidate.id, actorName: candidate.name } };
+        },
+        actorActionCandidatesFromShard: (_ledger, proposals) => structuredClone(proposals),
+        prepareActorActionAttempts: (ledger, candidates) => ({
+            ledger: structuredClone(ledger),
+            attempts: candidates.map((candidate) => ({
+                id: `ATT-${candidate.actorId}`,
+                actorId: candidate.actorId,
+            })),
+            rejected: [],
+        }),
+        recordActorActionAttempts: (ledger, attempts) => ({
+            ledger: structuredClone(ledger), recorded: structuredClone(attempts), rejected: [],
+        }),
+        stage3WorldAdjudicationsForAttempts: (rows) => structuredClone(rows || []),
+        stage3HeldWorldAdjudication: (attempt) => ({
+            actorId: attempt?.actorId,
+            status: 'held',
+            appliedStateChanges: [],
+        }),
+        validateWorldAdjudicationBatch: () => ({ valid: true, errors: [] }),
+        stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
     };
-    vm.runInNewContext(`${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
+    vm.runInNewContext(`${structuralLaneSource()}\n${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
     const baseCandidate = (id, name) => ({
         id, name, narrativeProfile: true,
         goals: ['核验当前新线索'], knowledgeBasis: ['knowledge'],
@@ -2306,6 +2460,7 @@ test('production draft validator locally defers an unadmitted actor batch withou
     let validatedEnvelope = null;
     const sandbox = {
         deepClone: (value) => structuredClone(value),
+        normalizeContinuityState,
         actorActionTargetOf: () => ({ chatId: 'chat-safe-hold', index: 2 }),
         parseActorShardProposal: (value, { candidate }) => ({
             proposal: { ...JSON.parse(value), actorId: candidate.id, actorName: candidate.name },
@@ -2323,7 +2478,11 @@ test('production draft validator locally defers an unadmitted actor batch withou
         },
         stage3ValidateWorldCandidateInMemory: (_captured, _settings, ledger, envelope) => {
             validatedEnvelope = structuredClone(envelope);
-            return { ok: true, ledger };
+            return {
+                ok: true,
+                ledger,
+                actorLaneStatus: envelope.actorLaneStatusOverride,
+            };
         },
         stage3SafeHeldDraftAfterParseFailure: (scheduledState, { nextTurn }) => ({
             ...structuredClone(scheduledState),
@@ -2335,7 +2494,7 @@ test('production draft validator locally defers an unadmitted actor batch withou
             world: {},
         }),
     };
-    vm.runInNewContext(`${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
+    vm.runInNewContext(`${structuralLaneSource()}\n${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
     const parsed = {
         state: {
             turn: 3,
@@ -2382,10 +2541,10 @@ test('production draft validator locally defers an unadmitted actor batch withou
     assert.deepEqual(Array.from(result.deferredActorIds), ['actor-a']);
     assert.deepEqual(Array.from(result.parsed.raw.actionProposals), []);
     assert.deepEqual(Array.from(result.parsed.raw.actionAdjudications), []);
-    assert.equal(JSON.stringify(result.parsed.raw.world), '{}');
-    assert.match(result.parsed.state.lastTick.reason, /本地权威校验/u);
+    assert.equal(result.parsed.raw.world.modelOutcome, undefined);
+    assert.equal(result.candidate.actorLaneStatus, 'held_actor_lane');
     assert.deepEqual(Array.from(validatedEnvelope.actionAdjudications), []);
-    assert.equal(JSON.stringify(validatedEnvelope.world), '{}');
+    assert.equal(validatedEnvelope.world.modelOutcome, undefined);
     assert.match(sourceSection(
         'function doctorRuntimeCriticalFingerprint()',
         'function diagnosticPayload()',
@@ -2399,6 +2558,7 @@ test('actor-admission safe hold stays fail-closed when a persisted ATT already e
     );
     const sandbox = {
         deepClone: (value) => structuredClone(value),
+        normalizeContinuityState,
         actorActionTargetOf: () => ({ chatId: 'chat-safe-hold', index: 2 }),
         parseActorShardProposal: (value, { candidate }) => ({
             proposal: { ...JSON.parse(value), actorId: candidate.id, actorName: candidate.name },
@@ -2408,11 +2568,12 @@ test('actor-admission safe hold stays fail-closed when a persisted ATT already e
             ledger: structuredClone(ledger), attempts: [],
             rejected: [{ actorId: 'actor-a', reasons: ['capability-out-of-bounds'] }],
         }),
+        stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
         stage3SafeHeldDraftAfterParseFailure: () => {
             throw new Error('persisted ATT must prevent local draft replacement');
         },
     };
-    vm.runInNewContext(`${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
+    vm.runInNewContext(`${structuralLaneSource()}\n${code}\nthis.validateDraft = stage3ValidateWorldDraftInMemory;`, sandbox);
     const result = sandbox.validateDraft(
         { chatId: 'chat-safe-hold', index: 2 },
         { continuityMaxThreads: 24 },
@@ -2855,7 +3016,7 @@ test('parse-failure safe hold defers only unpersisted scheduling and never drops
         'function sameTargetExceptContent(',
     );
     assert.match(run, /safeValidationReason === 'world\.output\.parse_invalid'[\s\S]*?stage3SafeHeldDraftAfterParseFailure/u);
-    assert.match(run, /scheduledActorIds,[\s\S]*?pendingActorAttempts: pendingActions\.attempts/u);
+    assert.match(run, /scheduledActorIds,[\s\S]*?pendingActorAttempts: modelPendingActions\.attempts/u);
     assert.match(run, /actor_scheduling\.advance_parse_deferred_to_hold[\s\S]*?scheduledActorIds = \[\]/u);
     assert.match(run, /proposalValidationCandidates\.clear\(\)/u);
     assert.match(run, /recoveryReason = 'local_safe_hold_after_parse_failure'/u);
@@ -3853,7 +4014,9 @@ test('manual retirement fresh-reads then runs exactly one local Recall and one A
                 raw: { world: {}, actionAdjudications: [] },
             }),
             stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
-            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: (_captured, _settings, _ledger, parsed) => ({
+                ok: true, parsed: structuredClone(parsed),
+            }),
             currentPlayerActorNames: () => [],
             stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
             persistActorActionAttemptsForTurn: async () => ({
@@ -4217,17 +4380,23 @@ test('production namespace writer requires one save/readback and fails closed at
         stage: index < 30 ? 'resolved' : 'advancing',
         title: `persistent thread ${index + 1}`,
     }));
-    const fullHistory = makeHarness({
-        nextContinuity: normalizeContinuityState({ chatId: 'chat-p3', threads: fullThreads }, {
+    const boundedHistory = normalizeContinuityState({ chatId: 'chat-p3', threads: fullThreads }, {
             chatId: 'chat-p3', maxThreads: 12, maxResolved: 12,
-        }),
+    });
+    const fullHistory = makeHarness({
+        nextContinuity: boundedHistory,
     });
     assert.equal(await fullHistory.run(), true);
     assert.deepEqual(fullHistory.counts(), { saves: 1, readbacks: 1 });
     assert.deepEqual(
         fullHistory.context.chatMetadata.mvu_auto_doctor.continuity.threads.map((thread) => thread.id),
-        fullThreads.map((thread) => thread.id),
-        'the namespace save/readback path must preserve every persistent thread ID',
+        boundedHistory.threads.map((thread) => thread.id),
+        'the namespace save/readback path must preserve bounded active/detail history',
+    );
+    assert.deepEqual(
+        fullHistory.context.chatMetadata.mvu_auto_doctor.continuity.resolvedArchive.map((thread) => thread.id),
+        boundedHistory.resolvedArchive.map((thread) => thread.id),
+        'resolved overflow remains in the durable archive rather than being silently dropped',
     );
 });
 
@@ -4702,7 +4871,9 @@ test('a fully committed prior generation becomes history only for a strictly new
                 raw: { world: {}, actionAdjudications: [] },
             }),
             stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
-            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: (_captured, _settings, _ledger, parsed) => ({
+                ok: true, parsed: structuredClone(parsed),
+            }),
             currentPlayerActorNames: () => [],
             stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
             persistActorActionAttemptsForTurn: async () => {
@@ -4780,7 +4951,9 @@ test('a fully committed prior generation becomes history only for a strictly new
                 raw: { world: {}, actionAdjudications: [] },
             }),
             stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
-            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: (_captured, _settings, _ledger, parsed) => ({
+                ok: true, parsed: structuredClone(parsed),
+            }),
             currentPlayerActorNames: () => [],
             stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
             persistActorActionAttemptsForTurn: async () => {
@@ -4852,7 +5025,9 @@ test('a fully committed prior generation becomes history only for a strictly new
                 raw: { world: {}, actionAdjudications: [] },
             }),
             stage3ValidateWorldCandidateInMemory: () => ({ ok: true }),
-            stage3ValidateWorldDraftInMemory: () => ({ ok: true }),
+            stage3ValidateWorldDraftInMemory: (_captured, _settings, _ledger, parsed) => ({
+                ok: true, parsed: structuredClone(parsed),
+            }),
             currentPlayerActorNames: () => [],
             stage3PreparedWorldCheckpoint: () => preparedCheckpoint,
             persistActorActionAttemptsForTurn: async () => ({
@@ -5796,20 +5971,24 @@ test('P3 Phase1 readback requires one shared advanced transaction revision', () 
                 actorLedger: { revision: 1, digest: 'actor-before' },
                 continuityCheckpoint: { revision: 5, digest: 'checkpoint-before' },
                 continuity: { revision: 4, digest: continuityDigest },
+                worldPressure: { revision: 0, digest: 'field:{}' },
             },
         },
     };
     const namespaceAt = ({ actorRevision = 6, checkpointRevision = 6,
         continuityRevision = 4, actorDigest = ledger.digest,
         actorLedgerValue = { ...ledger, digest: actorDigest },
-        continuityValue = continuity, checkpointValue = checkpoint } = {}) => ({
+        continuityValue = continuity, checkpointValue = checkpoint,
+        worldPressureValue = {} } = {}) => ({
         actorLedger: actorLedgerValue,
         continuity: continuityValue,
         continuityCheckpoint: checkpointValue,
+        worldPressure: worldPressureValue,
         fieldRevisions: {
             actorLedger: actorRevision,
             continuityCheckpoint: checkpointRevision,
             continuity: continuityRevision,
+            worldPressure: 0,
         },
     });
 
@@ -7540,6 +7719,17 @@ test('production Phase2 zero-model recovery neutralizes a legacy prepared direct
     const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
     const sandbox = {
         Date,
+        normalizedStoredAssistantMessage: (message) => ({
+            ok: true,
+            text: typeof message?.mes === 'string' ? message.mes : 'accepted narrative',
+        }),
+        acceptedContentText: (value) => String(value || ''),
+        stripAssistantAcceptedMechanism: (value) => String(value || ''),
+        observeAcceptedContentPressure: () => ({}),
+        stage3VisibleContinuitySelection: (value) => ({
+            selectedThreadIds: [], selectedWorldIds: [], state: structuredClone(value),
+        }),
+        settleActorLedgerInjectionReceipts: async () => {},
         pendingActorActionAttempts: () => ({ attempts: [], candidates: [] }),
         actorActionTargetOf: () => structuredClone(actionTarget),
         stage3PreparedPhase1StatesMatch: () => true,
@@ -7549,6 +7739,8 @@ test('production Phase2 zero-model recovery neutralizes a legacy prepared direct
             scheduledBase: structuredClone(scheduledBase),
             next: structuredClone(candidateNext),
         }),
+        stage3FreshMvuProfileGate: () => ({ ok: true, validActorIds: [], invalidActorIds: [] }),
+        compressResolvedContinuityHistory: (value) => structuredClone(value),
         markActorSchedulingFailure: () => {},
         attachChangedSourceRefs: (base, next) => {
             attachedFrom = structuredClone(base);
@@ -7569,6 +7761,10 @@ test('production Phase2 zero-model recovery neutralizes a legacy prepared direct
         stage3TargetIsCurrent: () => ({ ok: true }),
         actorActionTargetMatches: exact,
         stage3AcceptedTargetsMatch: exact,
+        staleWorldResult: (reason, extra = {}) => ({
+            status: 'stale', reason, validationCode: reason, module: 'world',
+            zeroWrite: true, worldModelCalls: 0, ...extra,
+        }),
         stage3ActorLedgerAfterProfileOnlyEvolution: ({ freshLedger }) => ({
             ok: true,
             ledger: structuredClone(freshLedger || {}),
@@ -7696,23 +7892,30 @@ test('P3 keeps full persistent thread history while P4 remains a separate visibl
     const normalized = normalizeContinuityState({ chatId: 'chat-full-history', threads }, {
         chatId: 'chat-full-history', maxThreads: 12, maxResolved: 12,
     });
-    const expectedIds = threads.map((thread) => thread.id);
-    assert.equal(normalized.threads.length, 72);
+    const expectedResolved = threads.filter((thread) => thread.stage === 'resolved').slice(-12);
+    const expectedActive = threads.filter((thread) => thread.stage !== 'resolved');
+    const expectedIds = [...expectedResolved, ...expectedActive].map((thread) => thread.id);
+    assert.equal(normalized.threads.length, 54);
     assert.deepEqual(normalized.threads.map((thread) => thread.id), expectedIds);
     assert.equal(normalized.threads.at(-1).id, 'OFFSCREEN-72');
-    assert.equal(normalized.threads.filter((thread) => thread.stage === 'resolved').length, 30);
+    assert.equal(normalized.threads.filter((thread) => thread.stage === 'resolved').length, 12);
     assert.equal(normalized.threads.filter((thread) => thread.stage === 'advancing').length, 42);
-    const expectedSourceRefs = threads.map((thread) => normalizeSourceRef(thread.sourceRefs[0]));
+    const expectedSourceRefs = [...expectedResolved, ...expectedActive]
+        .map((thread) => normalizeSourceRef(thread.sourceRefs[0]));
     assert.deepEqual(normalized.threads.map((thread) => thread.sourceRefs[0]), expectedSourceRefs);
+    assert.deepEqual(
+        normalized.resolvedArchive.map((thread) => thread.id),
+        threads.filter((thread) => thread.stage === 'resolved').slice(0, 18).map((thread) => thread.id),
+    );
     assert.equal(JSON.stringify(normalized).includes('branch'), false);
     const clocked = advanceContinuityClocks(normalized, {
         chatId: 'chat-full-history', random: () => 0.9,
     }).state;
-    assert.equal(clocked.threads.length, 72);
+    assert.equal(clocked.threads.length, 54);
     assert.deepEqual(clocked.threads.map((thread) => thread.id), expectedIds);
     assert.deepEqual(clocked.threads.map((thread) => thread.sourceRefs[0]), expectedSourceRefs);
     const merged = mergeMarkerRecords(clocked, [], { chatId: 'chat-full-history', maxThreads: 12 });
-    assert.equal(merged.threads.length, 72);
+    assert.equal(merged.threads.length, 54);
     assert.deepEqual(merged.threads.map((thread) => thread.id), expectedIds);
     assert.deepEqual(merged.threads.map((thread) => thread.sourceRefs[0]), expectedSourceRefs);
     const parsed = parseContinuityOutput(JSON.stringify(merged), { chatId: 'chat-full-history', maxThreads: 12 });
@@ -7741,7 +7944,7 @@ test('P3 source retains every scheduled ActorRef inside a bounded model projecti
     const runner = sourceSection('async function runContinuityTarget(captured, {', 'function sameTargetExceptContent(left, right)');
     assert.match(
         runner,
-        /scheduledActors = actorSchedule\.selected;[\s\S]*?scheduledActorIds = scheduledActors\.map\(\(actor\) => actor\.actorId\)\.filter\(Boolean\)/u,
+        /scheduledActors = actorSchedule\.selected\.filter\([\s\S]*?Object\.hasOwn\(mvuProfilesByActorId,[\s\S]*?scheduledActorIds = scheduledActors\.map\(\(actor\) => actor\.actorId\)\.filter\(Boolean\)/u,
     );
     assert.doesNotMatch(runner, /actor_schedule_empty/u);
 });
@@ -8011,7 +8214,7 @@ test('P3 accepts only current-target P1 actor-registration receipt evolution', (
 });
 
 test('P3 local recall is deterministic and adds zero model calls', () => {
-    const recallSource = sourceSection('function stage3WorldbookRegexKey(value) {', 'function buildContinuityMessages({');
+    const recallSource = sourceSection('function stage3LocalRecallPacket({', 'function stage3WorldbookPromptMaterial(');
     assert.doesNotMatch(recallSource, /callModel\(|await |maxTokens|timeout|failover/u);
     assert.match(recallSource, /local_structured_schedule/u);
     assert.match(recallSource, /packet\.digest = fingerprint\(JSON\.stringify\(packet\)\)/u);
@@ -8172,4 +8375,102 @@ test('P3 Advance prompt distinguishes new actor drafts from existing ATT adjudic
     assert.match(prompt, /技术身份和账本字段由医生本地绑定/u);
     assert.match(prompt, /不要抄写或猜测任何内部技术标识/u);
     assert.doesNotMatch(active, /attemptId|actorRef|target|travelTurns|actualResourceCosts/u);
+});
+
+test('production structural lanes commit through CAS/readback with zero or held actors, and P4 receives only resolved consequences', async () => {
+    const structuralSource = sourceSection(
+        'function stage3StructuralLaneRowSafe',
+        'function stage3ValidateWorldDraftInMemory',
+    );
+    const structuralSandbox = {
+        deepClone: (value) => structuredClone(value),
+        normalizeContinuityState,
+    };
+    vm.runInNewContext(
+        `${structuralSource}\nthis.safe = stage3StructuralLaneRowSafe;\n`
+        + 'this.positive = stage3PositiveStructuralWorldDelta;\n'
+        + 'this.isolate = stage3IsolateHeldActorWorldDelta;',
+        structuralSandbox,
+    );
+    const laneIds = ['faction:pressure-1', 'environment:pressure-1'];
+    const rawWorld = {
+        factions: [
+            { id: 'faction-safe', sourceId: 'faction:pressure-1', condition: 'strained', summary: '粮道改道' },
+            { id: 'faction-held', sourceId: 'faction:pressure-1', actorRefs: [{ actorId: 'actor-held' }], condition: 'victorious' },
+        ],
+        environment: {
+            sourceId: 'environment:pressure-1', economy: '供给转紧', summary: '港区开始限流',
+            incidents: [{ id: 'incident-safe', sourceId: 'environment:pressure-1', summary: '风暴预警' }],
+        },
+    };
+    const base = normalizeContinuityState({
+        chatId: 'chat-structure', turn: 4,
+        threads: [{ id: 'existing-thread', stage: 'active', title: '既有线索' }],
+        world: { factions: [{ id: 'base-faction', condition: 'stable' }], environment: { economy: '正常' } },
+    }, { chatId: 'chat-structure', maxThreads: 24, maxResolved: 24 });
+    const leakedState = {
+        ...structuredClone(base),
+        threads: [{ id: 'held-thread', sourceId: 'faction:pressure-1', actorRefs: [{ actorId: 'actor-held' }], stage: 'advanced' }],
+    };
+    const held = structuralSandbox.isolate(leakedState, rawWorld, base, {
+        actorIds: ['actor-held'], structuralLaneIds: laneIds, rawThreads: leakedState.threads,
+    });
+    assert.ok(held.state.world.factions.some((row) => row.id === 'faction-safe'));
+    assert.equal(held.state.world.factions.some((row) => row.id === 'faction-held'), false);
+    assert.equal(held.state.threads.some((row) => row.id === 'held-thread'), false);
+    assert.equal(held.state.world.environment.economy, '供给转紧');
+    assert.equal(held.state.world.environment.incidents[0].id, 'incident-safe');
+
+    const commit = async (continuity) => {
+        let persisted;
+        const context = {
+            chatId: 'chat-structure',
+            chatMetadata: {
+                mvu_auto_doctor: {
+                    version: 13, chatId: 'chat-structure', rev: 1,
+                    fieldRevisions: { continuity: 1 }, continuity: structuredClone(base),
+                },
+            },
+            updateChatMetadata(patch) { this.chatMetadata = { ...this.chatMetadata, ...structuredClone(patch) }; },
+            async saveMetadata() { persisted = structuredClone(this.chatMetadata.mvu_auto_doctor); },
+            async readPersistedChatMetadata() { return structuredClone(persisted); },
+        };
+        const writer = loadNamespaceWriter(() => context);
+        const next = {
+            ...context.chatMetadata.mvu_auto_doctor,
+            rev: 2, fieldRevisions: { continuity: 2 }, continuity: structuredClone(continuity),
+        };
+        const ok = await writer.write(next, 'chat-structure', {
+            fields: ['continuity'], durable: true, force: true, requireReadback: true,
+            contentValidator: (value) => JSON.stringify(value?.continuity) === JSON.stringify(continuity),
+        });
+        return { ok, persisted };
+    };
+    const heldCommit = await commit(held.state);
+    assert.equal(heldCommit.ok, true);
+    assert.equal(heldCommit.persisted.continuity.world.environment.economy, '供给转紧');
+    assert.equal(heldCommit.persisted.continuity.threads.some((row) => row.id === 'held-thread'), false);
+
+    const zeroDelta = structuralSandbox.positive(rawWorld, { laneIds, heldActorIds: [] });
+    const zeroState = structuredClone(base);
+    zeroState.world.factions.push(...(zeroDelta.factions || []));
+    zeroState.world.environment = { ...zeroState.world.environment, ...zeroDelta.environment };
+    const zeroCommit = await commit(zeroState);
+    assert.equal(zeroCommit.ok, true);
+    assert.ok(zeroCommit.persisted.continuity.world.factions.some((row) => row.id === 'faction-safe'));
+    assert.ok(zeroCommit.persisted.continuity.world.environment.incidents.some((row) => row.id === 'incident-safe'));
+
+    const resolved = normalizeContinuityState({
+        chatId: 'chat-structure', turn: 10,
+        threads: [{
+            id: 'resolved-visible', stage: 'resolved', relation: 'linked', origin: 'main_derivative',
+            title: '港区风暴', resolution: '风暴绕过港口', effects: ['供给转紧'], rumors: ['港口限流'],
+            trigger: '下一次潮汐', offscreenBeat: '隐藏过程日志', nextBeat: '不应重放的下一步', resolvedTurn: 9,
+        }],
+    }, { chatId: 'chat-structure', maxThreads: 24, maxResolved: 24 });
+    const packetText = buildContinuityPacketText(resolved, {
+        selectedThreadIds: ['resolved-visible'], maxChars: 12000,
+    });
+    assert.match(packetText, /供给转紧|港口限流/u);
+    assert.doesNotMatch(packetText, /隐藏过程日志|不应重放的下一步/u);
 });

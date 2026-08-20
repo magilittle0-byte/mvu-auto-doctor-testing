@@ -494,7 +494,7 @@ test('P3 keeps due actors outside optional budgets through local recall and one 
     assert.match(ledger, /const optional = scored\.filter\(\(item\) => !isMustInclude\(item\)\)\.slice\(0, coreLimit\)/u);
     assert.match(
         source,
-        /scheduledActors = actorSchedule\.selected;[\s\S]*?scheduledActorIds = scheduledActors\.map\(\(actor\) => actor\.actorId\)\.filter\(Boolean\)/u,
+        /scheduledActors = actorSchedule\.selected\.filter\([\s\S]*?scheduledActorIds = scheduledActors\.map\(\(actor\) => actor\.actorId\)\.filter\(Boolean\)/u,
     );
     assert.match(source, /stage3LocalRecallPacket\(\{[\s\S]*?await generateWorldContinuitySingleBatch/u);
     assert.match(source, /stage3PersistPreparedActorAttemptsOnFreshLedger[\s\S]*?stage3PreparedWorldCheckpoint[\s\S]*?await persistActorActionAttemptsForTurn/u);

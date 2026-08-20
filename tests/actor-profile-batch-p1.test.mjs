@@ -5265,8 +5265,8 @@ test('production path keeps current-source profiles untruncated and commits thro
     assert.match(profileRender, /actorProfileMvuProfilesFromData\(data, ACTOR_PROFILE_MVU_ROOT\)/u);
     assert.match(profileRender, /createActorProfileSurfaceView/u);
     assert.doesNotMatch(profileRender, /applyActorProfileUiMutation|regenerateActorProfileV6Module|TavernDB|tableEdit/iu);
-    assert.match(mvuSurface, /profileReadiness\(profile\)/u);
-    assert.match(mvuSurface, /profileRefReady\(actor, profile\)/u);
+    assert.match(mvuSurface, /profileReadiness\(profile, \{ requiredCompletionMode \}\)/u);
+    assert.match(mvuSurface, /profileRefReady\(actor, profile, requiredCompletionMode\)/u);
     assert.match(mvuSurface, /status\.repairable/u);
     assert.match(mvuSurface, /status\.migratable/u);
     const transaction = source.slice(source.indexOf('const promotedActorIds = actorRegistration.promoted'));

@@ -15,6 +15,11 @@ import {
     validateActorProfileInsertCandidate,
 } from './actor-profile-v6-core.mjs';
 
+export {
+    ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION,
+    ACTOR_PROFILE_NARRATIVE_SECTION_KEYS,
+};
+
 export const ACTOR_PROFILE_UPDATE_BLOCK = Object.freeze({
     start: '<人物档案更新>',
     end: '</人物档案更新>',
@@ -22,6 +27,10 @@ export const ACTOR_PROFILE_UPDATE_BLOCK = Object.freeze({
 });
 
 export const ACTOR_PROFILE_MVU_ROOT = '/人物档案/byActorId';
+// Ticket issuance and semantic MVU commit share one bounded transaction
+// capacity.  Exceeding it must quarantine before any MVU write so recovery
+// evidence cannot be silently truncated after a successful commit.
+export const ACTOR_PROFILE_BATCH_CAPACITY = 64;
 export const ACTOR_PROFILE_MVU_SCHEMA_VERSION = 1;
 
 export const ACTOR_PROFILE_MVU_FIELDS = Object.freeze({
@@ -116,6 +125,14 @@ const TECHNICAL_STATUS_VALUES = new Set([
 function text(value, max = 1200) {
     return String(value ?? '').replace(/[ \t\r\n]+/gu, ' ').trim().slice(0, max);
 }
+function isPlaceholderTicketName(value) {
+    return /^(?:原创人物骰票|人物骰票|票据|ticket)\s*[-_:：#]?\s*\d+$/iu.test(text(value, 160));
+}
+function naturalActorName(value, actorId = '') {
+    const name = text(value, 160);
+    if (!name || isPlaceholderTicketName(name) || (actorId && name === String(actorId))) return '';
+    return name;
+}
 function nonEmpty(value) {
     return typeof value === 'string' ? Boolean(text(value))
         : Array.isArray(value) ? value.some((item) => Boolean(text(item)))
@@ -125,6 +142,10 @@ function canonical(value) {
     if (Array.isArray(value)) return value.map(canonical);
     if (!value || typeof value !== 'object') return value;
     return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+}
+
+export function actorProfileMvuSourceRefDigest(value) {
+    return `profile-source:${fingerprint(JSON.stringify(canonical(value)))}`;
 }
 function pointerPart(value) { return String(value).replace(/~/gu, '~0').replace(/\//gu, '~1'); }
 function normalizeFieldKey(value) {
@@ -357,8 +378,9 @@ export function parseActorProfileUpdateBlock(output, options = {}) {
             const entry = normalizeEntry(row);
             const failures = [];
             if (row.__technical) failures.push(TECHNICAL_FAILURE);
-            if (!entry.name) failures.push(FIXED_FAILURES.NAME_MISSING);
+            if (!naturalActorName(entry.name, entry.actorId)) failures.push(FIXED_FAILURES.NAME_MISSING);
             if (entry.mode === 'new' && !entry.ticketId) failures.push(FIXED_FAILURES.TICKET_MISSING);
+            if (entry.mode === 'new' && !entry.sourceAnchor) failures.push(FIXED_FAILURES.ANCHOR_MISSING);
             if (entry.mode === 'existing' && !entry.actorId) failures.push(FIXED_FAILURES.ACTOR_ID_MISSING);
             if (failures.length) quarantined.push({ index, entry, reason: failures[0], failures });
             else entries.push(entry);
@@ -410,8 +432,9 @@ export function parseActorProfileUpdateBlock(output, options = {}) {
     for (const [index, raw] of rawEntries.entries()) {
         const entry = normalizeEntry(raw);
         const failures = [...new Set(raw.__failures || [])];
-        if (!entry.name) failures.push(FIXED_FAILURES.NAME_MISSING);
+        if (!naturalActorName(entry.name, entry.actorId)) failures.push(FIXED_FAILURES.NAME_MISSING);
         if (entry.mode === 'new' && !entry.ticketId) failures.push(FIXED_FAILURES.TICKET_MISSING);
+        if (entry.mode === 'new' && !entry.sourceAnchor) failures.push(FIXED_FAILURES.ANCHOR_MISSING);
         if (entry.mode === 'existing' && !entry.actorId) failures.push(FIXED_FAILURES.ACTOR_ID_MISSING);
         if (containsTechnicalField(entry.fields)) failures.push(TECHNICAL_FAILURE);
         if (failures.length) quarantined.push({ index, entry, reason: failures[0], failures });
@@ -444,7 +467,13 @@ function ticketIdentity(ticket) {
             Number.isInteger(order) && order > 0 ? `票据${order}` : '']
             .map((item) => text(item, 160).toLocaleLowerCase()).filter(Boolean),
         actorId,
-        name: text(ticket?.name || ticket?.actorRef?.name || ref?.displayName, 160),
+        // Ticket issuance owns the stable ActorId/ticket/axes. A generated
+        // placeholder is never a character name; only an explicitly
+        // confirmed name may be used as a fallback.
+        name: naturalActorName(
+            ticket?.confirmedName || ticket?.verifiedName || ticket?.actorRef?.name || ref?.displayName,
+            actorId,
+        ),
         ticketMetadata: ticket?.metadata || ticket?.ticketMetadata || null,
         reservation,
     };
@@ -476,45 +505,91 @@ export function bindActorProfileUpdateEntries(parsed, { tickets = [], actors = [
     ]).filter(([id]) => id));
     const entries = [];
     const failures = [...(source.failures || [])];
-    const quarantined = [...(source.quarantined || [])];
+    const quarantined = [];
+    const failedActorTargets = [];
+    const addFailedTarget = (row, identity = null) => {
+        const entry = normalizeEntry(row?.entry || row || {});
+        if (entry.mode !== 'new') return;
+        const actorId = String(identity?.actorId || row?.actorId || entry.actorId || '').trim();
+        if (!actorId) return;
+        const failureCodes = [...new Set([
+            ...(Array.isArray(row?.failures) ? row.failures : []),
+            ...(row?.reason ? [row.reason] : []),
+        ].map((value) => text(value, 160)).filter(Boolean))].slice(0, 12);
+        failedActorTargets.push({
+            actorId,
+            ticketId: text(identity?.ticketId || entry.ticketId, 160),
+            name: naturalActorName(entry.name, actorId) || naturalActorName(identity?.name, actorId),
+            sourceAnchor: text(entry.sourceAnchor, 1200),
+            missingFields: [...new Set([
+                ...(Array.isArray(row?.missingFields) ? row.missingFields : []),
+                ...failureCodes,
+            ].map((value) => text(value, 160)).filter(Boolean))].slice(0, 24),
+            failureCodes,
+        });
+    };
+    const quarantine = (entry, reason, extra = {}, identity = null) => {
+        const row = { entry, reason, failures: [reason], ...extra };
+        const enriched = identity?.actorId
+            ? { ...row, actorId: identity.actorId, ticketId: identity.ticketId || entry.ticketId,
+                reservedActorRef: { actorId: identity.actorId } }
+            : row;
+        quarantined.push(enriched);
+        addFailedTarget(enriched, identity);
+    };
+    for (const row of source.quarantined || []) {
+        const entry = normalizeEntry(row?.entry || {});
+        let identity = null;
+        if (entry.mode === 'new') {
+            const key = text(entry.ticketId, 160).toLocaleLowerCase().replace(/^票据\s*/u, '');
+            const matches = byTicket.get(key) || [];
+            identity = matches.length === 1 ? matches[0] : null;
+        }
+        const enriched = identity?.actorId
+            ? { ...row, entry, actorId: identity.actorId, ticketId: identity.ticketId || entry.ticketId,
+                reservedActorRef: { actorId: identity.actorId } }
+            : { ...row, entry };
+        quarantined.push(enriched);
+        addFailedTarget(enriched, identity);
+    }
     for (const raw of source.entries || []) {
         const entry = normalizeEntry(raw); let identity = null;
         if (entry.mode === 'new') {
             const key = text(entry.ticketId, 160).toLocaleLowerCase().replace(/^票据\s*/u, '');
             const matches = byTicket.get(key) || [];
             if (matches.length !== 1) {
-                quarantined.push({
-                    entry,
-                    reason: FIXED_FAILURES.TICKET_UNKNOWN,
-                    failures: [FIXED_FAILURES.TICKET_UNKNOWN],
-                });
+                quarantine(entry, FIXED_FAILURES.TICKET_UNKNOWN);
                 continue;
             }
             identity = matches[0];
             if (!identity.actorId) {
-                quarantined.push({ entry, reason: FIXED_FAILURES.TICKET_ACTOR_MISSING,
-                    failures: [FIXED_FAILURES.TICKET_ACTOR_MISSING] });
+                quarantine(entry, FIXED_FAILURES.TICKET_ACTOR_MISSING, {}, identity);
                 continue;
             }
-            if (entry.sourceAnchor && acceptedNarrative && !acceptedNarrative.includes(entry.sourceAnchor)) {
-                quarantined.push({ entry, reason: FIXED_FAILURES.ANCHOR_MISSING,
-                    failures: [FIXED_FAILURES.ANCHOR_MISSING] });
+            const name = naturalActorName(entry.name, identity.actorId);
+            if (!name) {
+                quarantine(entry, FIXED_FAILURES.NAME_MISSING, {}, identity);
+                continue;
+            }
+            if (!entry.sourceAnchor || !acceptedNarrative
+                || !acceptedNarrative.includes(entry.sourceAnchor)
+                || !entry.sourceAnchor.includes(name)) {
+                quarantine(entry, FIXED_FAILURES.ANCHOR_MISSING, {}, identity);
                 continue;
             }
         } else {
             identity = byActor.get(entry.actorId);
             if (!identity) {
-                quarantined.push({ entry, reason: FIXED_FAILURES.ACTOR_UNKNOWN,
-                    failures: [FIXED_FAILURES.ACTOR_UNKNOWN] });
+                quarantine(entry, FIXED_FAILURES.ACTOR_UNKNOWN);
                 continue;
             }
             if (identity.name && entry.name && identity.name !== entry.name) {
-                quarantined.push({ entry, reason: FIXED_FAILURES.ACTOR_CONFLICT,
-                    failures: [FIXED_FAILURES.ACTOR_CONFLICT] });
+                quarantine(entry, FIXED_FAILURES.ACTOR_CONFLICT, {}, identity);
                 continue;
             }
         }
-        entries.push({ ...entry, actorId: identity.actorId, name: identity.name || entry.name,
+        entries.push({ ...entry, actorId: identity.actorId, name: naturalActorName(entry.name, identity.actorId)
+            || identity.name,
             ticketId: identity.ticketId || entry.ticketId, ticketMetadata: identity.ticketMetadata || null });
     }
     return {
@@ -522,6 +597,9 @@ export function bindActorProfileUpdateEntries(parsed, { tickets = [], actors = [
         entries,
         failures: [...new Set(failures)],
         quarantined,
+        failedActorTargets: [...new Map(failedActorTargets
+            .filter((item) => item.actorId)
+            .map((item) => [`${item.actorId}|${item.ticketId}`, item])).values()],
         source,
     };
 }
@@ -558,19 +636,23 @@ export function validateActorProfileUpdateEntry(entry, {
     };
 }
 
-export function profileReadiness(profile) {
+export function profileReadiness(profile, { requiredCompletionMode = '' } = {}) {
     const source = profile && typeof profile === 'object' ? profile : {};
     if (source.profileFormat !== 'narrative-v1') return { ready: false, complete: false, readbackReady: false, missingFields: NARRATIVE_KEYS, reason: 'profile_format_invalid' };
     const sections = source.narrativeSections || {};
     const missingFields = NARRATIVE_KEYS.filter((key) => fieldMissing(sections[key]?.text || sections[key])
         || !['confirmed', 'designed_seed', 'hypothesis'].includes(text(sections[key]?.source, 40)));
-    if (source.completionMode === 'full_adult') {
+    const completionMode = String(requiredCompletionMode || source.completionMode || '');
+    if (completionMode === 'full_adult') {
         const physiology = sections.physiology;
-        const physiologyReady = !fieldMissing(physiology?.text || physiology)
+        const physiologyCoverage = validateActorProfilePhysiologyCoverage(physiology?.text || physiology);
+        const physiologyReady = physiologyCoverage.ok === true
             && ['confirmed', 'designed_seed', 'hypothesis'].includes(text(physiology?.source, 40))
             && Number(physiology?.contractVersion || 0) >= ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION;
         if (!physiologyReady) {
-            missingFields.push(...ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => `physiology.${key}`));
+            missingFields.push(...(physiologyCoverage.missingFields?.length
+                ? physiologyCoverage.missingFields
+                : ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS.map((key) => `physiology.${key}`)));
         }
     }
     const meta = source.本地元数据 || source.localMetadata || {};
@@ -580,6 +662,7 @@ export function profileReadiness(profile) {
         ready: complete && readbackReady && ['complete', 'readback_ready'].includes(text(meta.status, 40)),
         complete, readbackReady, missingFields,
         reason: !complete ? 'profile_incomplete' : !readbackReady ? 'profile_readback_unverified' : '',
+        completionMode,
     };
 }
 
@@ -685,27 +768,65 @@ export function compileActorProfileMvuPatch(bound, {
     const source = bound && Array.isArray(bound.entries) ? bound : { entries: [], failures: ['profile_binding_missing'] };
     const failures = [...(source.failures || [])];
     const quarantined = [...(source.quarantined || [])];
+    const failedActorTargets = [...(source.failedActorTargets || [])];
     const operations = []; const profiles = {}; const writeSet = [];
+    const transactionActorCount = new Set([
+        ...(source.entries || []).map((entry) => text(entry?.actorId || entry?.ticketId, 160)),
+        ...(source.quarantined || []).map((entry) => text(entry?.actorId || entry?.ticketId, 160)),
+    ].filter(Boolean)).size;
+    if (transactionActorCount > ACTOR_PROFILE_BATCH_CAPACITY) {
+        failures.push('actor_profile.batch_capacity_exceeded');
+        return {
+            ok: false, operations: [], profiles: {},
+            failures: [...new Set(failures)],
+            quarantined: [...quarantined, { reason: 'actor_profile.batch_capacity_exceeded' }],
+            failedActorTargets, committableActorIds: [], emptyOperations: true,
+            commitStatus: 'quarantined', writeSet: [], atomic: false, profileRoot,
+        };
+    }
     if (!String(profileRoot || '').trim()) failures.push(FIXED_FAILURES.ROOT_MISSING);
     if (!sourceRefComplete(sourceRef)) failures.push(FIXED_FAILURES.SOURCE_INCOMPLETE);
     if (!String(profileRoot || '').trim() || !sourceRefComplete(sourceRef)) {
         return { ok: false, operations: [], profiles: {}, failures: [...new Set(failures)], quarantined: [...new Set(failures)], committableActorIds: [], emptyOperations: true, commitStatus: 'quarantined', writeSet: [], atomic: false, profileRoot };
     }
+    const rootState = String(profileRootPresent || '').trim();
+    if (!['missing_root', 'root_without_byActorId', 'ready'].includes(rootState)) {
+        failures.push(FIXED_FAILURES.ROOT_MISSING);
+        return {
+            ok: false, operations: [], profiles: {}, failures: [...new Set(failures)],
+            quarantined: [...new Set(failures)], committableActorIds: [], emptyOperations: true,
+            commitStatus: 'quarantined', writeSet: [], atomic: false, profileRoot,
+        };
+    }
     const shouldCreateRoot = profileRoot === ACTOR_PROFILE_MVU_ROOT
-        && (profileRootPresent === false
-            || (profileRootPresent == null && Object.keys(existingProfiles || {}).length === 0));
+        && rootState === 'missing_root';
+    const shouldCreateByActorId = profileRoot === ACTOR_PROFILE_MVU_ROOT
+        && rootState === 'root_without_byActorId';
     if (shouldCreateRoot) {
         operations.push({
             op: 'insert',
             path: '/人物档案',
             value: { schemaVersion: ACTOR_PROFILE_MVU_SCHEMA_VERSION, byActorId: {} },
         });
+    } else if (shouldCreateByActorId) {
+        // Preserve any existing root siblings (including legacy metadata) and
+        // create only the missing semantic child.  Never replace /人物档案.
+        operations.push({
+            op: 'insert',
+            path: '/人物档案/byActorId',
+            value: {},
+        });
     }
     for (const [index, raw] of source.entries.entries()) {
         const validation = validateActorProfileUpdateEntry(raw, { completionMode });
         if (!validation.ok) {
             const reason = validation.failures[0] || FIXED_FAILURES.INCOMPLETE;
-            failures.push(reason); quarantined.push({ index, actorId: text(raw?.actorId, 160), reason, missingFields: validation.missingFields.slice(0, 12) });
+            const actorId = text(raw?.actorId, 160);
+            quarantined.push({ index, actorId, reason, missingFields: validation.missingFields.slice(0, 12) });
+            if (actorId) failedActorTargets.push({ actorId, ticketId: text(raw?.ticketId, 160),
+                name: naturalActorName(raw?.name, actorId), sourceAnchor: text(raw?.sourceAnchor, 1200),
+                missingFields: validation.missingFields.slice(0, 12), failureCodes: [reason] });
+            failures.push(reason);
             continue;
         }
         const entry = validation.entry; const actorId = entry.actorId;
@@ -739,7 +860,15 @@ export function compileActorProfileMvuPatch(bound, {
         const checked = validateActorProfileInsertCandidate(candidate, {
             actorRef: { actorId, name: entry.name }, completionMode,
         });
-        if (!checked.ok) { failures.push(FIXED_FAILURES.INCOMPLETE); quarantined.push({ index, actorId, reason: FIXED_FAILURES.INCOMPLETE, missingFields: checked.missingFields?.slice(0, 12) || [] }); continue; }
+        if (!checked.ok) {
+            const missingFields = checked.missingFields?.slice(0, 12) || [];
+            failures.push(FIXED_FAILURES.INCOMPLETE);
+            quarantined.push({ index, actorId, reason: FIXED_FAILURES.INCOMPLETE, missingFields });
+            failedActorTargets.push({ actorId, ticketId: text(raw?.ticketId, 160),
+                name: naturalActorName(raw?.name, actorId), sourceAnchor: text(raw?.sourceAnchor, 1200),
+                missingFields, failureCodes: [FIXED_FAILURES.INCOMPLETE] });
+            continue;
+        }
         const profile = normalizeActorProfileV6(
             { ...checked.candidate, actorId, name: entry.name, completionMode },
             { actorId, name: entry.name, mode: completionMode },
@@ -750,7 +879,7 @@ export function compileActorProfileMvuPatch(bound, {
             ticketId: entry.ticketId || old?.本地元数据?.ticketId || '',
             ticketMetadata: entry.ticketMetadata || old?.本地元数据?.ticketMetadata || null,
             sourceRef: { ...sourceRef },
-            sourceRefDigest: `profile-source:${fingerprint(JSON.stringify(canonical(sourceRef)))}`,
+            sourceRefDigest: actorProfileMvuSourceRefDigest(sourceRef),
             revision: Number.isInteger(old?.本地元数据?.revision) ? old.本地元数据.revision + 1 : 1,
             status: 'complete', readbackVerified: Boolean(readbackVerified), inferredFields: [], updatedAt: new Date(now).toISOString(),
         };
@@ -772,7 +901,12 @@ export function compileActorProfileMvuPatch(bound, {
     const meaningfulOperations = operations.filter((op) => op.path !== '/人物档案');
     if (!meaningfulOperations.length) operations.length = 0;
     const partial = failures.length > 0 || quarantined.length > 0;
-    return { ok: operations.length > 0, operations, profiles, failures: [...new Set(failures)], quarantined, committableActorIds, emptyOperations: operations.length === 0, commitStatus: operations.length === 0 ? 'quarantined' : partial ? 'partial' : 'committable', writeSet, atomic: !partial, profileRoot };
+    return { ok: operations.length > 0, operations, profiles, failures: [...new Set(failures)], quarantined,
+        failedActorTargets: [...new Map(failedActorTargets.filter((item) => item?.actorId)
+            .map((item) => [`${item.actorId}|${item.ticketId || ''}`, item])).values()],
+        committableActorIds, emptyOperations: operations.length === 0,
+        commitStatus: operations.length === 0 ? 'quarantined' : partial ? 'partial' : 'committable',
+        writeSet, atomic: !partial, profileRoot };
 }
 
 export function markActorProfileReadback(profile, { verified = true } = {}) {
@@ -822,8 +956,11 @@ export function preserveActorProfileOperationsOnUpdateBlock(messageText, replace
     return { ok: true, block: renderUpdateVariableBlock(next, analysis), operations: next, preservedCount: preserved.length };
 }
 
-export function actorProfilePromptProjection(profile, { maxCharacters = 900 } = {}) {
-    const readiness = profileReadiness(profile);
+export function actorProfilePromptProjection(profile, {
+    maxCharacters = 900,
+    requiredCompletionMode = '',
+} = {}) {
+    const readiness = profileReadiness(profile, { requiredCompletionMode });
     if (!readiness.ready) return null;
     const sections = profile.narrativeSections || {};
     const summary = NARRATIVE_KEYS.map((key) => text(sections[key]?.text || sections[key], 220))

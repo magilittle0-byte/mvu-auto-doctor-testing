@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { actorProfileMvuDigest } from '../actor-profile-mvu-core.mjs';
+import {
+    actorProfileMvuDigest,
+    actorProfileMvuSourceRefDigest,
+} from '../actor-profile-mvu-core.mjs';
 import {
     actorProfileSurfaceRuntimeFingerprint,
     collapseActorProfileAccordion,
@@ -26,6 +29,7 @@ function completeProfile(actorId, name, revision = 1, readback = true) {
     }]));
     return {
         profileFormat: 'narrative-v1',
+        completionMode: 'full',
         actorRef: { kind: 'actor_ref', actorId, name, aliases: [`${name}别名`] },
         姓名与别名: { 姓名: name, 别名: [`${name}别名`] },
         narrativeSections: sections,
@@ -33,6 +37,7 @@ function completeProfile(actorId, name, revision = 1, readback = true) {
         本地元数据: {
             revision, status: readback ? 'readback_ready' : 'complete',
             readbackVerified: readback, sourceRef: target,
+            sourceRefDigest: actorProfileMvuSourceRefDigest(target),
         },
     };
 }
@@ -44,6 +49,9 @@ function actorFor(profile, ready = true) {
         profileRef: {
             status: ready ? 'ready' : 'pending', readbackVerified: ready,
             digest: actorProfileMvuDigest(profile),
+            sourceRefDigest: profile.本地元数据.sourceRefDigest,
+            sourceRef: target,
+            completionMode: profile.completionMode,
         },
     };
 }

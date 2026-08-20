@@ -1,0 +1,12 @@
+export const PROMPT_CONTEXT_CORE_VERSION: string;
+export function stripActorProfileReceiptBlocks(value: unknown): { text: string; removed: number };
+export function extractActorProfileReceiptBlocks(value: unknown): string[];
+export function normalizeAssistantStoredText(value: unknown): { ok: boolean; text?: string; reason?: string };
+export function normalizeStoredAssistantMessage(message: unknown): { ok: boolean; text?: string; reason?: string };
+export function sanitizeOutgoingChatCopy(chat: unknown): { chat: unknown; removed: number };
+export function sanitizeFlatPromptByExactAssistantSource(prompt: unknown, sourceChat: unknown): { prompt: string; replaced: number; unsupported: boolean };
+export function inspectFlatPromptAfterAssistantChatSanitized(prompt: unknown, sourceChat: unknown): { prompt: string; replaced: number; unsupported: boolean };
+export function sanitizeActorProfilePromptPayload(eventData: unknown, sourceChat: unknown): { eventData: unknown; removed: number; replaced: number; unsupported: boolean; apiType: string };
+export function sanitizeActorProfilePromptPayloadInPlace(eventData: Record<string, unknown>, sourceChat: unknown): { eventData: unknown; removed: number; replaced: number; unsupported: boolean; apiType: string };
+export function selectBoundedRelevantActorIds(options?: Record<string, unknown>): { actorIds: string[]; maxActors: number; maxChars: number; maxTokens: number; omittedActorCount: number };
+export function actorProfilePromptProjectionBounded(state: unknown, options?: { maxChars?: number }): Record<string, unknown>;

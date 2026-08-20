@@ -10,6 +10,11 @@ let foregroundGenerationStarting = null;
 let pendingAcceptedFinalSession = null;
 let acceptedFinalDispatchInFlight = null;
 let acceptedFinalDispatchChain = Promise.resolve();
+let lastActorProfilePromptSanitization = {
+    status: 'not-yet', apiType: '', removed: 0, replaced: 0,
+    unsupported: false, eventName: '',
+};
+let lastActorProfilePromptReadyProof = null;
 const acceptedFinalDispatchPromises = new Map();
 const acceptedFinalLaunchPromises = new Map();
 function acceptedFinalDispatchKey(generation) {
@@ -38,6 +43,18 @@ function preemptHostBackgroundModelControllersForForegroundGeneration() { return
 function recordModelDiagnostic(entry) { globalThis.__doctorDiagnostics?.push(entry); }
 function hydrateVariableRepairCenterStatus() {}
 function hydrateDoctorRepairCenterStatus() {}
+function bindDoctorChatDeletionEvents() {}
+function bindActorProfilePromptSanitizationEvents() {}
+`;
+
+const profilePromptStateStubs = `
+let lastActorProfilePromptSanitization = {
+    status: 'not-yet', apiType: '', removed: 0, replaced: 0,
+    unsupported: false, eventName: '',
+};
+let lastActorProfilePromptReadyProof = null;
+function bindDoctorChatDeletionEvents() {}
+function bindActorProfilePromptSanitizationEvents() {}
 `;
 
 function sourceSection(start, end) {
@@ -204,7 +221,11 @@ test('R10 rejected lifecycle starts remain ignored and create zero Doctor state'
             pendingAcceptedFinalTimer: null, lastInjectionInspection: {}, continuationIdentityHint: null,
             getContext: () => ({
                 chatId: 'chat-a', chat: [],
-                eventTypes: { GENERATION_STARTED: 'generation_started' },
+                eventTypes: {
+                    GENERATION_STARTED: 'generation_started',
+                    CHAT_DELETED: 'chat_deleted',
+                    CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
+                },
                 eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
             }),
             acceptedFinalSessionIsCurrent: (generation) => generation === sandbox.activeGenerationSession,
@@ -216,6 +237,8 @@ test('R10 rejected lifecycle starts remain ignored and create zero Doctor state'
             enqueueActorProfiles: () => { state.tasks += 1; },
             enqueueContinuity: () => { state.tasks += 1; },
             writeChatNamespace: () => { state.namespaceWrites += 1; },
+            extractDeletedChatId: () => null,
+            disposeDoctorChatScope: () => undefined,
             setStatus: () => { state.statuses += 1; },
             setBusy: () => { state.busy += 1; },
             setTimeout: () => 1, clearTimeout: () => undefined,
@@ -323,6 +346,8 @@ test('R9 default opening without a generation lifecycle does zero Doctor work', 
                 GENERATION_STOPPED: 'generation_stopped',
                 GENERATION_ENDED: 'generation_ended',
                 CHAT_CHANGED: 'chat_changed',
+                CHAT_DELETED: 'chat_deleted',
+                CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
             },
             eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
         }),
@@ -828,6 +853,13 @@ test('runtime fingerprint binds accepted-final keying, foreground flush, and unl
     };
     const runtimeFor = (overrides = {}) => Function(
         'VERSION',
+        'PROMPT_PROFILE_SANITIZER_VERSION',
+        'ACTOR_PROFILE_PRESET_CONTRACT_VERSION',
+        'ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256',
+        'ACTOR_PROFILE_MAX_TRANSACTION_ACTORS',
+        'ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY',
+        'DOCTOR_CHAT_SCOPE_CORE_VERSION',
+        'ACTOR_OPERATIONAL_STATE_CORE_VERSION',
         'fingerprint',
         'actorProfileRecoveryCriticalFingerprint',
         'actorProfileGenerationCriticalFingerprint',
@@ -839,7 +871,9 @@ test('runtime fingerprint binds accepted-final keying, foreground flush, and unl
         ...helperNames,
         `${runtimeSource}; return doctorRuntimeCriticalFingerprint;`,
     )(
-        'test-version', digest,
+        'test-version', 'prompt-context-core-v1', 'post-content-before-options-v6',
+        '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+        64, 64, 'doctor-chat-scope-core-v1', 'actor-operational-state-core-v1', digest,
         () => 'recovery', () => 'generation', () => 'batch', () => 'authority',
         () => 'continuity', () => 'variable-repair', () => 'doctor-repair',
         ...helperNames.map((name) => overrides[name]
@@ -1485,6 +1519,8 @@ async function runProductionP4CommitLeaseGate({ externalProvider, cleanupFailed 
             throw new Error('foreign lease must not be confirmed');
         },
         writeChatNamespace: async () => { state.namespaceWrites += 1; return true; },
+        extractDeletedChatId: () => null,
+        disposeDoctorChatScope: () => undefined,
         deepClone: (value) => structuredClone(value),
         Date,
     };
@@ -1822,7 +1858,7 @@ async function runCleanupFailedAcceptedFinalLifecycle({ type, useProductionCandi
         __doctorDiagnostics: state.diagnostics,
     };
     vm.runInNewContext(
-        `${trace}\n${candidate}\n${identity}\n${support}\n${dispatch}\n${accept}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents; this.readTrace = () => generationLifecycleTraceDiagnosticProjection(getContext());`,
+        `${profilePromptStateStubs}\n${trace}\n${candidate}\n${identity}\n${support}\n${dispatch}\n${accept}\n${precompose}\n${bind}\nthis.bindEvents = bindEvents; this.readTrace = () => generationLifecycleTraceDiagnosticProjection(getContext());`,
         sandbox,
     );
     sandbox.bindEvents();
@@ -1907,7 +1943,11 @@ test('R8 keeps the P0 session when P4 precompose throws', async () => {
         pendingAcceptedFinalTimer: null, lastInjectionInspection: {}, continuationIdentityHint: null,
         getContext: () => ({
             chatId: 'chat-a', chat: [],
-            eventTypes: { GENERATION_STARTED: 'generation_started' },
+            eventTypes: {
+                GENERATION_STARTED: 'generation_started',
+                CHAT_DELETED: 'chat_deleted',
+                CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
+            },
             eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
         }),
         generationCandidateAllowed: () => ({ allowed: true, generationType: 'normal' }),
@@ -1916,6 +1956,9 @@ test('R8 keeps the P0 session when P4 precompose throws', async () => {
         resetCurrentModelCallStats: () => undefined,
         precomposeNextTurnConsumer: async () => { throw new Error('p4 only'); },
         recordGenerationLifecycleTrace: (code, detail) => state.traces.push({ code, detail }),
+        extractDeletedChatId: () => null,
+        disposeDoctorChatScope: () => undefined,
+        setStatus: () => undefined,
         setTimeout: () => 1, clearTimeout: () => undefined,
         Date: { now: () => 7 }, Math,
     };
@@ -1957,7 +2000,12 @@ test('R8 chat switch isolates a late deferred P4 rejection from chat B', async (
         downstreamBarrierProtocol: null, downstreamBarrierProtocolChatId: '',
         getContext: () => ({
             chatId: state.chatId, chat: [],
-            eventTypes: { GENERATION_STARTED: 'generation_started', CHAT_CHANGED: 'chat_changed' },
+            eventTypes: {
+                GENERATION_STARTED: 'generation_started',
+                CHAT_CHANGED: 'chat_changed',
+                CHAT_DELETED: 'chat_deleted',
+                CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
+            },
             eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
         }),
         generationCandidateAllowed: () => ({ allowed: true, generationType: 'normal' }),
@@ -1968,6 +2016,9 @@ test('R8 chat switch isolates a late deferred P4 rejection from chat B', async (
             if (session.chatId === 'chat-a') await lateP4.promise;
         },
         clearActorProfileReadShadow: () => undefined, clearTimeout: () => undefined,
+        extractDeletedChatId: () => null, disposeDoctorChatScope: () => undefined,
+        actorProfileSurfaceBusy: new Map(), actorProfileSurfaceFailures: new Map(),
+        actorProfileSurfaceCache: { key: '', profiles: null, readError: '' },
         resetChatScopedRuntimeDiagnostics: () => undefined,
         currentPendingSovereigntyObservationRecords: () => undefined,
         latestUndoRecord: () => null, readChatNamespace: () => ({}),
@@ -1982,10 +2033,13 @@ test('R8 chat switch isolates a late deferred P4 rejection from chat B', async (
     };
     vm.runInNewContext(`${traceVm}\n${bind}\nthis.bindEvents = bindEvents; this.getTrace = () => generationLifecycleTrace;`, sandbox);
     sandbox.bindEvents();
+    sandbox.actorSovereigntyScopeSelectorCache.set('chat-a', { actorId: 'actor-a' });
+    sandbox.actorSovereigntyScopeSelectorCache.set('chat-old', { actorId: 'actor-old' });
     const startA = state.callbacks.get('generation_started')('normal', {}, false);
     await new Promise((resolve) => setImmediate(resolve));
     state.chatId = 'chat-b';
     await state.callbacks.get('chat_changed')();
+    assert.equal(sandbox.actorSovereigntyScopeSelectorCache.size, 0, 'chat switch clears stale selector caches');
     await state.callbacks.get('generation_started')('normal', {}, false);
     const bInspection = sandbox.lastInjectionInspection;
     const bStatuses = state.statuses.length;
@@ -2038,12 +2092,18 @@ test('R7 ENDED without a session is an ephemeral diagnostic with zero release or
         pendingAcceptedFinalTimer: null,
         getContext: () => ({
             chatId: 'chat-a',
-            eventTypes: { GENERATION_ENDED: 'generation_ended' },
+            eventTypes: {
+                GENERATION_ENDED: 'generation_ended',
+                CHAT_DELETED: 'chat_deleted',
+                CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
+            },
             eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
         }),
         setStatus: (...args) => state.statuses.push(args),
         releaseNextTurnConsumer: async () => { state.releases += 1; return true; },
         writeChatNamespace: async () => { state.writes += 1; return true; },
+        extractDeletedChatId: () => null,
+        disposeDoctorChatScope: () => undefined,
         setTimeout: () => { throw new Error('no accepted-final timer is expected'); },
         clearTimeout: () => undefined,
     };
@@ -2088,10 +2148,15 @@ test('actual chat-change handler clears the old Doctor slot so the new chat can 
             chatId: 'chat-new', eventTypes: {
                 CHAT_CHANGED: 'chat_changed', GENERATION_STARTED: 'generation_started',
                 GENERATION_ENDED: 'generation_ended',
+                CHAT_DELETED: 'chat_deleted',
+                CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
             },
             eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
         }),
         clearActorProfileReadShadow: () => undefined,
+        extractDeletedChatId: () => null, disposeDoctorChatScope: () => undefined,
+        actorProfileSurfaceBusy: new Map(), actorProfileSurfaceFailures: new Map(),
+        actorProfileSurfaceCache: { key: '', profiles: null, readError: '' },
         clearTimeout: () => undefined,
         invalidateOperations: () => { state.invalidates += 1; },
         resetChatScopedRuntimeDiagnostics: () => undefined,
@@ -2192,6 +2257,8 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
         eventTypes: {
             CHAT_CHANGED: 'chat_changed', GENERATION_STARTED: 'generation_started',
             GENERATION_ENDED: 'generation_ended',
+                CHAT_DELETED: 'chat_deleted',
+                CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
         },
         eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
     });
@@ -2253,6 +2320,9 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
         setStatus: (...args) => state.statuses.push(args), setSocialStatus: () => undefined,
         setActorProfileStatus: () => undefined, setContinuityStatus: () => undefined, setForumStatus: () => undefined,
         clearActorProfileReadShadow: () => undefined, clearTimeout: () => undefined,
+        extractDeletedChatId: () => null, disposeDoctorChatScope: () => undefined,
+        actorProfileSurfaceBusy: new Map(), actorProfileSurfaceFailures: new Map(),
+        actorProfileSurfaceCache: { key: '', profiles: null, readError: '' },
         invalidateOperations: () => undefined, resetChatScopedRuntimeDiagnostics: () => undefined,
         currentPendingSovereigntyObservationRecords: () => undefined,
         pendingSerendipityDraft: null, pendingSerendipityBaseline: null, pendingNpcDesignTicketBatch: null,
@@ -2371,6 +2441,7 @@ test('P4 reads the prior producer without rewriting identity and three accepted 
             GENERATION_STARTED: 'generation_started',
             GENERATION_ENDED: 'generation_ended',
             GENERATION_STOPPED: 'generation_stopped',
+            CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
         },
         eventSource: { on: (name, callback) => state.callbacks.set(name, callback) },
     };
@@ -2471,7 +2542,7 @@ test('P4 reads the prior producer without rewriting identity and three accepted 
         Date, Math,
     };
     vm.runInNewContext(
-        `${runtimeIdentity}\n${candidate}\n${acceptedIdentity}\n${support}\n${accept}\n${bind}`
+        `${runtimeIdentity}\n${candidate}\n${acceptedIdentity}\n${support}\n${accept}\nfunction bindDoctorChatDeletionEvents() {}\nfunction bindActorProfilePromptSanitizationEvents() {}\n${bind}`
         + '\nthis.bindEvents = bindEvents; this.ensureRuntimeTargetIdentity = ensureRuntimeTargetIdentity;',
         sandbox,
     );

@@ -22,6 +22,19 @@ const preset = JSON.parse(await readFile(new URL(
     import.meta.url,
 ), 'utf8'));
 
+const doctorRepairOwnerFixture = `
+function doctorRepairOwnerIsCurrent(owner) {
+    return Boolean(owner && owner.cancelled !== true && String(owner.chatId || '')
+        === String(getContext()?.chatId || ''));
+}
+`;
+const normalizedAssistantFixture = `
+function normalizedStoredAssistantMessage(message) {
+    const text = typeof message?.mes === 'string' ? message.mes : '';
+    return text ? { ok: true, text } : { ok: false, reason: 'unsupported' };
+}
+`;
+
 test('selected preset exposes one accepted-final natural-language profile block immediately after content', () => {
     const prompts = Array.isArray(preset.prompts) ? preset.prompts : [];
     const profilePrompts = prompts.filter((entry) => (
@@ -36,9 +49,9 @@ test('selected preset exposes one accepted-final natural-language profile block 
     assert.match(profile.content, /ActorId/u);
     assert.match(profile.content, /JSONPatch/u);
     assert.match(profile.content, /技术字段/u);
-    assert.match(profile.content, /<\/content> 一闭合就立刻输出/u);
-    assert.match(profile.content, /然后才继续 <luntan>、<options>、<UpdateVariable>/u);
-    assert.match(profile.content, /不得把回执拖到可能被输出截断的回复最末尾/u);
+    assert.match(profile.content, /<content>正文…<luntan><\/luntan><\/content>；随后且仅随后输出/u);
+    assert.match(profile.content, /之后才继续 <options>、<UpdateVariable>/u);
+    assert.match(profile.content, /不得把回执拖到可能被输出截断的回复末尾/u);
     assert.match(profile.content, /没有变化时只输出 <!-- 人物档案无变化 -->/u);
     for (const key of [
         'generalBaseline', 'reproductiveAnatomy', 'secondaryTraits',
@@ -408,9 +421,27 @@ test('doctor repair projection changes the semantic and runtime fingerprints', (
         return new Function(
             'fingerprint',
             'VERSION',
+            'PROMPT_PROFILE_SANITIZER_VERSION',
+            'ACTOR_PROFILE_PRESET_CONTRACT_VERSION',
+            'ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256',
+            'ACTOR_PROFILE_MAX_TRANSACTION_ACTORS',
+            'ACTOR_PROFILE_RECOVERY_EVIDENCE_CAPACITY',
+            'DOCTOR_CHAT_SCOPE_CORE_VERSION',
+            'ACTOR_OPERATIONAL_STATE_CORE_VERSION',
             ...dependencies,
             `${runtimeFingerprintSection}; return doctorRuntimeCriticalFingerprint;`,
-        )(fingerprint, 'test-version', ...values)();
+        )(
+            fingerprint,
+            'test-version',
+            'prompt-context-core-v1',
+            'post-content-before-options-v6',
+            '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487',
+            64,
+            64,
+            'doctor-chat-scope-core-v1',
+            'actor-operational-state-core-v1',
+            ...values,
+        )();
     };
     const runtimeBase = makeRuntime();
     for (const helper of [
@@ -782,7 +813,7 @@ test('later verified module recovery suppresses old failure capsules until a new
         persistDoctorRepairCapsules: async () => { counters.capsules += 1; return true; },
         deepClone: (value) => structuredClone(value),
     });
-    vm.runInNewContext(`${runSource}\nthis.runAll = runDoctorRepairCenterUnlocked;`, sandbox);
+    vm.runInNewContext(`${doctorRepairOwnerFixture}\n${runSource}\nthis.runAll = runDoctorRepairCenterUnlocked;`, sandbox);
     const noWorkResult = await sandbox.runAll('all', { chatId: 'chat-a', index: 4 }, 'target-a');
     assert.equal(noWorkResult.status, 'nochange');
     assert.deepEqual(counters, { modules: 0, capsules: 0 });
@@ -1627,7 +1658,7 @@ test('world terminal diagnostics require applied plus durable readback before cl
             return true;
         },
     });
-    vm.runInNewContext(`${runSource}\nthis.runAll = runDoctorRepairCenterUnlocked;`, sandbox);
+    vm.runInNewContext(`${doctorRepairOwnerFixture}\n${runSource}\nthis.runAll = runDoctorRepairCenterUnlocked;`, sandbox);
     const worldOff = await sandbox.runAll('all', captured, 'deadbeef');
     assert.equal(worldOff.status, 'nochange');
     assert.deepEqual(Array.from(worldOff.actions), []);
@@ -1913,7 +1944,9 @@ test('repair-all target discovery is completely read-only and rejects identity-l
         latestAiMessage: () => ({ index: 1 }),
         doctorRepairTargetIdentityDigest: (target) => target ? 'deadbeef' : '',
         doctorRepairCenterModuleKey: (module, digest) => `${digest}:${module}`,
-        doctorRepairJoinedModuleOutcome: (_module, _captured, _digest, result) => result,
+        doctorRepairJoinedModuleOutcome: (module, _captured, _digest, result) => ({
+            status: 'completed', joined: true, actions: [{ module, ...result }],
+        }),
         releaseDoctorRepairModuleRequests: () => undefined,
         runDoctorRepairCenterUnlocked: async (_requested, captured) => (
             captured
@@ -1925,7 +1958,7 @@ test('repair-all target discovery is completely read-only and rejects identity-l
         ),
     };
     vm.runInNewContext(
-        `${idSource}\n${captureSource}\n${requestSource}\n`
+        `${normalizedAssistantFixture}\n${doctorRepairOwnerFixture}\n${idSource}\n${captureSource}\n${requestSource}\n`
         + 'this.capture = captureDoctorRepairTargetReadOnly; this.run = runDoctorRepairCenter;',
         sandbox,
     );
@@ -1997,7 +2030,9 @@ test('the first repair click resolves the live sovereignty scope before freezing
         latestAiMessage: () => ({ index: 1 }),
         doctorRepairTargetIdentityDigest: (target) => target?.scopeDigest || '',
         doctorRepairCenterModuleKey: (module, digest) => `${digest}:${module}`,
-        doctorRepairJoinedModuleOutcome: (_module, _captured, _digest, result) => result,
+        doctorRepairJoinedModuleOutcome: (module, _captured, _digest, result) => ({
+            status: 'completed', joined: true, actions: [{ module, ...result }],
+        }),
         releaseDoctorRepairModuleRequests: () => undefined,
         runDoctorRepairCenterUnlocked: async (_requested, captured) => {
             state.capturedScope = captured?.scopeDigest || '';
@@ -2005,7 +2040,7 @@ test('the first repair click resolves the live sovereignty scope before freezing
         },
     };
     vm.runInNewContext(
-        `${idSource}\n${captureSource}\n${requestSource}\nthis.run = runDoctorRepairCenter;`,
+        `${normalizedAssistantFixture}\n${doctorRepairOwnerFixture}\n${idSource}\n${captureSource}\n${requestSource}\nthis.run = runDoctorRepairCenter;`,
         sandbox,
     );
     assert.equal((await sandbox.run('profile')).status, 'nochange');
@@ -2073,7 +2108,7 @@ test('repair-all profile health projection reuses the frozen read-only target', 
         doctorRepairModulesFromSignals,
     };
     vm.runInNewContext(
-        `${idSource}\n${captureSource}\n${profileSource}\n${selectorSource}\n`
+        `${normalizedAssistantFixture}\n${idSource}\n${captureSource}\n${profileSource}\n${selectorSource}\n`
         + 'this.capture = captureDoctorRepairTargetReadOnly; '
         + 'this.select = doctorRepairModulesNeedingRepair;',
         sandbox,
@@ -2222,7 +2257,7 @@ test('production orchestrator never records an old-chat or old-scope result afte
             },
             deepClone: (value) => structuredClone(value),
         };
-        vm.runInNewContext(`${runSource}\nthis.run = runDoctorRepairCenterUnlocked;`, sandbox);
+        vm.runInNewContext(`${doctorRepairOwnerFixture}\n${runSource}\nthis.run = runDoctorRepairCenterUnlocked;`, sandbox);
         return { sandbox, state };
     };
     const afterOutcome = makeSandbox();
@@ -2263,14 +2298,16 @@ test('same Doctor request joins once while different requests stay serialized', 
         doctorRepairCenterRequests: new Map(),
         doctorRepairCenterModuleRequests: new Map(),
         doctorRepairCenterQueueGeneration: 0,
+        doctorRepairJoinedModuleOutcome: (module, _captured, _digest, result) => ({
+            status: 'completed', joined: true, actions: [{ module, ...result }],
+        }),
         syncTaskCancelButtons: () => undefined,
         doctorRepairCenterModuleKey: (module, digest) => `${digest}:${module}`,
-        doctorRepairJoinedModuleOutcome: (_module, _captured, _digest, result) => result,
         releaseDoctorRepairModuleRequests: () => undefined,
         getContext: () => ({ chatId: 'chat-a' }),
         latestAiMessage: () => ({ index: 4 }),
         resolveCurrentActorSovereigntyScope: async () => ({ resolved: true, scope: {} }),
-        captureDoctorRepairTargetReadOnly: () => ({ index: 4, digest: 'deadbeef' }),
+        captureDoctorRepairTargetReadOnly: () => ({ chatId: 'chat-a', index: 4, digest: 'deadbeef' }),
         doctorRepairTargetIdentityDigest: (target) => target?.digest || '',
         runDoctorRepairCenterUnlocked: async (requested) => {
             calls += 1;
@@ -2281,7 +2318,7 @@ test('same Doctor request joins once while different requests stay serialized', 
             return { status: 'completed', requested };
         },
     };
-    vm.runInNewContext(`${requestSource}\nthis.run = runDoctorRepairCenter;`, sandbox);
+    vm.runInNewContext(`${doctorRepairOwnerFixture}\n${requestSource}\nthis.run = runDoctorRepairCenter;`, sandbox);
     const first = sandbox.run('all');
     const duplicate = sandbox.run('all');
     await new Promise((resolve) => setImmediate(resolve));
@@ -2321,6 +2358,9 @@ test('repair-all publishes module slots, later explicit clicks retry, and invali
         doctorRepairCenterRequests: new Map(),
         doctorRepairCenterModuleRequests: new Map(),
         doctorRepairCenterQueueGeneration: 0,
+        doctorRepairJoinedModuleOutcome: (module, _captured, _digest, result) => ({
+            status: 'completed', joined: true, actions: [{ module, ...result }],
+        }),
         syncTaskCancelButtons: () => undefined,
         latestDoctorRepairCenterKind: 'busy',
         setDoctorRepairCenterStatus: (text, kind, options) => {
@@ -2329,7 +2369,7 @@ test('repair-all publishes module slots, later explicit clicks retry, and invali
         getContext: () => ({ chatId: 'chat-a' }),
         latestAiMessage: () => ({ index: 4 }),
         resolveCurrentActorSovereigntyScope: async () => ({ resolved: true, scope: {} }),
-        captureDoctorRepairTargetReadOnly: () => ({ index: 4, digest: 'deadbeef' }),
+        captureDoctorRepairTargetReadOnly: () => ({ chatId: 'chat-a', index: 4, digest: 'deadbeef' }),
         doctorRepairTargetIdentityDigest: (target) => target?.digest || '',
         deepClone: (value) => structuredClone(value),
         runDoctorRepairModule: async () => {
@@ -2338,7 +2378,7 @@ test('repair-all publishes module slots, later explicit clicks retry, and invali
         },
     };
     vm.runInNewContext(
-        `${moduleSource}\n${invalidateSource}\n${requestSource}\n`
+        `${doctorRepairOwnerFixture}\n${moduleSource}\n${invalidateSource}\n${requestSource}\n`
         + 'this.run = runDoctorRepairCenter; this.invalidate = invalidateDoctorRepairCenterRequests;',
         sandbox,
     );
@@ -2457,7 +2497,7 @@ test('production repair-all invokes only unhealthy modules and a healthy target 
             persistDoctorRepairCapsules: async () => { state.persists += 1; return true; },
             deepClone: (value) => structuredClone(value),
         };
-        vm.runInNewContext(`${runSource}\nthis.run = runDoctorRepairCenterUnlocked;`, sandbox);
+        vm.runInNewContext(`${doctorRepairOwnerFixture}\n${runSource}\nthis.run = runDoctorRepairCenterUnlocked;`, sandbox);
         return {
             result: await sandbox.run('all', { chatId: 'chat-a', index: 4 }, 'deadbeef'),
             state,

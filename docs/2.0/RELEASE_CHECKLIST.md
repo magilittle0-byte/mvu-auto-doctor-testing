@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.28 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.29 正式门禁清单
 
-候选：`2.0.0-rc.28`（当前仅测试仓；须在当前 loaded fingerprint 下完成同一聊天连续十二个有效回复。正常正文不得 reroll；仅正文硬失败可替换当前回复，Doctor/MVU/P3/P4 故障必须在已接受正文的精确 SourceRef 上修复。）
+候选：`2.0.0-rc.29`（当前仅测试仓；须在当前 loaded fingerprint 下完成同一聊天连续十二个有效回复。正常正文不得 reroll；仅正文硬失败可替换当前回复，Doctor/MVU/P3/P4 故障必须在已接受正文的精确 SourceRef 上修复。）
 
-当前状态：rc.27 提交 `0f1083c` 已按 runtime fingerprint `runtime-critical:939029:83b91472` 实际加载。真实第二个 accepted 回复形成一张六段基础 MVU 档案，人物档案模型调用为 0，世界与 P4 收束；但 `full_adult` 生理详细字段为空，编译/ready/前端三层误判为绿色，顶部摘要又被成功事务遗留的 `canRetry` 错误染红。rc.28 同时修复生理合同与终态投影后仍须完成一次完整套件、测试仓 main 推送、重新加载、同一已接受正文单人物修复与回读/刷新核验；旧指纹证据不算 rc.28 通过。
+当前状态：rc.29 已绑定候选预设 SHA-256 `5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487`，并纳入 runtime fingerprint。rc.27/rc.28 的真实观察保留在历史日志，但不适用于 rc.29；首轮完整自动套件为 658 项中 626 通过、32 项失败，修复旧 VM fixture 合同漂移与 resolved 重开 P1 后，最终完整自动套件为 662/662，通过 0 项失败，duration `13499.7558 ms`。真实宿主、目标模型、数据库、Tauri/SillyTavern 与十二回合门禁尚未运行。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

@@ -2,6 +2,7 @@ import { fingerprint } from '../../core.mjs';
 import { isActorId } from '../../actor-ref-core.mjs';
 import {
     actorProfileMvuDigest,
+    actorProfileMvuSourceRefDigest,
     profileReadiness,
 } from '../../actor-profile-mvu-core.mjs';
 import { ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION } from '../../actor-profile-v6-core.mjs';
@@ -104,14 +105,29 @@ function aliasesFor(actor, profile, name) {
     ]).filter((alias) => alias !== name && !isActorId(alias));
 }
 
-function profileRefReady(actor, profile) {
+function profileRefReady(actor, profile, requiredCompletionMode = '') {
     const ref = actor?.profileRef;
     if (!ref || ref.readbackVerified !== true || ref.status !== 'ready') return false;
     const digest = actorProfileMvuDigest(profile);
-    return Boolean(digest && String(ref.digest || ref.profileDigest || '') === String(digest));
+    const sourceRefDigest = String(profile?.本地元数据?.sourceRefDigest || '').trim();
+    if (!digest || String(ref.digest || '') !== String(digest)
+        || !sourceRefDigest || String(ref.sourceRefDigest || '') !== sourceRefDigest) return false;
+    if (!ref.sourceRef
+        || String(ref.sourceRefDigest || '') !== String(actorProfileMvuSourceRefDigest(ref.sourceRef))) {
+        return false;
+    }
+    if (requiredCompletionMode === 'full_adult'
+        && (String(ref.completionMode || '') !== 'full_adult'
+            || Number(ref.physiologyContractVersion || 0)
+                < ACTOR_PROFILE_ADULT_PHYSIOLOGY_CONTRACT_VERSION)) return false;
+    if (requiredCompletionMode === 'full'
+        && !['full', 'full_adult'].includes(
+            String(ref.completionMode || profile?.completionMode || 'full'),
+        )) return false;
+    return true;
 }
 
-function cardStatus({ actor, profile, busy = '', failure = '' }) {
+function cardStatus({ actor, profile, busy = '', failure = '', requiredCompletionMode = '' }) {
     if (!profile) {
         if (legacyVerified(actor)) {
             return {
@@ -127,10 +143,12 @@ function cardStatus({ actor, profile, busy = '', failure = '' }) {
             repairable: true, migratable: false, ready: false,
         };
     }
-    const readiness = profileReadiness(profile);
+    const readiness = profileReadiness(profile, { requiredCompletionMode });
     const metaStatus = text(profile?.本地元数据?.status, 40);
     const persistedFailure = metaStatus === 'persist_failed' || Boolean(failure);
-    const ready = readiness.ready && profileRefReady(actor, profile) && !persistedFailure;
+    const ready = readiness.ready
+        && profileRefReady(actor, profile, requiredCompletionMode)
+        && !persistedFailure;
     if (persistedFailure) return {
         key: 'persist_failed', color: 'red', label: '持久保存失败',
         repairable: true, migratable: false, ready: false,
@@ -177,6 +195,7 @@ export function createActorProfileSurfaceView({
             actor, profile,
             busy: text(busyByActorId?.[actorId], 40),
             failure: text(failureByActorId?.[actorId], 120),
+            requiredCompletionMode: completionMode,
         });
         const sourceRef = profile?.本地元数据?.sourceRef;
         const changedThisTurn = profile && exactSourceMatches(sourceRef, currentTarget);

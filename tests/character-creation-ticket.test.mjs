@@ -641,6 +641,9 @@ test('generation-near ticket prompt binds every consumed ticket to one hidden si
     assert.match(prompt, /六项缺一不可/u);
     assert.match(prompt, /人物档案无变化/u);
     assert.match(prompt, /输出 <\/content> 后，下一个非空内容必须立即是回执/u);
+    assert.match(prompt, /唯一的 <content> 内完成空的 <luntan><\/luntan> 并闭合 <\/content>/u);
+    assert.match(prompt, /<content>正文…<luntan><\/luntan><\/content> → 恰好一个人物档案回执 → <options>/u);
+    assert.doesNotMatch(prompt, /<\/content>[^\n]*回执[^\n]*再继续 <luntan>/u);
     assert.match(prompt, /明确覆盖预设 Four_Options_Output_Contract/u);
     assert.match(prompt, /禁止选择“人物档案无变化”/u);
     assert.match(prompt, /回执前不得出现选项、变量、论坛外置块、吐槽、状态栏/u);

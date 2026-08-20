@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     ACTOR_PROFILE_MVU_ROOT,
+    ACTOR_PROFILE_BATCH_CAPACITY,
     actorProfileMvuDigest,
     actorProfilePromptProjection,
     actorProfileSemanticRuntimeFingerprint,
@@ -100,7 +101,7 @@ test('single new actor compiles complete canonical V6 profile and provisions roo
     assert.equal(bound.ok, true);
     const compiled = compileActorProfileMvuPatch(bound, {
         profileRoot: ACTOR_PROFILE_MVU_ROOT,
-        profileRootPresent: false,
+        profileRootPresent: 'missing_root',
         sourceRef: sourceRef(),
         now: Date.UTC(2026, 7, 19),
     });
@@ -116,6 +117,28 @@ test('single new actor compiles complete canonical V6 profile and provisions roo
     assert.equal(profileReadiness(markActorProfileReadback(profile)).ready, true);
 });
 
+test('semantic profile transaction fails closed at 65 actors before any MVU operation', () => {
+    const entries = Array.from({ length: ACTOR_PROFILE_BATCH_CAPACITY }, (_, index) => ({
+        mode: 'new', actorId: `NPC-cap-${index}`, ticketId: `T-cap-${index}`,
+        name: `人物${index}`, aliases: [], sourceAnchor: `人物${index}`, fields: fullFields(String(index)),
+    }));
+    const atCapacity = compileActorProfileMvuPatch({ entries, failures: [], quarantined: [] }, {
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready', sourceRef: sourceRef(),
+    });
+    assert.equal(atCapacity.operations.length, ACTOR_PROFILE_BATCH_CAPACITY);
+    const overCapacity = compileActorProfileMvuPatch({
+        entries: [...entries, {
+            mode: 'new', actorId: 'NPC-cap-64', ticketId: 'T-cap-64',
+            name: '人物64', aliases: [], sourceAnchor: '人物64', fields: fullFields('64'),
+        }], failures: [], quarantined: [],
+    }, {
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready', sourceRef: sourceRef(),
+    });
+    assert.equal(overCapacity.operations.length, 0);
+    assert.equal(overCapacity.commitStatus, 'quarantined');
+    assert.ok(overCapacity.failures.includes('actor_profile.batch_capacity_exceeded'));
+});
+
 test('full-adult semantic profile is zero-write without all six physiology fields', () => {
     const generic = {
         entries: [{
@@ -125,7 +148,7 @@ test('full-adult semantic profile is zero-write without all six physiology field
         failures: [], quarantined: [],
     };
     const rejected = compileActorProfileMvuPatch(generic, {
-        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready',
         sourceRef: sourceRef(), completionMode: 'full_adult',
     });
     assert.equal(rejected.operations.length, 0);
@@ -142,7 +165,7 @@ test('full-adult semantic profile canonicalizes six physiology fields and gates 
         }],
         failures: [], quarantined: [],
     }, {
-        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready',
         sourceRef: sourceRef(), completionMode: 'full_adult',
     });
     assert.equal(compiled.commitStatus, 'committable');
@@ -174,7 +197,7 @@ test('multi-person batch quarantines one bad person without blocking complete pe
         tickets: [ticket()], acceptedNarrative: narrative, acceptedTarget: sourceRef(),
     });
     const compiled = compileActorProfileMvuPatch(bound, {
-        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: false, sourceRef: sourceRef(),
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'missing_root', sourceRef: sourceRef(),
     });
     assert.deepEqual(compiled.committableActorIds, ['NPC-1']);
     assert.equal(compiled.commitStatus, 'partial');
@@ -185,7 +208,7 @@ test('existing delta updates one canonical section and locked fields fail closed
     const initial = compileActorProfileMvuPatch({
         entries: [{ mode: 'new', actorId: 'NPC-2', ticketId: 'T-2', name: '周弦', aliases: [], fields: fullFields() }],
         failures: [], quarantined: [],
-    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true, sourceRef: sourceRef() });
+    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready', sourceRef: sourceRef() });
     const old = markActorProfileReadback(initial.profiles['NPC-2']);
     const parsed = parseActorProfileUpdateBlock(accepted(`<人物档案更新>
 已有角色｜ActorId=NPC-2｜姓名：周弦
@@ -193,14 +216,14 @@ test('existing delta updates one canonical section and locked fields fail closed
 </人物档案更新>`));
     const bound = bindActorProfileUpdateEntries(parsed, { actors: [{ id: 'NPC-2', name: '周弦' }] });
     const updated = compileActorProfileMvuPatch(bound, {
-        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready',
         existingProfiles: { 'NPC-2': old }, sourceRef: sourceRef({ messageId: 'message-2' }),
     });
     assert.match(updated.profiles['NPC-2'].narrativeSections.relationshipsMotives.text, /暂时合作/u);
     assert.equal(updated.profiles['NPC-2'].narrativeSections.person.text, old.narrativeSections.person.text);
     const lockedOld = { ...old, locks: { 'narrativeSections.relationshipsMotives': true } };
     const locked = compileActorProfileMvuPatch(bound, {
-        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready',
         existingProfiles: { 'NPC-2': lockedOld }, sourceRef: sourceRef({ messageId: 'message-3' }),
     });
     assert.equal(locked.operations.length, 0);
@@ -274,7 +297,7 @@ test('durable readback projection requires ready receipt and digest', () => {
     const compiled = compileActorProfileMvuPatch({
         entries: [{ mode: 'new', actorId: 'NPC-4', ticketId: 'T-4', name: '叶槐', aliases: [], fields: fullFields() }],
         failures: [], quarantined: [],
-    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true, sourceRef: sourceRef() });
+    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready', sourceRef: sourceRef() });
     assert.equal(actorProfilePromptProjection(compiled.profiles['NPC-4']), null);
     const ready = markActorProfileReadback(compiled.profiles['NPC-4']);
     const projection = actorProfilePromptProjection(ready);
@@ -286,13 +309,13 @@ test('same-ticket retry after replay failure is idempotent but another ticket ca
     const first = compileActorProfileMvuPatch({
         entries: [{ mode: 'new', actorId: 'NPC-6', ticketId: 'T-6', name: '迟川', aliases: [], fields: fullFields() }],
         failures: [], quarantined: [],
-    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true, sourceRef: sourceRef() });
+    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready', sourceRef: sourceRef() });
     const ready = markActorProfileReadback(first.profiles['NPC-6']);
     const same = compileActorProfileMvuPatch({
         entries: [{ mode: 'new', actorId: 'NPC-6', ticketId: 'T-6', name: '迟川', aliases: [], fields: fullFields() }],
         failures: [], quarantined: [],
     }, {
-        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready',
         existingProfiles: { 'NPC-6': ready }, sourceRef: sourceRef(),
     });
     assert.equal(same.operations[0].op, 'replace');
@@ -300,7 +323,7 @@ test('same-ticket retry after replay failure is idempotent but another ticket ca
         entries: [{ mode: 'new', actorId: 'NPC-6', ticketId: 'OTHER', name: '迟川', aliases: [], fields: fullFields() }],
         failures: [], quarantined: [],
     }, {
-        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true,
+        profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready',
         existingProfiles: { 'NPC-6': ready }, sourceRef: sourceRef(),
     });
     assert.equal(conflict.operations.length, 0);
@@ -311,13 +334,13 @@ test('legacy profile migration is explicit, non-destructive, and per-actor fail-
     const source = compileActorProfileMvuPatch({
         entries: [{ mode: 'new', actorId: 'NPC-5', ticketId: 'T-5', name: '旧人', aliases: [], fields: fullFields() }],
         failures: [], quarantined: [],
-    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: true, sourceRef: sourceRef() }).profiles['NPC-5'];
+    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'ready', sourceRef: sourceRef() }).profiles['NPC-5'];
     const legacyReady = markActorProfileReadback(source);
     legacyReady.baselineCommit = { readbackVerified: true };
     const migrated = compileLegacyActorProfileMigration({
         'NPC-5': legacyReady,
         'NPC-bad': { profileFormat: 'narrative-v1', baselineCommit: { readbackVerified: false } },
-    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: false, sourceRef: sourceRef() });
+    }, { profileRoot: ACTOR_PROFILE_MVU_ROOT, profileRootPresent: 'missing_root', sourceRef: sourceRef() });
     assert.deepEqual(migrated.committableActorIds, ['NPC-5']);
     assert.equal(migrated.legacyPreserved, true);
     assert.equal(migrated.quarantined.some((row) => row.actorId === 'NPC-bad'), true);
