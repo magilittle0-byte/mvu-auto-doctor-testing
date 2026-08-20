@@ -137,6 +137,8 @@ test('contracted receipt omission fails closed while post-content and legacy tai
 
 test('runtime fingerprint binds preset bridge, parser/compiler, transaction, P3, repair and P4', () => {
     const fingerprint = section('function doctorRuntimeCriticalFingerprint', 'function diagnosticPayload');
+    assert.match(fingerprint, /actorProfilePresetContractVersion\.toString\(\)/u);
+    assert.match(fingerprint, /actorProfilePresetContractVersion\(\)/u);
     for (const helper of [
         'actorProfileSemanticRuntimeFingerprint',
         'runSemanticActorProfileTarget',

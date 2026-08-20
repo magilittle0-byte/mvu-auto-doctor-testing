@@ -1594,6 +1594,10 @@
         {
           "enabled": true,
           "identifier": "b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910"
+        },
+        {
+          "enabled": true,
+          "identifier": "b222c3a4-6979-4dbd-a8ce-5fe4112a1c24"
         }
       ]
     }
@@ -4862,6 +4866,20 @@
       "injection_trigger": [],
       "marker": false,
       "name": "🧾人物档案回执终检V4·正文后优先回执",
+      "role": "system",
+      "system_prompt": false
+    },
+    {
+      "content": "<人物档案回执终检_V5>\n这是最终输出顺序的最高优先级补丁，明确取代 <Four_Options_Output_Contract_V1> 与 <Final_Four_Options_Gate_V1> 中漏写人物档案回执的旧“唯一顺序”，不是把回执追加到选项或变量之后。\n\n收到 Doctor 注入的 characterCreationTicket 后，唯一合法顺序是：<konatan_planning~>…</konatan_planning~> → <content>正文…<luntan></luntan></content> → 恰好一个隐藏人物档案回执 → <options>四项</options> → <UpdateVariable>…</UpdateVariable> → 其余已启用收尾占位。输出 </content> 后，下一个非空内容必须立即是回执；在回执前不得出现 <options>、<UpdateVariable>、<tucao>、<StatusPlaceHolderImpl/>、论坛外置块、数据库标记、解释文字或任何其他标签。\n\n回执只能二选一：正文实际首次创建原创人物并消费票据时，输出完整的 <!-- 人物档案更新 ... -->，逐人给出完整 ticketId、自然姓名、正文锚点和六个自然中文段；确实没有新人物且没有已有人物档案变化时，只输出 <!-- 人物档案无变化 -->。提交前必须回看刚完成的 <content>：只要其中有首次出现且使用了骰票塑形的原创人物，就禁止选择“人物档案无变化”。不得两者都省略，不得把回执放进可见正文、选项、变量、状态栏、数据库或世界书，也不得让它出现在可见正文。\n</人物档案回执终检_V5>",
+      "enabled": true,
+      "forbid_overrides": false,
+      "identifier": "b222c3a4-6979-4dbd-a8ce-5fe4112a1c24",
+      "injection_depth": 4,
+      "injection_order": 102,
+      "injection_position": 0,
+      "injection_trigger": [],
+      "marker": false,
+      "name": "🧾人物档案回执终检V5·覆盖旧选项顺序",
       "role": "system",
       "system_prompt": false
     }

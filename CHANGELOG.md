@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.24（2026-08-20，测试仓候选）
+- rc.23 在唯一测试聊天的同一首回合第四次直接 reroll 中，真实模型生成了正常正文和四个选项，并交回 `<!-- 人物档案无变化 -->`，但把回执放在 `<options>` 之后。根因是配套预设旧 `Four_Options_Output_Contract` 仍把 `</content> → <options>` 声明为“唯一顺序”，与新增的 `</content> → 人物回执 → <options>` 合同正面冲突；本地解析器正确以 `profile_block_missing` fail-closed，零档案、零 Registry、零人物模型调用，P3 stale 且无 world reserved/P4 污染。
+- 配套预设新增终检 V5，作为最高优先级补丁明确取代遗漏人物回执的旧选项顺序：`</content>` 后下一个非空内容必须是且只能是完整人物档案更新或无变化回执，然后才允许 options、UpdateVariable 与其他收尾。V5 还要求提交前回看刚完成的正文；只要首次原创人物实际消费骰票，就不得错误选择“无变化”。
+- Doctor 的生成前票据提示同步使用同一 V5 唯一顺序；新增 `ACTOR_PROFILE_PRESET_CONTRACT_VERSION` 并纳入 runtime fingerprint，避免外部预设合同与本地注入合同再次漂移。accepted-final 严格位置解析、MVU 原子提交、P3/P4、前端和 repair 边界均未放宽。
+- 定向自动检查 275/275 覆盖真实冲突形状、V5 在 prompt order 的最终位置以及 preset-contract fingerprint 绑定；rc.24 唯一一次完整 Node 自动套件 613/613，并通过语法、manifest/配套预设 JSON、差异与敏感信息检查。当前仍须完成测试仓 main 推送、实际安装加载和同一聊天同一首回合继续 reroll 复验；十二回合正式门禁未完成。
+
 ## 2.0.0-rc.23（2026-08-20，测试仓候选）
 - rc.23 首次真实加载核对发现扩展源码哈希与新 runtime fingerprint 已匹配当前提交，但普通诊断版本仍沿用 rc.22 常量。最终 rc.23 统一运行时与 manifest 版本，并新增二者精确一致回归，避免“代码已更新、用户仍看到旧版”的假缓存诊断。
 - rc.22 在唯一测试聊天的同一首回合第三次直接 reroll 后得到正常正文和选项，accepted-final 精确读回且人物模型调用为 0；但主输出在大型辅助域尾部被截断，严格尾部人物档案回执因此完全缺失。P1 正确以 `profile_block_missing` fail-closed、零半档案并留下 durable repair receipt；同时，ticket-only P4 清理被误当成上一回合世界包屏障，使独立 P3 始终未启动。

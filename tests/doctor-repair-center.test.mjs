@@ -43,7 +43,7 @@ test('selected preset exposes one accepted-final natural-language profile block 
 });
 
 test('selected preset closes every ticket turn with one explicit hidden profile receipt', () => {
-    const identifier = 'b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910';
+    const identifier = 'b222c3a4-6979-4dbd-a8ce-5fe4112a1c24';
     const terminal = (preset.prompts || []).filter((entry) => entry?.identifier === identifier);
     assert.equal(terminal.length, 1);
     assert.equal(terminal[0].enabled, true);
@@ -52,13 +52,18 @@ test('selected preset closes every ticket turn with one explicit hidden profile 
     assert.match(terminal[0].content, /<!-- 人物档案无变化 -->/u);
     assert.match(terminal[0].content, /不得两者都省略/u);
     assert.match(terminal[0].content, /不得让它出现在可见正文/u);
-    assert.match(terminal[0].content, /<\/content> 闭合后/u);
-    assert.match(terminal[0].content, /<StatusPlaceHolderImpl\/> 或其他大型辅助域开始前立即完成/u);
-    assert.match(terminal[0].content, /不得把回执拖到可能截断的回复末尾/u);
-    assert.match(terminal[0].content, /人物档案回执终检_V4/u);
+    assert.match(terminal[0].content, /输出 <\/content> 后/u);
+    assert.match(terminal[0].content, /<StatusPlaceHolderImpl\/>/u);
+    assert.match(terminal[0].content, /人物档案回执终检_V5/u);
+    assert.match(terminal[0].content, /最高优先级补丁/u);
+    assert.match(terminal[0].content, /明确取代 <Four_Options_Output_Contract_V1>/u);
+    assert.match(terminal[0].content, /<\/content> → 恰好一个隐藏人物档案回执 → <options>/u);
+    assert.match(terminal[0].content, /下一个非空内容必须立即是回执/u);
+    assert.match(terminal[0].content, /禁止选择“人物档案无变化”/u);
     const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
     assert.equal(order.filter((entry) => entry?.identifier === identifier).length, 1);
     assert.equal(order.find((entry) => entry?.identifier === identifier)?.enabled, true);
+    assert.equal(order.at(-1)?.identifier, identifier);
 });
 
 test('selected preset keeps second-person perception without assigning player feelings', () => {

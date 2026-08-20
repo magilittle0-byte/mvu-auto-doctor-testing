@@ -276,7 +276,8 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.23';
+const VERSION = '2.0.0-rc.24';
+const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v5';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -289,6 +290,10 @@ const IN_CHAT_POSITION = 1;
 const IN_CHAT_DEPTH = 1;
 const NEXT_TURN_CONSUMER_INJECTION_NAME = 'mvu-auto-doctor-next-turn-consumer';
 const DOCTOR_NEXT_TURN_PROVIDER_ID = 'doctor-extension-prompt';
+
+function actorProfilePresetContractVersion() {
+    return ACTOR_PROFILE_PRESET_CONTRACT_VERSION;
+}
 const ACTOR_ACTION_ERROR_LABELS = Object.freeze({
     'actor-identity-mismatch': '人物身份与当前账本不一致',
     'actor-not-actionable': '人物已死亡、离场或暂时无法行动',
@@ -4994,6 +4999,8 @@ function renderEnvironmentReport(report = lastEnvironmentReport) {
 function doctorRuntimeCriticalFingerprint() {
     return `runtime-critical:${fingerprint([
         VERSION,
+        actorProfilePresetContractVersion.toString(),
+        actorProfilePresetContractVersion(),
         actorProfileRecoveryCriticalFingerprint(),
         actorProfileGenerationCriticalFingerprint(),
         actorProfileCommitEvidenceDigest.toString(),
@@ -13739,7 +13746,8 @@ function npcDesignTicketPrompt(batch) {
         '知识、能力与资源：自然完整句',
         '-->',
         '完整 ticketId 必须从上方已消费的骰票逐字复制，不得写骰票序号、简称、ActorId、revision、digest、status、SourceRef、readback、JSONPatch 或数据库字段。该注释是机器读取域，不得出现在 <content> 或 <options> 的可见正文中。',
-        '本轮收到骰票后必须紧接 </content> 二选一：实际消费票据就输出完整“人物档案更新”注释；确实没有新人物且没有已有人物档案变化，就只输出 <!-- 人物档案无变化 -->。先完成这个短回执，再输出论坛、选项、变量、吐槽和状态栏；不得等到回复末尾。两者都不输出会被本地 Doctor 视为缺失回执并进入修复，而不会伪装成成功。',
+        '本段是最终输出顺序的最高优先级补丁，并明确覆盖预设 Four_Options_Output_Contract 与 Final_Four_Options_Gate 中漏写人物回执的旧“唯一顺序”。唯一合法顺序是：<konatan_planning~> → <content>…</content> → 恰好一个人物档案回执 → <options> → <UpdateVariable> → 其他收尾。输出 </content> 后，下一个非空内容必须立即是回执；回执前不得出现选项、变量、论坛外置块、吐槽、状态栏、数据库标记、解释文字或其他标签。',
+        '本轮收到骰票后必须在该位置二选一：实际消费票据就输出完整“人物档案更新”注释；确实没有新人物且没有已有人物档案变化，就只输出 <!-- 人物档案无变化 -->。提交前回看刚完成的 <content>：只要其中有首次出现且使用骰票塑形的原创人物，就禁止选择“人物档案无变化”。两者都不输出或放到选项之后都会被本地 Doctor 视为缺失回执并进入修复，而不会伪装成成功。',
         '</Actor_Profile_Update_Receipt>',
     ].join('\n');
 }

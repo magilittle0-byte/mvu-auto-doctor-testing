@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.23 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.24 正式门禁清单
 
-候选：`2.0.0-rc.23`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成同一测试聊天、同一首回合消息的 reroll 闭环）
+候选：`2.0.0-rc.24`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成同一测试聊天、同一首回合消息的 reroll 闭环）
 
-当前状态：rc.23 已完成语义档案桥、MVU 人物档案折叠前端、迁移与修复，并保留单 owner join。rc.22 同聊天 reroll 的正文与选项正常，但严格尾部人物档案回执被大型辅助域截断；P1 正确 fail-closed，ticket-only P4 屏障却阻断 P3。rc.23 把完整档案／无变化收据移到正文后第一专用槽，并只让真实 prior-world-package P4 阻挡 P3；定向 137/137 与唯一一次有效完整 Node 套件 612/612 已通过，重新加载和同聊天 reroll 复验仍待完成。
+当前状态：rc.23 已实际加载并在同一测试聊天首回合 reroll，正文、选项和无变化回执均生成，但旧四选项“唯一顺序”把回执推到 options 后，严格解析器正确 fail-closed。rc.24 用终检 V5 明确统一为 `</content> → 人物回执 → options → UpdateVariable`，Doctor 票据提示和 runtime fingerprint 同步绑定；定向 275/275 与唯一一次完整自动套件 613/613 已通过，推送、重新加载和同聊天 reroll 复验仍待完成。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

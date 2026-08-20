@@ -1,11 +1,11 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.23` 测试仓候选。状态：rc.22 在唯一测试聊天的同一首回合 reroll 后得到正常正文与选项，但大型辅助域在输出尾部被截断，位于严格尾部的人物档案回执随之缺失；P1 正确以 `profile_block_missing` fail-closed，ticket-only P4 清理却被当成上一回合世界包屏障而阻断独立 P3。rc.23 将回执前移到正文后第一专用槽，并让 P3 只等待真实 prior-world-package P4；首次加载探针还发现诊断 `VERSION` 常量滞后于 manifest，最终候选已统一并加入精确一致回归。仍须绑定最终 loaded fingerprint 在同一聊天复验，十二回合正式门禁未完成。
+适用版本：`2.0.0-rc.24` 测试仓候选。状态：rc.23 已实际加载到唯一测试聊天并在同一首回合继续 reroll；正文、选项与显式无变化回执均生成，但旧 `Four_Options_Output_Contract` 把 `</content> → <options>` 声明为唯一顺序，使模型把回执放在 options 后，P1 正确 fail-closed。rc.24 用终检 V5 取代该冲突顺序，并把同一 preset-contract 版本纳入 Doctor runtime fingerprint；仍须在同一聊天继续 reroll 绑定最终 loaded fingerprint，十二回合正式门禁未完成。
 
 ## 生产链
 
 1. 生成前继续复用现有 `characterCreationTicket` 和稳定 ActorId。P4 的唯一 next-turn consumer 同时承载本回合票据、上一回合世界事件/可见后果及最多六个相关 durable-ready MVU 档案摘要；不发送全部历史档案。票据载荷把每个实际消费的完整 ticketId 就近绑定到同一 accepted assistant 的隐藏六段回执；未消费任何票据且没有既有人物变化时也必须交回 `<!-- 人物档案无变化 -->`。
-2. 配套预设 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json` 使用终检 V4，在 `</content>` 后、论坛/选项/UpdateVariable/吐槽/状态等辅助域前输出唯一隐藏 `<人物档案更新>` 语义域或无变化收据。新人物给齐六段 V6 自然叙事档案，已有角色只给变化段；该位置让档案回执不再依赖长回复尾部是否被模型截断。
+2. 配套预设 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json` 使用终检 V5，明确取代旧四选项合同中遗漏回执的“唯一顺序”，将唯一隐藏 `<人物档案更新>` 语义域或无变化收据固定为 `</content>` 后的第一个非空内容，再继续论坛/选项/UpdateVariable/吐槽/状态等辅助域。新人物给齐六段 V6 自然叙事档案，已有角色只给变化段；该位置让档案回执不再依赖长回复尾部是否被模型截断，也不会被旧 options 顺序推迟。
 3. accepted-final 适配器只读取当前最终 assistant 的精确 SourceRef；聊天、message、swipe、generation、content、scope 或 epoch 漂移均零写入。格式先本地宽容修复，再按 ticket/ActorId 逐人物绑定和隔离。解析器只接受严格 whitespace-only post-content 插槽或旧聊天 legacy tail；仅实际 EOF 的未闭合块可本地补闭合，辅助域前未闭合块 fail-closed。预留 ticket 只是可选池，不等于已消费；完整专用块和无变化收据都缺失时记录 `profile_block_missing + emptyOperations + repairable`，绝不伪装成功。无精确票据的旧聊天仍保留省略兼容。
 4. 编译器在 working clone 上形成 `/人物档案/byActorId/<ActorId>` 操作，复用既有 MVU WAL、selected-field CAS、持久写、readback 与 touched-path rollback。第一次回读证明内容落地，第二次本地写入 ready 收据；最终操作合并回原消息 UpdateVariable，保留主回复原有变量操作。
 5. ActorRegistry 仍是唯一 ActorId/name/aliases 索引。ActorLedger 只保存 profileRef、digest、revision、readiness、ActionAttempt/receipt 和世界字段；完整档案只在 MVU，不再双写稳定/演化副本。
@@ -27,7 +27,7 @@
 ### A：最小适配
 
 - TavernDB 成熟填表结构只复用“有界目标、working clone、整批提交、回读失败不算成功”的事务形状；没有复制其表格、SQL 或内容权威。
-- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设增加正文后第一隐藏语义域，并只把原“你感到”模板最小修正为客观感官表达与明确的玩家主观感受禁写，不改写作者提示词主结构。rc.23 只把 Doctor 已有票据载荷和同一预设终检的“完整档案／无变化收据”二选一从易截断的尾部移到 `</content>` 后，未新建提示词通道。
+- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设增加正文后第一隐藏语义域，并只把原“你感到”模板最小修正为客观感官表达与明确的玩家主观感受禁写，不改写作者提示词主结构。rc.24 只增加最终顺序 V5 适配层，明确覆盖旧 options 合同的漏项；未改第三方核心结构、未新建提示词通道。
 - 既有 `profileV6` 自然叙事六段和锁/人工覆盖规范作为 MVU schema 内容形状；ActorLedger 改为单向 reference-only 投影。
 - 既有 P3/P4 注入只增加 MVU readback 摘要投影，不新增并行世界状态机或第二插槽。
 
@@ -52,4 +52,4 @@
 
 ## 非验收说明
 
-rc.22 的唯一一次完整自动套件为 610/610，实际 loaded fingerprint 也已匹配；但同一测试聊天的真实首回合第三次 reroll 暴露尾部回执被截断与 ticket-only P4 阻断 P3 两个生产根因，因此 rc.22 失败。rc.23 已增加正文后优先回执、legacy tail 兼容、EOF-only 本地修复、world-package-only P3 屏障与 runtime fingerprint mutation 回归；定向自动检查 137/137、唯一一次有效完整 Node 自动套件 612/612、语法、JSON 和差异检查均通过，推送、实际加载哈希匹配与同一聊天 reroll 证据仍待完成。自动检查和合成 DOM 回归都不证明真实可用；正式仓与正式 main 仍须等待完整十二回合协议。
+rc.23 的最终自动套件为 613/613，提交与实际 loaded hash/fingerprint 均匹配；但同一测试聊天的真实首回合第四次 reroll 暴露旧四选项“唯一顺序”与 post-content 回执冲突，回执落在 options 后并被严格解析器拒绝。rc.24 已增加最高优先级 V5 顺序补丁、Doctor 同源票据提示和 preset-contract fingerprint 绑定；定向检查 275/275、唯一一次完整自动套件 613/613、语法、JSON、差异与敏感信息检查均通过，推送、重新加载与同一聊天继续 reroll 证据仍待完成。自动检查和合成 DOM 回归都不证明真实可用；正式仓与正式 main 仍须等待完整十二回合协议。
