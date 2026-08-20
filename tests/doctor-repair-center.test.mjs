@@ -39,6 +39,21 @@ test('selected preset exposes one accepted-final natural-language profile block 
     assert.match(profile.content, /没有变化时不输出/u);
 });
 
+test('selected preset closes every ticket turn with one explicit hidden profile receipt', () => {
+    const identifier = 'b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910';
+    const terminal = (preset.prompts || []).filter((entry) => entry?.identifier === identifier);
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0].enabled, true);
+    assert.match(terminal[0].content, /只能二选一/u);
+    assert.match(terminal[0].content, /完整的 <!-- 人物档案更新/u);
+    assert.match(terminal[0].content, /<!-- 人物档案无变化 -->/u);
+    assert.match(terminal[0].content, /不得两者都省略/u);
+    assert.match(terminal[0].content, /不得让它出现在可见正文/u);
+    const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
+    assert.equal(order.filter((entry) => entry?.identifier === identifier).length, 1);
+    assert.equal(order.find((entry) => entry?.identifier === identifier)?.enabled, true);
+});
+
 test('selected preset keeps second-person perception without assigning player feelings', () => {
     const identifier = '82da9596-b36b-47cc-9f77-d91c7fff1919';
     const perspective = (preset.prompts || []).find((entry) => entry?.identifier === identifier);
@@ -72,6 +87,16 @@ test('profile repair classification is fixed-code and fail-closed', () => {
     });
     assert.equal(noWrite.code, 'profile_entry_incomplete');
     assert.equal(noWrite.zeroWrite, true);
+    const omittedContract = classifyActorProfileRepairFailure({
+        code: 'profile_block_missing',
+        status: 'failed',
+        emptyOperations: true,
+        writeCount: 0,
+    });
+    assert.equal(omittedContract.code, 'profile_block_missing');
+    assert.equal(omittedContract.failureClass, 'format_or_completeness');
+    assert.equal(omittedContract.status, 'repairable');
+    assert.equal(omittedContract.zeroWrite, true);
 });
 
 test('targeted profile repair envelope is privacy-safe and only carries bounded fields', () => {
@@ -259,6 +284,10 @@ test('doctor repair projection changes the semantic and runtime fingerprints', (
         safeResult: function unsafeResult() { return { status: 'applied' }; },
     });
     assert.notEqual(base, changedSuccessGate);
+    const changedFailureCodes = doctorRepairCenterSemanticFingerprint({
+        profileFailureCodes: new Set(['profile_block_missing']),
+    });
+    assert.notEqual(base, changedFailureCodes);
     const runtimeFingerprintSection = sourceSection(
         'function doctorRuntimeCriticalFingerprint()',
         'function diagnosticPayload()',

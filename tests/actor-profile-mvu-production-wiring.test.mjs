@@ -18,8 +18,10 @@ test('accepted-final profile adapter is exact-source, zero-model, and uses exist
     assert.match(semantic, /mergeActorProfileOperationsIntoAcceptedMessage/u);
     assert.match(semantic, /profileRootPresent/u);
     assert.match(semantic, /projectSemanticProfilesToActorLedger/u);
+    assert.match(semantic, /actorProfileExplicitNoChangeReceipt\(messageText\)/u);
+    assert.match(semantic, /exactTicketCount:\s*tickets\.length/u);
+    assert.match(semantic, /omission === 'profile_block_missing'[\s\S]*?emptyOperations:\s*true/u);
     assert.match(semantic, /actorProfileSemanticNoChange\(captured, acceptedContentText\(messageText\)\)/u);
-    assert.doesNotMatch(semantic, /reservedTickets\.length[\s\S]*?profile_block_missing/u);
     assert.doesNotMatch(semantic, /callModel|generateRaw|runActorProfileTarget/u);
 
     const wrapper = section('async function runSemanticActorProfileTarget(captured)', 'function renderSemanticProfileEntries');
@@ -49,7 +51,8 @@ test('P3 starts independently, freezes ready actors, and structure world does no
         wake,
         /profileResult\?\.status === 'no_candidates'[\s\S]*?profileResult\s*:\s*null/u,
     );
-    assert.match(wake, /joinedPendingOwner[\s\S]*?zeroWrite !== true[\s\S]*?worldModelCalls/u);
+    assert.doesNotMatch(wake, /joinedPendingOwner/u);
+    assert.match(wake, /zeroWrite !== true[\s\S]*?worldModelCalls/u);
     assert.match(wake, /freshTarget = await moduleTargetForAcceptedFinal\(envelope\)/u);
     assert.match(wake, /stage3TargetIsCurrent\(freshTarget, operationToken\(freshTarget\)\)/u);
     assert.match(wake, /expectedTarget:\s*freshTarget/u);
@@ -75,7 +78,7 @@ test('P4 keeps one exact-once consumer while adding only bounded related ready p
 test('semantic repair is single-person targeted and legacy migration is explicit and reversible', () => {
     const repair = section('async function runSemanticActorProfileTargetedRepair', 'async function migrateLegacyProfilesToMvu');
     assert.match(repair, /人物档案单人物定向补缺/u);
-    assert.match(repair, /targets\.slice\(0, 6\)/u);
+    assert.match(repair, /targets\.slice\(0, 1\)/u);
     assert.match(repair, /只补全一个人物/u);
     assert.doesNotMatch(repair, /runActorProfileTarget|completeActorProfilesForTurn/u);
     const migration = section('async function migrateLegacyProfilesToMvu', 'async function runActorProfileTarget');
@@ -86,11 +89,46 @@ test('semantic repair is single-person targeted and legacy migration is explicit
     assert.match(source, /actorProfilePathMode === 'semantic'/u);
 });
 
+test('contracted receipt omission fails closed while an explicit tail no-change receipt is valid', () => {
+    const helperSource = section(
+        'function actorProfileExplicitNoChangeReceipt',
+        'function actorProfileSemanticNoChange',
+    );
+    const helpers = new Function(
+        `${helperSource}\nreturn { actorProfileExplicitNoChangeReceipt, actorProfileReceiptOmissionDecision };`,
+    )();
+    assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
+        '<content>正文</content>\n<!-- 人物档案无变化 -->',
+    ), true);
+    assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
+        '<content><!-- 人物档案无变化 --></content>',
+    ), false);
+    assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
+        '<!-- 人物档案无变化 -->\n<options>1. 继续</options>',
+    ), false);
+    assert.equal(helpers.actorProfileReceiptOmissionDecision({
+        exactTicketCount: 32,
+        explicitNoChange: false,
+    }), 'profile_block_missing');
+    assert.equal(helpers.actorProfileReceiptOmissionDecision({
+        exactTicketCount: 32,
+        explicitNoChange: true,
+    }), 'no_candidates');
+    assert.equal(helpers.actorProfileReceiptOmissionDecision({
+        exactTicketCount: 0,
+        explicitNoChange: false,
+    }), 'no_candidates');
+});
+
 test('runtime fingerprint binds preset bridge, parser/compiler, transaction, P3, repair and P4', () => {
     const fingerprint = section('function doctorRuntimeCriticalFingerprint', 'function diagnosticPayload');
     for (const helper of [
         'actorProfileSemanticRuntimeFingerprint',
         'runSemanticActorProfileTarget',
+        'runSemanticActorProfileTargetCore',
+        'actorProfileExplicitNoChangeReceipt',
+        'actorProfileReceiptOmissionDecision',
+        'runSemanticActorProfileTargetedRepair',
         'wakeContinuityAfterProfileTerminal',
         'stage3StaleValidationCode',
         'stage3ZeroWriteStaleResult',

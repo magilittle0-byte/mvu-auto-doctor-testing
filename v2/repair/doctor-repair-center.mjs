@@ -6,6 +6,7 @@ const SUCCESS = new Set(['applied', 'nochange']);
 // journal.  This list deliberately mirrors the fixed, public failure codes
 // emitted by actor-profile-mvu-core; unknown values fail closed.
 const PROFILE_FAILURE_CODES = Object.freeze(new Set([
+    'profile_block_missing',
     'profile_block_duplicate',
     'profile_block_unclosed',
     'profile_block_too_large',
@@ -362,9 +363,11 @@ export function doctorRepairCapsuleProjection(journal, { maxEntries = 25 } = {})
 }
 
 export function doctorRepairCenterSemanticFingerprint(overrides = {}) {
+    const profileFailureCodes = overrides.profileFailureCodes || PROFILE_FAILURE_CODES;
     return [
         `modules:${MODULES.join(',')}`,
         `success:${[...SUCCESS].join(',')}`,
+        `profile-failure-codes:${[...profileFailureCodes].join(',')}`,
         (overrides.safeCode || safeCode).toString(),
         (overrides.count || count).toString(),
         (overrides.fixedProfileCode || fixedProfileCode).toString(),

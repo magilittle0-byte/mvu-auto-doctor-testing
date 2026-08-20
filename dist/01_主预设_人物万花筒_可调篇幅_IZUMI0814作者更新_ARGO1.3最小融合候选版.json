@@ -1590,6 +1590,10 @@
         {
           "enabled": true,
           "identifier": "4f2642de-5ef6-4ee4-9e94-2c52dd667a13"
+        },
+        {
+          "enabled": true,
+          "identifier": "b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910"
         }
       ]
     }
@@ -4844,6 +4848,20 @@
       "injection_trigger": [],
       "marker": false,
       "name": "🧾人物档案更新语义块·accepted-final桥接",
+      "role": "system",
+      "system_prompt": false
+    },
+    {
+      "content": "<人物档案回执终检_V3>\n本回合只要收到 Doctor 注入的 characterCreationTicket，就必须在 accepted assistant 原始文本最后完成一次隐藏回执，且只能二选一：正文实际创建并消费票据时，输出完整的 <!-- 人物档案更新 ... -->，逐人给出完整 ticketId、自然姓名、正文锚点和六个自然中文段；确实没有新人物且没有已有人物档案变化时，只输出 <!-- 人物档案无变化 -->。不得两者都省略，不得把回执放进 <content>、<options>、<UpdateVariable>、状态栏、数据库或世界书，也不得让它出现在可见正文。\n</人物档案回执终检_V3>",
+      "enabled": true,
+      "forbid_overrides": false,
+      "identifier": "b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910",
+      "injection_depth": 4,
+      "injection_order": 101,
+      "injection_position": 0,
+      "injection_trigger": [],
+      "marker": false,
+      "name": "🧾人物档案回执终检V3·缺失即修复",
       "role": "system",
       "system_prompt": false
     }

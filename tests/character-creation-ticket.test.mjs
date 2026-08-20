@@ -633,6 +633,8 @@ test('generation-near ticket prompt binds every consumed ticket to one hidden si
         '人物信息', '性格特征', '过往经历', '当前状态', '关系与动机', '知识、能力与资源',
     ]) assert.match(prompt, new RegExp(`${section}：自然完整句`, 'u'));
     assert.match(prompt, /不得出现在 <content> 或 <options> 的可见正文中/u);
+    assert.match(prompt, /人物档案无变化/u);
+    assert.match(prompt, /两者都不输出[\s\S]*不会伪装成成功/u);
     assert.ok(prompt.indexOf('NPC-DICE-FULL-1') < ticketsEnd);
     assert.ok(prompt.indexOf('NPC-DICE-FULL-2') < ticketsEnd);
 });

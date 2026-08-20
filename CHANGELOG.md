@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.22（2026-08-20，测试仓候选）
+- rc.21 在唯一测试聊天的同一首回合直接 reroll 后，正文与选项正常、玩家边界正常且人物模型调用为 0，但主模型仍没有交回人物档案块；运行时把“整份回执缺失”误判为 durable `no_candidates`，随后 P3 在 P1 唤醒前后均以零模型 stale 结束，P4 未准备。旧 swipe 保持零档案、零 Registry、零 P3/P4 消费，reroll 隔离本身通过。
+- 当前票据合同改为显式二选一：回复末尾必须是完整隐藏人物档案更新，或严格尾部 `<!-- 人物档案无变化 -->`。精确 SourceRef 上存在预留票据但两种回执都缺失时，P1 现在以 `profile_block_missing`、`emptyOperations` 和 repairable 缺项收据失败，不再伪装成功；无票据旧聊天仍兼容原省略语义。
+- P1→P3 安全接棒现在覆盖“初始 owner 已在 P1 检查前释放”和“P1 检查时仍 pending”两种微任务顺序；只对固定码、零写、零世界模型调用且 exact accepted SourceRef 仍当前的 stale 结果重新获取一次 owner。人物失败仍显式失败，但结构世界可独立收敛，已成功世界只收到幂等 duplicate enqueue，不会重复模型或写入。
+- 单人物修复后备默认只取一个目标；runtime fingerprint 新覆盖主 semantic adapter、显式无变化判定、缺失回执判定和单人物 repair adapter。新增真实根因回归、P3 settled-before-wake 时序、显式尾部回执与 fingerprint mutation 检查。rc.22 唯一一次完整 Node 自动套件为 610/610，并通过语法、manifest/配套预设 JSON 与差异检查；当前指纹真实同聊天 reroll 仍待执行，十二回合正式门禁未完成。
+
 ## 2.0.0-rc.21（2026-08-20，测试仓候选）
 - rc.20 当前指纹的真实全新聊天首回合已从 accepted-final 识别出 3 个新人物目标，但主模型没有输出任何隐藏人物档案块；P1 因 `profile_block_no_entries` 正确零写失败，人物模型调用为 0，P3/P4 随上游硬失败进入 `stale`/未准备。正文、选项和玩家自主权边界本身通过。
 - 根因冻结为生成前票据提示只约束人物塑形，没有在离用户输入最近的同一载荷里把“消费票据”绑定为六段档案的必要回执；长上下文中只靠预设较早位置的通用合同不足以形成逐票闭环。

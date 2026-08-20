@@ -21,7 +21,7 @@ https://github.com/magilittle0-byte/mvu-auto-doctor-testing
 
 这是一个独立的 SillyTavern / TauriTavern 扩展。它包含通用 MVU 审计修复、人物动机与关系证据守卫、分类活世界与事件连续性账本，以及不占正文的内置世界论坛，不会修改角色卡、SP·数据库、预设、缝合怪或其他扩展文件。
 
-2.0.0-rc.21 测试候选把人物档案语义生成前移到配套最新版预设：正文模型输出隐藏的自然中文增量，accepted-final 后由本地脚本绑定同一 characterCreationTicket/ActorId、逐人物编译并通过现有 MVU 事务原子写入与回读。MVU 是完整档案唯一内容权威；Doctor 正常路径零人物模型调用，只在修复中心定向补一个失败人物。P3 只读取 MVU durable-ready 档案，P4 在唯一插槽中追加相关人物摘要；数据库继续从最终正文独立填表。紧凑人物档案 accordion 默认全折叠、单人展开、六段分区、故障分色、单人物修复和旧档案迁移；rc.21 在 rc.20 的 P3 安全接棒和玩家边界上，把“已消费的生成前骰票”与 accepted assistant 末尾六段隐藏档案回执就近绑定，避免长上下文中正文已创建人物却漏交整个语义块，并把真实票据提示纳入 runtime fingerprint。它仍是测试候选，不能视为正式发布。来源映射见 [`docs/2.0/ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md`](docs/2.0/ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md)。
+2.0.0-rc.22 测试候选把人物档案语义生成前移到配套最新版预设：正文模型输出隐藏的自然中文增量，accepted-final 后由本地脚本绑定同一 characterCreationTicket/ActorId、逐人物编译并通过现有 MVU 事务原子写入与回读。MVU 是完整档案唯一内容权威；Doctor 正常路径零人物模型调用，只在修复中心定向补一个失败人物。P3 只读取 MVU durable-ready 档案，P4 在唯一插槽中追加相关人物摘要；数据库继续从最终正文独立填表。紧凑人物档案 accordion 默认全折叠、单人展开、六段分区、故障分色、单人物修复和旧档案迁移；rc.22 要求票据回合在回复末尾显式二选一交回完整隐藏档案块或“人物档案无变化”收据，整份回执缺失会 fail-closed 而不再伪装成功，并让 P3 在两种 owner 释放时序下只做一次受 SourceRef 约束的安全接棒。它仍是测试候选，不能视为正式发布。来源映射见 [`docs/2.0/ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md`](docs/2.0/ACTOR_PROFILE_MVU_SEMANTIC_BRIDGE_SOURCE_MAP.md)。
 
 “通用”指核心只依赖当前 MVU 数据、动态 JSON Pointer、实际 Schema/规则和 SillyTavern
 生命周期，不依赖某张角色卡、某组表名/列名、骰子 DOM 或缝合怪品牌。装备、骰子和
@@ -32,13 +32,13 @@ TavernDB 检测也不读取表格内容、不调用数据库 API；真实表格 
 
 ## 安装
 
-> `2.0.0-rc.21` 尚未完成真实门禁；正式发布前仍必须完成独立自动回归、真实目标模型生产全链、真实 SillyTavern、作者版
+> `2.0.0-rc.22` 尚未完成真实门禁；正式发布前仍必须完成独立自动回归、真实目标模型生产全链、真实 SillyTavern、作者版
 > TavernDB、隐藏 TauriTavern 和 CI 后才会合并默认 `main`。是否已经可在线更新，以远程
 > `main` 的 `manifest.json` 与本版 QC 报告为准；离线候选包仍用于手动更新或回滚演练。具体步骤见
 > [`2.0 RC 使用说明`](docs/2.0/USER_GUIDE_2.0_RC.md)。
 
 已有安装：先备份当前聊天并等待自动医生任务结束，然后只点击自动医生这一行自己的“更新”并刷新。
-从测试仓更新后扩展信息应显示 `2.0.0-rc.21`。不要点“全部更新”，
+从测试仓更新后扩展信息应显示 `2.0.0-rc.22`。不要点“全部更新”，
 也不要操作数据库、骰子前端、缝合怪、推进重roll助手或其他脚本的更新、分支、删除或重装按钮。
 
 全新在线安装使用：
@@ -48,7 +48,7 @@ TavernDB 检测也不读取表格内容、不调用数据库 API；真实表格 
 分支或标签：留空（默认 main）
 ```
 
-只有测试仓远程 `main` 的 `manifest.json` 已是 rc.21 时，测试安装后刷新页面才应显示 `2.0.0-rc.21`。更新或安装只改变自动医生自己的
+只有测试仓远程 `main` 的 `manifest.json` 已是 rc.22 时，测试安装后刷新页面才应显示 `2.0.0-rc.22`。更新或安装只改变自动医生自己的
 扩展代码，不会替换数据库、骰子前端、缝合怪、推进重roll助手或其他脚本。
 
 每次收到新的 AI 回复后，扩展会：

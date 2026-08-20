@@ -448,6 +448,7 @@ function loadAcceptedFinalFullDispatchHarness({
     profileResult = { status: 'not_completed' },
     realCleanupFailed = false,
     zeroWriteWorldRace = false,
+    settledZeroWriteWorldStaleStarts = 0,
     otherModuleResult = { status: 'not_completed' },
 } = {}) {
     const support = sourceSection(
@@ -483,6 +484,7 @@ function loadAcceptedFinalFullDispatchHarness({
         diagnostics: [],
         worldStarts: 0,
         releaseInitialWorld: null,
+        settledZeroWriteWorldStaleStarts,
     };
     const continuityPendingKeys = new Map();
     let initialWorldTask = null;
@@ -533,7 +535,9 @@ function loadAcceptedFinalFullDispatchHarness({
         enqueueActorProfiles: (_index, options) => {
             state.dispatchedTargets.push(options.expectedTarget);
             state.profileTargets.push(options.expectedTarget);
-            return Promise.resolve(profileResult);
+            return settledZeroWriteWorldStaleStarts > 0
+                ? new Promise((resolve) => setImmediate(() => resolve(profileResult)))
+                : Promise.resolve(profileResult);
         },
         enqueueContinuity: (_index, options) => {
             state.dispatchedTargets.push(options.expectedTarget);
@@ -542,6 +546,22 @@ function loadAcceptedFinalFullDispatchHarness({
                 noActorPermit: options.noActorPermit || null,
                 startBarrier: options.startBarrier || null,
             });
+            if (state.settledZeroWriteWorldStaleStarts > 0) {
+                const key = 'stage3-key';
+                if (continuityPendingKeys.has(key)) return continuityPendingKeys.get(key);
+                state.worldStarts += 1;
+                state.settledZeroWriteWorldStaleStarts -= 1;
+                const settled = Promise.resolve({
+                    status: 'stale',
+                    reason: 'world_phase1_actor_ledger_changed',
+                    validationCode: 'world.stale.actor_ledger_changed',
+                    module: 'world',
+                    zeroWrite: true,
+                    worldModelCalls: 0,
+                }).finally(() => continuityPendingKeys.delete(key));
+                continuityPendingKeys.set(key, settled);
+                return settled;
+            }
             if (zeroWriteWorldRace) {
                 const key = 'stage3-key';
                 if (continuityPendingKeys.has(key)) return continuityPendingKeys.get(key);
@@ -868,8 +888,8 @@ test('accepted-final dispatch gives variables, P3, and P1 the same frozen target
     const runtime = loadAcceptedFinalFullDispatchHarness();
     assert.equal(await runtime.accept(runtime.generation), true);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(runtime.state.dispatchedTargets.length, 3);
-    assert.equal(runtime.state.continuityCalls.length, 1);
+    assert.equal(runtime.state.dispatchedTargets.length, 4);
+    assert.equal(runtime.state.continuityCalls.length, 2);
     assert.equal(
         typeof runtime.state.continuityCalls[0].startBarrier?.then,
         'function',
@@ -889,9 +909,9 @@ test('real P4 cleanup_failed commit returns false but accepted-final still dispa
     const runtime = loadAcceptedFinalFullDispatchHarness({ realCleanupFailed: true });
     assert.equal(await runtime.accept(runtime.generation), true);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(runtime.state.dispatchedTargets.length, 3);
+    assert.equal(runtime.state.dispatchedTargets.length, 4);
     assert.equal(runtime.state.profileTargets.length, 1);
-    assert.equal(runtime.state.continuityCalls.length, 1);
+    assert.equal(runtime.state.continuityCalls.length, 2);
     assert.equal(runtime.state.worldModelCalls, 1);
     assert.equal(runtime.state.worldWrites, 1);
     assert.ok(runtime.state.dispatchedTargets.every((target) => (
@@ -916,10 +936,10 @@ test('a P1 not-completed result grants no retry permit but cannot block independ
     });
     await flushDispatch(incomplete);
     assert.equal(incomplete.state.profileTargets.length, 1);
-    assert.equal(incomplete.state.continuityCalls.length, 1);
+    assert.equal(incomplete.state.continuityCalls.length, 2);
     assert.equal(incomplete.state.worldModelCalls, 1);
     assert.equal(incomplete.state.worldWrites, 1);
-    assert.equal(incomplete.state.continuityCalls[0].noActorPermit, null);
+    assert.equal(incomplete.state.continuityCalls.every((call) => call.noActorPermit === null), true);
     assert.equal(incomplete.state.errors.length, 0);
     assert.equal(incomplete.state.continuityProfileRetrySignals.size, 0);
 
@@ -981,6 +1001,29 @@ test('a durable no-candidates P1 wake reacquires P3 once after joining a zero-wr
     assert.equal(runtime.state.diagnostics.at(-1).status, 'succeeded');
 });
 
+test('P1 wake reacquires once when both the launch owner and the settled-before-wake owner are zero-write stale', async () => {
+    const runtime = loadAcceptedFinalFullDispatchHarness({
+        profileResult: {
+            status: 'not_completed',
+            eligible: true,
+            profileBatch: { readbackVerified: false },
+        },
+        settledZeroWriteWorldStaleStarts: 2,
+        otherModuleResult: { status: 'applied' },
+    });
+    assert.equal(await runtime.accept(runtime.generation), true);
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(runtime.state.continuityCalls.length, 3, 'launch, settled wake owner, one fresh owner');
+    assert.equal(runtime.state.worldStarts, 3);
+    assert.equal(runtime.state.worldModelCalls, 1);
+    assert.equal(runtime.state.worldWrites, 1);
+    assert.equal(runtime.state.continuityCalls.at(-1).noActorPermit, null);
+    assert.equal(runtime.state.diagnostics.at(-1).task, 'doctor_total');
+    assert.equal(runtime.state.diagnostics.at(-1).status, 'failed');
+});
+
 test('strict no-candidates proof controls only the P1 wake while accepted-final P3 stays independent', async () => {
     const finalize = loadActorProfileRecoveryOutcomeFinalizer();
     const captured = { chatId: 'chat-a', generationId: 'generation-a' };
@@ -1033,8 +1076,8 @@ test('strict no-candidates proof controls only the P1 wake while accepted-final 
     assert.equal(await failedDispatch.accept(failedDispatch.generation), true);
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(failedDispatch.state.continuityCalls.length, 1);
-    assert.equal(failedDispatch.state.continuityCalls[0].noActorPermit, null);
+    assert.equal(failedDispatch.state.continuityCalls.length, 2);
+    assert.equal(failedDispatch.state.continuityCalls.every((call) => call.noActorPermit === null), true);
     assert.equal(failedDispatch.state.worldModelCalls, 1);
     assert.equal(failedDispatch.state.worldWrites, 1);
 });
@@ -2171,15 +2214,15 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
     assert.equal(state.precomposed, 2, 'the next generation starts after the old dispatch hand-off');
     assert.equal(state.identitySaves, 1);
     assert.equal(messages['chat-b'].extra.mvu_auto_doctor_generation_id, bSession.id);
-    assert.equal(state.dispatches.length, 3);
+    assert.equal(state.dispatches.length, 4);
     assert.equal(state.commitCalls, 1);
-    assert.deepEqual(state.dispatches.map((entry) => entry.kind).sort(), ['p1', 'p3', 'variable']);
+    assert.deepEqual(state.dispatches.map((entry) => entry.kind).sort(), ['p1', 'p3', 'p3', 'variable']);
     assert.ok(state.dispatches.every((entry) => entry.target.scopeDigest === 'scope-chat-b'));
     commitGate.resolve();
     await new Promise((resolve) => setImmediate(resolve));
     oldTimer();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(state.dispatches.length, 3, 'the cancelled old timer joins/no-ops instead of dispatching twice');
+    assert.equal(state.dispatches.length, 4, 'the cancelled old timer joins/no-ops instead of dispatching twice');
     assert.equal(state.commitCalls, 1);
 
     state.callbacks.get('generation_ended')();
@@ -2187,7 +2230,7 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(state.identitySaves, 2);
     assert.equal(messages['chat-b'].extra.mvu_auto_doctor_generation_id, nextBSession.id);
-    assert.equal(state.dispatches.length, 6, 'the new generation accepts normally after the flush');
+    assert.equal(state.dispatches.length, 8, 'the new generation accepts normally after the flush');
     assert.equal(state.commitCalls, 2);
 
     await state.callbacks.get('generation_started')('normal', {}, false);
@@ -2196,7 +2239,7 @@ test('event lifecycle runs real current-chat precompose and accept after clearin
     state.timers.at(-1)();
     await new Promise((resolve) => setImmediate(resolve));
     delete sandbox.document.body.dataset.generating;
-    assert.equal(state.dispatches.length, 6, 'an ordinary ENDED timer cannot bypass a still-generating host');
+    assert.equal(state.dispatches.length, 8, 'an ordinary ENDED timer cannot bypass a still-generating host');
     assert.equal(state.commitCalls, 2);
 
     state.chatId = 'chat-a';
@@ -2623,14 +2666,14 @@ test('accepted-final dispatch starts P3 independently and lets P1 readback issue
     );
     const profileAt = handler.indexOf("launchScoped('人物档案'");
     const profileEnqueueAt = handler.indexOf('const profileTask = enqueueActorProfiles', profileAt);
-    const profileReadbackAt = handler.indexOf("['atomic_readback', 'no_candidates']", profileEnqueueAt);
+    const profileReadbackAt = handler.indexOf("['atomic_readback', 'no_candidates', 'not_completed']", profileEnqueueAt);
     const profileRetryAt = handler.indexOf('await wakeContinuityAfterProfileTerminal(', profileReadbackAt);
     assert.ok(profileAt >= 0 && profileEnqueueAt > profileAt);
     assert.ok(profileReadbackAt > profileEnqueueAt);
     assert.ok(profileRetryAt > profileReadbackAt);
     assert.match(
         handler.slice(profileAt),
-        /\['atomic_readback', 'no_candidates'\][\s\S]*?await wakeContinuityAfterProfileTerminal\(/u,
+        /\['atomic_readback', 'no_candidates', 'not_completed'\][\s\S]*?await wakeContinuityAfterProfileTerminal\(/u,
     );
     assert.match(handler, /launchScoped\('世界连续性'[\s\S]*?enqueueContinuity/u);
     assert.doesNotMatch(

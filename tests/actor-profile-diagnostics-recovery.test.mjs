@@ -900,6 +900,10 @@ test('runtime fingerprint changes with the production profile route planner and 
         'completeActorProfilesForTurn',
         'acceptedModelProfileDiscoveryFacts',
         'actorProfileRecoveryProgressFromNamespace',
+        'runSemanticActorProfileTargetCore',
+        'actorProfileExplicitNoChangeReceipt',
+        'actorProfileReceiptOmissionDecision',
+        'runSemanticActorProfileTargetedRepair',
     ]) {
         assert.match(runtimeSource, new RegExp(`${helper}\\.toString\\(\\)`, 'u'));
     }
@@ -950,6 +954,22 @@ test('runtime fingerprint changes with the production profile route planner and 
     assert.notEqual(runtimeFor({
         actorProfileRecoveryProgressFromNamespace:
             function actorProfileRecoveryProgressFromNamespaceChanged() { return null; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        runSemanticActorProfileTargetCore:
+            async function runSemanticActorProfileTargetCoreChanged() { return { status: 'changed' }; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        actorProfileExplicitNoChangeReceipt:
+            function actorProfileExplicitNoChangeReceiptChanged() { return true; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        actorProfileReceiptOmissionDecision:
+            function actorProfileReceiptOmissionDecisionChanged() { return 'changed'; },
+    }), baseline);
+    assert.notEqual(runtimeFor({
+        runSemanticActorProfileTargetedRepair:
+            async function runSemanticActorProfileTargetedRepairChanged() { return { status: 'changed' }; },
     }), baseline);
 });
 

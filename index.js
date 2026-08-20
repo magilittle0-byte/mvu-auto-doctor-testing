@@ -275,7 +275,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.21';
+const VERSION = '2.0.0-rc.22';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
 const CONTINUITY_INJECTION_NAME = 'mvu-auto-doctor-continuity';
@@ -5001,6 +5001,14 @@ function doctorRuntimeCriticalFingerprint() {
             ? actorProfileSemanticRuntimeFingerprint() : '',
         typeof runSemanticActorProfileTarget === 'function'
             ? runSemanticActorProfileTarget.toString() : '',
+        typeof runSemanticActorProfileTargetCore === 'function'
+            ? runSemanticActorProfileTargetCore.toString() : '',
+        typeof actorProfileExplicitNoChangeReceipt === 'function'
+            ? actorProfileExplicitNoChangeReceipt.toString() : '',
+        typeof actorProfileReceiptOmissionDecision === 'function'
+            ? actorProfileReceiptOmissionDecision.toString() : '',
+        typeof runSemanticActorProfileTargetedRepair === 'function'
+            ? runSemanticActorProfileTargetedRepair.toString() : '',
         typeof projectSemanticProfilesToActorLedger === 'function'
             ? projectSemanticProfilesToActorLedger.toString() : '',
         typeof persistSemanticActorLedgerProjection === 'function'
@@ -7842,28 +7850,29 @@ async function moduleTargetForAcceptedFinal(envelope) {
 async function wakeContinuityAfterProfileTerminal(envelope, target, profileResult) {
     const noActorPermit = profileResult?.status === 'no_candidates'
         ? profileResult : null;
-    const continuityKey = stage3AcceptedTargetKey(target);
-    const joinedPendingOwner = Boolean(
-        continuityKey && continuityPendingKeys.has(continuityKey),
-    );
     const joined = await enqueueContinuity(envelope.index, {
         expectedTarget: target,
         noActorPermit,
         afterPending: true,
     });
     if (
-        !joinedPendingOwner
-        || joined?.status !== 'stale'
+        joined?.status !== 'stale'
         || joined?.reason === 'foreground_preempted'
         || joined?.zeroWrite !== true
         || Math.max(0, Number(joined?.worldModelCalls) || 0) !== 0
     ) return joined;
     // The accepted-final P3 owner can finish its zero-write source check in
     // the same microtask window in which P1 seals its durable terminal proof.
-    // P1 first joins that owner verbatim. Only after the owner has released,
-    // and only while the exact accepted source is still current, may the
-    // caller acquire one fresh owner with the now-durable profile permit.
+    // P1 first joins that owner verbatim when it is still registered. Only
+    // after that join has resolved, and only while the exact accepted source
+    // is still current, may the caller acquire one fresh owner with the now-
+    // durable profile outcome.
     // This is not a recursive queue retry and never repeats a model call.
+    // The initial owner can release in the few microtasks before P1 checks the
+    // registry. In that settled-before-wake ordering the first call above is
+    // itself the next owner and can still return a proven zero-write stale
+    // result. Treat both orderings alike; exact SourceRef and the one fresh
+    // enqueue below remain the authority boundary.
     const freshTarget = await moduleTargetForAcceptedFinal(envelope);
     if (!freshTarget) return joined;
     const guard = stage3TargetIsCurrent(freshTarget, operationToken(freshTarget));
@@ -7975,7 +7984,7 @@ function dispatchAcceptedFinal(envelope) {
                     legacyPath: true,
                 });
             }
-            if (['atomic_readback', 'no_candidates'].includes(semanticResult?.status)
+            if (['atomic_readback', 'no_candidates', 'not_completed'].includes(semanticResult?.status)
                 && target.epoch === operationEpoch
                 && target.chatId === getContext()?.chatId) {
                 stage3WakeResult = await wakeContinuityAfterProfileTerminal(
@@ -7999,7 +8008,7 @@ function dispatchAcceptedFinal(envelope) {
                 expectedTarget: target,
             });
             return profileTask.then(async (result) => {
-                if (!['atomic_readback', 'no_candidates'].includes(result?.status)) return result;
+                if (!['atomic_readback', 'no_candidates', 'not_completed'].includes(result?.status)) return result;
                 if (target.epoch !== operationEpoch || target.chatId !== getContext()?.chatId) return result;
                 stage3WakeResult = await wakeContinuityAfterProfileTerminal(
                     envelope,
@@ -13720,7 +13729,8 @@ function npcDesignTicketPrompt(batch) {
         '关系与动机：自然完整句',
         '知识、能力与资源：自然完整句',
         '-->',
-        '完整 ticketId 必须从上方已消费的骰票逐字复制，不得写骰票序号、简称、ActorId、revision、digest、status、SourceRef、readback、JSONPatch 或数据库字段。没有实际创建新人物且没有已有人物档案变化时，才省略整个注释。该注释是机器读取域，不得出现在 <content> 或 <options> 的可见正文中。',
+        '完整 ticketId 必须从上方已消费的骰票逐字复制，不得写骰票序号、简称、ActorId、revision、digest、status、SourceRef、readback、JSONPatch 或数据库字段。该注释是机器读取域，不得出现在 <content> 或 <options> 的可见正文中。',
+        '本轮收到骰票后必须在回复末尾二选一：实际消费票据就输出完整“人物档案更新”注释；确实没有新人物且没有已有人物档案变化，就只输出 <!-- 人物档案无变化 -->。两者都不输出会被本地 Doctor 视为缺失回执并进入修复，而不会伪装成成功。',
         '</Actor_Profile_Update_Receipt>',
     ].join('\n');
 }
@@ -17249,13 +17259,30 @@ function actorProfileSemanticFailure(captured, reason, extra = {}) {
     });
 }
 
+function actorProfileExplicitNoChangeReceipt(messageText) {
+    const source = String(messageText || '');
+    const matches = [...source.matchAll(/<!--[ \t]*人物档案无变化[ \t]*-->/gu)];
+    if (matches.length !== 1) return false;
+    const match = matches[0];
+    const end = Math.max(0, Number(match.index) || 0) + String(match[0] || '').length;
+    return source.slice(end).trim().length === 0;
+}
+
+function actorProfileReceiptOmissionDecision({
+    exactTicketCount = 0,
+    explicitNoChange = false,
+} = {}) {
+    if (explicitNoChange === true) return 'no_candidates';
+    return Math.max(0, Number(exactTicketCount) || 0) > 0
+        ? 'profile_block_missing'
+        : 'no_candidates';
+}
+
 function actorProfileSemanticNoChange(captured, acceptedNarrative = '') {
-    // The semantic block is intentionally omitted when the accepted reply
-    // contains no profile changes.  This is a verified zero-write decision,
-    // not a malformed-output failure and must not wake the legacy P1 model.
-    // Generation tickets are a pre-issued optional pool, not evidence that
-    // the reply consumed any ticket.  The accepted assistant contract owns
-    // that decision through presence/absence of the dedicated semantic block.
+    // Legacy/no-ticket replies may omit the semantic block. Current contracted
+    // generations prove the same decision with the explicit hidden no-change
+    // receipt; a wholly missing receipt there is a repairable failure rather
+    // than a fabricated successful zero-write decision.
     const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
     return actorProfileTransientResult('no_candidates', {
         target: sourceRefOf(captured),
@@ -17491,8 +17518,25 @@ async function runSemanticActorProfileTargetCore(captured) {
     if (!sovereigntyNarrativeEligible(messageText)) {
         return actorProfileSemanticFailure(captured, 'accepted_narrative_ineligible');
     }
+    const tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
+        .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
     const extracted = extractActorProfileUpdateBlock(messageText);
     if (!extracted.present) {
+        const omission = actorProfileReceiptOmissionDecision({
+            exactTicketCount: tickets.length,
+            explicitNoChange: actorProfileExplicitNoChangeReceipt(messageText),
+        });
+        if (omission === 'no_candidates') {
+            return actorProfileSemanticNoChange(captured, acceptedContentText(messageText));
+        }
+        if (omission === 'profile_block_missing') {
+            return actorProfileSemanticFailure(captured, 'profile_block_missing', {
+                emptyOperations: true,
+                missingFields: ['person', 'personality', 'history', 'currentState',
+                    'relationshipsMotives', 'knowledgeCapabilitiesResources'],
+                repairable: true,
+            });
+        }
         return actorProfileSemanticNoChange(captured, acceptedContentText(messageText));
     }
     if (!extracted.ok) {
@@ -17522,8 +17566,6 @@ async function runSemanticActorProfileTargetCore(captured) {
         identityScopeId: captured.identityScopeId,
         scopeDigest: captured.scopeDigest,
     });
-    const tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
-        .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
     const actors = (ledger.actors || []).map((actor) => ({
         id: actor.id,
         name: actor.name,
@@ -17885,7 +17927,7 @@ async function runSemanticActorProfileTargetedRepair(captured, { actorId: reques
     }
     const selectedTargets = requested
         ? targets.filter((target) => target.actorId === requested).slice(0, 1)
-        : targets.slice(0, 6);
+        : targets.slice(0, 1);
     if (!selectedTargets.length) return { status: 'no_candidates', reason: 'profile_repair_no_target' };
     const worldContext = await collectContinuityWorldContext(context, currentCharacter(context));
     const repairedEntries = [];
@@ -19178,6 +19220,11 @@ function stage3StaleValidationCode(reason) {
     return ({
         world_task_owner_changed: 'world.stale.owner_changed',
         current_source_identity_changed: 'world.stale.source_identity_changed',
+        world_target_generation_identity_missing: 'world.stale.generation_identity_missing',
+        stage3_generation_target_changed: 'world.stale.generation_target_changed',
+        world_phase1_actor_ledger_changed: 'world.stale.actor_ledger_changed',
+        world_phase1_target_authority_changed: 'world.stale.target_authority_changed',
+        world_phase1_actor_authority_changed: 'world.stale.actor_authority_changed',
         management_write_pending: 'world.stale.management_write_pending',
         current_source_unavailable: 'world.stale.source_unavailable',
         current_source_key_missing: 'world.stale.source_key_missing',
@@ -19925,11 +19972,7 @@ async function runContinuityTarget(captured, {
     };
     const acceptedTarget = stage3AcceptedTarget(captured);
     if (!acceptedTarget) {
-        return {
-            status: 'stale',
-            reason: 'world_target_generation_identity_missing',
-            module: 'world',
-        };
+        return stage3ZeroWriteStaleResult('world_target_generation_identity_missing');
     }
     const token = operationToken(captured);
     if (!stage3TaskOwnsCurrent(captured, token)) {
@@ -20282,7 +20325,7 @@ async function runContinuityTarget(captured, {
         });
     }
     if (!profileEvolution.ok) {
-        return { status: 'stale', reason: profileEvolution.reason, module: 'world' };
+        return staleWorldResult(profileEvolution.reason);
     }
     const phase1Expected = {
         actorLedger: stage3FieldState(phase1Namespace, 'actorLedger'),
