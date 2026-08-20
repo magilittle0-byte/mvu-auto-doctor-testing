@@ -17,12 +17,12 @@
 
 ## 当前候选
 
-- 版本：`2.0.0-rc.29`
+- 版本：`2.0.0-rc.30`
 - 实现范围：MVU durable semantic profile 前移、accepted-final exact SourceRef 事务、prompt-ready assistant 副本隔离、Doctor-owned CHAT_DELETED/GROUP_CHAT_DELETED 清理、人物/势力/环境三 lane、resolved 有界压缩和 ephemeral actorOperationalState。数据库、预设、MVU、Doctor/P3/P4 仍各自独立；语义档案不双写 legacy `profileV6`。
 - 候选预设：精确 IZUMI 文件 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json`，当前 SHA-256 为 `5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487`。V4 已禁用，V5/V6 采用唯一 `<content>` 内 luntan → `</content>` → 隐藏回执 → options/UpdateVariable 顺序；消费票据但缺项的人物不得静默省略，必须保留可恢复单人物壳。
 - 静态宿主证据：TavernHelper `4.8.19`；`extensions/TavernHelper/dist/index.js.map` SHA-256 为 `7989FC1B3A47978526D63FD63C9DCB5ED68B534523BD24C223FF0B82C7A1D961`。事件负载与所有权见 [`docs/2.0/MVU_RUNTIME_SOURCE_MAP.md`](docs/2.0/MVU_RUNTIME_SOURCE_MAP.md)。这不是宿主真实触发证据。
-- 首轮完整自动套件为 658 项中 626 通过、32 项失败；修复旧 VM fixture 合同漂移与 resolved 重开 P1 后，经用户明确授权运行的最终完整自动套件为 662/662，通过 0 项失败，duration `13499.7558 ms`。
-- 未执行：浏览器/Playwright、真实外部模型、真实数据库、真实 SillyTavern/Tauri、构建、CI、QC 生成/覆盖或正式发布门禁；没有运行真实 12 回合验收。自动套件已通过，但这些正式门禁仍未完成。
+- rc.29 精确源码在真实 TauriTavern/Playwright 后台加载时暴露入口语法错误，Doctor 未初始化且正文模型输入为零；rc.30 修复后唯一一次完整自动套件为 663/663，通过 0 项失败，duration `13601.2202 ms`。
+- 尚未执行：rc.30 当前提交的真实加载指纹、真实外部模型、真实数据库全链、十二回合验收、构建、CI、QC 覆盖或正式发布门禁。自动套件已通过，但这些正式门禁仍未完成。
 - 已知边界：默认 `actorRuntimeBindings={}`，无配置时 MVU 实时运行态显示未绑定；当前宿主没有提供可用于安全自动孤儿 GC 的权威 chat-ID 枚举，因此自动 GC 关闭，仅提供预览/确认入口。首回合档案、刷新/重启、新对话隔离、三 lane 和 attempt/world separation 的真实效果等待用户安装验证。
 - 发布含义：当前候选尚未推送到 testing `main`，不能作为可更新版本；即使后续推送，也只是自愿本地试用，不得视为稳定版或正式发布。
 

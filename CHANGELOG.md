@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2.0.0-rc.30（2026-08-21，测试仓候选）
+- 修复 rc.29 在真实 TauriTavern 更新并加载精确提交 `358ebe5` 后暴露的生产语法阻断：人物档案根缺失时的原子 replay 分支漏写条件表达式的空分支，浏览器模块解析以 `Unexpected token ')'` 终止，Doctor 因而完全未初始化。现补回显式 `: []`，不改变 MVU、人物完整度、SourceRef、P3/P4 或数据库所有权语义。
+- 新增“整份生产 `index.js` 以 ES module 语法解析”回归，防止 VM 切片和普通 `node --check index.js` 在当前 Windows/Node 调用形状下漏掉真实浏览器解析错误。rc.30 唯一一次完整自动套件为 663/663，通过 0 项失败，duration `13601.2202 ms`；仍须完成测试仓推送、真实加载指纹和十二回合门禁。
+
 ## 2.0.0-rc.29（2026-08-20，测试仓候选）
 - 完成 MVU durable semantic profile 前移与四项长期优化：accepted-final 原始 SourceRef 事务、assistant outgoing prompt 隔离、Doctor-owned 聊天清理、人物/势力/环境三 lane、有限 resolved 压缩和临时 actorOperationalState；数据库、预设、MVU、Doctor/P3/P4 所有权保持独立，语义档案不双写 legacy `profileV6`。
 - prompt-ready 过滤按宿主实际静态事件负载接线，支持 string/content[]/四种回执包装并对 system/user 同文碰撞 fail-closed；CHAT_DELETED/GROUP_CHAT_DELETED 只接受已证明的 chat_file_name 位置参数，不能权威枚举 chat IDs 时不自动 GC。

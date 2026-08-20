@@ -310,7 +310,7 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.29';
+const VERSION = '2.0.0-rc.30';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v6';
 const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = '5A4996E917F653C5CED4C24E422419940A5B79EEB8CF45ED55802D379F26F487';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
@@ -19269,7 +19269,7 @@ async function replayFinalizedSemanticProfileOperations({
             op: 'insert',
             path: '/人物档案',
             value: { schemaVersion: 1, byActorId: {} },
-        }]),
+        }] : []),
         ...(compiledOperations || [])
             .filter((operation) => operation.path !== '/人物档案')
             .map((operation) => ({
