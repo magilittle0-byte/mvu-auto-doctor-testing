@@ -259,6 +259,27 @@ function loadStage3ProfileEvolutionGate() {
     return sandbox.profileEvolutionGate;
 }
 
+test('P3 binds a brand-new empty ActorRegistry to the verified scope before drift comparison', () => {
+    const gate = loadStage3ProfileEvolutionGate();
+    const target = {
+        chatId: 'chat-empty-ledger', index: 2, messageId: 'message-2', swipeId: 6,
+        generationSerial: 7, generationId: 'generation-7', generationType: 'swipe',
+        scopeDigest: 'scope-current', contentFingerprint: 'content-current',
+    };
+    const result = gate({
+        baseLedger: {},
+        freshLedger: {},
+        actionTarget: target,
+        chatId: target.chatId,
+        scopeDigest: target.scopeDigest,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.ledger.actorRegistry.scopeDigest, target.scopeDigest);
+    assert.equal(result.ledger.actors.length, 0);
+    assert.equal(result.ledger.actionAttempts.length, 0);
+    assert.equal(result.ledger.actionReceipts.length, 0);
+});
+
 function loadContinuityWorldEntryCanonicalizer() {
     const code = sourceSection(
         'function usableContinuityWorldEntry(entry)',

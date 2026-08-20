@@ -1,6 +1,6 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.24` 测试仓候选。状态：rc.23 已实际加载到唯一测试聊天并在同一首回合继续 reroll；正文、选项与显式无变化回执均生成，但旧 `Four_Options_Output_Contract` 把 `</content> → <options>` 声明为唯一顺序，使模型把回执放在 options 后，P1 正确 fail-closed。rc.24 用终检 V5 取代该冲突顺序，并把同一 preset-contract 版本纳入 Doctor runtime fingerprint；仍须在同一聊天继续 reroll 绑定最终 loaded fingerprint，十二回合正式门禁未完成。
+适用版本：`2.0.0-rc.25` 测试仓候选。状态：rc.24 已在唯一测试聊天同一首回合的 direct reroll 中验证终检 V5 把显式无变化回执放到 `</content>` 后、options 前，且人物正常路径额外模型调用为 0；但真实新聊天的空 ActorRegistry 缺少 scopeDigest，使 P3 三次 fresh owner 都被误判为 `world.stale.actor_ledger_changed`。rc.25 只修正 P3 的空/旧 Registry 比较投影，仍须提交、重新加载并在同一聊天同一用户消息继续 reroll；十二回合正式门禁未完成。
 
 ## 生产链
 
@@ -27,7 +27,7 @@
 ### A：最小适配
 
 - TavernDB 成熟填表结构只复用“有界目标、working clone、整批提交、回读失败不算成功”的事务形状；没有复制其表格、SQL 或内容权威。
-- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设增加正文后第一隐藏语义域，并只把原“你感到”模板最小修正为客观感官表达与明确的玩家主观感受禁写，不改写作者提示词主结构。rc.24 只增加最终顺序 V5 适配层，明确覆盖旧 options 合同的漏项；未改第三方核心结构、未新建提示词通道。
+- 糖糖公司成熟多轴人物差异继续由同一 ticket 提供；最新版 Izumi/ARGO 融合预设增加正文后第一隐藏语义域，并只把原“你感到”模板最小修正为客观感官表达与明确的玩家主观感受禁写，不改写作者提示词主结构。终检 V5 只增加最终顺序适配层，明确覆盖旧 options 合同的漏项；未改第三方核心结构、未新建提示词通道。
 - 既有 `profileV6` 自然叙事六段和锁/人工覆盖规范作为 MVU schema 内容形状；ActorLedger 改为单向 reference-only 投影。
 - 既有 P3/P4 注入只增加 MVU readback 摘要投影，不新增并行世界状态机或第二插槽。
 
@@ -41,6 +41,7 @@
 - P3 模型前 stale 的统一 fixed-code 零写收据与 fresh exact-target 单次接棒。旧分支只有泛 `world.stale`，无法区分可安全接棒的零调用竞态与真实失败。
 - 生成前票据的逐票隐藏档案回执及其 runtime fingerprint。rc.20 真实证据证明通用预设合同在长上下文中可能与具体已消费票据脱节；新合同只闭合既有同一载荷，不引入第二识别器或第二档案权威。
 - 严格 post-content/legacy-tail 位置判定、票据回合缺失回执 fail-closed、P3 settled-before-wake 单次接棒和 `worldPackage` 屏障判定。rc.21 证明“完全省略等于成功”会掩盖主模型漏交；rc.22 又证明严格尾部会被大型辅助域截断，ticket-only P4 不能代表必须阻塞 P3 的世界包。旧路径没有这些本地证明。
+- P3 空/旧 ActorRegistry 的 scoped comparison projection。rc.24 真实新聊天证明：没有任何人物时 Registry 尚未持久化 scopeDigest，直接拿它与已验证 scope 比较会把稳定空账本永久误报成 `actor_ledger_changed`；rc.25 只在只读比较投影中补齐该 scope，真实 chat/scope 冲突仍 fail-closed。
 
 ## 不变量与失败语义
 
@@ -52,4 +53,4 @@
 
 ## 非验收说明
 
-rc.23 的最终自动套件为 613/613，提交与实际 loaded hash/fingerprint 均匹配；但同一测试聊天的真实首回合第四次 reroll 暴露旧四选项“唯一顺序”与 post-content 回执冲突，回执落在 options 后并被严格解析器拒绝。rc.24 已增加最高优先级 V5 顺序补丁、Doctor 同源票据提示和 preset-contract fingerprint 绑定；定向检查 275/275、唯一一次完整自动套件 613/613、语法、JSON、差异与敏感信息检查均通过，推送、重新加载与同一聊天继续 reroll 证据仍待完成。自动检查和合成 DOM 回归都不证明真实可用；正式仓与正式 main 仍须等待完整十二回合协议。
+rc.24 的提交、loaded hash 与 runtime fingerprint 均匹配，真实 swipe 6 证明 V5 回执顺序、正文/选项和隐藏隔离正确；P1 以 durable no-candidates 零写终态结束，额外人物模型调用为 0。随后 P3 因空 Registry scope 未投影而三次零模型 stale，未产生 world/P4。rc.25 已补该局部根因；定向 P3 100/100、accepted-final/P1→P3 53/53 与唯一一次有效完整套件 614/614 通过。当前自动和旧真实证据都不能替代 rc.25 重新加载后的同聊天 reroll。正式仓与正式 main 仍须等待完整十二回合协议。

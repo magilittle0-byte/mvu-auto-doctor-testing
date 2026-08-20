@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.24 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.25 正式门禁清单
 
-候选：`2.0.0-rc.24`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成同一测试聊天、同一首回合消息的 reroll 闭环）
+候选：`2.0.0-rc.25`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成同一测试聊天、同一首回合消息的 reroll 闭环）
 
-当前状态：rc.23 已实际加载并在同一测试聊天首回合 reroll，正文、选项和无变化回执均生成，但旧四选项“唯一顺序”把回执推到 options 后，严格解析器正确 fail-closed。rc.24 用终检 V5 明确统一为 `</content> → 人物回执 → options → UpdateVariable`，Doctor 票据提示和 runtime fingerprint 同步绑定；定向 275/275 与唯一一次完整自动套件 613/613 已通过，推送、重新加载和同聊天 reroll 复验仍待完成。
+当前状态：rc.24 已实际加载并在同一测试聊天首回合 direct reroll，正文、选项、隐藏无变化回执顺序和零人物模型调用均正确，但空 ActorRegistry 的缺失 scopeDigest 被 P3 永久误判为 `actor_ledger_changed`，world/P4 未终结。rc.25 只修复该空/旧 Registry 的 scoped comparison projection；定向 P3 100/100、accepted-final/P1→P3 53/53 与唯一一次有效完整自动套件 614/614 已通过，须完成推送、重新加载和同聊天 reroll 复验。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

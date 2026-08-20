@@ -276,7 +276,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.24';
+const VERSION = '2.0.0-rc.25';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v5';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;
@@ -21139,8 +21139,21 @@ function stage3ActorLedgerAfterProfileOnlyEvolution({
     chatId = '',
     scopeDigest = '',
 } = {}) {
-    const base = normalizeActorLedger(baseLedger, { chatId, scopeDigest });
-    const fresh = normalizeActorLedger(freshLedger, { chatId, scopeDigest });
+    // A brand-new chat legitimately has no persisted ActorRegistry yet. P3's
+    // comparison projection must bind that empty/legacy registry to the
+    // already-verified current scope; otherwise both reads retain an empty
+    // scopeDigest and are falsely classified as actor-ledger drift forever.
+    // normalizeActorRegistry still fail-closes real chat/scope conflicts.
+    const base = normalizeActorLedger(baseLedger, {
+        chatId,
+        scopeDigest,
+        allowScopeDigestFill: true,
+    });
+    const fresh = normalizeActorLedger(freshLedger, {
+        chatId,
+        scopeDigest,
+        allowScopeDigestFill: true,
+    });
     const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
     if (!chatId || base.chatId !== chatId || fresh.chatId !== chatId) {
         return { ok: false, reason: 'world_phase1_actor_ledger_changed' };
