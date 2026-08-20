@@ -11,7 +11,10 @@ import {
     profileReadiness,
     actorProfilePromptProjection,
 } from '../actor-profile-mvu-core.mjs';
-import { ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS } from '../actor-profile-v6-core.mjs';
+import {
+    ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
+    actorProfileRecoverySourceDigest,
+} from '../actor-profile-v6-core.mjs';
 import { actorProfileReadinessInLedger } from '../actor-ledger-core.mjs';
 import { composeActorOperationalState, actorOperationalPromptProjection } from '../actor-operational-state-core.mjs';
 import {
@@ -832,6 +835,61 @@ test('accepted-final profile adapter is exact-source, zero-model, and uses exist
     const wrapper = section('async function runSemanticActorProfileTarget(captured)', 'function renderSemanticProfileEntries');
     assert.match(wrapper, /finalizeActorProfileRecoveryOutcome\(captured, result\)/u);
     assert.match(wrapper, /recovery\.recoverySaved === true/u);
+    assert.match(wrapper, /profile_finalization_failed/u);
+    assert.match(wrapper, /terminalDiagnosticPersisted = false/u);
+});
+
+test('production imports the recovery source digest used by semantic failed-actor persistence', () => {
+    const importEnd = source.indexOf("from './actor-profile-v6-core.mjs'");
+    const importStart = source.lastIndexOf('import {', importEnd);
+    const profileImport = source.slice(importStart, importEnd);
+    assert.match(profileImport, /actorProfileRecoverySourceDigest/u);
+    const value = actorProfileRecoverySourceDigest({
+        chatId: 'chat-safe', messageId: 'message-safe', logicalIndex: 2, index: 2,
+        swipeId: 0, generation: 1, generationSerial: 1, generationId: 'generation-safe',
+        generationType: 'normal', scopeDigest: 'scope-safe', contentFingerprint: 'content-safe',
+    });
+    assert.match(value, /^profile-source:\d+:[a-f0-9]+$/u);
+});
+
+test('semantic profile wrapper converts finalization exceptions into a visible terminal failure', async () => {
+    const wrapper = section(
+        'async function runSemanticActorProfileTarget(captured)',
+        'function renderSemanticProfileEntries',
+    );
+    const statuses = [];
+    let schedulingFailure = '';
+    const run = new Function(
+        'setActorProfileStatus', 'runSemanticActorProfileTargetCore',
+        'actorProfileSemanticFailure', 'finalizeActorProfileRecoveryOutcome',
+        'captureTarget', 'getContext', 'sameAcceptedNarrativeTarget', 'sourceRefOf',
+        'recordActorProfileFinalDiagnostic', 'compactActorProfileFailureCode',
+        'latestActorProfileDiagnostic', 'markActorSchedulingNotReachedByProfile',
+        'renderSovereigntyHealth',
+        `${wrapper}\nreturn runSemanticActorProfileTarget;`,
+    )(
+        (text, kind) => statuses.push({ text, kind }),
+        async () => ({ status: 'atomic_readback', profileBatch: { committed: ['ACTOR-SAFE'] } }),
+        (_captured, reason, extra) => ({
+            status: 'not_completed', reason, profileBatch: { failed: [{ code: reason }], ...extra },
+        }),
+        async () => { throw new ReferenceError('missing private helper'); },
+        () => null,
+        () => ({ chatId: 'chat-safe' }),
+        () => false,
+        () => ({ chatId: 'chat-safe', messageId: 'message-safe' }),
+        async () => { throw new Error('diagnostic persistence unavailable'); },
+        (value) => String(value || '').slice(0, 120),
+        null,
+        (reason) => { schedulingFailure = reason; },
+        () => {},
+    );
+    const result = await run({ chatId: 'chat-safe', index: 2 });
+    assert.equal(result.status, 'not_completed');
+    assert.equal(result.reason, 'profile_finalization_failed');
+    assert.equal(result.terminalDiagnosticPersisted, false);
+    assert.equal(schedulingFailure, 'profile_finalization_failed');
+    assert.equal(statuses.at(-1).kind, 'error');
 });
 
 test('profile transaction settle tolerates only host-tail normalization and waits for an exact stable MVU base', async () => {

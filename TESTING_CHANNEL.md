@@ -17,14 +17,14 @@
 
 ## 当前候选
 
-- 版本：`2.0.0-rc.33`
+- 版本：`2.0.0-rc.34`
 - 实现范围：MVU durable semantic profile 前移、accepted-final exact SourceRef 事务、prompt-ready assistant 副本隔离、Doctor-owned CHAT_DELETED/GROUP_CHAT_DELETED 清理、人物/势力/环境三 lane、resolved 有界压缩和 ephemeral actorOperationalState。数据库、预设、MVU、Doctor/P3/P4 仍各自独立；语义档案不双写 legacy `profileV6`。
 - 候选预设：精确 IZUMI 文件 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json`，当前 SHA-256 为 `CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4`。V6 上下文隔离条目已唯一启用在人物语义块之前，V5 回执终检保持最后；V4 已禁用。消费票据但缺项的人物不得静默省略，必须保留可恢复单人物壳。
 - 静态宿主证据：TavernHelper `4.8.19`；`extensions/TavernHelper/dist/index.js.map` SHA-256 为 `7989FC1B3A47978526D63FD63C9DCB5ED68B534523BD24C223FF0B82C7A1D961`。事件负载与所有权见 [`docs/2.0/MVU_RUNTIME_SOURCE_MAP.md`](docs/2.0/MVU_RUNTIME_SOURCE_MAP.md)。这不是宿主真实触发证据。
-- rc.32 首个真实 accepted 回复暴露 P3 在模型调用前引用未声明 `recalledActorIds`，世界链与内置世界修复同时失败。rc.33 从当前冻结的调度/待裁决尝试构造唯一 `mustActorIds`，并移除遮住该错误的 VM 夹具全局注入；定向检查 158/158、唯一一次完整自动套件 666/666 通过，0 fail，duration `13520.7757 ms`。
-- 尚未执行：rc.33 当前提交真实加载指纹、真实数据库完整 CRUD、十二回合验收、构建、CI、QC 覆盖或正式发布门禁。
+- rc.33 第2个真实 accepted 回复带有专用人物档案块，变量和 P3 已提交，但自动 P1 因未导入 `actorProfileRecoverySourceDigest` 在恢复持久化前抛错并遗留 waiting。rc.34 显式复用 V6 recovery digest helper，并增加终态异常红色收口；定向检查 113/113 与唯一一次完整自动套件 668/668 通过，0 fail，duration `13905.969 ms`。
+- 尚未执行：rc.34 当前提交/推送、真实加载指纹、真实数据库完整 CRUD、十二回合验收、构建、CI、QC 覆盖或正式发布门禁。
 - 已知边界：默认 `actorRuntimeBindings={}`，无配置时 MVU 实时运行态显示未绑定；当前宿主没有提供可用于安全自动孤儿 GC 的权威 chat-ID 枚举，因此自动 GC 关闭，仅提供预览/确认入口。首回合档案、刷新/重启、新对话隔离、三 lane 和 attempt/world separation 的真实效果等待用户安装验证。
-- 发布含义：rc.33 自动检查已完成，提交与 testing `main` 推送待本轮差异/敏感信息复核后执行；随后必须重新加载当前指纹并从一个全新聊天开始真实验收。它仍只是测试通道候选，不得视为稳定版或正式发布。
+- 发布含义：rc.34 自动检查已完成，提交与 testing `main` 推送待执行；随后必须重新加载当前指纹并从一个全新聊天开始真实验收。它仍只是测试通道候选，不得视为稳定版或正式发布。
 
 ## 本次重点检查
 

@@ -2487,7 +2487,7 @@ export function normalizeActorProfileRecoverySourceRef(value) {
     };
 }
 
-function actorProfileRecoverySourceDigest(value) {
+export function actorProfileRecoverySourceDigest(value) {
     return `profile-source:${fingerprint(JSON.stringify(canonicalProfileValue(
         normalizeActorProfileRecoverySourceRef(value),
     )))}`;

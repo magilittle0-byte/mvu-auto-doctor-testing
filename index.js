@@ -165,6 +165,7 @@ import {
     actorProfileGenerationCriticalFingerprint,
     actorProfileIdentityEvidenceSurface,
     actorProfileRecoveryCriticalFingerprint,
+    actorProfileRecoverySourceDigest,
     actorProfileRecoverySourceMatches,
     actorProfileRetryReceiptMatches,
     actorProfileTicketBatchPersistenceDigest,
@@ -310,7 +311,7 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.33';
+const VERSION = '2.0.0-rc.34';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v6';
 const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = 'CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
@@ -19091,55 +19092,86 @@ async function runSemanticActorProfileTarget(captured) {
                 ? String(error.message) : 'profile_persistence_failed',
         );
     }
-    const recovery = await finalizeActorProfileRecoveryOutcome(captured, result);
-    result = recovery.result;
-    const fresh = captureTarget(getContext(), captured.index, {
-        frozenScope: captured.actorSovereigntyScope,
-        unscoped: !captured.scopeDigest,
-    });
-    const diagnosticTarget = sameAcceptedNarrativeTarget(captured, fresh) ? fresh : captured;
-    const committed = result?.profileBatch?.committed?.length || 0;
-    const failed = result?.profileBatch?.failed?.length
-        || result?.profileBatch?.quarantined?.length || 0;
-    const recoverySaved = recovery.recoverySaved === true;
-    result.terminalDiagnosticPersisted = await recordActorProfileFinalDiagnostic(
-        diagnosticTarget,
-        result,
-        { recoverySaved },
-    );
-    latestActorProfileDiagnostic = {
-        status: String(result?.status || 'not_completed'),
-        sourceRef: sourceRefOf(diagnosticTarget),
-        failingModules: failed ? ['profile'] : [],
-        lastFailureCodes: [...new Set([
-            result?.reason,
-            ...(result?.profileBatch?.failed || []).map((row) => row?.code || row?.reason),
-            ...(result?.profileBatch?.quarantined || []).map((row) => row?.reason),
-        ].map(compactActorProfileFailureCode).filter(Boolean))].slice(0, 8),
-        // Recovery material may have existed transiently before this exact
-        // accepted-final transaction completed.  A durable success must not
-        // keep advertising an unbound failure/repair action to the surface.
-        canRetry: result?.status === 'not_completed' && recoverySaved,
-        abortCause: '',
-        recoveredFieldCount: 0,
-    };
-    if (result?.status === 'atomic_readback') {
-        setActorProfileStatus(
-            `人物档案：本回合 ${committed} 人已完整原子写入 MVU 并回读；${failed ? `${failed} 人失败并等待单人物修复，` : ''}其他就绪人物与结构世界继续。`,
-            failed ? 'warn' : 'ok',
+    try {
+        const recovery = await finalizeActorProfileRecoveryOutcome(captured, result);
+        result = recovery.result;
+        const fresh = captureTarget(getContext(), captured.index, {
+            frozenScope: captured.actorSovereigntyScope,
+            unscoped: !captured.scopeDigest,
+        });
+        const diagnosticTarget = sameAcceptedNarrativeTarget(captured, fresh) ? fresh : captured;
+        const committed = result?.profileBatch?.committed?.length || 0;
+        const failed = result?.profileBatch?.failed?.length
+            || result?.profileBatch?.quarantined?.length || 0;
+        const recoverySaved = recovery.recoverySaved === true;
+        result.terminalDiagnosticPersisted = await recordActorProfileFinalDiagnostic(
+            diagnosticTarget,
+            result,
+            { recoverySaved },
         );
-    } else if (result?.status === 'no_candidates') {
-        setActorProfileStatus('人物档案：本回合没有档案变化，已确认零写入；人物与结构世界照常继续。', '');
-    } else if (result?.status === 'stale') {
-        setActorProfileStatus('人物档案：回复、swipe、聊天或作用域已变化，本次零写入。', '');
-    } else {
+        latestActorProfileDiagnostic = {
+            status: String(result?.status || 'not_completed'),
+            sourceRef: sourceRefOf(diagnosticTarget),
+            failingModules: failed ? ['profile'] : [],
+            lastFailureCodes: [...new Set([
+                result?.reason,
+                ...(result?.profileBatch?.failed || []).map((row) => row?.code || row?.reason),
+                ...(result?.profileBatch?.quarantined || []).map((row) => row?.reason),
+            ].map(compactActorProfileFailureCode).filter(Boolean))].slice(0, 8),
+            // Recovery material may have existed transiently before this exact
+            // accepted-final transaction completed.  A durable success must not
+            // keep advertising an unbound failure/repair action to the surface.
+            canRetry: result?.status === 'not_completed' && recoverySaved,
+            abortCause: '',
+            recoveredFieldCount: 0,
+        };
+        if (result?.status === 'atomic_readback') {
+            setActorProfileStatus(
+                `人物档案：本回合 ${committed} 人已完整原子写入 MVU 并回读；${failed ? `${failed} 人失败并等待单人物修复，` : ''}其他就绪人物与结构世界继续。`,
+                failed ? 'warn' : 'ok',
+            );
+        } else if (result?.status === 'no_candidates') {
+            setActorProfileStatus('人物档案：本回合没有档案变化，已确认零写入；人物与结构世界照常继续。', '');
+        } else if (result?.status === 'stale') {
+            setActorProfileStatus('人物档案：回复、swipe、聊天或作用域已变化，本次零写入。', '');
+        } else {
+            setActorProfileStatus(
+                '人物档案：本回合档案未完成；缺档人物本回合不行动，其他就绪人物和结构世界继续。医生可按单人物定向修复。',
+                'error',
+            );
+        }
+        renderSovereigntyHealth();
+        return result;
+    } catch (error) {
+        const reason = /^[a-z0-9_.:-]+$/iu.test(String(error?.message || ''))
+            ? String(error.message) : 'profile_finalization_failed';
+        result = actorProfileSemanticFailure(captured, reason, { repairable: true });
+        try {
+            result.terminalDiagnosticPersisted = await recordActorProfileFinalDiagnostic(
+                captured,
+                result,
+                { recoverySaved: false },
+            );
+        } catch {
+            result.terminalDiagnosticPersisted = false;
+        }
+        latestActorProfileDiagnostic = {
+            status: 'not_completed',
+            sourceRef: sourceRefOf(captured),
+            failingModules: ['profile'],
+            lastFailureCodes: [compactActorProfileFailureCode(reason)],
+            canRetry: false,
+            abortCause: '',
+            recoveredFieldCount: 0,
+        };
+        markActorSchedulingNotReachedByProfile(reason);
         setActorProfileStatus(
-            '人物档案：本回合档案未完成；缺档人物本回合不行动，其他就绪人物和结构世界继续。医生可按单人物定向修复。',
+            '人物档案：本回合档案终态收口失败；未把半档案显示为成功，请保留当前聊天并使用修复中心。',
             'error',
         );
+        renderSovereigntyHealth();
+        return result;
     }
-    renderSovereigntyHealth();
-    return result;
 }
 
 function renderSemanticProfileEntries(entries) {

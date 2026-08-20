@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.33 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.34 正式门禁清单
 
-候选：`2.0.0-rc.33`（当前仅测试仓；须在当前 loaded fingerprint 下完成同一聊天连续十二个有效回复。正常正文不得 reroll；仅正文硬失败可替换当前回复，Doctor/MVU/P3/P4 故障必须在已接受正文的精确 SourceRef 上修复。）
+候选：`2.0.0-rc.34`（当前仅测试仓；须在当前 loaded fingerprint 下完成同一聊天连续十二个有效回复。正常正文不得 reroll；仅正文硬失败可替换当前回复，Doctor/MVU/P3/P4 故障必须在已接受正文的精确 SourceRef 上修复。）
 
-当前状态：rc.33 绑定候选预设 SHA-256 `CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4`。rc.32 首个真实 accepted 回复暴露 P3 本地 Recall 未声明变量并已在 rc.33 修复；定向检查 158/158、完整自动套件 666/666 通过。旧真实结果不能替代 rc.33，真实宿主十二回合门禁待当前提交执行。
+当前状态：rc.34 绑定候选预设 SHA-256 `CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4`。rc.33 第2个真实 accepted 回复暴露人物恢复 SourceRef digest helper 未导入并遗留 waiting；rc.34 已接通成熟 helper 并增加红色终态兜底，定向检查 113/113 与唯一一次完整自动套件 668/668 通过。提交、推送和当前指纹十二回合真实门禁待执行；旧真实结果不能替代 rc.34。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

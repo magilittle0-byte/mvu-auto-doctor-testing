@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2.0.0-rc.34（2026-08-21，测试仓候选）
+- rc.33 真实酒馆第1个 accepted 回复完成变量、`no_candidates` 人物终态、P3 durable commit 和 P4；第2个 accepted 回复正文、选项和 P3 正常，但真实隐藏人物档案块进入恢复持久化时抛出 `actorProfileRecoverySourceDigest is not defined`。根因是成熟 V6 recovery helper 仍是模块私有函数，生产语义适配器却直接引用它；旧合成夹具没有执行这个真实失败人物目标分支。
+- 当前候选显式导出并导入同一个 recovery SourceRef digest helper，不复制第二份摘要算法；同时把语义 P1 的恢复持久化、终态诊断和状态展示收进兜底边界，即使未来终态阶段再出现异常也必须返回红色 `not_completed`，不能留下 busy/waiting 或绿色假成功。人物完整度、`full_adult` 生理门、MVU 原子提交/readback、数据库独立性和 P3/P4 所有权均未放宽。
+- 人物/accepted-final 定向检查 113/113、整份 ES module 解析 1/1 以及本候选唯一一次完整自动套件 668/668 均通过，0 fail，duration `13905.969 ms`。rc.33 两个真实回复只作根因证据，运行代码变化后不能续接 rc.34；须重新加载当前指纹并从一个全新聊天重新执行十二回合与恢复门禁。
+
 ## 2.0.0-rc.33（2026-08-21，测试仓候选）
 - rc.32 首个真实酒馆 accepted 回复证明正文、变量事务和 `no_candidates` 人物终态正常，但 P3 在任何世界模型调用前以 `world.unexpected_failure` 终止，内置“修复世界连续性”也因复走同一路径返回 `doctor.repair.world.adapter_failed`。根因是生产 `runContinuityTarget()` 在本地 Recall 前引用未声明的 `recalledActorIds`，而 VM 夹具曾手工注入同名全局并遮住浏览器 `ReferenceError`。
 - 当前候选从本回合冻结的 `scheduledActorIds` 与已持久化待裁决尝试构造唯一 `mustActorIds`，同一集合同时用于关系目标和本地 Recall；测试夹具不再补生产全局，并新增未声明引用回归。定向检查 158/158、唯一一次完整自动套件 666/666 通过，0 fail，duration `13520.7757 ms`。此修复不改变人物档案、MVU、数据库、预设或 P4 的权威边界。rc.32 的真实失败证据不能续接 rc.33，必须重新加载当前指纹并从一个全新聊天重新执行十二回合门禁。

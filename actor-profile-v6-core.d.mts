@@ -86,6 +86,7 @@ export function materializeActorProfileBaseline(
 ): object;
 export function actorProfileBaselineDigest(profile: unknown): string;
 export function normalizeActorProfileRecoverySourceRef(value: unknown): object;
+export function actorProfileRecoverySourceDigest(value: unknown): string;
 export function actorProfileRecoverySourceMatches(left: unknown, right: unknown): boolean;
 export function actorProfileTicketBatchPersistenceDigest(value: unknown, acceptedTarget?: unknown): string;
 export function sealActorProfileTicketBatchForPersistence(value: unknown, acceptedTarget: unknown): object | null;
