@@ -257,10 +257,21 @@ function acceptedProfileBlockFloor(source) {
     return tokens.reduce((floor, token) => Math.max(floor, lower.lastIndexOf(token)), -1);
 }
 
-function actorProfileReceiptPlacementKind(source, receiptIndex) {
+function actorProfileReceiptPlacementKind(source, receiptIndex, receiptEnd = -1) {
     const textSource = String(source || '');
     const index = Math.max(0, Number(receiptIndex) || 0);
     const lower = textSource.toLocaleLowerCase();
+    const end = Number(receiptEnd);
+    if (Number.isFinite(end) && end > index) {
+        const contentOpen = lower.lastIndexOf('<content', index);
+        const contentEndBeforeReceipt = lower.lastIndexOf('</content>', index);
+        const contentEndAfterReceipt = lower.indexOf('</content>', end);
+        if (
+            contentOpen > contentEndBeforeReceipt
+            && contentEndAfterReceipt >= end
+            && textSource.slice(end, contentEndAfterReceipt).trim().length === 0
+        ) return 'content_inner_tail';
+    }
     const contentEnd = lower.lastIndexOf('</content>', index);
     if (contentEnd < 0) return '';
     const between = textSource.slice(contentEnd + '</content>'.length, index);
@@ -276,7 +287,7 @@ function actorProfileReceiptPlacementKind(source, receiptIndex) {
 
 export function actorProfileReceiptPlacementAccepted(source, receiptIndex, receiptEnd = -1) {
     const textSource = String(source || '');
-    const placement = actorProfileReceiptPlacementKind(textSource, receiptIndex);
+    const placement = actorProfileReceiptPlacementKind(textSource, receiptIndex, receiptEnd);
     if (!placement) return false;
     if (placement !== 'legacy_tail' || !Number.isFinite(Number(receiptEnd)) || Number(receiptEnd) < 0) {
         return true;
@@ -299,16 +310,6 @@ export function extractActorProfileUpdateBlock(output, {
     };
     if (matches.length !== 1) return { ok: false, present: true, block: '', entries: [], failures: [FIXED_FAILURES.DUPLICATE_BLOCK] };
     const opener = matches[0][0];
-    if (requireAcceptedTail && !actorProfileReceiptPlacementAccepted(source, matches[0].index)) {
-        return {
-            ok: false,
-            present: true,
-            block: '',
-            entries: [],
-            failures: [FIXED_FAILURES.BLOCK_POSITION],
-            repairs: [],
-        };
-    }
     const start = matches[0].index + opener.length;
     const endToken = opener.startsWith('<!--') ? '-->' : ACTOR_PROFILE_UPDATE_BLOCK.end;
     let end = source.indexOf(endToken, start);
@@ -323,6 +324,7 @@ export function extractActorProfileUpdateBlock(output, {
     }
     if (end < 0) return { ok: false, present: true, block: '', entries: [], failures: [FIXED_FAILURES.UNCLOSED_BLOCK], repairs };
     const receiptEnd = end < source.length ? end + endToken.length : end;
+    const placement = actorProfileReceiptPlacementKind(source, matches[0].index, receiptEnd);
     if (requireAcceptedTail && !actorProfileReceiptPlacementAccepted(source, matches[0].index, receiptEnd)) {
         return {
             ok: false,
@@ -333,6 +335,7 @@ export function extractActorProfileUpdateBlock(output, {
             repairs,
         };
     }
+    if (placement === 'content_inner_tail') repairs.push('profile_receipt_relocated_from_content_inner_tail');
     const block = source.slice(start, end).trim();
     if (block.length > maxCharacters) return { ok: false, present: true, block: '', entries: [], failures: [FIXED_FAILURES.TOO_LARGE] };
     return { ok: true, present: true, block, entries: [], failures: [], repairs };

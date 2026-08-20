@@ -172,7 +172,7 @@ test('semantic repair is single-person targeted and legacy migration is explicit
     assert.match(source, /actorProfilePathMode === 'semantic'/u);
 });
 
-test('contracted receipt omission fails closed while post-content and legacy tail no-change receipts are valid', () => {
+test('contracted receipt omission fails closed while dedicated tail no-change receipts are valid', () => {
     const helperSource = section(
         'function actorProfileExplicitNoChangeReceipt',
         'function actorProfileSemanticNoChange',
@@ -189,6 +189,9 @@ test('contracted receipt omission fails closed while post-content and legacy tai
     ), true);
     assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
         '<content><!-- 人物档案无变化 --></content>',
+    ), true);
+    assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
+        '<content><!-- 人物档案无变化 -->\n正文仍在继续</content>',
     ), false);
     assert.equal(helpers.actorProfileExplicitNoChangeReceipt(
         '<!-- 人物档案无变化 -->\n<options>1. 继续</options>',

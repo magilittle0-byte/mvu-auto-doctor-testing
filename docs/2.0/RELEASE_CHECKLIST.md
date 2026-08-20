@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.26 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.27 正式门禁清单
 
-候选：`2.0.0-rc.26`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成同一测试聊天、同一首回合消息的 reroll 闭环）
+候选：`2.0.0-rc.27`（当前仅测试仓；以下完整真实门禁未执行；须在当前 loaded fingerprint 下完成同一测试聊天、同一首回合消息的 reroll 闭环）
 
-当前状态：rc.25 已实际加载到测试仓提交 `65d7ac9` 与 runtime fingerprint `runtime-critical:935764:33763949`，并在唯一测试聊天同一首回合 direct reroll 到 swipe 7。真实隐藏块为单人物、同票绑定、六段完整且不污染正文，但宿主机制尾规范化改变整条消息哈希，使旧事务门在 parser/compiler 之后误判 source drift 并零写；P3 已越过空 Registry 缺陷，但 fresh-chat 机械 nextTurn 令 safe-held 判定不可达。rc.26 修复这两个真实根因；定向 153/153、accepted-final/parser 66/66 与本候选唯一一次完整自动套件 616/616 已通过，推送、重新加载和同聊天 reroll 仍待完成。
+当前状态：rc.26 已实际加载到测试仓提交 `f3889a9` 与 runtime fingerprint `runtime-critical:939029:a8ae46c4`。同一测试聊天 swipe 19 的当前 accepted assistant 发行了同源票据，但唯一隐藏 no-change 回执紧贴在 `</content>` 内侧，旧严格位置门以 `profile_block_missing` 正确零写；旧 swipe 世界/P4 和人物状态均未污染当前源。rc.27 只增加该唯一 inner-tail 注释的本地 relocation，定向 262/262 与唯一一次完整自动套件 616/616 已通过；仍须推送、重新加载和同聊天 reroll。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

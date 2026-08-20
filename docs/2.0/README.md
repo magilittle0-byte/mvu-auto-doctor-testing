@@ -1,6 +1,6 @@
 # MVU Auto Doctor 2.0 权威规格索引
 
-状态：`2.0.0-rc.26-stable-profile-floor-and-fresh-safe-hold / testing-main / formal-gates-pending`
+状态：`2.0.0-rc.27-local-inner-tail-profile-receipt-repair / testing-main / formal-gates-pending`
 
 适用范围：2.0 产品、数据协议、事务协议、真实故障回放与阶段交接
 

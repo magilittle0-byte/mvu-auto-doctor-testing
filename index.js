@@ -276,7 +276,7 @@ import {
 } from './v2/repair/doctor-repair-center.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.26';
+const VERSION = '2.0.0-rc.27';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v5';
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
 const CHAT_NAMESPACE_VERSION = 13;

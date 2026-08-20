@@ -6,7 +6,7 @@
 
 1. 生成前继续复用现有 `characterCreationTicket` 和稳定 ActorId。P4 的唯一 next-turn consumer 同时承载本回合票据、上一回合世界事件/可见后果及最多六个相关 durable-ready MVU 档案摘要；不发送全部历史档案。票据载荷把每个实际消费的完整 ticketId 就近绑定到同一 accepted assistant 的隐藏六段回执；未消费任何票据且没有既有人物变化时也必须交回 `<!-- 人物档案无变化 -->`。
 2. 配套预设 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json` 使用终检 V5，明确取代旧四选项合同中遗漏回执的“唯一顺序”，将唯一隐藏 `<人物档案更新>` 语义域或无变化收据固定为 `</content>` 后的第一个非空内容，再继续论坛/选项/UpdateVariable/吐槽/状态等辅助域。新人物给齐六段 V6 自然叙事档案，已有角色只给变化段；该位置让档案回执不再依赖长回复尾部是否被模型截断，也不会被旧 options 顺序推迟。
-3. accepted-final 适配器只读取当前最终 assistant 的精确 SourceRef；聊天、message、swipe、generation、content、scope 或 epoch 漂移均零写入。格式先本地宽容修复，再按 ticket/ActorId 逐人物绑定和隔离。解析器只接受严格 whitespace-only post-content 插槽或旧聊天 legacy tail；仅实际 EOF 的未闭合块可本地补闭合，辅助域前未闭合块 fail-closed。预留 ticket 只是可选池，不等于已消费；完整专用块和无变化收据都缺失时记录 `profile_block_missing + emptyOperations + repairable`，绝不伪装成功。无精确票据的旧聊天仍保留省略兼容。
+3. accepted-final 适配器只读取当前最终 assistant 的精确 SourceRef；聊天、message、swipe、generation、content、scope 或 epoch 漂移均零写入。格式先本地宽容修复，再按 ticket/ActorId 逐人物绑定和隔离。解析器优先接受严格 whitespace-only post-content 插槽，也兼容旧聊天 true-EOF legacy tail；rc.27 额外把“唯一专用注释结束后只剩空白并立即 `</content>`”识别为可恢复 inner-tail 并本地 relocation。注释后继续正文、重复块、论坛/选项内伪块和语义校验失败仍 fail-closed。预留 ticket 只是可选池，不等于已消费；完整专用块和无变化收据都缺失时记录 `profile_block_missing + emptyOperations + repairable`，绝不伪装成功。无精确票据的旧聊天仍保留省略兼容。
 4. 编译器在 working clone 上形成 `/人物档案/byActorId/<ActorId>` 操作，复用既有 MVU WAL、selected-field CAS、持久写、readback 与 touched-path rollback。第一次回读证明内容落地，第二次本地写入 ready 收据；最终操作合并回原消息 UpdateVariable，保留主回复原有变量操作。
 5. ActorRegistry 仍是唯一 ActorId/name/aliases 索引。ActorLedger 只保存 profileRef、digest、revision、readiness、ActionAttempt/receipt 和世界字段；完整档案只在 MVU，不再双写稳定/演化副本。
 6. P3 与人物档案事务独立启动，冻结启动时已经 durable-ready 的人物集合。缺档人物不参与该批人物行动，结构世界、其他 ready 人物和支线仍继续；人物尝试必须由世界单批裁决。accepted-final 只在 active P4 consumer 明确携带同 generation 的 `worldPackage` 时等待其清理；ticket-only consumer 即使仍 pending 也不阻断 P3。P1 的 idempotent wake 先原样 join 已有 P3，绝不在 pending owner 链内递归重开；semantic `no_candidates` 会把同一 exact-source coverage proof 作为结构世界准入证明，`not_completed` 不提供人物准入但也不阻断结构世界。所有模型前 stale 都携带 `module=world + zeroWrite=true + worldModelCalls=0` 和固定隐私码；无论初始 owner 在 P1 检查时仍 pending，还是已在前几个微任务中释放，只有第一次唤醒结果满足该证明、不是前台抢占，且重新 fresh-read 后仍是同一 accepted envelope，P1 才取得一次新 owner。已完成世界只返回 duplicate；任何已调用模型、正文/swipe/generation/scope/epoch 漂移都保持零自动重跑。
@@ -44,6 +44,7 @@
 - P3 空/旧 ActorRegistry 的 scoped comparison projection。rc.24 真实新聊天证明：没有任何人物时 Registry 尚未持久化 scopeDigest，直接拿它与已验证 scope 比较会把稳定空账本永久误报成 `actor_ledger_changed`；rc.25 只在只读比较投影中补齐该 scope，真实 chat/scope 冲突仍 fail-closed。
 - accepted-final 后宿主机制尾规范化的静稳地板。rc.25 真实 swipe 7 证明：人物块和 accepted 正文不变时，宿主仍会重写 MVU/辅助尾，使“整条消息哈希”不是可直接写入的稳定 floor。rc.26 等待 accepted content、专用人物块和精确 MVU 基线连续稳定，再把规范化后的同一 SourceRef 交给既有事务；人物块、正文、swipe、generation、scope 或 epoch 变化仍 fail-closed。
 - fresh-chat 机械时钟 safe-held 适配。`turn 0 → nextTurn 1` 本身不是世界语义进展；rc.26 仅在线程/world/scenario 无变化、所有 ATT 已裁决或不存在时把 turn 降回基线并写可验证 held 收据，绝不制造人物行动结果。
+- 当前 accepted assistant 的唯一 inner-tail 人物回执本地 relocation。rc.26 真实 swipe 19 证明模型可能遵守“隐藏且紧邻正文末尾”却把注释放在 `</content>` 内侧；rc.27 只接受注释后没有任何正文、紧接容器关闭的形状，并继续用完整解析、ticket/ActorId、六段、SourceRef 与 MVU readback 门阻止数据库/世界书相似标记取得权威。
 
 ## 不变量与失败语义
 
@@ -55,4 +56,4 @@
 
 ## 非验收说明
 
-rc.25 的提交、loaded hash 与 runtime fingerprint 均匹配；真实 swipe 7 证明最新版预设会交回同票、六段完整且不可见的人物档案块，正常人物档案模型调用为 0。脱敏重放又证明 parser、绑定、compiler 和 MVU parse 都成功；生产失败来自事务开始前的宿主尾部规范化竞态，且 P3 在结构世界 safe-held 条件上存在 fresh turn 不可达。rc.26 已修复两处局部根因；定向 153/153、accepted-final/parser 66/66 与本候选唯一一次完整自动套件 616/616 均通过。自动检查和旧指纹证据都不能替代 rc.26 重新加载后的同聊天 reroll；正式仓与正式 main 仍须等待完整十二回合协议。
+rc.26 的提交、loaded hash 与 runtime fingerprint 均匹配；真实 swipe 19 证明当前模型会把唯一隐藏 no-change 回执紧贴在 `</content>` 内侧，旧解析器正确零写但把轻微格式偏差记为 `profile_block_missing`。rc.27 已增加有界 inner-tail relocation，并保留完整 ticket/六段/SourceRef/MVU/readback 门；定向 262/262 与本候选唯一一次完整自动套件 616/616 已通过。自动检查和旧指纹证据不能替代 rc.27 重新加载后的同聊天 reroll。正式仓与正式 main 仍须等待完整十二回合协议。

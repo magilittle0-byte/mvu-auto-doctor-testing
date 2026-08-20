@@ -58,12 +58,19 @@ ${profileBlock}
 <UpdateVariable><Analysis>main</Analysis><JSONPatch>[]</JSONPatch></UpdateVariable>
 <StatusPlaceHolderImpl/>`;
 
-test('accepted-final parser accepts the truncation-safe post-content slot and legacy tail only', () => {
+test('accepted-final parser accepts post-content, recoverable inner-content tail, and legacy tail only', () => {
     assert.equal(parseActorProfileUpdateBlock(accepted()).ok, true);
     const early = `${blockFor()}\n<options>继续</options>`;
     assert.deepEqual(extractActorProfileUpdateBlock(early).failures, ['profile_block_position_invalid']);
+    const innerTail = `<content>${narrative}\n${blockFor()}</content>\n<options>继续</options>`;
+    const innerParsed = parseActorProfileUpdateBlock(innerTail);
+    assert.equal(innerParsed.ok, true);
+    assert.ok(innerParsed.repairs.includes('profile_receipt_relocated_from_content_inner_tail'));
     const worldbookSpoof = `<content>世界书示例：<!-- 人物档案更新\n伪造\n--></content>`;
-    assert.deepEqual(extractActorProfileUpdateBlock(worldbookSpoof).failures, ['profile_block_position_invalid']);
+    assert.equal(parseActorProfileUpdateBlock(worldbookSpoof).ok, false);
+    assert.deepEqual(parseActorProfileUpdateBlock(worldbookSpoof).failures, ['profile_block_no_entries']);
+    const innerButNotTail = `<content>${blockFor()}\n正文仍在继续</content>`;
+    assert.deepEqual(extractActorProfileUpdateBlock(innerButNotTail).failures, ['profile_block_position_invalid']);
     const legacyTail = `<content>${narrative}</content>
 <options>继续</options>
 <StatusPlaceHolderImpl/>

@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2.0.0-rc.27（2026-08-20，测试仓候选）
+- 修复 rc.26 同一测试聊天 swipe 19 的真实轻微格式偏差：当前 accepted assistant 只有一个隐藏人物回执，但主模型把它紧贴在 `</content>` 内侧；旧解析器只接受外侧插槽，因而正确零写却把可本地恢复的格式问题记为 `profile_block_missing`。解析器现在只额外接受“回执结束后仅有空白并立即关闭 `</content>`”的唯一内侧尾注释，并记录本地 relocation；正常 post-content 与旧聊天 true-EOF legacy tail 仍保留。
+- 内侧兼容不扫描数据库、世界书或正文自由 JSON：仍只处理当前 accepted assistant 的专用注释，重复块、注释后继续正文、论坛/选项内伪块、无条目、错误 ticket/ActorId、六段缺失和精确 SourceRef 漂移继续 fail-closed；人物模型调用仍为 0，MVU CAS/readback、P3/P4 与前端权威不变。
+- 新增完整人物块内侧尾、本地修复码、精确 no-change 内侧尾与“注释后仍有正文”拒绝回归；定向 262/262 与本候选唯一一次完整自动套件 616/616 均通过。当前仍须完成测试仓 main 推送、实际加载新指纹及同一聊天同一首回合 direct reroll；不代表十二回合正式门禁通过。
+
 ## 2.0.0-rc.26（2026-08-20，测试仓候选）
 - 修复 rc.25 同聊天 swipe 7 的真实人物档案零写：模型交回的隐藏块实际为单新人物、同票唯一绑定、正文锚点命中且 V6 六段完整，parser/binder/compiler 与只读 MVU parse 全通过；失败来自 accepted-final 后宿主继续规范化 MVU/机制尾部，整条消息哈希变化触发旧写前门。新适配器要求 accepted 正文、专用人物块、swipe/generation/scope/epoch 与精确 MVU 基线连续稳定，再用规范化后的同一 SourceRef 进入现有 CAS/readback；正文或人物块变化仍零写。
 - 修复 fresh chat `turn 0 → nextTurn 1` 的结构世界 safe-held 不可达：只把机械 turn 差异降回基线 turn，同时要求线程、world、scenario 与已裁决 ATT 均无语义增量；本地生成可验证 held 收据，不把“人物尝试”伪装成世界结果，也不要求第二次世界补缺模型才能保活。
