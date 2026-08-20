@@ -125,6 +125,11 @@ function loadAcceptedContentFunctions() {
     return sandbox;
 }
 
+test('plain default opening normalizes through the production social sanitizer result shape', () => {
+    const runtime = loadAcceptedContentFunctions();
+    assert.equal(runtime.acceptedContentText('plain default opening'), 'plain default opening');
+});
+
 function loadAcceptedFinalScopeDecision() {
     const code = sourceSection(
         'function acceptedFinalScopeDecision(generation, scopeDigest)',
