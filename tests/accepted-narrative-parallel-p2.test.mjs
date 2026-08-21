@@ -2685,6 +2685,44 @@ function loadAcceptedTargetMatcher(operationEpoch = 7) {
     return sandbox.sameAcceptedNarrativeTarget;
 }
 
+function loadStrictTargetGuard({ operationEpoch = 7 } = {}) {
+    const code = sourceSection(
+        'function targetIsCurrent(captured, token = null, { requireLatest = true } = {})',
+        'function doctorOwnedMessageRewriteProofKey(captured, nextFingerprint)',
+    );
+    const state = {
+        message: {
+            is_user: false,
+            mes: 'whole-message-b',
+            swipe_id: 0,
+        },
+        generationId: 'generation-a',
+        doctorOwnedRewriteProof: true,
+    };
+    const context = {
+        chatId: 'chat-a',
+        chat: [null, null, state.message],
+    };
+    const sandbox = {
+        operationEpoch,
+        operationIsCurrent: () => true,
+        getContext: () => context,
+        actorSovereigntyScopeDigest: () => 'scope:chat-a|character:card-main',
+        currentActorSovereigntyScope: () => ({}),
+        latestAiMessage: () => ({ index: 2 }),
+        normalizedStoredAssistantMessage: (message) => ({ ok: true, text: message.mes }),
+        ensureMessageStableId: () => 'message-2',
+        ensureRuntimeTargetIdentity: () => ({ generationId: state.generationId }),
+        fingerprint: (value) => String(value),
+        acceptedContentFingerprint: (value) => (
+            String(value).includes('narrative-b') ? 'accepted-b' : 'accepted-a'
+        ),
+        doctorOwnedMessageRewriteProofMatches: () => state.doctorOwnedRewriteProof,
+    };
+    vm.runInNewContext(`${code}\nthis.targetIsCurrent = targetIsCurrent;`, sandbox);
+    return { guard: sandbox.targetIsCurrent, state };
+}
+
 function makeTarget(overrides = {}) {
     return {
         chatId: 'chat-a',
@@ -2882,6 +2920,52 @@ test('accepted target matcher allows mechanism refresh but fails closed on narra
     }
     const changedEpochMatches = loadAcceptedTargetMatcher(8);
     assert.equal(changedEpochMatches(target, makeTarget({ epoch: 8 })), false);
+});
+
+test('variable guard accepts Doctor-owned mechanism rewrite but rejects narrative and generation drift', () => {
+    const { guard, state } = loadStrictTargetGuard();
+    const target = makeTarget();
+    assert.deepEqual(
+        { ...guard(target) },
+        { ok: true, reason: '' },
+        'a profile receipt or MVU frontend rewrite must not cancel the parallel variable audit',
+    );
+
+    state.doctorOwnedRewriteProof = false;
+    assert.equal(
+        guard(target).ok,
+        false,
+        'an unproved third-party mechanism rewrite remains fail-closed',
+    );
+    state.doctorOwnedRewriteProof = true;
+
+    state.message.mes = 'whole-message-b narrative-b';
+    assert.equal(guard(target).ok, false, 'accepted narrative drift remains fail-closed');
+
+    state.message.mes = 'whole-message-b';
+    state.generationId = 'generation-b';
+    assert.equal(guard(target).ok, false, 'generation identity drift remains fail-closed');
+});
+
+test('future transcript profile sanitizer returns text instead of coercing a result object', () => {
+    const code = sourceSection(
+        'function stripAssistantAcceptedMechanism(text)',
+        'function acceptedContentText(text)',
+    );
+    const sandbox = {
+        stripMechanism: (value) => String(value),
+        stripActorProfileReceiptBlocks: (value) => ({
+            text: String(value).replace(/<人物档案更新>[\s\S]*?<\/人物档案更新>/gu, ''),
+            removed: 1,
+        }),
+    };
+    vm.runInNewContext(`${code}\nthis.stripAssistantAcceptedMechanism = stripAssistantAcceptedMechanism;`, sandbox);
+    const result = sandbox.stripAssistantAcceptedMechanism(
+        '可见正文\n<人物档案更新>隐藏回执</人物档案更新>',
+    );
+    assert.equal(typeof result, 'string');
+    assert.equal(result.trim(), '可见正文');
+    assert.notEqual(result, '[object Object]');
 });
 
 test('pre-model P3 stale receipts are fixed-code zero-write evidence for safe P1 handoff', () => {

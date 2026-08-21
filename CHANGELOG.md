@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2.0.0-rc.38（2026-08-21，测试仓候选）
+- rc.37 在真实 TauriTavern 的全新聊天首回合已证明：正文与选项正常；同票稳定 ActorId 的一名人物完整生成六段自然档案与 `full_adult` 生理档案，MVU 原子提交/readback-ready，人物档案额外模型调用为0；P3 世界提交和 P4 下一回合包也完成。但人物档案适配器随后移除已消费的隐藏回执并刷新同一 accepted assistant 时，并行变量事务仍用整条消息原始哈希做最终闸门，因而在模型调用成功后误报 `variable.final.stale` 并零写取消。按真实硬门立即停止，rc.37 不可用。
+- rc.38 的目标闸门先保持 chat/message/swipe/generation/scope/epoch 全部严格一致；整条消息哈希变化时，必须同时匹配已存在的 accepted-content fingerprint 和本次 Doctor 在内存登记的精确旧/新消息改写证明。证明在保存失败或 operation 失效时撤销/清空。Doctor 自有的人物回执消费、MVU 区块重放和状态占位刷新因此不会取消同一正文的变量事务；第三方机制改写以及任何可见叙事、generation、swipe、chat、scope 或 epoch 漂移仍零写。
+- 修复未来正文上下文清洁器的接口错配：`stripActorProfileReceiptBlocks()` 返回 `{ text, removed }`，生产 `stripAssistantAcceptedMechanism()` 现在显式只返回 `.text`，不再把 `[object Object]` 注入后续 P1/P3 prompt。配套 IZUMI/ARGO 预设内容与 SHA-256 不变。直接相关回归 210/210 与最终完整自动套件 676/676 均通过，0 fail，duration `13424.7254 ms`；rc.38 当前指纹真实十二回合/恢复门仍待重新执行，不得据此声明可用。
+
 ## 2.0.0-rc.37（2026-08-21，测试仓候选）
 - rc.36 在真实 TauriTavern 的同一全新聊天完成十二个正常有效回复及一个追加压力输入，正文、选项、变量、世界和 P4 均可终态，但十三个 accepted assistant 全部错误返回“人物档案无变化”，MVU/Registry/人物页始终为0人；因此人物档案、多 NPC、`full_adult` 生理和恢复门未通过，rc.36 不可用。
 - 根因是生成前动态票据把消费范围错误限制为“无角色卡、世界书、原著或数据库设定的原创 NPC”。当前 V7 合同改为：任何首次进入当前聊天、可稳定单指、尚无输入 MVU 档案的非玩家人物都必须消费预先发行且已绑定稳定 ActorId 的同一票据；权威设定覆盖骰轴内容，但不能成为跳过建档的理由。

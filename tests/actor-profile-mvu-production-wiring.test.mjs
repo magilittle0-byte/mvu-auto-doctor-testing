@@ -966,6 +966,8 @@ test('finalized replay updates only multimodal text parts and a failed save rest
 
     const refreshSource = section('async function refreshMessage', 'async function persistRepairRecord');
     const before = structuredClone(message);
+    const recordedProofKeys = [];
+    const revokedProofKeys = [];
     const context = {
         chat: [message],
         saveChat: async () => { throw new Error('synthetic save failure'); },
@@ -975,7 +977,8 @@ test('finalized replay updates only multimodal text parts and a failed save rest
     };
     const refresh = new Function(
         'targetIsCurrent', 'getContext', 'deepClone', 'normalizedStoredAssistantMessage',
-        'applyBlockToCurrentSwipe', 'console',
+        'applyBlockToCurrentSwipe', 'fingerprint', 'acceptedContentFingerprint',
+        'recordDoctorOwnedMessageRewriteProof', 'revokeDoctorOwnedMessageRewriteProof', 'console',
         `${refreshSource}\nreturn refreshMessage;`,
     )(
         () => ({ ok: true }),
@@ -986,10 +989,24 @@ test('finalized replay updates only multimodal text parts and a failed save rest
             _message.mes[0].text = '临时写入';
             return true;
         },
+        (value) => `whole:${String(value)}`,
+        (value) => `accepted:${String(value).replace('临时写入', '正文')}`,
+        (_captured, nextFingerprint) => {
+            const key = `proof:${nextFingerprint}`;
+            recordedProofKeys.push(key);
+            return key;
+        },
+        (key) => revokedProofKeys.push(key),
         { warn() {} },
     );
-    assert.equal(await refresh(0, 'x', true), false);
+    const captured = {
+        fingerprint: 'whole:正文',
+        contentFingerprint: 'accepted:正文',
+    };
+    assert.equal(await refresh(0, 'x', true, '', captured), false);
     assert.deepEqual(message, before, 'save failure must restore the original multimodal swipe');
+    assert.equal(recordedProofKeys.length, 1, 'Doctor refresh records one exact rewrite proof');
+    assert.deepEqual(revokedProofKeys, recordedProofKeys, 'failed persistence revokes the proof');
 });
 
 test('runtime diagnostic version exactly matches the install manifest', () => {

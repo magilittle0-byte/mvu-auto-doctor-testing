@@ -1,6 +1,6 @@
 # Doctor repair center source map
 
-适用候选：`2.0.0-rc.37`。rc.36 的隐私安全 `长度:哈希` 诊断与 exact-target repair 路由继续保留；rc.37 另外把 `profile_ticket_batch_missing`、`profile_ticket_batch_identity_invalid` 与 `profile_ticket_prompt_unverified` 归入固定码身份/绑定失败，保持零写、可诊断且不保存人物名、正文或提示词。prompt-ready 证明缺失不是可以用第二人物模型猜回来的语义缺项，必须先恢复当前 generation 的真实提示词与 SourceRef 所有权。
+适用候选：`2.0.0-rc.38`。rc.36 的隐私安全 `长度:哈希` 诊断与 exact-target repair 路由继续保留；rc.37 另外把 `profile_ticket_batch_missing`、`profile_ticket_batch_identity_invalid` 与 `profile_ticket_prompt_unverified` 归入固定码身份/绑定失败。rc.38 允许同一 accepted narrative 的 Doctor 自有机制刷新继续，但可见叙事或 SourceRef 身份漂移仍零写；保持可诊断且不保存人物名、正文或提示词。prompt-ready 证明缺失不是可以用第二人物模型猜回来的语义缺项，必须先恢复当前 generation 的真实提示词与 SourceRef 所有权。
 
 人物正常路径仍先本地解析 accepted-final 回执且零人物模型。若精确 V4 回执证明格式、完整度或绑定缺项且初次事务零写入，P1 复用同一个单人物 repair adapter 按 sealed failedActorTargets 顺序自动补齐；每个 ActorId 独立完成 MVU 写入/readback 后才移除该 owner，后续人物失败不会回滚前面已验证人物。显式 Registry projection owner 仍必须携带封存的结构化 evidence，不能借普通补档回执绕过。
 

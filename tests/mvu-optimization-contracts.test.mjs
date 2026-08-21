@@ -257,11 +257,13 @@ test('B: production invalidateOperations clears task owners with the invalidated
         ['current-task', { chatId: 'current-chat' }],
     ]);
     const pending = new Set(['pending']);
+    const rewriteProofs = new Map([['old-proof', { epoch: 4 }]]);
     const activeControllers = new Set();
     const sandbox = {
         operationEpoch: 4,
         activeSovereigntyTaskIds: taskIds,
         activeSovereigntyTaskOwners: owners,
+        doctorOwnedMessageRewriteProofs: rewriteProofs,
         activeModelControllers: activeControllers,
         activeTaskProgress: null,
         pendingOpeningSyncTimer: null,
@@ -276,6 +278,7 @@ test('B: production invalidateOperations clears task owners with the invalidated
     const names = [
         'operationEpoch', 'invalidateDoctorRepairCenterRequests', 'activeModelControllers',
         'activeSovereigntyTaskIds', 'activeSovereigntyTaskOwners', 'activeTaskProgress',
+        'doctorOwnedMessageRewriteProofs',
         'finishTaskProgress', 'syncTaskCancelButtons', 'pendingOpeningSyncTimer',
         'automaticPendingKeys', 'runChain', 'actorProfilePendingKeys', 'actorProfileChain',
         'invalidateContinuityQueue', 'forumChain',
@@ -286,6 +289,7 @@ test('B: production invalidateOperations clears task owners with the invalidated
     assert.equal(inspect.operationEpoch, 5, 'invalidation advances the operation epoch');
     assert.equal(inspect.taskCount, 0);
     assert.equal(inspect.ownerCount, 0);
+    assert.equal(rewriteProofs.size, 0, 'invalidation drops Doctor-owned rewrite proofs');
     assert.equal(pending.size, 0);
     assert.equal(sandbox.actorProfilePendingKeys.size, 0);
 });

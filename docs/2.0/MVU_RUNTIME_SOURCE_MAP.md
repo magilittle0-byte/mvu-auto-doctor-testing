@@ -4,6 +4,21 @@ This document records the current controlled-host static compatibility
 evidence paired with the test-channel candidate. It is not a real
 SillyTavern/Tauri run and is not evidence for the twelve-turn acceptance gate.
 
+## Accepted narrative versus Doctor-owned mechanism rewrites
+
+The rc.37 real first turn exposed a parallel-settlement race: the semantic
+profile transaction correctly consumed its hidden receipt and refreshed the
+same stored assistant swipe, but the variable transaction still compared the
+legacy whole-message fingerprint and cancelled as `variable.final.stale` after
+its model call succeeded. rc.38 keeps chat, message, swipe, generation, scope
+and epoch exact. When only the whole-message fingerprint differs it additionally
+requires the already-captured accepted-content fingerprint to match; narrative
+or identity drift remains zero-write. This lets profile receipt consumption,
+MVU replay and status placeholders coexist without weakening the visible
+accepted-final boundary. `stripAssistantAcceptedMechanism()` also consumes the
+sanitizer's `.text` result explicitly, so future prompt copies cannot receive
+`[object Object]`.
+
 ## Prompt-ready host evidence
 
 - The paired IZUMI preset places `mvu-auto-doctor-profile-context-separation-v6`

@@ -311,7 +311,7 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.37';
+const VERSION = '2.0.0-rc.38';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'first-chat-appearance-ticket-v7';
 const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = '2BCA3FB302098212828AD37ABE9BEC9FDC020BF7439DC5602A36A702C5A85AF1';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
@@ -1332,6 +1332,7 @@ const activeSovereigntyTaskIds = new Set();
 const activeSovereigntyTaskOwners = new Map();
 const pendingSovereigntyObservations = new Map();
 const actorSovereigntyScopeSelectorCache = new Map();
+const doctorOwnedMessageRewriteProofs = new Map();
 const modelRouteSlotCursors = { strict: 0, fast: 0 };
 const modelRouteHealth = { strict: new Map(), fast: new Map() };
 
@@ -4619,6 +4620,7 @@ function invalidateContinuityQueue() {
 
 function invalidateOperations(reason = '', { persistProgress = true } = {}) {
     operationEpoch += 1;
+    doctorOwnedMessageRewriteProofs.clear();
     invalidateDoctorRepairCenterRequests();
     for (const controller of activeModelControllers) {
         try {
@@ -8769,10 +8771,80 @@ function targetIsCurrent(captured, token = null, { requireLatest = true } = {}) 
     ) {
         return { ok: false, reason: '目标回复 generation 身份已经变化' };
     }
-    if (fingerprint(normalized.text) !== captured.fingerprint) {
+    const currentFingerprint = fingerprint(normalized.text);
+    const currentContentFingerprint = acceptedContentFingerprint(normalized.text);
+    if (
+        currentFingerprint !== captured.fingerprint
+        && (
+            currentContentFingerprint !== captured.contentFingerprint
+            || !doctorOwnedMessageRewriteProofMatches(
+                captured,
+                currentFingerprint,
+                currentContentFingerprint,
+            )
+        )
+    ) {
         return { ok: false, reason: '目标回复正文已经变化' };
     }
     return { ok: true, reason: '' };
+}
+
+function doctorOwnedMessageRewriteProofKey(captured, nextFingerprint) {
+    if (!captured || !String(nextFingerprint || '').trim()) return '';
+    return [
+        captured.chatId,
+        captured.index,
+        captured.messageId,
+        captured.swipeId,
+        captured.generationId,
+        captured.scopeDigest,
+        captured.epoch,
+        captured.fingerprint,
+        nextFingerprint,
+    ].join(':');
+}
+
+function recordDoctorOwnedMessageRewriteProof(
+    captured,
+    nextFingerprint,
+    nextContentFingerprint,
+) {
+    const key = doctorOwnedMessageRewriteProofKey(captured, nextFingerprint);
+    if (
+        !key
+        || captured?.epoch !== operationEpoch
+        || String(nextContentFingerprint || '') !== String(captured.contentFingerprint || '')
+    ) return '';
+    doctorOwnedMessageRewriteProofs.set(key, {
+        chatId: String(captured.chatId || ''),
+        epoch: captured.epoch,
+        contentFingerprint: String(nextContentFingerprint || ''),
+    });
+    while (doctorOwnedMessageRewriteProofs.size > 64) {
+        doctorOwnedMessageRewriteProofs.delete(
+            doctorOwnedMessageRewriteProofs.keys().next().value,
+        );
+    }
+    return key;
+}
+
+function revokeDoctorOwnedMessageRewriteProof(key) {
+    if (key) doctorOwnedMessageRewriteProofs.delete(key);
+}
+
+function doctorOwnedMessageRewriteProofMatches(
+    captured,
+    currentFingerprint,
+    currentContentFingerprint,
+) {
+    const key = doctorOwnedMessageRewriteProofKey(captured, currentFingerprint);
+    const proof = key ? doctorOwnedMessageRewriteProofs.get(key) : null;
+    return !!(
+        proof
+        && proof.chatId === String(captured?.chatId || '')
+        && proof.epoch === operationEpoch
+        && proof.contentFingerprint === String(currentContentFingerprint || '')
+    );
 }
 
 function targetSnapshotIsCurrent(captured, { requireLatest = true } = {}) {
@@ -10079,7 +10151,7 @@ function actorProfileAuthoritySourceRef(captured) {
 }
 
 function stripAssistantAcceptedMechanism(text) {
-    return stripActorProfileReceiptBlocks(stripMechanism(text));
+    return stripActorProfileReceiptBlocks(stripMechanism(text)).text;
 }
 
 function acceptedContentText(text) {
@@ -13205,10 +13277,21 @@ async function refreshMessage(
         ? { ...captured, fingerprint: normalizedStoredAssistantMessage(message).text
             ? fingerprint(normalizedStoredAssistantMessage(message).text) : '' }
         : captured;
+    const rewrittenText = captured && changed
+        ? normalizedStoredAssistantMessage(message)
+        : null;
+    const rewriteProofKey = rewrittenText?.ok
+        ? recordDoctorOwnedMessageRewriteProof(
+            captured,
+            postMutationTarget.fingerprint,
+            acceptedContentFingerprint(rewrittenText.text),
+        )
+        : '';
     if (changed) {
         if (captured) {
             const guard = targetIsCurrent(postMutationTarget, token, { requireLatest: false });
             if (!guard.ok) {
+                revokeDoctorOwnedMessageRewriteProof(rewriteProofKey);
                 restoreMessage();
                 return false;
             }
@@ -13221,6 +13304,7 @@ async function refreshMessage(
             await context.saveChat();
         } catch (error) {
             console.warn('[MVU Auto Doctor] 保存更新区块失败：', error);
+            revokeDoctorOwnedMessageRewriteProof(rewriteProofKey);
             restoreMessage();
             return false;
         }
@@ -13228,6 +13312,7 @@ async function refreshMessage(
     if (captured) {
         const guard = targetIsCurrent(postMutationTarget, token, { requireLatest: false });
         if (!guard.ok) {
+            revokeDoctorOwnedMessageRewriteProof(rewriteProofKey);
             restoreMessage();
             return false;
         }
