@@ -1,6 +1,6 @@
 # 人物档案语义前移与 MVU 权威接线来源映射
 
-适用版本：`2.0.0-rc.35` 测试仓候选。rc.34 保留 rc.33 的人物恢复 digest 修复与红色终态兜底；rc.35 只修复真实第3轮暴露的 MVU 动态对象祖先级变量适配，不改变人物档案完整度、`full_adult` 生理门、MVU 唯一权威或 P3/P4 readiness。当前指纹十二回合门禁待重新执行；rc.34 真实结果仅为故障证据，不能续接当前候选。
+适用版本：`2.0.0-rc.36` 测试仓候选。rc.36 修复真实 rc.35 第2回合暴露的补档恢复分流：V4 普通解析/绑定/完整度回执不再被 Registry projection 分支截获；只有显式 projection owner 或结构化 evidence 才走零模型投影恢复。普通 exact-SourceRef 缺档由既有单人物 adapter 逐 Actor 自动补齐，仍须完整六段、`full_adult` 六项生理、MVU 原子写入与 durable readback；任一坏人物保留剩余精确 owner，不撤销已验证人物。当前指纹十二回合门禁待重新执行；rc.35 真实结果仅为故障证据，不能续接当前候选。
 
 ## 生产链
 
@@ -59,7 +59,7 @@
 
 Projection recovery is also part of the rc.29 through rc.34 transaction path: `recoverSemanticProfileRegistryProjection()` derives a new or existing Registry candidate from the exact receipt SourceRef, stable ActorId, MVU natural identity, local readback metadata and committed profile digest. It may replace an old ledger `profileRef`; it does not require the ref to match before recovery. It removes only recovered `registry_projection_pending:*` codes and preserves same-batch `failedActorTargets`/ticket owners. Any digest, source, identity or save/readback mismatch remains repairable and zero-write where rollback is verified. rc.34 的 `actorProfileRecoverySourceDigest` 仍由 `actor-profile-v6-core.mjs` 单点实现；`index.js` 只导入复用，不另造摘要算法。
 
-The current exact paired preset is the IZUMI file named above; its candidate SHA-256 is recorded in `TESTING_CHANNEL.md` and bound into `doctorRuntimeCriticalFingerprint()`. Historical rc.27 through rc.34 observations and suites do not substitute for rc.35 current-fingerprint evidence.
+The current exact paired preset is the IZUMI file named above; its candidate SHA-256 is recorded in `TESTING_CHANNEL.md` and bound into `doctorRuntimeCriticalFingerprint()`. Historical rc.27 through rc.35 observations and suites do not substitute for rc.36 current-fingerprint evidence.
 
 ## 不变量与失败语义
 

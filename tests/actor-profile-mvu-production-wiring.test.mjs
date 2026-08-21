@@ -471,6 +471,108 @@ test('registry projection recovery derives a new Actor identity from durable MVU
     );
 });
 
+test('ordinary sealed V4 retry receipts reach targeted repair while projection claims stay fail-closed', () => {
+    const claimSource = section(
+        'function semanticProfileReceiptClaimsProjectionRecovery',
+        'function semanticProfileRecoveryResidualFailureCodes',
+    );
+    const claim = new Function(
+        'semanticProfileRecoveryEvidence',
+        `${claimSource}\nreturn semanticProfileReceiptClaimsProjectionRecovery;`,
+    )((code) => String(code || '').startsWith('registry_projection_pending:v1:')
+        ? { actorId: 'NPC-safe', profileDigest: 'profile-v1:1:abc123' } : null);
+    assert.equal(claim({
+        version: 4,
+        failureCodes: ['profile_source_anchor_missing', 'failed_actor:NPC-safe'],
+        projectionEvidence: [],
+    }), false);
+    assert.equal(claim({
+        version: 4,
+        failureCodes: ['registry_projection_pending'],
+        projectionEvidence: [],
+    }), true);
+    assert.equal(claim({
+        version: 4,
+        failureCodes: ['profile_source_anchor_missing'],
+        projectionEvidence: [{ actorId: 'NPC-safe', profileDigest: 'profile-v1:1:abc123' }],
+    }), true);
+    const recovery = section(
+        'async function recoverSemanticProfileRegistryProjection',
+        'async function runActorProfileTarget(captured,',
+    );
+    assert.match(recovery, /if \(!semanticProfileReceiptClaimsProjectionRecovery\(receipt\)\) return null/u);
+});
+
+test('automatic semantic fallback repairs each failed ActorId once and preserves prior good actors on failure', async () => {
+    const repairSource = section(
+        'function semanticActorProfileAutomaticRepairEligible',
+        'async function runSemanticActorProfileTarget(captured)',
+    );
+    const exercise = async ({ failActor = '' } = {}) => {
+        const state = { targets: ['NPC-a', 'NPC-b', 'NPC-c'], calls: [] };
+        const sourceRef = { messageId: 'm1', generationId: 'g1', swipeId: 0 };
+        const captured = {
+            chatId: 'chat-1', index: 2, actorSovereigntyScope: {}, scopeDigest: 'scope-1',
+        };
+        const sandbox = new Function(
+            'sourceRefOf', 'captureTarget', 'getContext', 'sameAcceptedNarrativeTarget',
+            'readChatNamespace', 'actorProfileTicketBatchPersistenceMatches',
+            'actorProfileRetryReceiptMatches', 'runSemanticActorProfileTargetedRepair',
+            'actorProfileTransientResult', 'ACTOR_PROFILE_MAX_TRANSACTION_ACTORS',
+            `${repairSource}\nreturn { eligible: semanticActorProfileAutomaticRepairEligible, run: runSemanticActorProfileAutomaticRepair };`,
+        )(
+            () => sourceRef,
+            () => captured,
+            () => ({ chatId: 'chat-1' }),
+            () => true,
+            () => ({
+                actorProfileRetryReceipt: state.targets.length ? {
+                    ticketBatchDigest: 'ticket-digest', failureCodes: ['profile_block_missing'],
+                } : null,
+                characterCreationTicketBatches: state.targets.length ? [{
+                    persistenceDigest: 'ticket-digest',
+                    failedActorTargets: state.targets.map((actorId) => ({ actorId })),
+                }] : [],
+            }),
+            () => true,
+            () => true,
+            async (_captured, { actorId }) => {
+                state.calls.push(actorId);
+                if (actorId === failActor) return {
+                    status: 'not_completed', reason: 'profile_targeted_repair_incomplete',
+                    modelCalls: 1, profileBatch: { readbackVerified: false },
+                };
+                state.targets.shift();
+                return {
+                    status: 'atomic_readback', modelCalls: 1,
+                    remainingFailedActorTargets: [...state.targets],
+                    profileBatch: { readbackVerified: true, modelCalls: 1 },
+                };
+            },
+            (status, detail) => ({ module: 'actor_profiles', status, ...detail }),
+            64,
+        );
+        const initial = {
+            status: 'not_completed',
+            profileBatch: { failure: { failureClass: 'format_or_completeness', zeroWrite: true } },
+        };
+        assert.equal(sandbox.eligible(initial), true);
+        return { result: await sandbox.run(captured, initial), state };
+    };
+    const completed = await exercise();
+    assert.equal(completed.result.status, 'atomic_readback');
+    assert.equal(completed.result.profileBatch.readbackVerified, true);
+    assert.deepEqual(completed.result.profileBatch.committed, ['NPC-a', 'NPC-b', 'NPC-c']);
+    assert.deepEqual(completed.state.calls, ['NPC-a', 'NPC-b', 'NPC-c']);
+    assert.equal(completed.result.modelCalls, 3);
+
+    const partial = await exercise({ failActor: 'NPC-b' });
+    assert.equal(partial.result.status, 'not_completed');
+    assert.equal(partial.result.profileBatch.readbackVerified, false);
+    assert.deepEqual(partial.result.profileBatch.committed, ['NPC-a']);
+    assert.deepEqual(partial.state.calls, ['NPC-a', 'NPC-b']);
+});
+
 test('initial partial projection failure preserves the exact bad-Actor recovery owner for refresh repair', async () => {
     const failureSource = section('function actorProfileSemanticFailure', 'function actorProfileExplicitNoChangeReceipt');
     const semanticFailure = new Function(

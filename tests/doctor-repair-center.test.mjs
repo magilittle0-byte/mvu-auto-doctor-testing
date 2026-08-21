@@ -754,6 +754,35 @@ test('repair-all selects only current-target terminal diagnostics including firs
     assert.equal(projected.modelDiagnostics[0].targetDigest, 'aaaaaaaa');
 });
 
+test('real core fingerprint shape survives diagnostic privacy normalization and remains repair-addressable', () => {
+    const diagnosticNormalization = sourceSection(
+        'function safeDiagnosticFingerprint(value)',
+        'function structuredOutputShape(output)',
+    );
+    const helpers = new Function(
+        'safeDiagnosticReason', 'fingerprint', 'getContext',
+        `${diagnosticNormalization}\nreturn { safeDiagnosticFingerprint, normalizedModelDiagnostics, modelDiagnosticsForChat };`,
+    )(
+        (value) => String(value || '').slice(0, 500),
+        (value) => String(value) === 'chat-current' ? '64:abcdef12' : '63:12345678',
+        () => ({ chatId: 'chat-current', chat: Array(5) }),
+    );
+    const realShape = '339:49f0a217';
+    assert.equal(helpers.safeDiagnosticFingerprint(realShape), realShape);
+    assert.equal(helpers.safeDiagnosticFingerprint('aaaaaaaa'), 'aaaaaaaa');
+    assert.equal(helpers.safeDiagnosticFingerprint('private-chat-name'), '');
+    const [normalized] = helpers.normalizedModelDiagnostics([{
+        chatScope: '64:abcdef12', targetDigest: realShape,
+        task: 'variable_final', status: 'failed', targetIndex: 4,
+    }]);
+    assert.equal(normalized.chatScope, '64:abcdef12');
+    assert.equal(normalized.targetDigest, realShape);
+    assert.deepEqual(helpers.modelDiagnosticsForChat([
+        { chatScope: '64:abcdef12', targetDigest: realShape, task: 'variable_final', status: 'failed', targetIndex: 4 },
+        { chatScope: '63:12345678', targetDigest: realShape, task: 'variable_final', status: 'failed', targetIndex: 4 },
+    ]).map((entry) => entry.chatScope), ['64:abcdef12']);
+});
+
 test('later verified module recovery suppresses old failure capsules until a newer failure arrives', async () => {
     const diagnosticSource = sourceSection(
         'function doctorRepairDiagnosticModule(entry)',

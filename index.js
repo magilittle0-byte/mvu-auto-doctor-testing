@@ -311,7 +311,7 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.35';
+const VERSION = '2.0.0-rc.36';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v6';
 const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = 'CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
@@ -2249,13 +2249,21 @@ function safeDiagnosticReason(value) {
         .slice(0, 500);
 }
 
+function safeDiagnosticFingerprint(value) {
+    const text = String(value || '');
+    // core.fingerprint() is a privacy-safe FNV projection in the form
+    // "<source-length>:<hex>".  Keep compatibility with older hex-only
+    // receipts, but never accept arbitrary labels or raw identity material.
+    return /^(?:[a-f0-9]{8,64}|[0-9]{1,10}:[a-f0-9]{8,64})$/u.test(text)
+        ? text : '';
+}
+
 function normalizedModelDiagnostics(value) {
     if (!Array.isArray(value)) return [];
     return value
         .filter((entry) => entry && typeof entry === 'object')
         .map((entry) => ({
-            chatScope: /^[a-f0-9]{8,64}$/u.test(String(entry.chatScope || ''))
-                ? String(entry.chatScope) : '',
+            chatScope: safeDiagnosticFingerprint(entry.chatScope),
             at: Math.max(0, Number(entry.at) || 0),
             phase: ['transport', 'parse', 'validation'].includes(entry.phase)
                 ? entry.phase
@@ -2307,8 +2315,7 @@ function normalizedModelDiagnostics(value) {
             targetIndex: Number.isInteger(Number(entry.targetIndex))
                 ? Number(entry.targetIndex)
                 : -1,
-            targetDigest: /^[a-f0-9]{8,64}$/u.test(String(entry.targetDigest || ''))
-                ? String(entry.targetDigest) : '',
+            targetDigest: safeDiagnosticFingerprint(entry.targetDigest),
             failureKind: String(entry.failureKind || '').slice(0, 80),
             validationCode: /^[a-z0-9_.:-]{1,160}$/iu.test(
                 String(entry.validationCode || ''),
@@ -5311,6 +5318,10 @@ function doctorRuntimeCriticalFingerprint() {
             ? actorProfileSemanticRuntimeFingerprint() : '',
         typeof runSemanticActorProfileTarget === 'function'
             ? runSemanticActorProfileTarget.toString() : '',
+        typeof semanticActorProfileAutomaticRepairEligible === 'function'
+            ? semanticActorProfileAutomaticRepairEligible.toString() : '',
+        typeof runSemanticActorProfileAutomaticRepair === 'function'
+            ? runSemanticActorProfileAutomaticRepair.toString() : '',
         typeof runSemanticActorProfileTargetCore === 'function'
             ? runSemanticActorProfileTargetCore.toString() : '',
         typeof settleSemanticActorProfileTransactionTarget === 'function'
@@ -5333,6 +5344,8 @@ function doctorRuntimeCriticalFingerprint() {
             ? semanticProfileRecoveryEvidence.toString() : '',
         typeof semanticProfileProjectionEvidenceCode === 'function'
             ? semanticProfileProjectionEvidenceCode.toString() : '',
+        typeof semanticProfileReceiptClaimsProjectionRecovery === 'function'
+            ? semanticProfileReceiptClaimsProjectionRecovery.toString() : '',
         typeof semanticProfileRecoveryResidualFailureCodes === 'function'
             ? semanticProfileRecoveryResidualFailureCodes.toString() : '',
         typeof semanticProfileRecoveryIdentityMatchesActor === 'function'
@@ -5404,6 +5417,8 @@ function doctorRuntimeCriticalFingerprint() {
         actorProfileTransportRoutePlan.toString(),
         assertUsableModelOutput.toString(),
         callModel.toString(),
+        safeDiagnosticFingerprint.toString(),
+        normalizedModelDiagnostics.toString(),
         extractUpdateBlockCandidate.toString(),
         stripAutomaticallyComputedOps.toString(),
         stripRedundantExistingContainerOps.toString(),
@@ -19092,6 +19107,121 @@ async function runSemanticActorProfileTargetCore(captured) {
     });
 }
 
+function semanticActorProfileAutomaticRepairEligible(result) {
+    const failureClass = String(result?.profileBatch?.failure?.failureClass || '');
+    return result?.status === 'not_completed'
+        && result?.profileBatch?.failure?.zeroWrite === true
+        && ['format_or_completeness', 'identity_binding'].includes(failureClass);
+}
+
+async function runSemanticActorProfileAutomaticRepair(captured, initialResult) {
+    if (!semanticActorProfileAutomaticRepairEligible(initialResult)) return null;
+    const sourceRef = sourceRefOf(captured);
+    const committed = [];
+    const attempted = new Set();
+    let modelCalls = 0;
+    for (let attempt = 0; attempt < ACTOR_PROFILE_MAX_TRANSACTION_ACTORS; attempt += 1) {
+        const fresh = captureTarget(getContext(), captured.index, {
+            frozenScope: captured.actorSovereigntyScope,
+            unscoped: !captured.scopeDigest,
+        });
+        if (!sameAcceptedNarrativeTarget(captured, fresh)) {
+            return actorProfileTransientResult('stale', {
+                reason: 'profile_repair_target_changed', modelCalls,
+                automaticRecovery: { attempted: true, committed: committed.length },
+            });
+        }
+        const namespace = readChatNamespace(getContext());
+        const receipt = namespace?.actorProfileRetryReceipt;
+        const ticketBatch = (namespace?.characterCreationTicketBatches || [])
+            .find((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
+                acceptedTarget: sourceRef,
+                expectedDigest: receipt?.ticketBatchDigest || '',
+            })) || null;
+        if (!receipt || !ticketBatch || !actorProfileRetryReceiptMatches(receipt, {
+            currentSourceRef: sourceRef,
+            ticketBatch,
+        })) {
+            if (committed.length) {
+                return actorProfileTransientResult('atomic_readback', {
+                    target: sourceRef, eligible: true, modelCalls,
+                    registryReadback: true,
+                    automaticRecovery: { attempted: true, committed: committed.length },
+                    profileBatch: {
+                        initial: committed.length, maintenance: 0, modelCalls,
+                        committed, failed: [], readbackVerified: true,
+                        semantic: true, targeted: true,
+                    },
+                });
+            }
+            return null;
+        }
+        const targets = (ticketBatch.failedActorTargets || [])
+            .map((target) => String(target?.actorId || '').trim())
+            .filter(Boolean);
+        if (!targets.length) return null;
+        const actorId = targets[0];
+        if (attempted.has(actorId)) {
+            return actorProfileTransientResult('not_completed', {
+                reason: 'profile_targeted_repair_incomplete', modelCalls,
+                automaticRecovery: { attempted: true, committed: committed.length },
+                profileBatch: {
+                    ...(initialResult?.profileBatch || {}), modelCalls,
+                    committed, readbackVerified: false,
+                },
+            });
+        }
+        attempted.add(actorId);
+        let repaired;
+        try {
+            repaired = await runSemanticActorProfileTargetedRepair(captured, { actorId });
+        } catch {
+            repaired = { status: 'not_completed', reason: 'profile_targeted_repair_incomplete' };
+        }
+        modelCalls += Math.max(
+            0,
+            Number(repaired?.modelCalls) || 0,
+            Number(repaired?.profileBatch?.modelCalls) || 0,
+        );
+        if (repaired?.status !== 'atomic_readback' || repaired?.profileBatch?.readbackVerified !== true) {
+            return actorProfileTransientResult('not_completed', {
+                ...repaired,
+                status: 'not_completed',
+                reason: repaired?.reason || 'profile_targeted_repair_incomplete',
+                modelCalls,
+                automaticRecovery: { attempted: true, committed: committed.length },
+                profileBatch: {
+                    ...(repaired?.profileBatch || initialResult?.profileBatch || {}),
+                    modelCalls, committed,
+                    readbackVerified: false,
+                },
+            });
+        }
+        committed.push(actorId);
+        if (!Array.isArray(repaired?.remainingFailedActorTargets)
+            || repaired.remainingFailedActorTargets.length === 0) {
+            return actorProfileTransientResult('atomic_readback', {
+                target: sourceRef, eligible: true, modelCalls,
+                registryReadback: true,
+                automaticRecovery: { attempted: true, committed: committed.length },
+                profileBatch: {
+                    initial: committed.length, maintenance: 0, modelCalls,
+                    committed, failed: [], readbackVerified: true,
+                    semantic: true, targeted: true,
+                },
+            });
+        }
+    }
+    return actorProfileTransientResult('not_completed', {
+        reason: 'profile_transaction_actor_capacity_exceeded', modelCalls,
+        automaticRecovery: { attempted: true, committed: committed.length },
+        profileBatch: {
+            ...(initialResult?.profileBatch || {}), modelCalls,
+            committed, readbackVerified: false,
+        },
+    });
+}
+
 async function runSemanticActorProfileTarget(captured) {
     setActorProfileStatus('人物档案：正在本地解析最终回复并核验 MVU 回读…', 'busy');
     let result;
@@ -19107,6 +19237,10 @@ async function runSemanticActorProfileTarget(captured) {
     try {
         const recovery = await finalizeActorProfileRecoveryOutcome(captured, result);
         result = recovery.result;
+        const automaticRecovery = recovery.recoverySaved === true
+            ? await runSemanticActorProfileAutomaticRepair(captured, result)
+            : null;
+        if (automaticRecovery) result = automaticRecovery;
         const fresh = captureTarget(getContext(), captured.index, {
             frozenScope: captured.actorSovereigntyScope,
             unscoped: !captured.scopeDigest,
@@ -20064,6 +20198,17 @@ function semanticProfileProjectionEvidenceCode(actorId, profileDigest) {
     return `registry_projection_pending:v1:${encodeURIComponent(id)}:${encodeURIComponent(digest)}`;
 }
 
+function semanticProfileReceiptClaimsProjectionRecovery(receipt) {
+    const failureCodes = Array.isArray(receipt?.failureCodes)
+        ? receipt.failureCodes.map((value) => String(value || '').trim()) : [];
+    return (Array.isArray(receipt?.projectionEvidence) && receipt.projectionEvidence.length > 0)
+        || failureCodes.some((code) => (
+            code === 'registry_projection_pending'
+            || code === 'registry_projection_pending_digest_missing'
+            || semanticProfileRecoveryEvidence(code) != null
+        ));
+}
+
 function semanticProfileRecoveryResidualFailureCodes(receipt, recoveredActorIds, ticketBatch = null) {
     const recovered = new Set([...recoveredActorIds || []].map((value) => String(value || '').trim()));
     return [...new Set([
@@ -20211,6 +20356,12 @@ async function recoverSemanticProfileRegistryProjection(captured) {
         .map((item) => [item.actorId, item])).values()];
     const actorIds = evidence.map((item) => item.actorId).filter(Boolean);
     if (!actorIds.length) {
+        // Current V4 is also the normal durable retry format for parser,
+        // binding and completeness failures.  An ordinary V4 receipt with no
+        // projection claim must fall through to the single-actor repair
+        // adapter; only an explicit projection-recovery owner is blocked by
+        // missing structured evidence.
+        if (!semanticProfileReceiptClaimsProjectionRecovery(receipt)) return null;
         return receiptVersion === 4 || receiptVersion === 2 || (receipt.failureCodes || []).includes('registry_projection_pending_digest_missing')
             ? { status: 'not_completed', reason: receiptVersion === 4
                 ? 'profile_registry_projection_structured_evidence_missing'
