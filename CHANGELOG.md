@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2.0.0-rc.35（2026-08-21，测试仓候选）
+- rc.34 当前指纹在真实 TauriTavern 同一全新聊天中完成 2 个有效回复；第3个正文和选项正常，人物 `no_candidates`、世界 `world.committed`，但严格变量通道两次响应均成功返回后，同一现有普通对象下两个新成员仍被宿主 MVU 静默丢弃，最终 `variable.final.failed`，Doctor 总耗时 `102386 ms`。按硬门停止于第3回合，未 reroll、未发送第4回合，rc.34 不能继续验收。
+- 根因是既有本地修复只把缺失叶子合并为最近动态父对象；真实 MVU 同时静默丢弃该父对象的 replace 时，代码没有继续尝试仍然存在的普通对象祖先。rc.35 在同一解析/事务链中逐级尝试祖先级机械合并；每一级都从同一 expected state 重建，仍须通过 MVU parser、Schema、触碰路径和所有未触碰字段保留校验。数组、只读、混合失败、缺失祖先或无关字段损失继续零写入。
+- 变量/accepted-final 直接相关定向测试 64/64 与本候选唯一一次完整自动套件 669/669 均通过，0 fail，duration `13537.8621 ms`。运行代码变化后，rc.34 的两轮真实成功和第3轮失败只作根因证据；须推送并加载 rc.35 当前指纹，再从一个全新聊天重新执行十二回合与恢复门禁。
+
 ## 2.0.0-rc.34（2026-08-21，测试仓候选）
 - rc.33 真实酒馆第1个 accepted 回复完成变量、`no_candidates` 人物终态、P3 durable commit 和 P4；第2个 accepted 回复正文、选项和 P3 正常，但真实隐藏人物档案块进入恢复持久化时抛出 `actorProfileRecoverySourceDigest is not defined`。根因是成熟 V6 recovery helper 仍是模块私有函数，生产语义适配器却直接引用它；旧合成夹具没有执行这个真实失败人物目标分支。
 - 当前候选显式导出并导入同一个 recovery SourceRef digest helper，不复制第二份摘要算法；同时把语义 P1 的恢复持久化、终态诊断和状态展示收进兜底边界，即使未来终态阶段再出现异常也必须返回红色 `not_completed`，不能留下 busy/waiting 或绿色假成功。人物完整度、`full_adult` 生理门、MVU 原子提交/readback、数据库独立性和 P3/P4 所有权均未放宽。

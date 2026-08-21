@@ -286,6 +286,74 @@ test('dynamic object members are mechanically coalesced and revalidated without 
     assert.equal(result.newData.stat_data.untouched.flag, true);
 });
 
+test('dynamic object repair escalates to an existing ancestor when the nearest parent replace is dropped', async () => {
+    const oldData = {
+        stat_data: {
+            state: {
+                dynamic: {
+                    existing: { score: 1 },
+                },
+            },
+            untouched: { flag: true },
+        },
+    };
+    const block = [
+        '<UpdateVariable>',
+        '<Analysis>synthetic nested dynamic object update</Analysis>',
+        '<JSONPatch>',
+        JSON.stringify([
+            { op: 'insert', path: '/state/dynamic/new-a', value: { score: 2 } },
+            { op: 'insert', path: '/state/dynamic/new-b', value: { score: 3 } },
+        ]),
+        '</JSONPatch>',
+        '</UpdateVariable>',
+    ].join('\n');
+    const prepared = preparePatch(block, oldData);
+    const rejected = validatePatchResult(oldData, deepClone(oldData), prepared);
+    const ancestor = coalesceMissingObjectTargetsPatch(prepared, oldData, rejected, {
+        ancestorDepth: 2,
+    });
+    assert.equal(ancestor.error, undefined);
+    assert.equal(ancestor.ancestorDepth, 2);
+    assert.deepEqual(ancestor.parentPaths, ['/state']);
+    assert.equal(parsePatchBlock(ancestor.block).ops[0].path, '/state');
+
+    const start = indexSource.indexOf('async function parseCandidate(');
+    const end = indexSource.indexOf('function variableFailureResolution(', start);
+    const parserSource = indexSource.slice(start, end);
+    let parseCalls = 0;
+    const Mvu = {
+        parseMessage: async (candidateBlock, candidateOldData) => {
+            parseCalls += 1;
+            const candidatePrepared = preparePatch(candidateBlock, candidateOldData);
+            if (parseCalls < 3) return deepClone(candidateOldData);
+            return {
+                ...deepClone(candidateOldData),
+                stat_data: candidatePrepared.expectedStat,
+            };
+        },
+    };
+    const sandbox = {
+        extractUpdateBlockCandidate,
+        stripAutomaticallyComputedOps,
+        stripRedundantExistingContainerOps,
+        normalizeObjectPropertyOps,
+        preparePatch,
+        coalesceMissingObjectTargetsPatch,
+        validatePatchResult,
+        deepClone,
+        recognizeDeterministicMvuSideEffects: async () => [],
+    };
+    vm.runInNewContext(`${parserSource}\nthis.parseCandidate = parseCandidate;`, sandbox);
+    const result = await sandbox.parseCandidate(Mvu, oldData, block);
+    assert.equal(result.status, 'ready');
+    assert.equal(parseCalls, 3);
+    assert.equal(result.objectParentRepairDepth, 2);
+    assert.deepEqual([...result.objectParentRepairPaths], ['/state']);
+    assert.equal(result.newData.stat_data.untouched.flag, true);
+    assert.equal(validatePatchResult(oldData, result.newData, result.prepared).ok, true);
+});
+
 test('dynamic object coalescing stays fail-closed for mixed or unrelated state loss', () => {
     const oldData = {
         stat_data: {

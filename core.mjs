@@ -595,10 +595,13 @@ export function preparePatch(patchBlock, oldData) {
  * repair only: mixed failures, arrays, readonly paths, missing parents and
  * unrelated state loss remain fail-closed.
  */
-export function coalesceMissingObjectTargetsPatch(prepared, oldData, checked) {
+export function coalesceMissingObjectTargetsPatch(prepared, oldData, checked, {
+    ancestorDepth = 1,
+} = {}) {
     const oldStat = statDataOf(oldData);
     const expectedStat = prepared?.expectedStat;
     const details = Array.isArray(checked?.details) ? checked.details : [];
+    const depth = Math.max(1, Math.floor(Number(ancestorDepth) || 1));
     if (!oldStat || !isPlainObject(expectedStat) || checked?.ok || checked?.nochange || !details.length) {
         return { error: '没有可安全重组的动态对象目标' };
     }
@@ -617,8 +620,8 @@ export function coalesceMissingObjectTargetsPatch(prepared, oldData, checked) {
         ) return { error: '失败项不全是可重组的已触碰动态对象成员' };
 
         const parts = pointerSegments(path);
-        if (!parts || parts.length < 2) return { error: '动态对象目标缺少可重组父路径' };
-        const parentPath = pointerPath(parts.slice(0, -1));
+        if (!parts || parts.length <= depth) return { error: '动态对象目标缺少可重组祖先路径' };
+        const parentPath = pointerPath(parts.slice(0, -depth));
         const oldParent = pointerGet(oldStat, parentPath);
         const expectedParent = pointerGet(expectedStat, parentPath);
         if (
@@ -651,6 +654,7 @@ export function coalesceMissingObjectTargetsPatch(prepared, oldData, checked) {
         prepared: repaired,
         parentPaths: uniqueParents,
         repairedTargetCount: details.length,
+        ancestorDepth: depth,
     };
 }
 

@@ -311,7 +311,7 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.34';
+const VERSION = '2.0.0-rc.35';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v6';
 const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = 'CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
@@ -12792,6 +12792,7 @@ async function parseCandidate(Mvu, oldData, output, {
     let checked = validatePatchResult(oldData, parsed, prepared);
     let parserSideEffectPaths = [];
     let objectParentRepairPaths = [];
+    let objectParentRepairDepth = 0;
     if (!checked.ok && !checked.nochange) {
         parserSideEffectPaths = await recognizeDeterministicMvuSideEffects(
             Mvu,
@@ -12812,12 +12813,19 @@ async function parseCandidate(Mvu, oldData, output, {
         }
     }
     if (!checked.ok && !checked.nochange) {
-        const parentRepair = coalesceMissingObjectTargetsPatch(
-            prepared,
-            oldData,
-            checked,
-        );
-        if (!parentRepair.error) {
+        // Some dynamic MVU schemas silently drop both a new member insert and
+        // a replace of its nearest dynamic object. Escalate only through
+        // already-existing plain-object ancestors. Every candidate is rebuilt
+        // from the same expected state and must pass the same MVU parser plus
+        // full untouched-field validation before it can become committable.
+        for (let ancestorDepth = 1; ancestorDepth <= 8; ancestorDepth += 1) {
+            const parentRepair = coalesceMissingObjectTargetsPatch(
+                prepared,
+                oldData,
+                checked,
+                { ancestorDepth },
+            );
+            if (parentRepair.error) continue;
             try {
                 const repairedPrepared = parentRepair.prepared;
                 repairedPrepared.automaticallyComputedPaths = [
@@ -12875,6 +12883,8 @@ async function parseCandidate(Mvu, oldData, output, {
                     parsed = repairedParsed;
                     checked = repairedChecked;
                     objectParentRepairPaths = [...parentRepair.parentPaths];
+                    objectParentRepairDepth = ancestorDepth;
+                    break;
                 }
             } catch {
                 // The normal bounded model retry remains available. A local
@@ -12914,6 +12924,7 @@ async function parseCandidate(Mvu, oldData, output, {
         ignoredRedundantContainerPaths: containerNormalized.ignoredPaths,
         parserSideEffectPaths,
         objectParentRepairPaths,
+        objectParentRepairDepth,
         recoveredOutput: locallyRecovered || recoveredByObjectParent,
         recoveryReason: finalRecoveryReason,
     };
@@ -13847,6 +13858,7 @@ async function runTarget(targetId, {
             recoveryReason: candidate.recoveryReason,
             parserSideEffectPaths: candidate.parserSideEffectPaths || [],
             objectParentRepairPaths: candidate.objectParentRepairPaths || [],
+            objectParentRepairDepth: Number(candidate.objectParentRepairDepth) || 0,
         };
     } catch (error) {
         result = {
