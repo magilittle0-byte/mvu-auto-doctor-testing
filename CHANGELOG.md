@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2.0.0-rc.37（2026-08-21，测试仓候选）
+- rc.36 在真实 TauriTavern 的同一全新聊天完成十二个正常有效回复及一个追加压力输入，正文、选项、变量、世界和 P4 均可终态，但十三个 accepted assistant 全部错误返回“人物档案无变化”，MVU/Registry/人物页始终为0人；因此人物档案、多 NPC、`full_adult` 生理和恢复门未通过，rc.36 不可用。
+- 根因是生成前动态票据把消费范围错误限制为“无角色卡、世界书、原著或数据库设定的原创 NPC”。当前 V7 合同改为：任何首次进入当前聊天、可稳定单指、尚无输入 MVU 档案的非玩家人物都必须消费预先发行且已绑定稳定 ActorId 的同一票据；权威设定覆盖骰轴内容，但不能成为跳过建档的理由。
+- 票据提示现在必须在真实 `CHAT_COMPLETION_PROMPT_READY`/`GENERATE_AFTER_COMBINE_PROMPTS` outgoing 副本中逐字落地并形成 generation/chat/serial/type/digest 证明，accepted-final 才允许解析、持久化票据批次和 MVU 档案事务。只有显式的隐藏“人物档案无变化”回执能证明零人物；丢失回执、票据 owner 或 prompt-ready 证明均 fail-closed，不能再伪绿。
+- 配套 IZUMI/ARGO 预设真实 `prompt_order` 已停用旧 V4，并把“首次入聊人物票据 V7”作为最终覆盖；当前精确 SHA-256 为 `2BCA3FB302098212828AD37ABE9BEC9FDC020BF7439DC5602A36A702C5A85AF1`。直接相关回归 426/426 与本候选唯一一次完整自动套件 674/674 均通过，0 fail，duration `13457.5024 ms`；当前指纹真实门禁尚未执行，本条不得作为可用声明。
+
 ## 2.0.0-rc.36（2026-08-21，测试仓候选）
 - rc.35 在真实 TauriTavern 同一全新聊天完成第1个有效回复；第2个正文和选项正常、世界 `world.committed`，但变量终态失败，人物语义回执缺失后留下3个精确票据目标。内置“修复全部”只看到人物模块，人物修复又以 `profile_registry_projection_structured_evidence_missing` 零模型、零写入结束。正文未 reroll，第3回合未发送。
 - 根因一是诊断归一化只允许纯十六进制，却把 `core.fingerprint()` 的真实 `长度:十六进制` 形态清空，导致当前目标变量失败无法被 repair-all 选中，并使 chatScope 退化为空。当前保留受限的真实指纹形态及旧纯十六进制兼容，原始聊天/消息内容仍不能进入诊断。

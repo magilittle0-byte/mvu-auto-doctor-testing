@@ -311,9 +311,9 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.36';
-const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'post-content-before-options-v6';
-const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = 'CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4';
+const VERSION = '2.0.0-rc.37';
+const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'first-chat-appearance-ticket-v7';
+const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = '2BCA3FB302098212828AD37ABE9BEC9FDC020BF7439DC5602A36A702C5A85AF1';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
 const PROMPT_PROFILE_SANITIZER_VERSION = PROMPT_CONTEXT_CORE_VERSION;
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
@@ -1395,8 +1395,11 @@ let lastInjectionInspection = {
     apiType: '',
     generationId: '',
     generationSerial: 0,
+    ticketPromptRegistered: false,
+    ticketPromptLanded: false,
+    ticketPromptApiType: '',
+    ticketPromptCheckedAt: 0,
 };
-let lastRegisteredContinuityContent = '';
 let pendingNpcDesignTicketBatch = null;
 const npcDesignTicketBatches = new Map();
 let activeNextTurnConsumer = null;
@@ -4974,9 +4977,14 @@ function inspectContinuityInjectionEvent(eventData) {
                 || payload.apiType !== 'chat'
             )
         ) return;
-        const registered = !!lastRegisteredContinuityContent;
+        const registered = lastInjectionInspection.registered === true;
+        const ticketOnly = lastInjectionInspection.worldPackage === 'ticket_only';
+        const effectiveLanded = ticketOnly
+            ? lastInjectionInspection.ticketPromptLanded === true
+            : payload.landed;
         lastInjectionInspection = {
-            status: registered ? (payload.landed ? 'success' : 'missing') : 'skipped',
+            ...lastInjectionInspection,
+            status: registered ? (effectiveLanded ? 'success' : 'missing') : 'skipped',
             checkedAt: Date.now(),
             registered,
             landed: payload.landed,
@@ -5389,6 +5397,12 @@ function doctorRuntimeCriticalFingerprint() {
         classifyWorldPressureCandidate.toString(),
         admitDoctorWorldCandidates.toString(),
         typeof npcDesignTicketPrompt === 'function' ? npcDesignTicketPrompt.toString() : '',
+        typeof prepareNpcDesignTicketBatch === 'function'
+            ? prepareNpcDesignTicketBatch.toString() : '',
+        typeof actorProfileTicketPromptProofMatches === 'function'
+            ? actorProfileTicketPromptProofMatches.toString() : '',
+        typeof ensureActorProfileTicketPromptInOutgoingPayload === 'function'
+            ? ensureActorProfileTicketPromptInOutgoingPayload.toString() : '',
         typeof immutableNextTurnConsumerPayload === 'function'
             ? immutableNextTurnConsumerPayload.toString() : '',
         actorProfileSurfaceRuntimeFingerprint.toString(),
@@ -14329,7 +14343,7 @@ function continuityFeatureActive(settings, force = false) {
     return settings.continuityMode !== 'off';
 }
 
-function prepareNpcDesignTicketBatch() {
+function prepareNpcDesignTicketBatch(session = lastGeneration) {
     const context = getContext();
     const chatId = context?.chatId || '';
     const capacity = Math.min(
@@ -14340,16 +14354,16 @@ function prepareNpcDesignTicketBatch() {
     );
     const target = {
         chatId,
-        generation: generationSerial,
-        generationId: lastGeneration.id,
-        generationType: lastGeneration.type || 'normal',
+        generation: session.serial,
+        generationId: session.id,
+        generationType: session.type || 'normal',
     };
     const tickets = Array.from({ length: capacity }, (_, index) => {
         const ticket = issueCharacterCreationTicket({
-            id: `${lastGeneration.id}|ticket:${index + 1}`,
-            name: `原创人物骰票${index + 1}`,
+            id: `${session.id}|ticket:${index + 1}`,
+            name: `首次入聊人物票据${index + 1}`,
         }, {
-            entropy: `${chatId}|${lastGeneration.id}|${index + 1}`,
+            entropy: `${chatId}|${session.id}|${index + 1}`,
             target,
             order: index + 1,
         });
@@ -14360,10 +14374,10 @@ function prepareNpcDesignTicketBatch() {
         // payload so persistence seals and semantic binding carry it across
         // accepted-final without pretending ActorRegistry registration has
         // already happened.
-        const ticketHandle = `${chatId}|${lastGeneration.id}|${ticket.ticketId}`;
+        const ticketHandle = `${chatId}|${session.id}|${ticket.ticketId}`;
         const reservedActorId = actorIdFromScopedIdentity(`ticket:${ticket.ticketId}`, {
             chatId,
-            identityKey: `character-creation-ticket:${lastGeneration.id}:${ticket.ticketId}`,
+            identityKey: `character-creation-ticket:${session.id}:${ticket.ticketId}`,
         });
         const reservedActorRef = actorRefFrom({
             actorId: reservedActorId,
@@ -14379,9 +14393,9 @@ function prepareNpcDesignTicketBatch() {
             reservation: {
                 status: 'reserved',
                 chatId,
-                generationId: lastGeneration.id,
-                generationSerial,
-                generationType: lastGeneration.type || 'normal',
+                generationId: session.id,
+                generationSerial: session.serial,
+                generationType: session.type || 'normal',
                 ticketId: ticket.ticketId,
                 ticketHandle,
                 actorId: reservedActorRef.actorId,
@@ -14390,12 +14404,13 @@ function prepareNpcDesignTicketBatch() {
     });
     pendingNpcDesignTicketBatch = {
         ...target,
-        generationSerial: generationSerial,
+        generationSerial: session.serial,
         capacity,
         completionMode: getSettings().actorProfileCompletionMode,
+        promptReadyProof: null,
         tickets,
     };
-    npcDesignTicketBatches.set(lastGeneration.id, pendingNpcDesignTicketBatch);
+    npcDesignTicketBatches.set(session.id, pendingNpcDesignTicketBatch);
     for (const [generationId, batch] of npcDesignTicketBatches) {
         if (batch.chatId !== chatId || npcDesignTicketBatches.size > 12) {
             npcDesignTicketBatches.delete(generationId);
@@ -14446,15 +14461,15 @@ function npcDesignTicketPrompt(batch) {
         : '';
     return [
         '<Original_NPC_Dice_Tickets>',
-        '这些骰票由医生脚本在正文生成前实际掷出，不是让模型自行挑选。只有本回复自然需要创建“没有数据库、角色卡、原著或既有正文人格设定”的原创NPC时才使用；没有新人物就全部忽略，禁止为了消费骰票强行加人。',
-        '按原创NPC首次出现顺序依次使用骰票。数据库/角色卡/原著硬设定 > 已接受正文 > 同源验证的权威材料 > 已保存档案 > 骰票；某轴冲突就丢弃该轴，不折中改写上层设定。其他材料只给剧情职能、没有给人格事实时，才用骰票补空白。',
-        '骰票数量不是正文人物上限。若本回复自然出现的原创NPC多于骰票，超出的角色仍须正常具名、出场并保留彼此独立的身份；不得合并、无名化、延后或伪称其已取得生成前骰票。',
-        '骰票决定内在组合，预设负责在首次出场前完成塑形；正文首次最多自然显露三项，不输出骰票、属性表、类型名或设计过程。不同人物不得互换骰票，也不得把职业、种族或一次情绪覆盖全部骰轴。',
+        '这些票据由医生脚本在正文生成前发行，并已各自预留稳定 ActorId，不是让模型自行挑选或事后补号。凡本回复中首次进入当前聊天、可稳定单指、尚无输入 MVU 档案的非玩家人物，都必须按首次出现顺序消费一张票据完成身份绑定；无论人物来自角色卡、世界书、原著、数据库已知设定，还是本轮原创，都不能因为“已有设定”而跳过票据。没有这类首次入聊人物时才全部忽略，禁止为了消费票据强行加人。',
+        '票据同时携带人格骰轴，但骰轴只填真正空白：数据库/角色卡/原著硬设定 > 已接受正文 > 同源验证的权威材料 > 已保存档案 > 骰轴。已有设定人物仍消费票据来取得稳定 ActorId，却必须逐项丢弃与权威材料冲突或已经被明确设定的骰轴；不得折中改写上层设定。只有原创人物或现有材料没有给出的人格维度才用骰轴补全。',
+        '票据数量不是正文人物上限。若本回复自然首次出现的稳定非玩家人物多于票据，超出的角色仍须正常具名、出场并保留彼此独立身份；不得合并、无名化、延后或伪称其已取得生成前票据，但必须在隐藏回执中保留其姓名与正文锚点，让 Doctor 明确隔离为待修复人物，不能报“无变化”。',
+        '对真正原创且人格空白的人物，骰轴决定不冲突的内在组合，预设负责在首次出场前完成塑形；正文首次最多自然显露三项，不输出骰票、属性表、类型名或设计过程。不同人物不得互换票据，也不得把职业、种族或一次情绪覆盖全部骰轴。',
         '人格票只描述稳定基线；本回合紧张、愤怒、冷淡等动态状态不得固化成永久人格。不得输出或保存MBTI、九型、Tritype、依恋类型名或代码。票据耗尽后不得事后重掷人格；医生仍会依据权威事实、已接受正文与不冲突的创意补全，原子生成完整档案。',
         ...rows,
         '</Original_NPC_Dice_Tickets>',
         '<Actor_Profile_Update_Receipt>',
-        '这是上述骰票在同一条 accepted assistant 回复中的必要语义回执，不是第二次人物识别。只要正文实际创建并消费了任一骰票，就不得把该人物误判成“没有变化”；必须先在唯一的 <content> 内完成空的 <luntan></luntan> 并闭合 </content>，随后立刻输出回执，再继续 <options>、<UpdateVariable>、<tucao>、<StatusPlaceHolderImpl> 或其他大型辅助域，禁止把人物回执拖到可能被截断的回复最末尾。',
+        '这是上述票据在同一条 accepted assistant 回复中的必要语义回执，不是第二次人物识别。只要正文实际让任一尚无输入 MVU 档案的稳定非玩家人物首次进入当前聊天，无论其设定是否早已存在，都必须消费票据并写完整新档案，绝不得把该人物误判成“没有变化”；必须先在唯一的 <content> 内完成空的 <luntan></luntan> 并闭合 </content>，随后立刻输出回执，再继续 <options>、<UpdateVariable>、<tucao>、<StatusPlaceHolderImpl> 或其他大型辅助域，禁止把人物回执拖到可能被截断的回复最末尾。',
         ...physiologyInstructions,
         '隐藏注释严格使用以下行序；多人物在同一注释内逐人重复，某一人物失败不得删掉其他完整人物：',
         '<!-- 人物档案更新',
@@ -14469,10 +14484,112 @@ function npcDesignTicketPrompt(batch) {
         '-->',
         '完整 ticketId 必须从上方已消费的骰票逐字复制，不得写骰票序号、简称、ActorId、revision、digest、status、SourceRef、readback、JSONPatch 或数据库字段。该注释是机器读取域，不得出现在 <content> 或 <options> 的可见正文中。',
         '本段是最终输出顺序的最高优先级补丁，并明确覆盖预设 Four_Options_Output_Contract 与 Final_Four_Options_Gate 中漏写人物回执的旧“唯一顺序”。唯一合法顺序是：<konatan_planning~> → <content>正文…<luntan></luntan></content> → 恰好一个人物档案回执 → <options> → <UpdateVariable> → 其他收尾。输出 </content> 后，下一个非空内容必须立即是回执；回执前不得出现选项、变量、论坛外置块、吐槽、状态栏、数据库标记、解释文字或其他标签。',
-        '本轮收到骰票后必须在该位置二选一：实际消费票据就输出完整“人物档案更新”注释；确实没有新人物且没有已有人物档案变化，就只输出 <!-- 人物档案无变化 -->。提交前回看刚完成的 <content>：只要其中有首次出现且使用骰票塑形的原创人物，就禁止选择“人物档案无变化”。两者都不输出或放到选项之后都会被本地 Doctor 视为缺失回执并进入修复，而不会伪装成成功。',
+        '本轮收到票据后必须在该位置二选一：实际消费票据就输出完整“人物档案更新”注释；确实没有任何尚无输入 MVU 档案的稳定非玩家人物首次入聊、也没有已有人物档案变化，才输出 <!-- 人物档案无变化 -->。提交前回看刚完成的 <content>：只要其中有这类首次入聊人物，即使其来自角色卡、世界书、原著或数据库既有设定，也禁止选择“人物档案无变化”。两者都不输出或放到选项之后都会被本地 Doctor 视为缺失回执并进入修复，而不会伪装成成功。',
         '消费了骰票却有字段或生理项缺失时，不得把该人物从回执中省略或改报“人物档案无变化”：必须保留完整 ticketId、自然姓名、可见正文锚点和已经写出的自然段。Doctor 会将该人物整行隔离并创建可恢复的单人物修复目标；这表示 MVU 原子提交失败，不是删除人物。其他完整人物仍照常提交。',
         '</Actor_Profile_Update_Receipt>',
     ].join('\n');
+}
+
+function actorProfileTicketPromptPayloadTexts(value, depth = 0) {
+    if (depth > 4 || value == null) return [];
+    if (typeof value === 'string') return [value];
+    if (Array.isArray(value)) {
+        return value.flatMap((item) => actorProfileTicketPromptPayloadTexts(item, depth + 1));
+    }
+    if (!isPlainObject(value)) return [];
+    if (value.type === 'text' && typeof value.text === 'string') return [value.text];
+    return [
+        ...actorProfileTicketPromptPayloadTexts(value.content, depth + 1),
+        ...actorProfileTicketPromptPayloadTexts(value.text, depth + 1),
+    ];
+}
+
+function actorProfileTicketPromptProofMatches(batch, captured) {
+    const proof = batch?.promptReadyProof;
+    const expectedText = npcDesignTicketPrompt(batch);
+    return Boolean(
+        proof?.version === 1
+        && proof.landed === true
+        && String(proof.chatId || '') === String(captured?.chatId || '')
+        && String(proof.generationId || '') === String(captured?.generationId || '')
+        && Number(proof.generationSerial) === Number(captured?.generationSerial)
+        && String(proof.generationType || '') === String(captured?.generationType || '')
+        && String(proof.ticketPromptDigest || '') === fingerprint(expectedText)
+    );
+}
+
+function ensureActorProfileTicketPromptInOutgoingPayload(eventData, eventName = '') {
+    if (!eventData || eventData.dryRun) return { ok: false, reason: 'dry_run' };
+    const session = activeGenerationSession;
+    const context = getContext();
+    const batch = session?.id ? npcDesignTicketBatches.get(session.id) : null;
+    if (
+        !session
+        || !batch
+        || session.stopped
+        || String(context?.chatId || '') !== String(session.chatId || '')
+        || String(batch.chatId || '') !== String(session.chatId || '')
+        || String(batch.generationId || '') !== String(session.id || '')
+        || Number(batch.generationSerial) !== Number(session.serial)
+        || String(batch.generationType || '') !== String(session.type || '')
+    ) return { ok: false, reason: 'ticket_prompt_owner_missing' };
+    const ticketText = npcDesignTicketPrompt(batch);
+    if (!ticketText) return { ok: false, reason: 'ticket_prompt_empty' };
+    let apiType = '';
+    let injected = false;
+    if (Array.isArray(eventData.chat)) {
+        apiType = 'chat';
+        const landed = eventData.chat.some((message) => (
+            actorProfileTicketPromptPayloadTexts(message?.content).some((text) => text.includes(ticketText))
+        ));
+        if (!landed) {
+            const message = { role: 'system', content: ticketText };
+            const lastUserIndex = eventData.chat.findLastIndex((entry) => entry?.role === 'user');
+            if (lastUserIndex >= 0) eventData.chat.splice(lastUserIndex, 0, message);
+            else eventData.chat.push(message);
+            injected = true;
+        }
+    } else if (typeof eventData.prompt === 'string') {
+        apiType = 'prompt';
+        if (!eventData.prompt.includes(ticketText)) {
+            eventData.prompt = `${eventData.prompt}\n\n${ticketText}`;
+            injected = true;
+        }
+    } else {
+        return { ok: false, reason: 'ticket_prompt_payload_unsupported' };
+    }
+    const landed = apiType === 'chat'
+        ? eventData.chat.some((message) => (
+            actorProfileTicketPromptPayloadTexts(message?.content).some((text) => text.includes(ticketText))
+        ))
+        : eventData.prompt.includes(ticketText);
+    if (!landed) return { ok: false, reason: 'ticket_prompt_landing_failed' };
+    batch.promptReadyProof = {
+        version: 1,
+        chatId: session.chatId,
+        generationId: session.id,
+        generationSerial: session.serial,
+        generationType: session.type,
+        ticketPromptDigest: fingerprint(ticketText),
+        apiType,
+        eventName: String(eventName || '').slice(0, 80),
+        landed: true,
+        injected,
+        checkedAt: Date.now(),
+    };
+    pendingNpcDesignTicketBatch = batch;
+    npcDesignTicketBatches.set(session.id, batch);
+    lastInjectionInspection = {
+        ...lastInjectionInspection,
+        ticketPromptRegistered: true,
+        ticketPromptLanded: true,
+        ticketPromptApiType: apiType,
+        ticketPromptCheckedAt: Date.now(),
+        generationId: session.id,
+        generationSerial: session.serial,
+        worldPackage: lastInjectionInspection.worldPackage || 'ticket_only',
+    };
+    return { ok: true, apiType, injected, landed: true };
 }
 
 function npcDesignTicketBatchForTarget(captured) {
@@ -15206,10 +15323,10 @@ function recordNextTurnConsumerInspection(session, {
     validationCode = '',
 } = {}) {
     lastInjectionInspection = {
-        status: placed ? 'success' : 'skipped',
+        status: placed ? 'registered' : 'skipped',
         checkedAt: Date.now(),
         registered: placed,
-        landed: placed,
+        landed: false,
         socialRegistered: false,
         socialLanded: false,
         serendipityRegistered: false,
@@ -15217,6 +15334,10 @@ function recordNextTurnConsumerInspection(session, {
         apiType: 'next-turn-consumer',
         generationId: String(session?.id || ''),
         generationSerial: Math.max(0, Number(session?.serial) || 0),
+        ticketPromptRegistered: false,
+        ticketPromptLanded: false,
+        ticketPromptApiType: '',
+        ticketPromptCheckedAt: 0,
         worldPackage: ['verified', 'ticket_only'].includes(worldPackage)
             ? worldPackage
             : '',
@@ -15318,7 +15439,7 @@ async function precomposeNextTurnConsumer(session) {
             }
         }
     }
-    const ticketBatch = prepareNpcDesignTicketBatch();
+    const ticketBatch = prepareNpcDesignTicketBatch(session);
     const ticketText = npcDesignTicketPrompt(ticketBatch);
     let payload = immutableNextTurnConsumerPayload(worldText, ticketText);
     const profileText = typeof p4ActorProfileSummary === 'function'
@@ -18445,17 +18566,14 @@ function actorProfileReceiptOmissionDecision({
     exactTicketCount = 0,
     explicitNoChange = false,
 } = {}) {
-    if (explicitNoChange === true) return 'no_candidates';
-    return Math.max(0, Number(exactTicketCount) || 0) > 0
-        ? 'profile_block_missing'
-        : 'no_candidates';
+    void exactTicketCount;
+    return explicitNoChange === true ? 'no_candidates' : 'profile_block_missing';
 }
 
 function actorProfileSemanticNoChange(captured, acceptedNarrative = '') {
-    // Legacy/no-ticket replies may omit the semantic block. Current contracted
-    // generations prove the same decision with the explicit hidden no-change
-    // receipt; a wholly missing receipt there is a repairable failure rather
-    // than a fabricated successful zero-write decision.
+    // Current semantic generations prove zero candidates with the dedicated
+    // hidden no-change receipt. A wholly missing receipt is never promoted to
+    // a successful zero-write outcome merely because the ticket owner was lost.
     const coverage = actorProfileDiscoveryCoveragePlan(acceptedNarrative);
     return actorProfileTransientResult('no_candidates', {
         target: sourceRefOf(captured),
@@ -18737,8 +18855,47 @@ async function runSemanticActorProfileTargetCore(captured) {
     if (!sovereigntyNarrativeEligible(messageText)) {
         return actorProfileSemanticFailure(captured, 'accepted_narrative_ineligible');
     }
-    let tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
+    const ticketBatch = npcDesignTicketBatchForTarget(captured);
+    if (!ticketBatch) {
+        return actorProfileSemanticFailure(captured, 'profile_ticket_batch_missing', {
+            emptyOperations: true,
+            repairable: true,
+        });
+    }
+    if (!actorProfileTicketPromptProofMatches(ticketBatch, captured)) {
+        return actorProfileSemanticFailure(captured, 'profile_ticket_prompt_unverified', {
+            emptyOperations: true,
+            repairable: true,
+        });
+    }
+    const acceptedTicketTarget = sourceRefOf(captured);
+    const persistedTicket = (readChatNamespace()?.characterCreationTicketBatches || [])
+        .some((entry) => actorProfileTicketBatchPersistenceMatches(entry, {
+            acceptedTarget: acceptedTicketTarget,
+        }));
+    if (!persistedTicket) {
+        const ticketPersistenceFailure = {};
+        const persisted = await persistNpcDesignTicketBatch(
+            ticketBatch,
+            captured,
+            ticketPersistenceFailure,
+        );
+        if (!persisted) {
+            return actorProfileSemanticFailure(
+                captured,
+                actorProfileTicketPersistenceFailureCode(ticketPersistenceFailure),
+                { emptyOperations: true, repairable: true },
+            );
+        }
+    }
+    let tickets = (ticketBatch.tickets || [])
         .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
+    if (!tickets.length || tickets.length !== Number(ticketBatch.capacity)) {
+        return actorProfileSemanticFailure(captured, 'profile_ticket_batch_identity_invalid', {
+            emptyOperations: true,
+            repairable: true,
+        });
+    }
     let extracted = extractActorProfileUpdateBlock(messageText);
     if (!extracted.present) {
         const omission = actorProfileReceiptOmissionDecision({
@@ -31301,6 +31458,19 @@ function bindActorProfilePromptSanitizationEvents(context, types) {
             // this existing contract.
             sanitizeSocialPromptEvent(eventData, eventName);
             sanitizeActorProfilePromptEvent(eventData, eventName);
+            const ticketPrompt = ensureActorProfileTicketPromptInOutgoingPayload(
+                eventData,
+                eventName,
+            );
+            if (!ticketPrompt.ok && ticketPrompt.reason !== 'dry_run') {
+                lastInjectionInspection = {
+                    ...lastInjectionInspection,
+                    status: 'blocked',
+                    landed: false,
+                    checkedAt: Date.now(),
+                    reason: ticketPrompt.reason,
+                };
+            }
             inspectContinuityInjectionEvent(eventData);
         });
     }
@@ -31457,6 +31627,10 @@ async function beginForegroundGenerationSession(candidate, dryRun) {
                 apiType: '',
                 generationId: session.id,
                 generationSerial,
+                ticketPromptRegistered: false,
+                ticketPromptLanded: false,
+                ticketPromptApiType: '',
+                ticketPromptCheckedAt: 0,
             };
             resetCurrentModelCallStats(generationType);
             try {

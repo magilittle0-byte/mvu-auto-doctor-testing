@@ -211,7 +211,8 @@ test('A: production prompt-ready helper preserves social-first/profile/continuit
     const handlers = new Map();
     const bind = new Function(
         'context', 'types', 'setStatus', 'lastActorProfilePromptSanitization',
-        'sanitizeSocialPromptEvent', 'sanitizeActorProfilePromptEvent', 'inspectContinuityInjectionEvent',
+        'sanitizeSocialPromptEvent', 'sanitizeActorProfilePromptEvent',
+        'ensureActorProfileTicketPromptInOutgoingPayload', 'inspectContinuityInjectionEvent',
         `${indexSource.slice(helperStart, helperEnd)}\nreturn bindActorProfilePromptSanitizationEvents;`,
     )(
         { eventSource: { on: (name, handler) => handlers.set(name, handler) } },
@@ -222,6 +223,10 @@ test('A: production prompt-ready helper preserves social-first/profile/continuit
         () => {}, { status: 'not-yet', unsupported: false },
         (_data, name) => calls.push(`social:${name}`),
         (_data, name) => calls.push(`profile:${name}`),
+        (_data, name) => {
+            calls.push(`ticket:${name}`);
+            return { ok: true, landed: true };
+        },
         () => calls.push('continuity'),
     );
     bind(
@@ -233,7 +238,12 @@ test('A: production prompt-ready helper preserves social-first/profile/continuit
     );
     assert.deepEqual([...handlers.keys()].sort(), ['after-combine', 'prompt-ready']);
     handlers.get('prompt-ready')({ prompt: 'x' });
-    assert.deepEqual(calls, ['social:prompt-ready', 'profile:prompt-ready', 'continuity']);
+    assert.deepEqual(calls, [
+        'social:prompt-ready',
+        'profile:prompt-ready',
+        'ticket:prompt-ready',
+        'continuity',
+    ]);
     assert.match(indexSource, /bindActorProfilePromptSanitizationEvents\(context, types\)/u);
 });
 

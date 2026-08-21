@@ -545,7 +545,7 @@ test('static production path proves pre-generation injection and forbids doctor 
         runtimeSource.indexOf('async function commitNextTurnConsumer'),
     );
     assert.ok(
-        nextTurnConsumer.indexOf('prepareNpcDesignTicketBatch()')
+        nextTurnConsumer.indexOf('prepareNpcDesignTicketBatch(session)')
             < nextTurnConsumer.indexOf('immutableNextTurnConsumerPayload(worldText, ticketText)'),
         '票据必须在唯一 P4 next-turn consumer 组装最终提示词前创建',
     );
@@ -611,7 +611,7 @@ test('static production path proves pre-generation injection and forbids doctor 
 test('generation-near ticket prompt binds every consumed ticket to one hidden six-section receipt', async () => {
     const runtimeSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const start = runtimeSource.indexOf('function npcDesignTicketPrompt(batch)');
-    const end = runtimeSource.indexOf('\nfunction npcDesignTicketBatchForTarget', start);
+    const end = runtimeSource.indexOf('\nfunction actorProfileTicketPromptPayloadTexts', start);
     assert.ok(start >= 0 && end > start);
     const npcDesignTicketPrompt = new Function(
         `return (${runtimeSource.slice(start, end)});`,
@@ -628,7 +628,7 @@ test('generation-near ticket prompt binds every consumed ticket to one hidden si
     const ticketsEnd = prompt.indexOf('</Original_NPC_Dice_Tickets>');
     const receiptStart = prompt.indexOf('<Actor_Profile_Update_Receipt>');
     assert.ok(ticketsEnd >= 0 && receiptStart > ticketsEnd, '回执合同必须贴在完整票据池之后');
-    assert.match(prompt, /只要正文实际创建并消费了任一骰票[\s\S]*不得把该人物误判成“没有变化”/u);
+    assert.match(prompt, /只要正文实际让任一尚无输入 MVU 档案的稳定非玩家人物首次进入当前聊天[\s\S]*不得把该人物误判成“没有变化”/u);
     assert.match(prompt, /新增人物｜ticket=对应完整ticketId/u);
     for (const section of [
         '人物信息', '性格特征', '过往经历', '当前状态', '关系与动机', '知识、能力与资源',
@@ -650,7 +650,7 @@ test('generation-near ticket prompt binds every consumed ticket to one hidden si
     assert.match(prompt, /禁止把人物回执拖到可能被截断的回复最末尾/u);
     assert.ok(
         prompt.indexOf('唯一合法顺序')
-            < prompt.indexOf('本轮收到骰票后必须在该位置二选一'),
+            < prompt.indexOf('本轮收到票据后必须在该位置二选一'),
         '档案回执必须先于可能被截断的大型辅助域',
     );
     assert.match(prompt, /两者都不输出[\s\S]*不会伪装成成功/u);

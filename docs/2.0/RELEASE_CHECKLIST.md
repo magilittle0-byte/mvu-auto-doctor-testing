@@ -1,8 +1,8 @@
-# MVU Auto Doctor 2.0.0-rc.36 正式门禁清单
+# MVU Auto Doctor 2.0.0-rc.37 正式门禁清单
 
-候选：`2.0.0-rc.36`（当前仅测试仓；须在当前 loaded fingerprint 下完成同一聊天连续十二个有效回复。正常正文不得 reroll；仅正文硬失败可替换当前回复，Doctor/MVU/P3/P4 故障必须在已接受正文的精确 SourceRef 上修复。）
+候选：`2.0.0-rc.37`（当前仅测试仓；须在当前 loaded fingerprint 下完成同一聊天连续十二个有效回复。正常正文不得 reroll；仅正文硬失败可替换当前回复，Doctor/MVU/P3/P4 故障必须在已接受正文的精确 SourceRef 上修复。）
 
-当前状态：rc.36 绑定候选预设 SHA-256 `CDFCCBA82EF9DBD8CFF627143C687F3E010876901CFD57981C29B1C70919B5D4`。rc.35 第2个真实回复暴露诊断 `长度:哈希` 被清空而漏选变量失败，以及普通 V4 补档回执被 projection recovery 错误拦截；rc.36 保留隐私安全 scope/target 指纹并让 exact-SourceRef 普通补档逐 Actor 自动恢复。定向回归 261/261 与唯一一次完整自动套件 672/672（0 fail，`13503.992 ms`）通过；提交、推送和当前指纹十二回合真实门禁待执行，旧真实结果不能替代 rc.36。
+当前状态：rc.36 真实十二回复及追加压力输入全部误报“人物档案无变化”，人物档案门失败。rc.37 绑定候选预设 SHA-256 `2BCA3FB302098212828AD37ABE9BEC9FDC020BF7439DC5602A36A702C5A85AF1`，把所有首次入聊且缺 MVU 档案的稳定非玩家人物纳入同票 ActorId/完整档案合同，并以真实 prompt-ready outgoing proof 作为 accepted-final 前置门。直接相关回归 426/426、完整自动套件 674/674（0 fail，`13457.5024 ms`）已通过；提交、推送和当前指纹十二回合真实门禁仍待完成，旧真实结果不能替代 rc.37。
 这不是正式验收证据。结构化报告只接受本轮代码指纹下重新取得的真实目标模型、数据库、
 SillyTavern/TauriTavern 与连续十二回合证据；旧版本结果不作为本轮通过依据。正式仓和正式
 `main` 保持不动，完成全部真实门禁前不得合并或声明可用。

@@ -6,9 +6,9 @@ SillyTavern/Tauri run and is not evidence for the twelve-turn acceptance gate.
 
 ## Prompt-ready host evidence
 
-- The paired IZUMI preset now places `mvu-auto-doctor-profile-context-separation-v6`
-  exactly once in the enabled `prompt_order`, before the natural profile receipt
-  contract while leaving the V5 terminal receipt gate last. A prompt object that
+- The paired IZUMI preset places `mvu-auto-doctor-profile-context-separation-v6`
+  exactly once in the enabled `prompt_order`, disables legacy V4 in that real order,
+  and leaves the V7 first-chat-appearance ticket contract as the final override. A prompt object that
   exists only in `prompts` is not treated as active production evidence.
 
 - Controlled host: TavernHelper `4.8.19`.
@@ -31,8 +31,12 @@ SillyTavern/Tauri run and is not evidence for the twelve-turn acceptance gate.
 The production handler is synchronous at the event boundary. It sanitizes an
 outgoing payload copy, leaves `context.chat` and stored `message.mes` intact,
 and only performs a flat replacement when assistant-source ownership is
-provable. Ambiguous or unsupported payloads are diagnostic failures, not
-claimed filtering. Real host event triggering was not run in this task.
+provable. It also proves that the exact current-generation ticket contract is
+present in that outgoing copy (injecting it once when absent); the proof binds
+chat, generation id/serial/type and ticket-prompt digest. Accepted-final profile
+commit fails closed when that proof is absent or stale. Ambiguous or unsupported
+payloads are diagnostic failures, not claimed filtering. Current-fingerprint
+real host event triggering remains part of the pending acceptance run.
 
 The two host subscription boundaries are explicit production helpers:
 `bindActorProfilePromptSanitizationEvents(context, types)` registers both

@@ -102,7 +102,12 @@ test('selected preset closes every ticket turn with one explicit hidden profile 
     const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
     assert.equal(order.filter((entry) => entry?.identifier === identifier).length, 1);
     assert.equal(order.find((entry) => entry?.identifier === identifier)?.enabled, true);
-    assert.equal(order.at(-1)?.identifier, identifier);
+    assert.equal(order.at(-1)?.identifier, 'mvu-auto-doctor-first-chat-appearance-ticket-v7');
+    assert.ok(
+        order.findIndex((entry) => entry?.identifier === identifier)
+            < order.findIndex((entry) => entry?.identifier === 'mvu-auto-doctor-first-chat-appearance-ticket-v7'),
+        'V7 must be the final override after the V5 output-order contract',
+    );
 });
 
 test('selected preset keeps second-person perception without assigning player feelings', () => {
@@ -156,6 +161,14 @@ test('profile repair classification is fixed-code and fail-closed', () => {
     assert.equal(sourceChanged.code, 'profile_source_changed_before_commit');
     assert.equal(sourceChanged.failureClass, 'identity_binding');
     assert.equal(sourceChanged.zeroWrite, true);
+    const promptUnverified = classifyActorProfileRepairFailure({
+        code: 'profile_ticket_prompt_unverified',
+        status: 'failed',
+        writeCount: 0,
+    });
+    assert.equal(promptUnverified.code, 'profile_ticket_prompt_unverified');
+    assert.equal(promptUnverified.failureClass, 'identity_binding');
+    assert.equal(promptUnverified.zeroWrite, true);
 });
 
 test('targeted profile repair envelope is privacy-safe and only carries bounded fields', () => {

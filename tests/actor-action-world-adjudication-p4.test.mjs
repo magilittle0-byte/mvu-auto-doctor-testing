@@ -468,7 +468,7 @@ test('P4 cleanup failure fails closed and never restarts a producer or legacy br
     );
     assert.match(
         consumer,
-        /packet\.consumerLease\?\.state === 'reserved'[\s\S]*?convergePersistedStaleNextTurnWorldLease\([\s\S]*?packet = null;[\s\S]*?prepareNpcDesignTicketBatch\(\)/u,
+        /packet\.consumerLease\?\.state === 'reserved'[\s\S]*?convergePersistedStaleNextTurnWorldLease\([\s\S]*?packet = null;[\s\S]*?prepareNpcDesignTicketBatch\(session\)/u,
     );
     assert.match(
         consumer,

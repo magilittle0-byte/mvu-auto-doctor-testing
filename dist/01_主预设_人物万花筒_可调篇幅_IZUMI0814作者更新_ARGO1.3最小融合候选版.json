@@ -1596,12 +1596,16 @@
           "identifier": "4f2642de-5ef6-4ee4-9e94-2c52dd667a13"
         },
         {
-          "enabled": true,
+          "enabled": false,
           "identifier": "b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910"
         },
         {
           "enabled": true,
           "identifier": "b222c3a4-6979-4dbd-a8ce-5fe4112a1c24"
+        },
+        {
+          "enabled": true,
+          "identifier": "mvu-auto-doctor-first-chat-appearance-ticket-v7"
         }
       ]
     }
@@ -4898,6 +4902,20 @@
       "injection_trigger": [],
       "marker": false,
       "name": "🧾Doctor人物档案上下文隔离V6",
+      "role": "system",
+      "system_prompt": false
+    },
+    {
+      "content": "<First_Chat_Appearance_Ticket_V7>\n本条是人物档案票据的最新最高优先级合同，并取代任何把 characterCreationTicket 限定为‘仅原创人物使用’的旧说法。Doctor 在生成前给出的每张票据都已经预留稳定 ActorId。只要本回复中有可稳定单指的非玩家人物首次进入当前聊天，且输入中没有该人的 MVU 完整档案，就必须按首次出现顺序消费一张票据并在隐藏回执中一次写全该人物；人物来自角色卡、99条内嵌世界书、原著、数据库已有设定或本轮原创都一样要绑定票据。已有权威设定只决定档案内容并压过骰轴，绝不是跳过建档的理由；票据中的人格骰轴仅补真正空白且不冲突的维度。\n提交前逐一回看正文里的首次入聊人物：只要存在上述人物，就严禁输出‘人物档案无变化’。每个新档案必须包含人物信息、性格特征、过往经历、当前状态、关系与动机、知识、能力与资源六段自然中文；上游启用 full_adult 时还必须写全六项生理字段，不适用项自然说明原因。唯一顺序仍是 </content> 后立即写恰好一个隐藏人物档案回执，再输出 <options> 和 <UpdateVariable>。模型只写语义，不写 ActorId、revision、digest、SourceRef、readback、MVU路径或JSONPatch。\n</First_Chat_Appearance_Ticket_V7>",
+      "enabled": true,
+      "forbid_overrides": false,
+      "identifier": "mvu-auto-doctor-first-chat-appearance-ticket-v7",
+      "injection_depth": 4,
+      "injection_order": 104,
+      "injection_position": 0,
+      "injection_trigger": [],
+      "marker": false,
+      "name": "🧾首次入聊人物票据V7·设定人物也必须绑定",
       "role": "system",
       "system_prompt": false
     }

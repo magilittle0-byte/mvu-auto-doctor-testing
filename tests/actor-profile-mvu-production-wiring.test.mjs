@@ -63,6 +63,110 @@ test('stored assistant text normalization is shared, multimodal-safe, and fail-c
     assert.equal(normalizeStoredAssistantMessage({ mes: '<人物档案更新>' }).ok, false);
 });
 
+test('prompt-ready ticket contract lands on the real outgoing copy exactly once', () => {
+    const helperSource = section(
+        'function actorProfileTicketPromptPayloadTexts',
+        'function npcDesignTicketBatchForTarget',
+    );
+    const batch = {
+        chatId: 'chat-1', generationId: 'generation-1', generationSerial: 7,
+        generationType: 'normal', tickets: [{ ticketId: 'ticket-1' }],
+    };
+    const batches = new Map([['generation-1', batch]]);
+    const session = {
+        chatId: 'chat-1', id: 'generation-1', serial: 7, type: 'normal', stopped: false,
+    };
+    const fingerprint = (value) => `fp:${String(value).length}:${String(value)}`;
+    const helpers = new Function(
+        'isPlainObject', 'npcDesignTicketPrompt', 'activeGenerationSession',
+        'npcDesignTicketBatches', 'getContext', 'fingerprint',
+        'pendingNpcDesignTicketBatch', 'lastInjectionInspection',
+        `${helperSource}\nreturn { ensureActorProfileTicketPromptInOutgoingPayload, actorProfileTicketPromptProofMatches };`,
+    )(
+        (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value),
+        () => '<Actor_Profile_Update_Receipt>ticket-1</Actor_Profile_Update_Receipt>',
+        session,
+        batches,
+        () => ({ chatId: 'chat-1' }),
+        fingerprint,
+        null,
+        {},
+    );
+    const eventData = { chat: [{ role: 'user', content: 'continue' }], dryRun: false };
+    const first = helpers.ensureActorProfileTicketPromptInOutgoingPayload(
+        eventData,
+        'chat_completion_prompt_ready',
+    );
+    assert.deepEqual(first, { ok: true, apiType: 'chat', injected: true, landed: true });
+    assert.equal(eventData.chat.length, 2);
+    assert.equal(eventData.chat[0].role, 'system');
+    assert.match(eventData.chat[0].content, /Actor_Profile_Update_Receipt/u);
+    const second = helpers.ensureActorProfileTicketPromptInOutgoingPayload(
+        eventData,
+        'chat_completion_prompt_ready',
+    );
+    assert.equal(second.injected, false);
+    assert.equal(eventData.chat.length, 2, 'the same ticket contract is never appended twice');
+    assert.equal(helpers.actorProfileTicketPromptProofMatches(batch, {
+        chatId: 'chat-1', generationId: 'generation-1', generationSerial: 7,
+        generationType: 'normal',
+    }), true);
+    assert.equal(helpers.ensureActorProfileTicketPromptInOutgoingPayload(
+        { messages: [] },
+        'unknown_prompt_ready',
+    ).reason, 'ticket_prompt_payload_unsupported');
+});
+
+test('ticket prompt proof cannot promote a missing verified P4 world package', () => {
+    const inspectionSource = section(
+        'function promptPayloadContainsSentinel',
+        'function sanitizeSocialPromptEvent',
+    );
+    const makeHarness = (worldPackage) => new Function(
+        'CONTINUITY_INJECTION_SENTINEL', 'SOCIAL_INJECTION_SENTINEL',
+        'SERENDIPITY_INJECTION_SENTINEL', 'lastGeneration', 'generationSerial',
+        'renderEnvironmentReport', 'initialInspection',
+        `let lastInjectionInspection = initialInspection;\n${inspectionSource}\n`
+            + 'return { inspectContinuityInjectionEvent, getInspection: () => lastInjectionInspection };',
+    )(
+        '<WORLD_SENTINEL>', '<SOCIAL_SENTINEL>', '<SERENDIPITY_SENTINEL>',
+        { id: 'generation-1' }, 7, () => {},
+        {
+            status: 'registered', checkedAt: 0, registered: true, landed: false,
+            apiType: 'next-turn-consumer', generationId: 'generation-1',
+            generationSerial: 7, worldPackage,
+            ticketPromptRegistered: true, ticketPromptLanded: true,
+            ticketPromptApiType: 'chat', ticketPromptCheckedAt: 1,
+        },
+    );
+
+    const verifiedMissing = makeHarness('verified');
+    verifiedMissing.inspectContinuityInjectionEvent({
+        chat: [{ role: 'system', content: '<ticket-only>' }],
+        dryRun: false,
+    });
+    assert.equal(verifiedMissing.getInspection().status, 'missing');
+    assert.equal(verifiedMissing.getInspection().ticketPromptLanded, true);
+    assert.equal(verifiedMissing.getInspection().landed, false);
+
+    const verifiedLanded = makeHarness('verified');
+    verifiedLanded.inspectContinuityInjectionEvent({
+        chat: [{ role: 'system', content: '<WORLD_SENTINEL>' }],
+        dryRun: false,
+    });
+    assert.equal(verifiedLanded.getInspection().status, 'success');
+    assert.equal(verifiedLanded.getInspection().landed, true);
+
+    const ticketOnly = makeHarness('ticket_only');
+    ticketOnly.inspectContinuityInjectionEvent({
+        chat: [{ role: 'system', content: '<ticket-only>' }],
+        dryRun: false,
+    });
+    assert.equal(ticketOnly.getInspection().status, 'success');
+    assert.equal(ticketOnly.getInspection().landed, false,
+        'ticket-only success must not fabricate a world sentinel landing');
+});
+
 test('production accepted-final capture uses normalized text and rejects unknown stored shapes', () => {
     const capture = section('function captureTarget', 'async function freshFrozenScopeGuard');
     assert.match(capture, /normalizedStoredAssistantMessage\(message\)/u);
@@ -243,6 +347,8 @@ test('production semantic actor capacity rejects 65 before parse/replace/write',
         'freshFrozenScopeGuard', 'operationToken', 'continuityTargetIsCurrent',
         'actorProfileTransientResult',
         'getContext', 'sovereigntyNarrativeEligible', 'npcDesignTicketBatchForTarget',
+        'actorProfileTicketPromptProofMatches', 'actorProfileTicketBatchPersistenceMatches',
+        'persistNpcDesignTicketBatch', 'actorProfileTicketPersistenceFailureCode',
         'reservedTicketMatchesAcceptedTarget', 'extractActorProfileUpdateBlock',
         'actorProfileReceiptOmissionDecision', 'settleSemanticActorProfileTransactionTarget',
         'parseActorProfileUpdateBlock', 'readChatNamespace', 'normalizeActorLedger',
@@ -260,7 +366,11 @@ test('production semantic actor capacity rejects 65 before parse/replace/write',
         (status, extra) => ({ status, ...extra }),
         () => fakeContext,
         () => true,
-        () => ({ tickets: [] }),
+        () => ({ capacity: 65, tickets: actorIds.map((actorId) => ({ actorId })) }),
+        () => true,
+        () => true,
+        async () => true,
+        () => 'profile_persistence_failed',
         () => true,
         () => ({ present: true, ok: true, block: '<人物档案更新>' }),
         () => 'profile_block_missing',
@@ -897,6 +1007,16 @@ test('paired IZUMI preset bytes and runtime version are the candidate truth', as
     assert.equal(named.get('🧾人物档案回执终检V4·兼容历史（停用）')?.enabled, false);
     assert.equal(named.get('🧾人物档案更新语义块V6·accepted-final桥接')?.enabled, true);
     assert.equal(named.get('🧾人物档案回执终检V5·覆盖旧选项顺序')?.enabled, true);
+    const actualPromptOrder = new Map((preset.prompt_order || [])
+        .flatMap((group) => group.order || [])
+        .map((entry) => [entry.identifier, entry.enabled === true]));
+    assert.equal(actualPromptOrder.get('b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910'), false,
+        'the host prompt_order, not only the prompt object, must disable legacy V4');
+    assert.equal(actualPromptOrder.get('mvu-auto-doctor-first-chat-appearance-ticket-v7'), true);
+    const ticketV7 = named.get('🧾首次入聊人物票据V7·设定人物也必须绑定');
+    assert.equal(ticketV7?.enabled, true);
+    assert.match(ticketV7?.content || '', /角色卡、99条内嵌世界书、原著、数据库已有设定/u);
+    assert.match(ticketV7?.content || '', /都一样要绑定票据/u);
     const enabledProfilePrompts = (preset.prompts || []).filter((entry) => (
         entry.enabled === true && /人物档案|Doctor.*profile/iu.test(String(entry.name || ''))
     ));
@@ -925,6 +1045,9 @@ test('accepted-final profile adapter is exact-source, zero-model, and uses exist
     assert.match(source, /async function replayFinalizedSemanticProfileOperations[\s\S]*?mergeActorProfileOperationsIntoAcceptedMessage/u);
     assert.match(semantic, /profileRootPresent/u);
     assert.match(semantic, /projectSemanticProfilesToActorLedger/u);
+    assert.match(semantic, /profile_ticket_batch_missing/u);
+    assert.match(semantic, /actorProfileTicketPromptProofMatches\(ticketBatch, captured\)/u);
+    assert.match(semantic, /persistNpcDesignTicketBatch\([\s\S]*?ticketBatch,[\s\S]*?captured/u);
     assert.match(semantic, /actorProfileExplicitNoChangeReceipt\(messageText\)/u);
     assert.match(semantic, /exactTicketCount:\s*tickets\.length/u);
     assert.match(semantic, /omission === 'profile_block_missing'[\s\S]*?emptyOperations:\s*true/u);
@@ -1262,7 +1385,7 @@ test('contracted receipt omission fails closed while dedicated tail no-change re
     assert.equal(helpers.actorProfileReceiptOmissionDecision({
         exactTicketCount: 0,
         explicitNoChange: false,
-    }), 'no_candidates');
+    }), 'profile_block_missing');
 });
 
 test('runtime fingerprint binds preset bridge, parser/compiler, transaction, P3, repair and P4', () => {
