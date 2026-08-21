@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2.0.0-rc.39（2026-08-21，测试仓候选）
+- rc.38 当前指纹在真实 TauriTavern 唯一全新聊天中第1回合完整终态；第2回合正文与选项正常，变量 `applied`、世界 `committed`、P4 pending+proof，但真实隐藏回执中的2个人物都给了不含姓名的可见锚点，并且在已明确注入 `full_adult` 时仍漏掉全部六项生理字段。旧解析器以 `profile_source_anchor_missing` 整批零写，恢复材料又未持久化，Doctor 最终 `doctor_modules_not_settled`，总耗时 `150155 ms`。按真实硬门停止，rc.38 不可用。
+- rc.39 在专用 accepted-assistant 回执、同票 reserved ActorId 和精确可见 `<content>` 三重边界内，允许本地把缺失、未命中或未包含姓名的正文锚点收敛为正文中实际存在的自然姓名；姓名不在可见正文时仍 fail-closed，数据库、世界书、选项和历史隐藏块不能提供锚点。真实失败回执的脱敏本地回放由 `quarantined` 变为2人可绑定，未泄露姓名或正文。
+- 配套 IZUMI/ARGO 预设新增最终 `full_adult` 生理硬闸 V8；运行时 ticket prompt 同步要求每个新人物逐人写齐六段与六个 physiology field，年龄未明、非人或不适用也必须在对应项自然说明原因，未补齐前不得闭合回执或输出 options/UpdateVariable。缺项仍保持0操作、红色待修复且不ready，绝不以蓝色 busy 或绿色卡掩盖。当前预设 SHA-256 为 `7F13F4B1F996AB5A03596F19DFDFE7BB95D97D4DCF0BB2E80998C578DFC7FE62`；直接相关回归 201/201 与修复后完整自动套件 677/677 均通过，0 fail，duration `13537.7591 ms`。当前指纹真实十二回合与恢复门仍待重新执行。
+
 ## 2.0.0-rc.38（2026-08-21，测试仓候选）
 - rc.37 在真实 TauriTavern 的全新聊天首回合已证明：正文与选项正常；同票稳定 ActorId 的一名人物完整生成六段自然档案与 `full_adult` 生理档案，MVU 原子提交/readback-ready，人物档案额外模型调用为0；P3 世界提交和 P4 下一回合包也完成。但人物档案适配器随后移除已消费的隐藏回执并刷新同一 accepted assistant 时，并行变量事务仍用整条消息原始哈希做最终闸门，因而在模型调用成功后误报 `variable.final.stale` 并零写取消。按真实硬门立即停止，rc.37 不可用。
 - rc.38 的目标闸门先保持 chat/message/swipe/generation/scope/epoch 全部严格一致；整条消息哈希变化时，必须同时匹配已存在的 accepted-content fingerprint 和本次 Doctor 在内存登记的精确旧/新消息改写证明。证明在保存失败或 operation 失效时撤销/清空。Doctor 自有的人物回执消费、MVU 区块重放和状态占位刷新因此不会取消同一正文的变量事务；第三方机制改写以及任何可见叙事、generation、swipe、chat、scope 或 epoch 漂移仍零写。

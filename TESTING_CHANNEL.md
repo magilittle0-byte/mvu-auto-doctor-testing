@@ -17,15 +17,15 @@
 
 ## 当前候选
 
-- 版本：`2.0.0-rc.38`
+- 版本：`2.0.0-rc.39`
 - 实现范围：MVU durable semantic profile 前移、accepted-final exact SourceRef 事务、prompt-ready assistant 副本隔离、Doctor-owned CHAT_DELETED/GROUP_CHAT_DELETED 清理、人物/势力/环境三 lane、resolved 有界压缩和 ephemeral actorOperationalState。数据库、预设、MVU、Doctor/P3/P4 仍各自独立；语义档案不双写 legacy `profileV6`。
-- 候选预设：精确 IZUMI 文件 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json`，当前 SHA-256 为 `2BCA3FB302098212828AD37ABE9BEC9FDC020BF7439DC5602A36A702C5A85AF1`。V6 上下文隔离条目唯一启用，V4 在真实 `prompt_order` 中停用，V7 首次入聊票据合同作为最终覆盖。任何首次入聊且没有输入 MVU 档案的稳定非玩家人物都必须绑定票据；权威设定只覆盖骰轴，不允许跳过建档。
+- 候选预设：精确 IZUMI 文件 `dist/01_主预设_人物万花筒_可调篇幅_IZUMI0814作者更新_ARGO1.3最小融合候选版.json`，当前 SHA-256 为 `7F13F4B1F996AB5A03596F19DFDFE7BB95D97D4DCF0BB2E80998C578DFC7FE62`。V6 上下文隔离条目启用，V4 在真实 `prompt_order` 中停用，V7 首次入聊票据合同与最终 V8 `full_adult` 生理逐人物硬闸均在真实顺序中启用。任何首次入聊且没有输入 MVU 档案的稳定非玩家人物都必须绑定票据；权威设定只覆盖骰轴，不允许跳过建档。
 - 静态宿主证据：TavernHelper `4.8.19`；`extensions/TavernHelper/dist/index.js.map` SHA-256 为 `7989FC1B3A47978526D63FD63C9DCB5ED68B534523BD24C223FF0B82C7A1D961`。事件负载与所有权见 [`docs/2.0/MVU_RUNTIME_SOURCE_MAP.md`](docs/2.0/MVU_RUNTIME_SOURCE_MAP.md)。这不是宿主真实触发证据。
-- rc.37 真实首回合已完整生成一名人物的六段档案与 `full_adult` 生理档案并完成 MVU readback；人物额外模型调用为0，世界/P4终态。但人物回执消费后的同消息刷新导致并行变量事务误报 `variable.final.stale`，因此候选失败。rc.38 只允许 accepted narrative 不变且具有本次 Doctor 精确旧/新哈希证明的自有机制刷新继续；保存失败或 operation 失效会撤销证明，第三方机制改写、叙事或身份漂移仍 fail-closed；后续 prompt 也不再收到 `[object Object]`。
-- 自动检查：直接相关回归 210/210；最终完整自动套件 676/676，0 fail，duration `13424.7254 ms`；语法、manifest/预设 JSON 与 diff 检查通过。
-- 尚未执行：rc.38 提交/推送、真实加载指纹、重新开始的十二回合验收、恢复门、构建、CI、QC 覆盖或正式发布门禁。
+- rc.38 真实第2回合有2个人物档案块，但锚点未包含姓名且两人均漏掉 `full_adult` 六项生理，最终0档案写入、`doctor_modules_not_settled`、150155ms。rc.39 本地只从精确可见正文实际存在的姓名修复锚点；V8 强制每个新人物在关闭回执前逐项写齐生理，不适用也说明原因。缺项继续红色、0操作、不ready。
+- 自动检查：直接相关回归 201/201；修复后完整自动套件 677/677，0 fail，duration `13537.7591 ms`；当前语法、manifest/预设 JSON 检查通过。
+- 尚未执行：rc.39 提交/推送、真实加载指纹、重新开始的十二回合验收、恢复门、构建、CI、QC 覆盖或正式发布门禁。
 - 已知边界：默认 `actorRuntimeBindings={}`，无配置时 MVU 实时运行态显示未绑定；当前宿主没有提供可用于安全自动孤儿 GC 的权威 chat-ID 枚举，因此自动 GC 关闭，仅提供预览/确认入口。首回合档案、刷新/重启、新对话隔离、三 lane 和 attempt/world separation 的真实效果等待用户安装验证。
-- 发布含义：rc.38 当前尚未冻结；即使随后提交与 testing `main` 推送，也必须加载当前指纹并从一个全新聊天重新开始真实验收。它仍只是测试通道候选，不得视为稳定版或正式发布。
+- 发布含义：rc.39 当前尚未冻结；即使随后提交与 testing `main` 推送，也必须加载当前指纹并从一个全新聊天重新开始真实验收。它仍只是测试通道候选，不得视为稳定版或正式发布。
 
 ## 本次重点检查
 

@@ -117,6 +117,38 @@ test('single new actor compiles complete canonical V6 profile and provisions roo
     assert.equal(profileReadiness(markActorProfileReadback(profile)).ready, true);
 });
 
+test('missing new-actor source anchor is locally inferred only from exact accepted narrative', () => {
+    const withoutAnchor = accepted(blockFor().replace(/｜正文锚点：林岚/u, ''));
+    const repaired = parseActorProfileUpdateBlock(withoutAnchor, {
+        acceptedNarrative: narrative,
+    });
+    assert.equal(repaired.ok, true);
+    assert.equal(repaired.entries[0].sourceAnchor, '林岚');
+    assert.ok(repaired.repairs.includes('profile_source_anchor_inferred_from_narrative'));
+    const bound = bindActorProfileUpdateEntries(repaired, {
+        tickets: [ticket()], actors: [], acceptedNarrative: narrative, acceptedTarget: sourceRef(),
+    });
+    assert.equal(bound.ok, true);
+
+    const noVisibleName = parseActorProfileUpdateBlock(withoutAnchor, {
+        acceptedNarrative: '旧港地图被压在桌角，没有可稳定单指的人物。',
+    });
+    assert.equal(noVisibleName.entries.length, 0);
+    assert.equal(noVisibleName.quarantined[0].reason, 'profile_source_anchor_missing');
+    assert.equal(parseActorProfileUpdateBlock(withoutAnchor).quarantined[0].reason,
+        'profile_source_anchor_missing', 'callers without exact accepted narrative remain fail-closed');
+
+    const mismatched = parseActorProfileUpdateBlock(accepted(blockFor()
+        .replace('正文锚点：林岚', '正文锚点：把旧港地图压在桌角')));
+    assert.equal(mismatched.ok, true, 'the syntactically present semantic anchor remains parseable');
+    const rebound = bindActorProfileUpdateEntries(mismatched, {
+        tickets: [ticket()], actors: [], acceptedNarrative: narrative, acceptedTarget: sourceRef(),
+    });
+    assert.equal(rebound.ok, true);
+    assert.equal(rebound.entries[0].sourceAnchor, '林岚');
+    assert.ok(rebound.repairs.includes('profile_source_anchor_inferred_from_narrative'));
+});
+
 test('semantic profile transaction fails closed at 65 actors before any MVU operation', () => {
     const entries = Array.from({ length: ACTOR_PROFILE_BATCH_CAPACITY }, (_, index) => ({
         mode: 'new', actorId: `NPC-cap-${index}`, ticketId: `T-cap-${index}`,

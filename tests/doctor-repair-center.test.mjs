@@ -102,11 +102,12 @@ test('selected preset closes every ticket turn with one explicit hidden profile 
     const order = (preset.prompt_order || []).flatMap((entry) => entry?.order || []);
     assert.equal(order.filter((entry) => entry?.identifier === identifier).length, 1);
     assert.equal(order.find((entry) => entry?.identifier === identifier)?.enabled, true);
-    assert.equal(order.at(-1)?.identifier, 'mvu-auto-doctor-first-chat-appearance-ticket-v7');
+    assert.equal(order.at(-2)?.identifier, 'mvu-auto-doctor-first-chat-appearance-ticket-v7');
+    assert.equal(order.at(-1)?.identifier, 'mvu-auto-doctor-full-adult-profile-hard-gate-v8');
     assert.ok(
         order.findIndex((entry) => entry?.identifier === identifier)
             < order.findIndex((entry) => entry?.identifier === 'mvu-auto-doctor-first-chat-appearance-ticket-v7'),
-        'V7 must be the final override after the V5 output-order contract',
+        'V7 must follow the V5 output-order contract before the final V8 physiology gate',
     );
 });
 

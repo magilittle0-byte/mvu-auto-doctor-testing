@@ -1030,6 +1030,9 @@ test('paired IZUMI preset bytes and runtime version are the candidate truth', as
     assert.equal(actualPromptOrder.get('b8d8d91c-ef0f-4c4e-9466-a6c7f3d2e910'), false,
         'the host prompt_order, not only the prompt object, must disable legacy V4');
     assert.equal(actualPromptOrder.get('mvu-auto-doctor-first-chat-appearance-ticket-v7'), true);
+    assert.equal(actualPromptOrder.get('mvu-auto-doctor-full-adult-profile-hard-gate-v8'), true);
+    assert.equal([...actualPromptOrder.keys()].at(-2), 'mvu-auto-doctor-first-chat-appearance-ticket-v7');
+    assert.equal([...actualPromptOrder.keys()].at(-1), 'mvu-auto-doctor-full-adult-profile-hard-gate-v8');
     const ticketV7 = named.get('🧾首次入聊人物票据V7·设定人物也必须绑定');
     assert.equal(ticketV7?.enabled, true);
     assert.match(ticketV7?.content || '', /角色卡、99条内嵌世界书、原著、数据库已有设定/u);
@@ -1040,6 +1043,11 @@ test('paired IZUMI preset bytes and runtime version are the candidate truth', as
     const joined = enabledProfilePrompts.map((entry) => `${entry.name}\n${entry.content || ''}`).join('\n');
     assert.match(joined, /消费了骰票却有字段或生理项缺失时，不得把该人物从回执中省略或改报“人物档案无变化”/u);
     assert.match(joined, /完整 ticketId、自然姓名、可见正文锚点和已经写出的自然段/u);
+    const fullAdultV8 = named.get('🧾full_adult生理硬闸V8·每人物六项');
+    assert.equal(fullAdultV8?.enabled, true);
+    assert.match(fullAdultV8?.content || '', /每个新人物都必须/u);
+    assert.match(fullAdultV8?.content || '', /年龄未明、非人种族或某项不适用/u);
+    assert.match(fullAdultV8?.content || '', /未补齐前不得输出 -->、<options>、<UpdateVariable>/u);
     assert.match(joined, /<luntan>[\s\S]*?<\/content>[\s\S]*?人物档案[\s\S]*?(?:options|UpdateVariable)/u);
     // The prompt may name the forbidden machine-owned fields in its
     // instruction text.  What must stay semantic-only is the model's
@@ -1064,8 +1072,12 @@ test('accepted-final profile adapter is exact-source, zero-model, and uses exist
     assert.match(semantic, /projectSemanticProfilesToActorLedger/u);
     assert.match(semantic, /profile_ticket_batch_missing/u);
     assert.match(semantic, /actorProfileTicketPromptProofMatches\(ticketBatch, captured\)/u);
+    assert.match(source, /当前已启用 full_adult；本回合生理硬闸生效/u,
+        'runtime ticket prompt must activate the paired preset V8 with the exact mode phrase');
     assert.match(semantic, /persistNpcDesignTicketBatch\([\s\S]*?ticketBatch,[\s\S]*?captured/u);
     assert.match(semantic, /actorProfileExplicitNoChangeReceipt\(messageText\)/u);
+    assert.equal((semantic.match(/parseActorProfileUpdateBlock\(messageText,\s*\{[\s\S]*?acceptedNarrative:\s*acceptedContentText\(messageText\),[\s\S]*?\}\);/gu) || []).length, 2,
+        'preflight and final parse both receive only the exact accepted visible narrative for local anchor repair');
     assert.match(semantic, /exactTicketCount:\s*tickets\.length/u);
     assert.match(semantic, /omission === 'profile_block_missing'[\s\S]*?emptyOperations:\s*true/u);
     assert.match(semantic, /actorProfileSemanticNoChange\(captured, acceptedContentText\(messageText\)\)/u);

@@ -1,6 +1,6 @@
 # MVU Auto Doctor 2.0 权威规格索引
 
-状态：`2.0.0-rc.38-accepted-narrative-mechanism-refresh-candidate / automated-676-pass / real-gates-pending`
+状态：`2.0.0-rc.39-profile-anchor-local-repair-full-adult-v8-candidate / targeted-201-pass / full-suite-677-pass / real-gates-pending`
 
 适用范围：2.0 产品、数据协议、事务协议、真实故障回放与阶段交接
 

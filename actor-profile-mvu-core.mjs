@@ -133,6 +133,17 @@ function naturalActorName(value, actorId = '') {
     if (!name || isPlaceholderTicketName(name) || (actorId && name === String(actorId))) return '';
     return name;
 }
+function inferSourceAnchorFromAcceptedNarrative(entry, acceptedNarrative = '') {
+    const name = naturalActorName(entry?.name, entry?.actorId);
+    const narrative = String(acceptedNarrative || '');
+    // The dedicated accepted-assistant receipt plus the reserved ticket proves
+    // the transaction domain.  The source anchor is only a narrative-presence
+    // guard, so a missing model-written anchor can be repaired locally from the
+    // exact natural name already present in accepted visible content.  Never
+    // infer from options, worldbook/database text or an absent/generic name.
+    if (!name || !narrative || !narrative.includes(name)) return '';
+    return name;
+}
 function nonEmpty(value) {
     return typeof value === 'string' ? Boolean(text(value))
         : Array.isArray(value) ? value.some((item) => Boolean(text(item)))
@@ -374,13 +385,21 @@ export function parseActorProfileUpdateBlock(output, options = {}) {
     if (structured) {
         const entries = [];
         const quarantined = [];
+        const localRepairs = [...(extracted.repairs || [])];
         for (const [index, row] of structured.entries()) {
             const entry = normalizeEntry(row);
             const failures = [];
             if (row.__technical) failures.push(TECHNICAL_FAILURE);
             if (!naturalActorName(entry.name, entry.actorId)) failures.push(FIXED_FAILURES.NAME_MISSING);
             if (entry.mode === 'new' && !entry.ticketId) failures.push(FIXED_FAILURES.TICKET_MISSING);
-            if (entry.mode === 'new' && !entry.sourceAnchor) failures.push(FIXED_FAILURES.ANCHOR_MISSING);
+            if (entry.mode === 'new' && !entry.sourceAnchor) {
+                entry.sourceAnchor = inferSourceAnchorFromAcceptedNarrative(
+                    entry,
+                    options.acceptedNarrative,
+                );
+                if (entry.sourceAnchor) localRepairs.push('profile_source_anchor_inferred_from_narrative');
+                else failures.push(FIXED_FAILURES.ANCHOR_MISSING);
+            }
             if (entry.mode === 'existing' && !entry.actorId) failures.push(FIXED_FAILURES.ACTOR_ID_MISSING);
             if (failures.length) quarantined.push({ index, entry, reason: failures[0], failures });
             else entries.push(entry);
@@ -393,7 +412,7 @@ export function parseActorProfileUpdateBlock(output, options = {}) {
             entries,
             quarantined,
             failures,
-            repairs: [...new Set([...(extracted.repairs || []), 'profile_json_wrapper_parsed'])],
+            repairs: [...new Set([...localRepairs, 'profile_json_wrapper_parsed'])],
         };
     }
     const lines = extracted.block.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
@@ -429,12 +448,20 @@ export function parseActorProfileUpdateBlock(output, options = {}) {
     if (current) rawEntries.push(current);
     const entries = [];
     const quarantined = [];
+    const localRepairs = [...(extracted.repairs || [])];
     for (const [index, raw] of rawEntries.entries()) {
         const entry = normalizeEntry(raw);
         const failures = [...new Set(raw.__failures || [])];
         if (!naturalActorName(entry.name, entry.actorId)) failures.push(FIXED_FAILURES.NAME_MISSING);
         if (entry.mode === 'new' && !entry.ticketId) failures.push(FIXED_FAILURES.TICKET_MISSING);
-        if (entry.mode === 'new' && !entry.sourceAnchor) failures.push(FIXED_FAILURES.ANCHOR_MISSING);
+        if (entry.mode === 'new' && !entry.sourceAnchor) {
+            entry.sourceAnchor = inferSourceAnchorFromAcceptedNarrative(
+                entry,
+                options.acceptedNarrative,
+            );
+            if (entry.sourceAnchor) localRepairs.push('profile_source_anchor_inferred_from_narrative');
+            else failures.push(FIXED_FAILURES.ANCHOR_MISSING);
+        }
         if (entry.mode === 'existing' && !entry.actorId) failures.push(FIXED_FAILURES.ACTOR_ID_MISSING);
         if (containsTechnicalField(entry.fields)) failures.push(TECHNICAL_FAILURE);
         if (failures.length) quarantined.push({ index, entry, reason: failures[0], failures });
@@ -447,7 +474,7 @@ export function parseActorProfileUpdateBlock(output, options = {}) {
         entries,
         quarantined,
         failures,
-        repairs: [...new Set(extracted.repairs || [])],
+        repairs: [...new Set(localRepairs)],
     };
 }
 
@@ -507,6 +534,7 @@ export function bindActorProfileUpdateEntries(parsed, { tickets = [], actors = [
     const failures = [...(source.failures || [])];
     const quarantined = [];
     const failedActorTargets = [];
+    const repairs = [...(source.repairs || [])];
     const addFailedTarget = (row, identity = null) => {
         const entry = normalizeEntry(row?.entry || row || {});
         if (entry.mode !== 'new') return;
@@ -574,8 +602,16 @@ export function bindActorProfileUpdateEntries(parsed, { tickets = [], actors = [
             if (!entry.sourceAnchor || !acceptedNarrative
                 || !acceptedNarrative.includes(entry.sourceAnchor)
                 || !entry.sourceAnchor.includes(name)) {
-                quarantine(entry, FIXED_FAILURES.ANCHOR_MISSING, {}, identity);
-                continue;
+                const inferredAnchor = inferSourceAnchorFromAcceptedNarrative(
+                    { ...entry, name },
+                    acceptedNarrative,
+                );
+                if (!inferredAnchor) {
+                    quarantine(entry, FIXED_FAILURES.ANCHOR_MISSING, {}, identity);
+                    continue;
+                }
+                entry.sourceAnchor = inferredAnchor;
+                repairs.push('profile_source_anchor_inferred_from_narrative');
             }
         } else {
             identity = byActor.get(entry.actorId);
@@ -600,6 +636,7 @@ export function bindActorProfileUpdateEntries(parsed, { tickets = [], actors = [
         failedActorTargets: [...new Map(failedActorTargets
             .filter((item) => item.actorId)
             .map((item) => [`${item.actorId}|${item.ticketId}`, item])).values()],
+        repairs: [...new Set(repairs)],
         source,
     };
 }
@@ -1011,6 +1048,7 @@ export function actorProfileSemanticRuntimeFingerprint(mutationProbe = '') {
         ACTOR_PROFILE_PHYSIOLOGY_COVERAGE_KEYS,
         actorProfileReceiptPlacementKind,
         actorProfileReceiptPlacementAccepted,
+        inferSourceAnchorFromAcceptedNarrative,
         extractActorProfileUpdateBlock,
         parseActorProfileUpdateBlock,
         bindActorProfileUpdateEntries,

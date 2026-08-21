@@ -311,9 +311,9 @@ import {
 } from './actor-operational-state-core.mjs';
 
 const PLUGIN_ID = 'mvu_auto_doctor';
-const VERSION = '2.0.0-rc.38';
+const VERSION = '2.0.0-rc.39';
 const ACTOR_PROFILE_PRESET_CONTRACT_VERSION = 'first-chat-appearance-ticket-v7';
-const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = '2BCA3FB302098212828AD37ABE9BEC9FDC020BF7439DC5602A36A702C5A85AF1';
+const ACTOR_PROFILE_PRESET_ARTIFACT_EXPECTED_SHA256 = '7F13F4B1F996AB5A03596F19DFDFE7BB95D97D4DCF0BB2E80998C578DFC7FE62';
 const ACTOR_PROFILE_MAX_TRANSACTION_ACTORS = 64;
 const PROMPT_PROFILE_SANITIZER_VERSION = PROMPT_CONTEXT_CORE_VERSION;
 const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
@@ -14538,8 +14538,9 @@ function npcDesignTicketPrompt(batch) {
         return `骰票${index + 1}[${ticket.ticketId}]：${axes.join('｜')}`;
     });
     const physiologyInstructions = batch.completionMode === 'full_adult' ? [
-        '当前已启用 full_adult；每个适用的新成人物还必须增加一行生理特征，并把以下六项自然完整地写在该行内：',
-        '六项缺一不可；不适用项也必须自然说明原因。标签只用于本地可靠拆分，MVU 与前端保存和展示的是自然中文，不展示这些标签。',
+        '【当前已启用 full_adult；本回合生理硬闸生效】每个新人物都必须增加且只增加一行“生理特征”，无论人物为成人、年龄未明、非人种族或某项不适用，都不得省略这一行或其中任何一项。',
+        '六项缺一不可：该行必须逐项写全 generalBaseline、reproductiveAnatomy、secondaryTraits、reproductiveFunction、sexualResponse、limitations 六个 field；不适用或不能据设定细化时，在对应 field 中用自然中文写明不适用及原因，不能留空、写未知、删除字段或改报“人物档案无变化”。',
+        '关闭人物档案注释前，按本回合实际消费的每个 ticketId 逐人复核六段自然档案和上述六个生理 field；任一人物任一项缺失时，先在同一人物下补齐，再输出 -->、<options> 或 <UpdateVariable>。标签只用于本地可靠拆分，MVU 与前端保存和展示自然中文。',
     ] : [];
     const physiologyReceipt = batch.completionMode === 'full_adult'
         ? '生理特征：<field key="generalBaseline">一般生理基线完整句</field><field key="reproductiveAnatomy">生殖解剖完整句</field><field key="secondaryTraits">第二性征完整句</field><field key="reproductiveFunction">生殖功能完整句</field><field key="sexualResponse">性反应基线完整句</field><field key="limitations">限制与不适用说明完整句</field>'
@@ -14558,7 +14559,7 @@ function npcDesignTicketPrompt(batch) {
         ...physiologyInstructions,
         '隐藏注释严格使用以下行序；多人物在同一注释内逐人重复，某一人物失败不得删掉其他完整人物：',
         '<!-- 人物档案更新',
-        '新增人物｜ticket=对应完整ticketId｜姓名：正文自然姓名｜正文锚点：同一可定位称谓',
+        '新增人物｜ticket=对应完整ticketId｜姓名：正文自然姓名｜正文锚点：必须逐字包含同一自然姓名的可见正文片段；若拿不准就直接复制自然姓名',
         '人物信息：自然完整句',
         '性格特征：自然完整句',
         '过往经历：自然完整句',
@@ -19006,7 +19007,10 @@ async function runSemanticActorProfileTargetCore(captured) {
     // Count the accepted block before the host/MVU settle path.  This is a
     // pre-write transaction gate: a too-large batch must not even enter the
     // replay/readback preparation that could otherwise leave partial state.
-    const preflightParsed = parseActorProfileUpdateBlock(messageText, { extracted });
+    const preflightParsed = parseActorProfileUpdateBlock(messageText, {
+        extracted,
+        acceptedNarrative: acceptedContentText(messageText),
+    });
     const ticketActorIds = new Map((tickets || []).map((ticket) => [
         String(ticket?.ticketId || ticket?.id || '').trim(),
         String(ticket?.reservedActorRef?.actorId || ticket?.stableActorRef?.actorId
@@ -19047,7 +19051,10 @@ async function runSemanticActorProfileTargetCore(captured) {
     extracted = settled.extracted;
     tickets = (npcDesignTicketBatchForTarget(captured)?.tickets || [])
         .filter((ticket) => reservedTicketMatchesAcceptedTarget(ticket, captured));
-    const parsed = parseActorProfileUpdateBlock(messageText, { extracted });
+    const parsed = parseActorProfileUpdateBlock(messageText, {
+        extracted,
+        acceptedNarrative: acceptedContentText(messageText),
+    });
     if (parsed.failures?.length || (!parsed.ok && !parsed.quarantined?.length)) {
         const first = parsed.failures?.[0] || parsed.quarantined?.[0]?.reason;
         return actorProfileSemanticFailure(captured, first || 'profile_block_malformed', {

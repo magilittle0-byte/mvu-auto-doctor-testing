@@ -19,11 +19,22 @@ accepted-final boundary. `stripAssistantAcceptedMechanism()` also consumes the
 sanitizer's `.text` result explicitly, so future prompt copies cannot receive
 `[object Object]`.
 
+The rc.38 real second turn then exposed two profile-output gaps without weakening
+any authority boundary: both accepted profile rows used visible anchors that did
+not contain their natural names, and both omitted all six `full_adult` physiology
+fields. rc.39 permits a zero-model anchor repair only when the same reserved-ticket
+name literally exists in the exact accepted `<content>`; database, worldbook,
+options and hidden history cannot supply it. Missing physiology remains zero-write
+and non-ready. The runtime ticket prompt plus the paired preset's final V8 gate
+require every new row to carry six natural sections and all six physiology fields
+before the receipt closes.
+
 ## Prompt-ready host evidence
 
 - The paired IZUMI preset places `mvu-auto-doctor-profile-context-separation-v6`
   exactly once in the enabled `prompt_order`, disables legacy V4 in that real order,
-  and leaves the V7 first-chat-appearance ticket contract as the final override. A prompt object that
+  and places the V7 first-chat-appearance ticket contract immediately before the
+  final `mvu-auto-doctor-full-adult-profile-hard-gate-v8` override. A prompt object that
   exists only in `prompts` is not treated as active production evidence.
 
 - Controlled host: TavernHelper `4.8.19`.
